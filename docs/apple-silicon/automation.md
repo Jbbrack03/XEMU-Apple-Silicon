@@ -108,6 +108,32 @@ scripts/apple-silicon/run-benchmark.sh pgr2 \
   scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
 ```
 
+## Profile Setup Runs
+
+Before recording real benchmark routes, use live setup runs to create or select
+game profiles without recording those menu actions:
+
+```sh
+scripts/apple-silicon/live-setup.sh pgr2 600
+scripts/apple-silicon/live-setup.sh crimson 600
+scripts/apple-silicon/live-setup.sh rainbow 600
+```
+
+These runs use a persistent copied HDD image at:
+
+```text
+benchmark-runs/profile-prep/xbox_hdd.qcow2
+```
+
+Use that prepared HDD as the source for later recorded or replayed benchmark
+runs:
+
+```sh
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/record-input.sh pgr2 300 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv
+```
+
 Set `XEMU_BENCH_EXTRA_QEMU_ARGS` when a benchmark run needs an extra xemu/QEMU
 argument such as a trace selector:
 

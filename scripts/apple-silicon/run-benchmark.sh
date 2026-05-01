@@ -32,6 +32,9 @@ Outputs logs and a scratch HDD copy under benchmark-runs/.
 
 Set XEMU_BENCH_RECORD_INPUT=auto to record physical controller input to the
 run directory instead of replaying a scripted input file.
+Set XEMU_BENCH_LIVE_INPUT=1 for physical controller input without recording.
+Set XEMU_BENCH_HDD_IN_PLACE=1 only with a copied HDD image that should be
+modified directly by profile/setup runs.
 EOF
 }
 
@@ -77,6 +80,8 @@ if [[ "$RECORD_INPUT_REQUEST" == "1" || "$RECORD_INPUT_REQUEST" == "auto" ]]; th
 else
     RECORD_INPUT="$RECORD_INPUT_REQUEST"
 fi
+LIVE_INPUT="${XEMU_BENCH_LIVE_INPUT:-0}"
+HDD_IN_PLACE="${XEMU_BENCH_HDD_IN_PLACE:-0}"
 SCRATCH_HDD="${RUN_DIR}/xbox_hdd.qcow2"
 LOG_FILE="${RUN_DIR}/xemu.log"
 META_FILE="${RUN_DIR}/metadata.txt"
@@ -96,7 +101,7 @@ LOADVM_AT="${XEMU_BENCH_LOADVM_AT:-2}"
 SNAPSHOT_NO_THUMBNAIL="${XEMU_BENCH_SNAPSHOT_NO_THUMBNAIL:-1}"
 EXTRA_QEMU_ARGS="${XEMU_BENCH_EXTRA_QEMU_ARGS:-}"
 PORT1_BINDING="keyboard"
-if [[ -n "$RECORD_INPUT" ]]; then
+if [[ -n "$RECORD_INPUT" || "$LIVE_INPUT" == "1" ]]; then
     PORT1_BINDING=""
 fi
 
@@ -107,7 +112,7 @@ for file in "$XEMU" "$MCPX" "$BIOS" "$HDD_SOURCE" "$DISC"; do
     fi
 done
 
-if [[ -z "$RECORD_INPUT" && ! -e "$INPUT_SCRIPT" ]]; then
+if [[ -z "$RECORD_INPUT" && "$LIVE_INPUT" != "1" && ! -e "$INPUT_SCRIPT" ]]; then
     echo "missing required file: $INPUT_SCRIPT" >&2
     exit 1
 fi
@@ -120,7 +125,11 @@ if [[ -n "$EXISTING_XEMU_PIDS" && "${XEMU_BENCH_ALLOW_EXISTING:-0}" != "1" ]]; t
 fi
 
 mkdir -p "$RUN_DIR"
-cp -c "$HDD_SOURCE" "$SCRATCH_HDD" 2>/dev/null || cp "$HDD_SOURCE" "$SCRATCH_HDD"
+if [[ "$HDD_IN_PLACE" == "1" ]]; then
+    SCRATCH_HDD="$HDD_SOURCE"
+else
+    cp -c "$HDD_SOURCE" "$SCRATCH_HDD" 2>/dev/null || cp "$HDD_SOURCE" "$SCRATCH_HDD"
+fi
 
 cat > "$CONFIG_FILE" <<EOF
 [general]
@@ -150,10 +159,13 @@ EOF
     echo "duration_seconds: $DURATION"
     if [[ -n "$RECORD_INPUT" ]]; then
         echo "input_script: none"
+    elif [[ "$LIVE_INPUT" == "1" ]]; then
+        echo "input_script: none"
     else
         echo "input_script: $INPUT_SCRIPT"
     fi
     echo "record_input: ${RECORD_INPUT:-none}"
+    echo "live_input: $LIVE_INPUT"
     echo "run_dir: $RUN_DIR"
     echo "xemu: $XEMU"
     echo "disc: $DISC"
@@ -161,6 +173,7 @@ EOF
     echo "disc_mtime: $(stat -f%Sm "$DISC" 2>/dev/null || stat -c%y "$DISC" 2>/dev/null || echo unknown)"
     echo "hdd_source: $HDD_SOURCE"
     echo "scratch_hdd: $SCRATCH_HDD"
+    echo "hdd_in_place: $HDD_IN_PLACE"
     echo "config_file: $CONFIG_FILE"
     echo "screenshot_interval_seconds: $SCREENSHOT_INTERVAL"
     echo "screenshot_start_delay_seconds: $SCREENSHOT_START_DELAY"
@@ -269,6 +282,16 @@ if [[ -n "$RECORD_INPUT" ]]; then
     echo "Recording controller input: $RECORD_INPUT"
     XEMU_RECORD_INPUT="$RECORD_INPUT" \
     XEMU_RECORD_INPUT_PORT=1 \
+    XEMU_PERF_LOG=1 \
+    XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
+    XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    "$XEMU" \
+      -config_path "$CONFIG_FILE" \
+      -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
+      ${EXTRA_QEMU_ARGS} \
+      > "$LOG_FILE" 2>&1 &
+elif [[ "$LIVE_INPUT" == "1" ]]; then
+    echo "Using live controller input without recording"
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
