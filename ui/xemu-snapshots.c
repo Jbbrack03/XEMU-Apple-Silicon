@@ -274,7 +274,12 @@ void xemu_snapshots_save_extra_data(QEMUFile *f)
     }
 
     size_t thumbnail_size = 0;
-    void *thumbnail_buf = xemu_snapshots_create_framebuffer_thumbnail_png(&thumbnail_size);
+    void *thumbnail_buf = NULL;
+    const char *skip_thumbnail = getenv("XEMU_SNAPSHOT_NO_THUMBNAIL");
+    if (!skip_thumbnail || !skip_thumbnail[0] || !strcmp(skip_thumbnail, "0")) {
+        thumbnail_buf =
+            xemu_snapshots_create_framebuffer_thumbnail_png(&thumbnail_size);
+    }
 
     qemu_put_be32(f, XEMU_SNAPSHOT_DATA_MAGIC);
     qemu_put_be32(f, XEMU_SNAPSHOT_DATA_VERSION);

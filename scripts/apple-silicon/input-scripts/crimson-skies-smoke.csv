@@ -1,0 +1,42 @@
+# time_ms,control,value
+#
+# Generic boot/menu smoke route for Crimson Skies. Tune this file after the
+# first captured run if the title needs different menu timing.
+8000,start,1
+8200,start,0
+12000,a,1
+12200,a,0
+18000,start,1
+18200,start,0
+24000,a,1
+24200,a,0
+30000,a,1
+30200,a,0
+36000,dpad_down,1
+36200,dpad_down,0
+39000,a,1
+39200,a,0
+45000,start,1
+45200,start,0
+47000,a,1
+47200,a,0
+52000,dpad_down,1
+52200,dpad_down,0
+53000,dpad_down,1
+53200,dpad_down,0
+54000,dpad_down,1
+54200,dpad_down,0
+55000,dpad_right,1
+55200,dpad_right,0
+56000,dpad_right,1
+56200,dpad_right,0
+57000,dpad_right,1
+57200,dpad_right,0
+58000,a,1
+58200,a,0
+65000,lstick_y,32767
+80000,lstick_y,0
+81000,rtrigger,32767
+91000,rtrigger,0
+93000,lstick_x,18000
+105000,lstick_x,0

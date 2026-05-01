@@ -1,0 +1,3 @@
+# Keep scripted input enabled without changing controller state during normal
+# benchmark durations.
+9999999,a,0

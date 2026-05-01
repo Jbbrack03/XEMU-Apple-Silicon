@@ -23,6 +23,124 @@
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
 #include "geom.h"
 
+static bool env_flag_enabled(const char *name)
+{
+    const char *value = getenv(name);
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
+typedef enum NativeTriDepthFlag {
+    NATIVE_TRI_DEPTH_FLAG_UNSET,
+    NATIVE_TRI_DEPTH_FLAG_DISABLED,
+    NATIVE_TRI_DEPTH_FLAG_ENABLED,
+} NativeTriDepthFlag;
+
+static NativeTriDepthFlag native_tri_depth_flag_state(const char *name)
+{
+    const char *value = getenv(name);
+
+    if (!value || !value[0]) {
+        return NATIVE_TRI_DEPTH_FLAG_UNSET;
+    }
+
+    if (strcmp(value, "0") == 0) {
+        return NATIVE_TRI_DEPTH_FLAG_DISABLED;
+    }
+
+    return NATIVE_TRI_DEPTH_FLAG_ENABLED;
+}
+
+static bool diagnostic_simplify_tri_depth_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        enabled = env_flag_enabled("XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH");
+        if (enabled) {
+            fprintf(stderr,
+                    "xemu-perf: diagnostic_simplify_tri_geom_depth=1\n");
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
+static bool diagnostic_skip_tri_geom_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        enabled = env_flag_enabled("XEMU_DIAG_SKIP_TRI_GEOM");
+        if (enabled) {
+            fprintf(stderr, "xemu-perf: diagnostic_skip_tri_geom=1\n");
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
+bool pgraph_glsl_native_tri_depth_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+    static const char *source;
+
+    if (!initialized) {
+        NativeTriDepthFlag flag =
+            native_tri_depth_flag_state("XEMU_NATIVE_TRI_DEPTH");
+
+        if (flag == NATIVE_TRI_DEPTH_FLAG_UNSET) {
+            flag = native_tri_depth_flag_state("XEMU_DIAG_NATIVE_TRI_DEPTH");
+            if (flag == NATIVE_TRI_DEPTH_FLAG_ENABLED) {
+                source = "XEMU_DIAG_NATIVE_TRI_DEPTH";
+            }
+        } else if (flag == NATIVE_TRI_DEPTH_FLAG_ENABLED) {
+            source = "XEMU_NATIVE_TRI_DEPTH";
+        }
+
+        enabled = source != NULL;
+        if (enabled) {
+            fprintf(stderr,
+                    "xemu-perf: native_tri_depth=1 source=%s mode=safe\n",
+                    source);
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
+bool pgraph_glsl_native_tri_depth_supported(enum ShaderPrimitiveMode primitive_mode,
+                                            enum ShaderPolygonMode polygon_front_mode,
+                                            enum ShaderPolygonMode polygon_back_mode,
+                                            bool smooth_shading,
+                                            bool first_vertex_is_provoking)
+{
+    if (polygon_front_mode != POLY_MODE_FILL ||
+        polygon_back_mode != POLY_MODE_FILL) {
+        return false;
+    }
+
+    switch (primitive_mode) {
+    case PRIM_TYPE_TRIANGLES:
+    case PRIM_TYPE_TRIANGLE_STRIP:
+    case PRIM_TYPE_TRIANGLE_FAN:
+        /*
+         * The OpenGL path configures GL_FIRST_VERTEX_CONVENTION. That matches
+         * the NV2A first-provoking flat-shading case, while nonfirst
+         * provoking still needs the geometry shader to select the right flat
+         * vertex for strips and fans.
+         */
+        return smooth_shading || first_vertex_is_provoking;
+    default:
+        return false;
+    }
+}
+
 void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *state)
 {
     state->primitive_mode = (enum ShaderPrimitiveMode)pg->primitive_mode;
@@ -34,17 +152,15 @@ void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *state)
         pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER),
         NV_PGRAPH_SETUPRASTER_BACKFACEMODE);
 
-    state->smooth_shading = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3),
-                                     NV_PGRAPH_CONTROL_3_SHADEMODE) ==
-                            NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH;
-
-    state->first_vertex_is_provoking =
-        GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3),
-                 NV_PGRAPH_CONTROL_3_PROVOKING_VERTEX) ==
-        NV_PGRAPH_CONTROL_3_PROVOKING_VERTEX_FIRST;
+    state->smooth_shading = pg->smooth_shading;
+    state->first_vertex_is_provoking = pg->first_vertex_is_provoking;
 
     state->z_perspective = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) &
                            NV_PGRAPH_CONTROL_0_Z_PERSPECTIVE_ENABLE;
+    state->diagnostic_simplify_tri_depth =
+        diagnostic_simplify_tri_depth_enabled();
+    state->diagnostic_skip_tri_geom = diagnostic_skip_tri_geom_enabled();
+    state->native_tri_depth = pgraph_glsl_native_tri_depth_enabled();
 
     if (pg->renderer->ops.get_gpu_properties) {
         GPUProperties *gpu_props = pg->renderer->ops.get_gpu_properties();
@@ -92,9 +208,19 @@ bool pgraph_glsl_need_geom(const GeomState *state)
     case PRIM_TYPE_LINES:
     case PRIM_TYPE_LINE_LOOP:
     case PRIM_TYPE_LINE_STRIP:
+        return true;
     case PRIM_TYPE_TRIANGLES:
     case PRIM_TYPE_TRIANGLE_STRIP:
     case PRIM_TYPE_TRIANGLE_FAN:
+        if ((state->diagnostic_skip_tri_geom ||
+             state->native_tri_depth) &&
+            pgraph_glsl_native_tri_depth_supported(
+                state->primitive_mode, state->polygon_front_mode,
+                state->polygon_back_mode, state->smooth_shading,
+                state->first_vertex_is_provoking)) {
+            return false;
+        }
+        return true;
     case PRIM_TYPE_QUADS:
     case PRIM_TYPE_QUAD_STRIP:
         return true;
@@ -118,6 +244,7 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
     bool need_triz = false;
     bool need_quadz = false;
     bool need_linez = false;
+    bool simplify_triz = false;
     const char *layout_in = NULL;
     const char *layout_out = NULL;
     const char *body = NULL;
@@ -140,6 +267,7 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
     case PRIM_TYPE_TRIANGLES:
     case PRIM_TYPE_TRIANGLE_STRIP:
     case PRIM_TYPE_TRIANGLE_FAN:
+        simplify_triz = state->diagnostic_simplify_tri_depth;
         if (state->first_vertex_is_provoking) {
             provoking_index = "v[0]";
         } else if (state->primitive_mode == PRIM_TYPE_TRIANGLE_STRIP) {
@@ -153,7 +281,13 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
         layout_in = "layout(triangles) in;\n";
         if (polygon_mode == POLY_MODE_FILL) {
             layout_out = "layout(triangle_strip, max_vertices = 3) out;\n";
-            body = "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
+            body = simplify_triz ?
+                   "  mat4 pz = mat4(v_vtxPos[v[0]], v_vtxPos[v[1]], v_vtxPos[v[2]], vec4(0.0));\n"
+                   "  emit_vertex(v[0], pz);\n"
+                   "  emit_vertex(v[1], pz);\n"
+                   "  emit_vertex(v[2], pz);\n"
+                   "  EndPrimitive();\n" :
+                   "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
                    "  emit_vertex(v[0], pz);\n"
                    "  emit_vertex(v[1], pz);\n"
                    "  emit_vertex(v[2], pz);\n"
@@ -161,14 +295,26 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
         } else if (polygon_mode == POLY_MODE_LINE) {
             need_linez = true;
             layout_out = "layout(line_strip, max_vertices = 6) out;\n";
-            body = "  float dz = calc_triz(v[0], v[1], v[2])[3].x;\n"
+            body = simplify_triz ?
+                   "  emit_line(v[0], v[1], 0.0);\n"
+                   "  emit_line(v[1], v[2], 0.0);\n"
+                   "  emit_line(v[2], v[0], 0.0);\n" :
+                   "  float dz = calc_triz(v[0], v[1], v[2])[3].x;\n"
                    "  emit_line(v[0], v[1], dz);\n"
                    "  emit_line(v[1], v[2], dz);\n"
                    "  emit_line(v[2], v[0], dz);\n";
         } else {
             assert(polygon_mode == POLY_MODE_POINT);
             layout_out = "layout(points, max_vertices = 3) out;\n";
-            body = "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
+            body = simplify_triz ?
+                   "  mat4 pz = mat4(v_vtxPos[v[0]], v_vtxPos[v[1]], v_vtxPos[v[2]], vec4(0.0));\n"
+                   "  emit_vertex(v[0], mat4(pz[0], pz[0], pz[0], pz[3]));\n"
+                   "  EndPrimitive();\n"
+                   "  emit_vertex(v[1], mat4(pz[1], pz[1], pz[1], pz[3]));\n"
+                   "  EndPrimitive();\n"
+                   "  emit_vertex(v[2], mat4(pz[2], pz[2], pz[2], pz[3]));\n"
+                   "  EndPrimitive();\n" :
+                   "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
                    "  emit_vertex(v[0], mat4(pz[0], pz[0], pz[0], pz[3]));\n"
                    "  EndPrimitive();\n"
                    "  emit_vertex(v[1], mat4(pz[1], pz[1], pz[1], pz[3]));\n"
@@ -262,11 +408,18 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
         break;
     case PRIM_TYPE_POLYGON:
         if (polygon_mode == POLY_MODE_FILL) {
+            simplify_triz = state->diagnostic_simplify_tri_depth;
             provoking_index = "v[2]";
             need_triz = true;
             layout_in = "layout(triangles) in;\n";
             layout_out = "layout(triangle_strip, max_vertices = 3) out;\n";
-            body = "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
+            body = simplify_triz ?
+                   "  mat4 pz = mat4(v_vtxPos[v[0]], v_vtxPos[v[1]], v_vtxPos[v[2]], vec4(0.0));\n"
+                   "  emit_vertex(v[0], pz);\n"
+                   "  emit_vertex(v[1], pz);\n"
+                   "  emit_vertex(v[2], pz);\n"
+                   "  EndPrimitive();\n" :
+                   "  mat4 pz = calc_triz(v[0], v[1], v[2]);\n"
                    "  emit_vertex(v[0], pz);\n"
                    "  emit_vertex(v[1], pz);\n"
                    "  emit_vertex(v[2], pz);\n"
@@ -363,7 +516,7 @@ MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts)
         provoking_index,
         provoking_index);
 
-    if (need_triz || need_quadz) {
+    if ((need_triz && !simplify_triz) || need_quadz) {
         mstring_append(
             output,
             // Kahan's algorithm for computing a*b - c*d using FMA for higher

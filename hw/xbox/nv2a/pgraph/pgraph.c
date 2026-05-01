@@ -39,6 +39,38 @@
 
 NV2AState *g_nv2a;
 
+static bool pgraph_native_tri_depth_trace_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE");
+        enabled = value && value[0] && strcmp(value, "0") != 0;
+        initialized = true;
+    }
+
+    return enabled;
+}
+
+static void pgraph_trace_shading_method(PGRAPHState *pg, const char *method,
+                                        uint32_t parameter)
+{
+    static unsigned int logged;
+
+    if (!pgraph_native_tri_depth_trace_enabled() || logged >= 80) {
+        return;
+    }
+
+    fprintf(stderr,
+            "xemu-native-tri-depth-trace: method=%s parameter=0x%08x "
+            "live_smooth=%d live_first=%d control3=0x%08x\n",
+            method, parameter, pg->smooth_shading,
+            pg->first_vertex_is_provoking,
+            pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3));
+    logged++;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
@@ -232,6 +264,8 @@ void pgraph_init(NV2AState *d)
     pg->draw_time = 0;
 
     pg->material_alpha = 0.0f;
+    pg->smooth_shading = true;
+    pg->first_vertex_is_provoking = false;
     PG_SET_MASK(NV_PGRAPH_CONTROL_3, NV_PGRAPH_CONTROL_3_SHADEMODE,
          NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH);
     pg->primitive_mode = PRIM_TYPE_INVALID;
@@ -311,6 +345,8 @@ static bool attempt_renderer_init(PGRAPHState *pg)
         local_err = NULL;
         return false;
     }
+
+    nv2a_profile_log_startup(pg->renderer->name);
 
     return true;
 }
@@ -1521,10 +1557,12 @@ DEF_METHOD(NV097, SET_SHADE_MODE)
 {
     switch (parameter) {
     case NV097_SET_SHADE_MODE_V_FLAT:
+        pg->smooth_shading = false;
         PG_SET_MASK(NV_PGRAPH_CONTROL_3, NV_PGRAPH_CONTROL_3_SHADEMODE,
                  NV_PGRAPH_CONTROL_3_SHADEMODE_FLAT);
         break;
     case NV097_SET_SHADE_MODE_V_SMOOTH:
+        pg->smooth_shading = true;
         PG_SET_MASK(NV_PGRAPH_CONTROL_3, NV_PGRAPH_CONTROL_3_SHADEMODE,
                  NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH);
         break;
@@ -1532,13 +1570,17 @@ DEF_METHOD(NV097, SET_SHADE_MODE)
         /* Discard */
         break;
     }
+    pgraph_trace_shading_method(pg, "SET_SHADE_MODE", parameter);
 }
 
 DEF_METHOD(NV097, SET_PROVOKING_VERTEX)
 {
     assert((parameter & ~1) == 0);
+    pg->first_vertex_is_provoking =
+        parameter == NV097_SET_PROVOKING_VERTEX_FIRST;
     PG_SET_MASK(NV_PGRAPH_CONTROL_3, NV_PGRAPH_CONTROL_3_PROVOKING_VERTEX,
              parameter);
+    pgraph_trace_shading_method(pg, "SET_PROVOKING_VERTEX", parameter);
 }
 
 DEF_METHOD(NV097, SET_POLYGON_OFFSET_SCALE_FACTOR)

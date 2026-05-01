@@ -147,6 +147,7 @@ static void shader_module_cache_entry_init(Lru *lru, LruNode *node,
         kind_str = "geometry shader";
         code = pgraph_glsl_gen_geom(&module->key.geom.state,
                                     module->key.geom.glsl_opts);
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_MODULE_GEN);
         break;
     case GL_FRAGMENT_SHADER:
         kind_str = "fragment shader";
@@ -198,6 +199,7 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
 
     bool need_geometry_shader = pgraph_glsl_need_geom(&state->geom);
     if (need_geometry_shader) {
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_PROGRAM_GEN);
         memset(&key, 0, sizeof(key));
         key.kind = GL_GEOMETRY_SHADER;
         key.geom.state = state->geom;
@@ -233,6 +235,7 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
     binding->gl_program = program;
     binding->gl_primitive_mode = get_gl_primitive_mode(
         state->geom.polygon_front_mode, state->geom.primitive_mode);
+    binding->has_geometry_shader = need_geometry_shader;
     binding->initialized = true;
 
     set_texture_sampler_uniforms(binding);
@@ -505,6 +508,7 @@ static void shader_cache_entry_init(Lru *lru, LruNode *node, const void *state)
     binding->cached = false;
     binding->program = NULL;
     binding->save_thread = NULL;
+    binding->has_geometry_shader = pgraph_glsl_need_geom(&binding->state.geom);
 }
 
 static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
@@ -524,6 +528,7 @@ static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
     binding->cached = false;
     binding->save_thread = NULL;
     binding->program = NULL;
+    binding->has_geometry_shader = false;
     memset(&binding->state, 0, sizeof(ShaderState));
 }
 
@@ -772,6 +777,9 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
     if (r->shader_binding &&
         !pgraph_glsl_check_shader_state_dirty(pg, &r->shader_binding->state)) {
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND_NOTDIRTY);
+        if (r->shader_binding->has_geometry_shader) {
+            nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_BIND_NOTDIRTY);
+        }
         goto update_uniforms;
     }
 
@@ -799,12 +807,16 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
     assert(binding->initialized);
     r->shader_binding = binding;
     pg->program_data_dirty = false;
+    pgraph_gl_trace_native_tri_depth_state(pg, binding, "bind", "shader");
 
     qemu_mutex_unlock(&r->shader_cache_lock);
 
     binding_changed = (r->shader_binding != old_binding);
     if (binding_changed) {
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_BIND);
+        if (r->shader_binding->has_geometry_shader) {
+            nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_BIND);
+        }
         glUseProgram(r->shader_binding->gl_program);
     }
 

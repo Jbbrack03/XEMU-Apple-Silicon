@@ -137,9 +137,7 @@ void pgraph_glsl_set_vsh_state(PGRAPHState *pg, VshState *vsh)
         }
     }
 
-    vsh->smooth_shading = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3),
-                                   NV_PGRAPH_CONTROL_3_SHADEMODE) ==
-                          NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH;
+    vsh->smooth_shading = pg->smooth_shading;
 
     vsh->fog_enable =
         pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3) & NV_PGRAPH_CONTROL_3_FOGENABLE;

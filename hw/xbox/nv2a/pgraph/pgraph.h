@@ -201,6 +201,8 @@ typedef struct PGRAPHState {
     bool ltc1_dirty[NV2A_LTC1_COUNT];
 
     float material_alpha;
+    bool smooth_shading;
+    bool first_vertex_is_provoking;
 
     // should figure out where these are in lighting context
     float light_infinite_half_vector[NV2A_MAX_LIGHTS][3];

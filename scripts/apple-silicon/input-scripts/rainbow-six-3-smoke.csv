@@ -1,0 +1,26 @@
+# time_ms,control,value
+#
+# Generic boot/menu smoke route for Rainbow Six 3. Tune this file after the
+# first captured run if the title needs different menu timing.
+38000,start,1
+38200,start,0
+46000,a,1
+46200,a,0
+58000,a,1
+58200,a,0
+66000,a,1
+66200,a,0
+74000,a,1
+74200,a,0
+82000,a,1
+82200,a,0
+90000,a,1
+90200,a,0
+100000,a,1
+100200,a,0
+115000,lstick_y,32767
+133000,lstick_y,0
+135000,rstick_x,16000
+145000,rstick_x,0
+147000,rtrigger,32767
+153000,rtrigger,0

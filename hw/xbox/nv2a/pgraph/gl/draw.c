@@ -24,6 +24,209 @@
 #include "debug.h"
 #include "renderer.h"
 
+static bool pgraph_gl_trace_native_tri_depth_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE");
+        enabled = value && value[0] && strcmp(value, "0") != 0;
+        initialized = true;
+    }
+
+    return enabled;
+}
+
+void pgraph_gl_trace_native_tri_depth_state(PGRAPHState *pg,
+                                            ShaderBinding *binding,
+                                            const char *site,
+                                            const char *source)
+{
+    static unsigned int logged;
+    static unsigned int smooth_logged;
+    static bool suppressed;
+
+    if (!pgraph_gl_trace_native_tri_depth_enabled()) {
+        return;
+    }
+
+    if (pg->smooth_shading && smooth_logged >= 24) {
+        return;
+    }
+
+    if (logged >= 240) {
+        if (!suppressed) {
+            fprintf(stderr,
+                    "xemu-native-tri-depth-trace: further messages suppressed\n");
+            suppressed = true;
+        }
+        return;
+    }
+
+    if (!binding) {
+        fprintf(stderr,
+                "xemu-native-tri-depth-trace: site=%s source=%s live_prim=%u "
+                "live_smooth=%d live_first=%d control3=0x%08x binding=NULL\n",
+                site, source, pg->primitive_mode, pg->smooth_shading,
+                pg->first_vertex_is_provoking,
+                pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3));
+        logged++;
+        if (pg->smooth_shading) {
+            smooth_logged++;
+        }
+        return;
+    }
+
+    const GeomState *geom = &binding->state.geom;
+    const PshState *psh = &binding->state.psh;
+
+    if (pg->smooth_shading && geom->smooth_shading && psh->smooth_shading &&
+        smooth_logged >= 24) {
+        return;
+    }
+
+    if (!geom->native_tri_depth && !psh->native_tri_depth) {
+        return;
+    }
+
+    fprintf(stderr,
+            "xemu-native-tri-depth-trace: site=%s source=%s live_prim=%u "
+            "live_smooth=%d live_first=%d control3=0x%08x binding=%p "
+            "program=%u gl_prim=0x%x has_geom=%d geom_prim=%u "
+            "geom_smooth=%d geom_first=%d geom_native=%d psh_smooth=%d "
+            "psh_native=%d\n",
+            site, source, pg->primitive_mode, pg->smooth_shading,
+            pg->first_vertex_is_provoking,
+            pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3), binding,
+            binding->gl_program, binding->gl_primitive_mode,
+            binding->has_geometry_shader, geom->primitive_mode,
+            geom->smooth_shading, geom->first_vertex_is_provoking,
+            geom->native_tri_depth, psh->smooth_shading,
+            psh->native_tri_depth);
+    logged++;
+    if (pg->smooth_shading && geom->smooth_shading && psh->smooth_shading) {
+        smooth_logged++;
+    }
+}
+
+static void pgraph_gl_profile_geometry_shader_draw(ShaderBinding *binding)
+{
+    if (!binding || !binding->has_geometry_shader) {
+        return;
+    }
+
+    nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW);
+
+    switch (binding->state.geom.primitive_mode) {
+    case PRIM_TYPE_LINES:
+    case PRIM_TYPE_LINE_LOOP:
+    case PRIM_TYPE_LINE_STRIP:
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_LINE);
+        break;
+    case PRIM_TYPE_TRIANGLES:
+    case PRIM_TYPE_TRIANGLE_STRIP:
+    case PRIM_TYPE_TRIANGLE_FAN:
+    case PRIM_TYPE_POLYGON:
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_TRI);
+        break;
+    case PRIM_TYPE_QUADS:
+    case PRIM_TYPE_QUAD_STRIP:
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_QUAD);
+        break;
+    default:
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_OTHER);
+        break;
+    }
+}
+
+static bool pgraph_gl_polygon_offset_fill_enabled(PGRAPHState *pg)
+{
+    uint32_t raster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+
+    return (raster & NV_PGRAPH_SETUPRASTER_POFFSETFILLENABLE) != 0;
+}
+
+static void pgraph_gl_profile_native_tri_depth_draw(PGRAPHState *pg,
+                                                    ShaderBinding *binding)
+{
+    if (!binding) {
+        return;
+    }
+
+    GeomState *state = &binding->state.geom;
+
+    if (!state->native_tri_depth) {
+        return;
+    }
+
+    switch (state->primitive_mode) {
+    case PRIM_TYPE_TRIANGLES:
+    case PRIM_TYPE_TRIANGLE_STRIP:
+    case PRIM_TYPE_TRIANGLE_FAN:
+        break;
+    default:
+        return;
+    }
+
+    if (state->polygon_front_mode != POLY_MODE_FILL ||
+        state->polygon_back_mode != POLY_MODE_FILL) {
+        return;
+    }
+
+    nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_CANDIDATE);
+    if (state->smooth_shading) {
+        nv2a_profile_inc_counter(
+            NV2A_PROF_NATIVE_TRI_DEPTH_CANDIDATE_SMOOTH);
+    } else if (state->first_vertex_is_provoking) {
+        nv2a_profile_inc_counter(
+            NV2A_PROF_NATIVE_TRI_DEPTH_CANDIDATE_FLAT_FIRST);
+    } else {
+        nv2a_profile_inc_counter(
+            NV2A_PROF_NATIVE_TRI_DEPTH_CANDIDATE_FLAT_NONFIRST);
+    }
+
+    bool supported = pgraph_glsl_native_tri_depth_supported(
+        state->primitive_mode, state->polygon_front_mode,
+        state->polygon_back_mode, state->smooth_shading,
+        state->first_vertex_is_provoking);
+
+    if (supported && !binding->has_geometry_shader) {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
+
+        if (state->z_perspective) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_ZPERSPECTIVE);
+        } else {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_LINEAR_Z);
+        }
+
+        if (pgraph_gl_polygon_offset_fill_enabled(pg)) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_POLY_OFFSET);
+        }
+
+        if (state->smooth_shading) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_SMOOTH);
+        } else if (state->first_vertex_is_provoking) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST);
+        }
+    } else {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_FALLBACK);
+        if (!state->smooth_shading) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_FALLBACK_FLAT);
+        }
+        if (!state->smooth_shading && !state->first_vertex_is_provoking) {
+            nv2a_profile_inc_counter(
+                NV2A_PROF_NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST);
+        }
+    }
+}
+
 void pgraph_gl_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -159,6 +362,8 @@ void pgraph_gl_draw_begin(NV2AState *d)
 
     pgraph_gl_bind_textures(d);
     pgraph_gl_bind_shaders(pg);
+    pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
+                                           "draw_begin", "begin");
 
     glColorMask(mask_red, mask_green, mask_blue, mask_alpha);
     glDepthMask(!!(control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE));
@@ -391,6 +596,10 @@ void pgraph_gl_flush_draw(NV2AState *d)
     if (pg->draw_arrays_length) {
         NV2A_GL_DPRINTF(false, "Draw Arrays");
         nv2a_profile_inc_counter(NV2A_PROF_DRAW_ARRAYS);
+        pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
+                                               "flush", "draw_arrays");
+        pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
+        pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
         assert(pg->inline_elements_length == 0);
         assert(pg->inline_buffer_length == 0);
         assert(pg->inline_array_length == 0);
@@ -406,6 +615,10 @@ void pgraph_gl_flush_draw(NV2AState *d)
     } else if (pg->inline_elements_length) {
         NV2A_GL_DPRINTF(false, "Inline Elements");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);
+        pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
+                                               "flush", "inline_elements");
+        pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
+        pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
         assert(pg->inline_buffer_length == 0);
         assert(pg->inline_array_length == 0);
 
@@ -447,6 +660,10 @@ void pgraph_gl_flush_draw(NV2AState *d)
     } else if (pg->inline_buffer_length) {
         NV2A_GL_DPRINTF(false, "Inline Buffer");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_BUFFERS);
+        pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
+                                               "flush", "inline_buffer");
+        pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
+        pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
         assert(pg->inline_array_length == 0);
 
         if (pg->compressed_attrs) {
@@ -479,6 +696,10 @@ void pgraph_gl_flush_draw(NV2AState *d)
     } else if (pg->inline_array_length) {
         NV2A_GL_DPRINTF(false, "Inline Array");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ARRAYS);
+        pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
+                                               "flush", "inline_array");
+        pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
+        pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
 
         unsigned int index_count = pgraph_gl_bind_inline_array(d);
         glDrawArrays(r->shader_binding->gl_primitive_mode,

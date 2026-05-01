@@ -32,6 +32,9 @@ typedef struct {
     bool smooth_shading;
     bool first_vertex_is_provoking;
     bool z_perspective;
+    bool diagnostic_simplify_tri_depth;
+    bool diagnostic_skip_tri_geom;
+    bool native_tri_depth;
     short tri_rot0;
     short tri_rot1;
 } GeomState;
@@ -42,7 +45,13 @@ typedef struct GenGeomGlslOptions {
 
 void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *geom);
 
+bool pgraph_glsl_native_tri_depth_enabled(void);
 bool pgraph_glsl_need_geom(const GeomState *state);
+bool pgraph_glsl_native_tri_depth_supported(enum ShaderPrimitiveMode primitive_mode,
+                                            enum ShaderPolygonMode polygon_front_mode,
+                                            enum ShaderPolygonMode polygon_back_mode,
+                                            bool smooth_shading,
+                                            bool first_vertex_is_provoking);
 
 MString *pgraph_glsl_gen_geom(const GeomState *state, GenGeomGlslOptions opts);
 

@@ -120,6 +120,7 @@ typedef struct ShaderBinding {
 
     GLuint gl_program;
     GLenum gl_primitive_mode;
+    bool has_geometry_shader;
 
     struct {
         PshUniformLocs psh;
@@ -245,6 +246,10 @@ extern GloContext *g_nv2a_context_display;
 
 unsigned int pgraph_gl_bind_inline_array(NV2AState *d);
 void pgraph_gl_bind_shaders(PGRAPHState *pg);
+void pgraph_gl_trace_native_tri_depth_state(PGRAPHState *pg,
+                                            ShaderBinding *binding,
+                                            const char *site,
+                                            const char *source);
 void pgraph_gl_bind_textures(NV2AState *d);
 void pgraph_gl_bind_vertex_attributes(NV2AState *d, unsigned int min_element, unsigned int max_element, bool inline_data, unsigned int inline_stride, unsigned int provoking_element);
 bool pgraph_gl_check_surface_to_texture_compatibility(const SurfaceBinding *surface, const TextureShape *shape);

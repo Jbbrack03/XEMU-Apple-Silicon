@@ -1,0 +1,641 @@
+# Handoff
+
+Last updated: 2026-05-01
+
+## Current State
+
+- Source has been cloned into:
+  - `/Users/jbbrack03/XEMU_MacOS/xemu-fork`
+- Baseline commit:
+  - `ebe34071b7fec3b6187248c57708fdd6cc3a8b97`
+- Working branch:
+  - `apple-silicon-performance`
+- Documentation created under:
+  - `docs/apple-silicon/`
+
+Source code changes made this session:
+
+- `build.sh`
+  - exports `CMAKE` on Darwin when `cmake` is available on `PATH`, so Meson's
+    cross-build path can configure the `nv2a_vsh_cpu` CMake subproject.
+  - removes duplicate app `LC_RPATH` entries during macOS packaging, avoiding a
+    `dyld` launch abort on macOS 26.4.1.
+- `ui/xemu-input.c`
+  - adds opt-in scripted controller input via `XEMU_SCRIPTED_INPUT`, allowing
+    repeatable benchmark navigation without physical controller input.
+- `hw/xbox/nv2a/debug.h`
+- `hw/xbox/nv2a/pgraph/profile.c`
+- `hw/xbox/nv2a/pgraph/pgraph.c`
+  - add opt-in `XEMU_PERF_LOG=1` startup and per-interval performance logging
+    with FPS, frame pacing, and existing NV2A profile counters.
+  - add a final `xemu-perf:` counter flush on graceful process exit so short
+    diagnostic tails are included in benchmark summaries.
+- `hw/xbox/nv2a/pgraph/gl/draw.c`
+- `hw/xbox/nv2a/pgraph/gl/renderer.h`
+- `hw/xbox/nv2a/pgraph/gl/shaders.c`
+  - add OpenGL geometry-shader attribution counters for module/program
+    generation, binds, and geometry-backed draws by primitive family.
+  - add native triangle-depth draw/fallback counters for the opt-in
+    replacement path.
+  - add native triangle-depth candidate counters split by smooth, flat-first,
+    and flat-nonfirst state so the flat-shading diagnostic can distinguish
+    "not reached" from "reached but misclassified".
+  - add capped `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` logging for live
+    PGRAPH/bound-shader state correlation at shader bind, draw begin, and draw
+    flush.
+- `hw/xbox/nv2a/pgraph/glsl/geom.c`
+- `hw/xbox/nv2a/pgraph/glsl/geom.h`
+  - add temporary `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` diagnostic toggle that
+    keeps triangle-family geometry shaders active while bypassing their
+    depth-plane/slope calculation.
+  - add temporary `XEMU_DIAG_SKIP_TRI_GEOM=1` diagnostic toggle that bypasses
+    geometry-shader program generation for triangle-family fill draws and draws
+    native GL triangles directly.
+  - tighten the native triangle-depth eligibility rule so all flat-shaded
+    triangle fills stay on the existing geometry-shader path until flat
+    shading is deliberately validated.
+  - later relax that rule for flat-shaded first-provoking triangle fills only,
+    matching the OpenGL renderer's `GL_FIRST_VERTEX_CONVENTION`; flat nonfirst
+    provoking remains on the geometry-shader fallback path.
+- `hw/xbox/nv2a/pgraph/glsl/psh.c`
+- `hw/xbox/nv2a/pgraph/glsl/psh.h`
+  - add `XEMU_NATIVE_TRI_DEPTH=1` as the completed current opt-in path that
+    bypasses triangle-family fill geometry shaders and derives depth plus
+    polygon-slope offset from native GL rasterization state in the fragment
+    shader.
+  - keep `XEMU_DIAG_NATIVE_TRI_DEPTH=1` accepted as a compatibility alias for
+    older benchmark notes and commands.
+  - make the preferred `XEMU_NATIVE_TRI_DEPTH=0` spelling override the old alias,
+    so a shell with both variables set follows the stable flag.
+  - the native bypass now applies only to triangle-family fill primitives;
+    line primitives remain on the existing geometry-shader path.
+- `ui/xemu-snapshots.c`
+  - adds `XEMU_SNAPSHOT_NO_THUMBNAIL=1` to skip snapshot thumbnail generation
+    for benchmark-created snapshots.
+- `scripts/apple-silicon/run-benchmark.sh`
+  - launches Crimson Skies or Rainbow Six 3 with scripted input, metadata
+    capture, QMP socket, optional periodic screenshots, logs, and a scratch HDD
+    copy.
+  - refuses to start if a previous xemu process is still running and cleans up
+    run-owned xemu processes when the timed run exits.
+  - can save and restore named VM snapshots through QMP/HMP.
+  - records disc size/modification time in metadata, which caught stale
+    flat-triangle ISO risk.
+  - accepts `XEMU_BENCH_EXTRA_QEMU_ARGS` for reproducible trace runs such as
+    `-trace nv2a_pgraph_method`.
+  - waits briefly for QMP `quit` before sending SIGTERM, allowing the final
+    perf-log flush to run on normal benchmark shutdown.
+  - records native triangle-depth and related diagnostic environment toggles in
+    benchmark metadata.
+- `scripts/apple-silicon/native-tri-depth-compare.sh`
+  - runs paired baseline/native snapshot benchmarks with a shared scratch-HDD
+    source and snapshot tag.
+  - writes perf summaries and a cropped screenshot comparison to a
+    `benchmark-runs/*-native-tri-depth-compare-*` report directory.
+  - records native triangle-depth and related diagnostic environment toggles in
+    benchmark metadata.
+  - retries each side by default when a launch produces no usable perf summary,
+    absorbing the nondeterministic Apple OpenGL startup crash seen locally.
+- `scripts/apple-silicon/qmp-hmp.py`
+  - sends one HMP command through the QMP `human-monitor-command` bridge.
+- `scripts/apple-silicon/validate-native-tri-depth.sh`
+  - runs or checks the flat-tri-depth XBE and fails unless the flat-first
+    native / flat-nonfirst geometry fallback split is present.
+
+Baseline app status:
+
+- `./build.sh -a arm64` succeeds.
+- `ninja -C build qemu-system-i386` succeeds.
+- `dist/xemu.app` code-sign verification succeeds.
+- `dist/xemu.app/Contents/MacOS/xemu --version` launches and reports Apple's
+  OpenGL-on-Metal renderer.
+
+## Important Findings
+
+- macOS build packages `qemu-system-i386`.
+- Apple Silicon build target is still `i386-softmmu`, so Xbox CPU code runs via
+  QEMU TCG.
+- Native arm64 baseline build now succeeds with `./build.sh -a arm64`.
+- The packaged baseline app is `dist/xemu.app`.
+- `dist/xemu.app` passes code-sign verification.
+- `dist/xemu.app/Contents/MacOS/xemu --version` launches and reports:
+  - GL vendor: `Apple`
+  - GL renderer: `Apple M3 Ultra`
+  - GL version: `4.1 Metal - 90.5`
+- macOS currently links OpenGL.
+- Vulkan is not enabled for Darwin in current Meson logic.
+- Renderer default selection prefers OpenGL before Vulkan.
+- Geometry shaders are used for most non-point primitive modes.
+- Public issue #2506 ties severe macOS 3D performance regression to PR #2240.
+- Public comments identify geometry shader usage as the likely cause and name
+  geometry-shader removal as the real fix.
+- B0/B1 log-based gameplay route metrics are recorded; automated screenshot
+  capture remains unreliable from this Codex desktop context.
+- Scripted smoke routes now navigate:
+  - Crimson Skies through pilot registration into the in-engine sequence.
+  - Rainbow Six 3 through default profile creation and Campaign into Hereford
+    mission loading.
+- Baseline metrics are recorded in
+  `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
+- B0 Crimson Skies baseline:
+  - run: `benchmark-runs/20260430-095612-crimson-skies`
+  - average: 29.93 FPS over 139 intervals
+  - tail-60 average: 30.98 FPS
+- B1 Rainbow Six 3 baseline:
+  - run: `benchmark-runs/20260430-095919-rainbow-six-3`
+  - average: 26.45 FPS over 174 intervals
+  - tail-60 average: 30.98 FPS
+- Snapshot restore through QMP/HMP works for both current benchmark scenes:
+  - Crimson tag `crimson_scene_b0`, saved in
+    `benchmark-runs/20260430-100438-crimson-skies/xbox_hdd.qcow2`.
+  - Rainbow tag `rainbow_scene_b1_nothumb`, saved in
+    `benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2`.
+- OpenGL geometry-shader attribution counters are now included in
+  `xemu-perf:` output:
+  - module/program generation counters.
+  - bind / not-dirty bind counters.
+  - draw counters split into line, triangle, quad, and other primitive
+    families.
+- B2/B3 snapshot scene-entry runs with geometry counters are recorded in
+  `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
+- B2 Crimson Skies counter run:
+  - run: `benchmark-runs/20260430-103500-crimson-skies`
+  - average: 29.70 FPS over 28 intervals
+  - post-load average after first five intervals: 30.98 FPS / 20.63 MSPF
+  - geometry draws: 25,202, all triangle-family
+- B3 Rainbow Six 3 counter run:
+  - run: `benchmark-runs/20260430-103536-rainbow-six-3`
+  - average: 29.23 FPS over 27 intervals
+  - post-load average after first five intervals: 30.97 FPS / 17.66 MSPF
+  - geometry draws: 149,961, all triangle-family
+- Rainbow Six 3 is currently the better geometry-shader overhead diagnostic
+  scene because it issues roughly six times the geometry-backed draws of the
+  Crimson scene over the same run length.
+- `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` is available as a temporary diagnostic
+  toggle. It keeps triangle-family geometry shaders active but bypasses their
+  depth-plane/slope calculation.
+- D1 Rainbow Six 3 diagnostic run:
+  - run: `benchmark-runs/20260430-104001-rainbow-six-3`
+  - toggle: `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1`
+  - average: 28.24 FPS over 25 intervals
+  - post-load average after first five intervals: 30.72 FPS / 18.39 MSPF
+  - geometry draws: 128,277, all triangle-family
+  - result: no improvement over B3, with one late 162 ms frame-time spike.
+- D1 suggests the performance issue is more likely geometry shader dispatch,
+  Apple OpenGL driver behavior, or surrounding pipeline work than the
+  triangle depth/slope arithmetic itself.
+- `XEMU_DIAG_SKIP_TRI_GEOM=1` is available as a temporary diagnostic toggle. It
+  bypasses geometry-shader program generation for triangle-family fill draws
+  and lets OpenGL draw native triangles directly. This is not a correctness
+  path because the fragment shader no longer receives the geometry shader's
+  per-triangle depth payload.
+- D2 Rainbow Six 3 diagnostic run:
+  - run: `benchmark-runs/20260430-105200-rainbow-six-3`
+  - toggle: `XEMU_DIAG_SKIP_TRI_GEOM=1`
+  - average: 29.93 FPS over 27 intervals
+  - post-load average after first five intervals: 30.96 FPS / 6.38 MSPF
+  - geometry draws: 0
+  - result: large frame-time improvement while FPS remains capped near 31 FPS.
+- D2 strongly implicates geometry-shader dispatch or Apple's OpenGL
+  geometry-shader implementation as the local bottleneck.
+- `XEMU_NATIVE_TRI_DEPTH=1` is the completed current opt-in GL triangle-family
+  fill replacement path. It bypasses triangle-family fill geometry shaders,
+  then derives depth and polygon-slope offset from `gl_FragCoord` in the
+  fragment shader. It is validated for the current opt-in triangle-fill
+  coverage described below, but is not yet a default renderer path.
+- `XEMU_DIAG_NATIVE_TRI_DEPTH=1` is still accepted as a compatibility alias for
+  older notes and runs. If `XEMU_NATIVE_TRI_DEPTH` is explicitly set to `0`, the
+  old alias no longer turns the path on.
+- D3 Rainbow Six 3 diagnostic run:
+  - run: `benchmark-runs/20260430-110636-rainbow-six-3`
+  - toggle: `XEMU_DIAG_NATIVE_TRI_DEPTH=1`
+  - average: 29.49 FPS over 27 intervals
+  - post-load average after first five intervals: 30.96 FPS / 8.10 MSPF
+  - geometry draws: 0
+  - result: retains most of D2's frame-time improvement while moving toward a
+    correctness-preserving replacement.
+- D4 Crimson Skies diagnostic run:
+  - run: `benchmark-runs/20260430-111006-crimson-skies`
+  - toggle: `XEMU_DIAG_NATIVE_TRI_DEPTH=1`
+  - average: 31.15 FPS over 28 intervals
+  - post-load average after first five intervals: 30.98 FPS / 18.97 MSPF
+  - geometry draws: 0
+  - result: confirms the toggle runs on the second benchmark scene, though
+    Crimson is less sensitive to the geometry-shader bottleneck.
+- D5 Rainbow Six 3 line-safe rerun:
+  - run: `benchmark-runs/20260430-111903-rainbow-six-3`
+  - toggle: `XEMU_DIAG_NATIVE_TRI_DEPTH=1`
+  - average: 30.89 FPS over 28 intervals
+  - post-load average after first five intervals: 30.99 FPS / 6.35 MSPF
+  - geometry draws: 0
+  - result: historical Rainbow comparison point; use P1/P2 for current
+    same-build baseline/native evidence.
+- D6/D7 Crimson Skies line-safe reruns:
+  - D6 run: `benchmark-runs/20260430-112058-crimson-skies`
+  - D6 post-load average: 30.98 FPS / 27.53 MSPF
+  - D7 run: `benchmark-runs/20260430-112157-crimson-skies`
+  - D7 post-load average: 30.98 FPS / 20.30 MSPF
+  - geometry draws: 0 in both runs, including line-family counters.
+  - result: Crimson shows more frame-time variance; use it as a cross-check,
+    not the primary geometry-dispatch timing scene.
+- D8/D9 tightened native triangle-depth reruns:
+  - D8 Rainbow run: `benchmark-runs/20260430-113642-rainbow-six-3`
+  - D8 post-load average: 30.99 FPS / 6.47 MSPF
+  - D8 native triangle-depth draws: 197,212; fallbacks: 0; geometry draws: 0.
+  - D9 Crimson run: `benchmark-runs/20260430-113732-crimson-skies`
+  - D9 post-load average: 30.98 FPS / 20.01 MSPF
+  - D9 native triangle-depth draws: 71,277; fallbacks: 0; geometry draws: 0.
+  - result: the safer flat-shading eligibility rule preserved the Rainbow
+    performance win in the current benchmark scene. Later tightening keeps all
+    flat-shaded triangle fills on the geometry-shader path until flat shading
+    is deliberately validated.
+- D10 Rainbow confirmation run:
+  - run: `benchmark-runs/20260430-114511-rainbow-six-3`
+  - D10 post-load average: 30.98 FPS / 6.78 MSPF
+  - D10 native triangle-depth draws: 192,776; fallbacks: 0; geometry draws: 0.
+  - result: repeats the D8 performance band and confirms the current Rainbow
+    snapshot still stays entirely on the native triangle-depth path.
+- A dedicated flat-shading test XBE now exists:
+  - source: `scripts/apple-silicon/xbe-tests/flat-tri-depth/`
+  - XBE: `scripts/apple-silicon/xbe-tests/flat-tri-depth/bin/default.xbe`
+  - ISO: `scripts/apple-silicon/xbe-tests/flat-tri-depth/flat-tri-depth.iso`
+  - manual copy:
+    `/Users/jbbrack03/XEMU_MacOS/Test_Games/flat-tri-depth.xiso.iso`
+  - launcher target:
+    `scripts/apple-silicon/run-benchmark.sh flat-tri-depth`
+  - trace run `benchmark-runs/20260430-141331-flat-tri-trace` confirms the XBE
+    sends `NV097_SET_SHADE_MODE` flat plus first/last
+    `NV097_SET_PROVOKING_VERTEX`.
+  - passing run `benchmark-runs/20260430-153555-flat-tri-depth` confirms the
+    expected split: first-provoking flat triangles use the native path, while
+    last-provoking flat triangles fall back to the geometry shader.
+- `scripts/apple-silicon/extract-perf-summary.sh` now summarizes `xemu-perf:`
+  logs into overall/post-load averages and key geometry/native counters.
+- `scripts/apple-silicon/xbe-tests/flat-tri-depth/flat-tri-depth.iso` was
+  rebuilt from the current source at 2026-04-30 14:38:34 CDT.
+- New flat-triangle trace/validation runs:
+  - `benchmark-runs/20260430-143952-flat-tri-depth`: rebuilt ISO, no trace,
+    still reported all candidates as smooth.
+  - `benchmark-runs/20260430-144128-flat-tri-depth`: rebuilt ISO with
+    `-trace nv2a_pgraph_method`; trace showed flat-last draw methods, but perf
+    still reported candidates as smooth.
+  - `benchmark-runs/20260430-144451-flat-tri-depth`: after adding explicit
+    method-owned `PGRAPHState` shade/provoking fields, trace still showed
+    flat-last draw methods while perf still reported candidates as smooth.
+- Current flat-shading conclusion:
+  - Stale media is no longer the explanation; metadata now records the rebuilt
+    ISO timestamp.
+  - Renderer-side state tracing showed live PGRAPH state and bound shader state
+    both become flat-first at bind, draw begin, and flush.
+  - The earlier all-smooth summaries were caused by the short XBE's flat phase
+    landing after the final regular one-second perf interval. A graceful final
+    perf-log flush now captures the partial tail.
+  - Validation run `benchmark-runs/20260430-153555-flat-tri-depth` passes the
+    flat counter split: 480 `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST`, 304
+    `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST`, and 304 `GEOM_SHADER_DRAW_TRI`.
+- `scripts/apple-silicon/compare-screenshots.py` now crops paired screenshots,
+  writes baseline/candidate/diff images, and prints simple visual-diff metrics.
+- First Rainbow Six 3 visual smoke comparison:
+  - baseline geometry run: `benchmark-runs/20260430-115436-rainbow-six-3`
+  - native triangle-depth run: `benchmark-runs/20260430-115335-rainbow-six-3`
+  - 10s viewport crop comparison: mean absolute error 0.1854, RMS 1.2256,
+    changed pixels above threshold 8: 0.4382%.
+  - visual inspection did not show an obvious rendering break, but this is only
+    a smoke check and not a proof of depth or polygon-offset correctness.
+- Native triangle-depth coverage counters now split native draws by:
+  - w-depth versus linear depth.
+  - fill polygon offset.
+  - smooth shading versus flat-first.
+  - flat fallback and flat-nonfirst fallback.
+- D11/D12 snapshot coverage runs:
+  - D11 Rainbow: `benchmark-runs/20260430-120458-rainbow-six-3`, 30.97 FPS /
+    6.36 MSPF post-load, 198,119 native draws, 0 fallbacks, 100,772 w-depth,
+    97,347 linear-depth, 26,019 polygon-offset, all smooth.
+  - D12 Crimson: `benchmark-runs/20260430-120553-crimson-skies`, 30.99 FPS /
+    20.39 MSPF post-load, 71,436 native draws, 0 fallbacks, all linear-depth,
+    24,738 polygon-offset, all smooth.
+- D15 post-tightening Rainbow confirmation:
+  - run: `benchmark-runs/20260430-121927-rainbow-six-3`
+  - post-load average: 30.97 FPS / 6.41 MSPF
+  - native triangle-depth draws: 201,450; fallbacks: 0.
+  - coverage: 101,016 w-depth, 100,434 linear-depth, 26,823 polygon-offset,
+    all smooth; flat fallback counters remained 0 because this scene has no
+    flat-shaded triangle fills.
+- Flat-first native triangle-depth eligibility was added after D15. It is a
+  targeted correctness expansion based on the OpenGL first-provoking convention;
+  local Crimson/Rainbow routes still do not exercise flat-shaded triangle fills,
+  so a dedicated nxdk flat-tri-depth XBE was created for direct validation.
+- D16 Rainbow flat-first eligibility check:
+  - run: `benchmark-runs/20260430-135911-rainbow-six-3`
+  - post-load average: 31.01 FPS / 7.62 MSPF
+  - native triangle-depth draws: 192,998; fallbacks: 0; geometry draws: 0.
+  - coverage: 100,772 w-depth, 92,226 linear-depth, 24,423 polygon-offset,
+    all smooth; flat-first and flat fallback counters remained 0.
+  - result: the flat-first eligibility expansion did not perturb the existing
+    smooth Rainbow snapshot path.
+- D13/D14 longer route coverage runs:
+  - D13 Rainbow smoke route:
+    `benchmark-runs/20260430-120653-rainbow-six-3`, 313,378 native draws, 0
+    fallbacks, 89,376 polygon-offset, all smooth.
+  - D14 Crimson smoke route:
+    `benchmark-runs/20260430-120851-crimson-skies`, 328,477 native draws, 0
+    fallbacks, 92,169 polygon-offset, all smooth.
+- Crimson visual smoke comparison:
+  - baseline geometry run: `benchmark-runs/20260430-121112-crimson-skies`
+  - native triangle-depth run: `benchmark-runs/20260430-121141-crimson-skies`
+  - 10s viewport crop comparison: mean absolute error 0.8191, RMS 2.3252,
+    changed pixels above threshold 8: 1.7876%.
+  - the baseline/native diff is much smaller than Crimson's normal temporal
+    movement in this scene.
+- Native triangle-depth is now promoted from raw diagnostic to stable opt-in
+  experiment flag:
+  - preferred flag: `XEMU_NATIVE_TRI_DEPTH=1`.
+  - compatibility alias: `XEMU_DIAG_NATIVE_TRI_DEPTH=1`.
+  - explicit preferred disable: `XEMU_NATIVE_TRI_DEPTH=0`, which wins over the
+    alias if both are present.
+  - control-plane smoke run: `benchmark-runs/20260430-173353-flat-tri-depth`,
+    with `native_tri_depth=1 source=XEMU_NATIVE_TRI_DEPTH mode=safe` in the log
+    and `env_XEMU_NATIVE_TRI_DEPTH: 1` in metadata.
+  - conflict smoke run: `benchmark-runs/20260430-175500-flat-tri-depth`, launched
+    with `XEMU_NATIVE_TRI_DEPTH=0` and `XEMU_DIAG_NATIVE_TRI_DEPTH=1`; it emitted
+    no native enable line, reported 0 native triangle-depth draws, and kept
+    51,863 triangle draws on the geometry-shader path.
+- Same-build paired native triangle-depth comparisons:
+  - P1 Rainbow report:
+    `benchmark-runs/20260430-174138-native-tri-depth-compare-rainbow-six-3`.
+  - P1 baseline/native runs:
+    `benchmark-runs/20260430-174138-rainbow-six-3` and
+    `benchmark-runs/20260430-174156-rainbow-six-3`.
+  - P1 post-load MSPF: 23.10 baseline, 6.83 native.
+  - P1 geometry draws: 79,775 baseline, 0 native.
+  - P1 native draws: 124,914, covering 50,142 w-depth, 74,772 linear-depth, and
+    23,976 polygon-offset draws.
+  - P1 visual crop changed pixels: 0.6131%.
+  - P2 Crimson report:
+    `benchmark-runs/20260430-174443-native-tri-depth-compare-crimson-skies`.
+  - P2 baseline/native runs:
+    `benchmark-runs/20260430-174443-crimson-skies` and
+    `benchmark-runs/20260430-174500-crimson-skies`.
+  - P2 post-load MSPF: 29.47 baseline, 17.87 native.
+  - P2 geometry draws: 20,041 baseline, 0 native.
+  - P2 native draws: 61,983, all linear-depth, with 23,142 polygon-offset draws.
+  - P2 visual crop changed pixels: 3.6913%; visual inspection showed aligned
+    crops with differences concentrated on texture/detail edges rather than an
+    obvious depth-order break.
+- New validation file:
+  `docs/apple-silicon/benchmarks/2026-04-30-native-tri-depth-validation.md`.
+- A first Crimson D3 attempt crashed before QMP became available:
+  - run: `benchmark-runs/20260430-110740-crimson-skies`
+  - crash report: `~/Library/Logs/DiagnosticReports/xemu-2026-04-30-110745.ips`
+  - stack pointed at Apple's `GLImageWork` texture upload path before perf
+    intervals were emitted.
+  - immediate rerun completed, so this is treated as nondeterministic Apple
+    OpenGL startup behavior unless it becomes reproducible.
+- A post-tightening Rainbow attempt also crashed before QMP became available:
+  - run: `benchmark-runs/20260430-121742-rainbow-six-3`
+  - crash report: `~/Library/Logs/DiagnosticReports/xemu-2026-04-30-121748.ips`
+  - stack again pointed at Apple's OpenGL texture upload worker path before
+    perf intervals were emitted.
+  - immediate rerun completed as D15, so this remains categorized as
+    nondeterministic Apple OpenGL startup behavior.
+- A flat-tri-depth trace attempt also hit the same Apple OpenGL worker class:
+  - run: `benchmark-runs/20260430-152912-flat-tri-depth`
+  - crash report pasted in-thread for process 24357 at 2026-04-30 15:29:13
+    CDT.
+  - crashed in `GLImageWork` / `libGLImage.dylib` during `glTexImage2D`
+    texture upload before any `xemu-perf:` interval was emitted.
+  - immediate rerun completed and validation later passed as
+    `benchmark-runs/20260430-153555-flat-tri-depth`.
+- CLI `-loadvm` failed for the Crimson snapshot with a saved USB hub
+  device-tree mismatch, so the harness restores after startup through QMP/HMP.
+- Rainbow Six 3 crashed Apple's OpenGL worker path when a thumbnail-bearing
+  snapshot was present on the scratch HDD. Benchmark-created snapshots now
+  default to no thumbnail, and the thumbnail-free Rainbow snapshot restored
+  successfully.
+- QMP `screendump` can crash Apple's OpenGL-on-Metal path and should not be the
+  default capture method yet.
+- macOS `screencapture` failed from this Codex desktop context with
+  `could not create image from display`; Computer Use screenshots were usable
+  for live route verification.
+
+## Next Session Checklist
+
+1. Treat native triangle-depth as the completed current triangle-family fill
+   replacement category for opt-in Apple Silicon testing. It is still not a
+   default renderer path, but the current Rainbow/Crimson/flat-XBE evidence is
+   enough to stop re-proving this same slice unless triangle code changes.
+2. Treat flat-tri-depth counter validation as passing for the current path.
+   The run to cite is
+   `benchmark-runs/20260430-153555-flat-tri-depth`: 480 flat-first native
+   draws, 304 flat-nonfirst fallbacks, and 304 triangle-family geometry-shader
+   draws. The current packaged-app rerun after the code cleanup is
+   `benchmark-runs/20260430-210159-flat-tri-depth`: 422 flat-first native
+   draws, 240 flat-nonfirst fallbacks, and 240 triangle-family geometry-shader
+   draws.
+3. Keep `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` available for targeted debugging,
+   but leave it off for timing runs.
+4. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for future same-build
+   comparisons instead of hand-pairing runs.
+5. Start the next implementation session by measuring or creating coverage for
+   the remaining geometry-shader users under `XEMU_NATIVE_TRI_DEPTH=1`.
+6. After coverage is clear, choose one remaining geometry-shader category to
+   remove or narrow: line primitives, quad/quad-strip expansion, polygon fill,
+   or nonfill triangle modes.
+7. Use this wrapper if the flat validation needs to be reproduced:
+
+```sh
+scripts/apple-silicon/validate-native-tri-depth.sh --run 20
+```
+
+   It runs the flat XBE with `XEMU_NATIVE_TRI_DEPTH=1`, extracts the perf
+   summary, and fails if the expected native/fallback split is missing.
+
+   Use this trace-heavy variant only for debugging:
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_PERF_LOG_INTERVAL_MS=1000 \
+scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
+  scripts/apple-silicon/input-scripts/noop.csv 22
+```
+
+   Passing means the first-provoking flat phase produces nonzero
+   `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST`, and the last-provoking flat phase
+   produces nonzero `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST` plus
+   `GEOM_SHADER_DRAW_TRI`.
+8. Run follow-up implementation/diagnostic changes against the saved scene
+   snapshots:
+   - Crimson: load `crimson_scene_b0`
+   - Rainbow: load `rainbow_scene_b1_nothumb`
+9. Compare the result against B2/B3/D1/D2/D3/D4, D17, and P1/P2 in
+   `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
+10. Only after the GL geometry-shader replacement work, decide whether V0/V1
+   Vulkan-over-Metal experiments are worth doing before the native Metal path.
+
+## Things Not To Forget
+
+- Do not delete or overwrite the local BIOS/HDD/game files.
+- Do not assume MoltenVK or KosmicKrisp is good enough without a run.
+- Do not optimize from intuition when Instruments or counters can answer.
+- Keep docs updated after each meaningful experiment.
+
+## Useful Commands
+
+Build baseline:
+
+```sh
+./build.sh -a arm64
+```
+
+Verify packaged app:
+
+```sh
+codesign --verify --deep --strict --verbose=2 dist/xemu.app
+dist/xemu.app/Contents/MacOS/xemu --version
+```
+
+Show current commit:
+
+```sh
+git rev-parse HEAD
+```
+
+Find geometry shader use:
+
+```sh
+rg -n "geometryShader|GL_GEOMETRY_SHADER|pgraph_glsl_need_geom|EmitVertex|EndPrimitive" hw/xbox/nv2a/pgraph
+```
+
+Find macOS/Vulkan build logic:
+
+```sh
+rg -n "host_os == 'darwin'|vulkan =|OpenGL|Molten|Metal|VK_USE_PLATFORM" meson.build build.sh hw/xbox/nv2a ui
+```
+
+View public regression:
+
+```sh
+gh issue view 2506 --repo xemu-project/xemu --comments
+```
+
+View PR #2240:
+
+```sh
+gh pr view 2240 --repo xemu-project/xemu --comments
+```
+
+Run snapshot scene-entry benchmarks:
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-100438-crimson-skies/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=crimson_scene_b0 \
+scripts/apple-silicon/run-benchmark.sh crimson \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=rainbow_scene_b1_nothumb \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+Re-run D1 diagnostic only if confirmation is needed:
+
+```sh
+XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=rainbow_scene_b1_nothumb \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+Re-run D2 diagnostic only if confirmation is needed:
+
+```sh
+XEMU_DIAG_SKIP_TRI_GEOM=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=rainbow_scene_b1_nothumb \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+Re-run the opt-in native triangle-depth path only for regression checks:
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=rainbow_scene_b1_nothumb \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/20260430-100438-crimson-skies/xbox_hdd.qcow2 \
+XEMU_BENCH_LOADVM_TAG=crimson_scene_b0 \
+scripts/apple-silicon/run-benchmark.sh crimson \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+```
+
+Run a same-build paired native triangle-depth comparison:
+
+```sh
+scripts/apple-silicon/native-tri-depth-compare.sh \
+  rainbow benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2 \
+  rainbow_scene_b1_nothumb 16
+```
+
+Rebuild the dedicated flat-shading XBE only if its source changes:
+
+```sh
+NXDK_DIR=/Users/jbbrack03/XEMU_MacOS/nxdk \
+PATH=/Users/jbbrack03/XEMU_MacOS/nxdk/bin:/opt/homebrew/Cellar/lld@19/19.1.7/bin:/opt/homebrew/opt/llvm/bin:$PATH \
+make -C scripts/apple-silicon/xbe-tests/flat-tri-depth
+```
+
+Reproduce the passing flat-XBE validation:
+
+```sh
+scripts/apple-silicon/validate-native-tri-depth.sh --run 20
+```
+
+Summarize a run:
+
+```sh
+scripts/apple-silicon/extract-perf-summary.sh benchmark-runs/20260430-153555-flat-tri-depth
+```
+
+Trace flat-XBE state only if debugging a regression:
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_PERF_LOG_INTERVAL_MS=1000 \
+scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
+  scripts/apple-silicon/input-scripts/noop.csv 22
+```
+
+Recommended next implementation shape:
+
+- The flat-tri-depth begin/bind/flush logging has been added and validated.
+  The mismatch was a perf-window artifact; graceful final perf flushing now
+  captures the flat XBE tail.
+- Treat `XEMU_NATIVE_TRI_DEPTH=1` as the completed triangle-family fill path for
+  this category. Continue using Rainbow Six 3 as the highest-signal retail scene
+  when the next geometry-shader-removal slice needs timing data, but first
+  confirm or create coverage for the remaining primitive category.
+- Start the next session by measuring or creating coverage for one remaining
+  geometry-shader user, then remove or narrow it: line primitives,
+  quad/quad-strip expansion, polygon fill, or nonfill triangle modes.
+- Compare future geometry-shader changes against B3/D1/D2/D3/D5/D17/P1/P2
+  before trying Vulkan-over-Metal.

@@ -56,6 +56,13 @@ package_macos() {
       done
     done
 
+    # dylibbundler can leave duplicate LC_RPATH entries. Recent macOS dyld
+    # rejects duplicate rpaths at launch, so keep only one copy.
+    app_rpath="@executable_path/${lib_rpath}/"
+    while [ "$(otool -l "$exe_path" | awk -v rpath="$app_rpath" '/cmd LC_RPATH/{flag=1; next} flag && /path /{if ($2 == rpath) count++; flag=0} END{print count+0}')" -gt 1 ]; do
+      install_name_tool -delete_rpath "$app_rpath" "$exe_path"
+    done
+
     # Copy in runtime resources
     mkdir -p dist/xemu.app/Contents/Resources
 
@@ -232,6 +239,9 @@ case "$platform" in # Adjust compilation options based on platform
         fi
         sys_ldflags='-headerpad_max_install_names'
         export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
+        if [[ -z "${CMAKE:-}" ]] && command -v cmake >/dev/null; then
+            export CMAKE="$(command -v cmake)"
+        fi
         opts="$opts --disable-cocoa --cross-prefix="
         postbuild='package_macos'
         ;;

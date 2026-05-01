@@ -29,6 +29,7 @@
 #include "qemu/osdep.h"
 #include "hw/xbox/nv2a/debug.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
+#include "geom.h"
 #include "psh.h"
 
 DEF_UNIFORM_INFO_ARR(PshUniform, PSH_UNIFORM_DECL_X)
@@ -58,6 +59,18 @@ static uint32_t get_color_key_mask_for_texture(PGRAPHState *pg, int i)
     return get_colorkey_mask(color_format);
 }
 
+static bool psh_native_tri_depth_available(PGRAPHState *pg)
+{
+    uint32_t raster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+    enum ShaderPolygonMode front_mode = (enum ShaderPolygonMode)GET_MASK(
+        raster, NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    enum ShaderPolygonMode back_mode = (enum ShaderPolygonMode)GET_MASK(
+        raster, NV_PGRAPH_SETUPRASTER_BACKFACEMODE);
+    return pgraph_glsl_native_tri_depth_supported(
+        (enum ShaderPrimitiveMode)pg->primitive_mode, front_mode, back_mode,
+        pg->smooth_shading, pg->first_vertex_is_provoking);
+}
+
 void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
 {
     state->window_clip_exclusive = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
@@ -81,10 +94,11 @@ void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
                                           NV_PGRAPH_SHADOWCTL_SHADOW_ZFUNC);
     state->z_perspective = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0) &
                            NV_PGRAPH_CONTROL_0_Z_PERSPECTIVE_ENABLE;
+    state->native_tri_depth =
+        pgraph_glsl_native_tri_depth_enabled() &&
+        psh_native_tri_depth_available(pg);
 
-    state->smooth_shading = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CONTROL_3),
-                                     NV_PGRAPH_CONTROL_3_SHADEMODE) ==
-                            NV_PGRAPH_CONTROL_3_SHADEMODE_SMOOTH;
+    state->smooth_shading = pg->smooth_shading;
 
     state->depth_clipping =
         GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_ZCOMPRESSOCCLUDE),
@@ -995,7 +1009,33 @@ static MString* psh_convert(struct PixelShader *ps)
                              "}\n");
     }
 
-    if (ps->state->z_perspective) {
+    if (ps->state->native_tri_depth) {
+        if (ps->state->z_perspective) {
+            mstring_append(
+                clip,
+                "precise float zvalue = 1.0 / gl_FragCoord.w;\n"
+                "float nativeTriMZ = max(abs(dFdx(gl_FragCoord.w) * float(surfaceScale.x)),\n"
+                "                       abs(dFdy(gl_FragCoord.w) * float(surfaceScale.y)));\n"
+                "if (zvalue > 0.0) {\n"
+                "  float zslopeofs = depthFactor*nativeTriMZ*zvalue*zvalue;\n"
+                "  zvalue += depthOffset;\n"
+                "  zvalue += zslopeofs;\n"
+                "} else {\n"
+                "  zvalue = uintBitsToFloat(0x7F7FFFFFu);\n"
+                "}\n"
+                "if (isnan(zvalue)) {\n"
+                "  zvalue = uintBitsToFloat(0x7F7FFFFFu);\n"
+                "}\n");
+        } else {
+            mstring_append(
+                clip,
+                "precise float zvalue = gl_FragCoord.z * clipRange.y;\n"
+                "float nativeTriMZ = max(abs(dFdx(zvalue) * float(surfaceScale.x)),\n"
+                "                       abs(dFdy(zvalue) * float(surfaceScale.y)));\n"
+                "zvalue += depthOffset;\n"
+                "zvalue += depthFactor*nativeTriMZ;\n");
+        }
+    } else if (ps->state->z_perspective) {
         mstring_append(
             clip,
             "vec2 unscaled_xy = gl_FragCoord.xy / surfaceScale;\n"
