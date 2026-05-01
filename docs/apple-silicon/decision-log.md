@@ -783,3 +783,75 @@ on Apple Silicon. On the renderer side, Crimson Skies' documented
 shader-compile stutter (1310 ms worst-frame, 16-second longest stutter
 run) is the highest user-visible jitter target and is independent of
 the TCG path.
+
+## 2026-05-01: Adopt research-informed implementation roadmap
+
+Status: documented. Each individual landing remains data-driven and will
+be added to this log separately as it ships.
+
+Decision:
+
+Pursue, in priority order: (1) frame-pacing emulation-rate slewing
+(Phase 2.5), (2) async shader compile (Phase 2.5), (3) native Metal
+renderer with CPU-side index expansion + framebuffer fetch + VS-Expand +
+async pipeline compile (Phase 4a–4i), (4) persistent shader/pipeline
+cache (Phase 4f / Phase 5), (5) persistent TCG translation cache
+(Phase 5a, PPTC pattern), (6) SSE / x87 hardfloat audit (Phase 5b,
+already tracked in `handoff.md` Prioritized Next Tasks #3). Reject
+custom x86 → ARM64 JIT (low ceiling, high macOS JIT pain documented in
+RPCS3 PR #12115) and ICB / argument-buffer work (premature for Xbox-era
+workloads).
+
+Rationale:
+
+The 2026-05-01 emulator survey
+(`docs/apple-silicon/research.md` "Apple Silicon Emulator Survey")
+catalogued how Dolphin, PCSX2, DuckStation, RPCS3, Ryujinx, and PPSSPP
+solve problems analogous to xemu's. Concrete patterns with named code
+references:
+
+- Dolphin `Source/Core/VideoCommon/IndexGenerator.cpp` (CPU-side
+  primitive expansion).
+- PCSX2 `pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm` `m_expand_index_buffer`
+  (VS-Expand with precomputed static index buffer + Metal function
+  constants).
+- DuckStation `src/util/metal_device.mm:2536-2620` (`presentDrawable:atTime:`
+  + emulation-rate slewing for jitter-free pacing).
+- DuckStation `src/util/metal_device.mm:387-410` and PCSX2 PR #5630
+  (framebuffer fetch on Apple GPU family for blend / register-combiner
+  passes).
+- Dolphin PR #5702 (hybrid ubershader for async shader compile).
+- Ryujinx PPTC blog (persistent translation cache pattern).
+- RPCS3 PR #12115 (catalogued macOS Apple Silicon JIT pain — used here
+  as anti-pattern reference).
+
+These extend rather than replace the existing prioritized work. Frame
+pacing (DuckStation pattern) directly addresses the 30 FPS gameplay
+jitter symptom captured in
+`benchmarks/2026-05-01-baseline-jitter.md`. Async shader compile
+(Dolphin / RPCS3 pattern) directly addresses Crimson Skies' 1310 ms
+worst-frame from Apple's GL-on-Metal synchronous compile. The Metal
+backend shape — index expansion + FBFetch + VS-Expand + async
+pipeline compile — is now concrete and data-driven rather than a
+hand-wave.
+
+Verification:
+
+- Survey content captured in `docs/apple-silicon/research.md` "Apple
+  Silicon Emulator Survey (2026-05-01)" with citations.
+- Strategy phases updated: Phase 2.5 inserted, Phase 4 expanded with
+  sub-deliverables 4a–4i, Phase 5 expanded with 5a (PPTC) and 5b
+  (hardfloat audit), new "What we ruled out" section.
+- No code changes in this entry. This is a planning decision.
+
+Consequence:
+
+Each individual landing remains gated by the project's data-driven rule
+(workspace `CLAUDE.md` rule #1): fresh `sample` profile + dated
+benchmark note + measured before/after, with append-only decision-log
+entries when each ships. Specifically: Phase 2.5 frame-pacing slewing
+should land before the Metal renderer because it is graphics-API-
+agnostic and trivially measurable; the async shader compile slice
+should follow because Crimson is the largest user-visible jitter target
+and its bottleneck has been profiled to synchronous shader compile in
+the Apple OpenGL-on-Metal driver.

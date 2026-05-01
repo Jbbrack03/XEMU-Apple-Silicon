@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated: 2026-05-01 (after measurement-infrastructure expansion and voice-fast-lock investigation)
+Last updated: 2026-05-01 (after emulator-survey research session)
 
 ## Current State
 
@@ -774,6 +774,48 @@ lock-elision alone cannot deliver. The realistic 60 FPS path needs:
 4. The native Metal renderer track (Phase 4 of `strategy.md`). The bigger
    Crimson lift, and breaks the Apple-OpenGL synchronous-shader-compile
    ceiling.
+
+## Update — 2026-05-01 emulator-survey research session
+
+Research-only session; no code changes. Captured a survey of how other
+emulators achieve excellent performance on Apple Silicon (Dolphin,
+PCSX2, DuckStation, PPSSPP, RPCS3, Ryujinx) and produced a research-
+informed implementation roadmap.
+
+Outputs:
+
+- New section in `docs/apple-silicon/research.md`: "Apple Silicon
+  Emulator Survey (2026-05-01)" with named code references and source
+  URLs for every claim.
+- Updates in `docs/apple-silicon/strategy.md`:
+  - Phase 2.5 (Frame Pacing & Async Shader Compile) inserted —
+    graphics-API-agnostic; can land on the current OpenGL path.
+  - Phase 4 expanded with sub-deliverables 4a–4i (Metal presentation,
+    CPU index-expansion port, framebuffer fetch on Apple GPU,
+    VS-Expand for sprites/lines, async pipeline compile, persistent
+    pipeline cache, buffer/texture management, frame-capture workflow,
+    perf comparison).
+  - Phase 5 expanded with 5a (PPTC persistent TCG translation cache)
+    and 5b (SSE / x87 hardfloat audit, already tracked).
+  - New "What we ruled out" section documenting why a custom
+    x86 → ARM64 JIT, indirect-command-buffers, and Hypervisor.framework
+    are off the roadmap.
+- New decision-log entry: "2026-05-01: Adopt research-informed
+  implementation roadmap".
+
+This session does NOT supersede the existing Prioritized Next Tasks
+list below. The survey adds named patterns and source references for
+tasks already in flight — especially #2 (async shader compile), which
+now has Dolphin's hybrid ubershader (PR #5702) and RPCS3's 2018 async
+pipeline as named templates.
+
+The next implementation slice should still be #2 (async shader compile)
+— it has the highest measured user-visible jitter leverage (Crimson's
+1310 ms worst-frame from synchronous compile inside Apple's
+GL-on-Metal driver). Consider a parallel small slice for Phase 2.5
+emulation-rate slewing because it is graphics-API-agnostic, trivially
+measurable on the existing OpenGL path via `mspf_max` jitter keys, and
+mirrors a proven DuckStation/PCSX2 pattern.
 
 ## Prioritized Next Tasks
 

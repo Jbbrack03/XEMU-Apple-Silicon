@@ -158,11 +158,20 @@ Start in `handoff.md`, section `Next Session Checklist`. The important state is:
   triangle-path change was made.
 - Use `scripts/apple-silicon/validate-native-tri-depth.sh --run 20` only as a
   quick regression gate for the completed triangle-family fill slice.
-- First useful next task: replay the PGR2 gameplay route under baseline and
-  `XEMU_NATIVE_TRI_DEPTH=1`, then inspect whether the remaining severe
-  slowdown is dominated by quad-family geometry-shader work.
-- Candidate next categories: quad/quad-strip expansion first, then line
-  primitives, polygon fill, and nonfill triangle modes.
+- All three opt-in flags (`XEMU_NATIVE_TRI_DEPTH=1`, `XEMU_NATIVE_QUAD=1`,
+  `XEMU_PGRAPH_FAST_READ=1`) are landed and visually validated; PGR2 /
+  Rainbow Six 3 / Crimson Skies all meet the 30 FPS gameplay floor with
+  the three flags on. Do not re-prove these unless the underlying code
+  changes.
+- First useful next task: async shader compile
+  (`XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`) to address Crimson Skies'
+  documented 1310 ms worst-frame from synchronous compile in Apple's
+  GL-on-Metal driver. See `strategy.md` Phase 2.5 and the 2026-05-01
+  emulator-survey research session in `research.md` for the
+  research-informed roadmap.
+- Parallel small slice: emulation-rate slewing (also Phase 2.5),
+  graphics-API-agnostic and trivially measurable on the existing OpenGL
+  path via `mspf_max` jitter keys.
 
 ## First Principle
 

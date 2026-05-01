@@ -210,6 +210,37 @@ Deliverables:
 - Benchmarks proving reduced shader compilation stalls and improved macOS 3D
   pacing.
 
+### Phase 2.5: Frame Pacing & Async Shader Compile
+
+These two slices are independent of graphics-API choice and can land on
+the current OpenGL path before Phase 3 or Phase 4. They address the
+user-visible jitter sources documented in
+`benchmarks/2026-05-01-baseline-jitter.md`:
+
+- Crimson Skies' 1310 ms worst-frame from synchronous shader compilation
+  in Apple's GL-on-Metal driver (P99 = 892 ms, longest stutter run = 16
+  s). Identified as the highest user-visible jitter cost.
+- PGR2 / Rainbow tail jitter from emulation-clock drift relative to host
+  vsync.
+
+Deliverables:
+
+- Frame pacing — emulation-rate slewing. Lock guest 60 Hz to host vsync
+  via fractional clock adjustment of ≤ 1 %, mirroring DuckStation's
+  "Sync to Host Refresh Rate" (PCSX2 PR #5488). Graphics-API-agnostic;
+  measurable on the existing OpenGL build via the per-interval
+  `mspf_max` jitter keys in `extract-perf-summary.sh`.
+- Async shader compile (`XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`). Worker
+  thread compiles shader programs off the renderer's critical path;
+  placeholder/ubershader bind while waiting; swap on completion. Pattern
+  from Dolphin's hybrid ubershader (PR #5702) and RPCS3's 2018 async
+  shader pipeline. Verification gate: Crimson route's `SHADER_GEN` /
+  `SURF_TO_TEX` / `TEX_UPLOAD` co-occurring stutter intervals dropping
+  by ≥ 80 %.
+
+Both slices are research-informed; named source references are in
+`research.md` "Apple Silicon Emulator Survey (2026-05-01)".
+
 ### Phase 3: Vulkan-over-Metal Prototype
 
 Deliverables:
@@ -221,22 +252,88 @@ Deliverables:
 
 ### Phase 4: Native Metal Renderer
 
-Deliverables:
+Sub-deliverables informed by the 2026-05-01 emulator survey
+(`research.md`):
 
-- Metal presentation path.
-- Metal shader/pipeline cache.
-- Metal buffer/texture/surface management.
-- Metal System Trace and frame capture workflow.
-- Performance and correctness comparison against Phase 0.
+- 4a. Metal presentation primitives. `CAMetalLayer`, `MTLDevice`,
+  `MTLCommandQueue`, `presentDrawable:atTime:` for VRR-aware
+  presentation pacing. Reference: DuckStation
+  `metal_device.mm:2536-2620`. Pair with the Phase 2.5 emulation-rate
+  slewing for the full frame-pacing recipe.
+- 4b. CPU-side index expansion (Metal). Port the existing
+  `XEMU_NATIVE_TRI_DEPTH` / `XEMU_NATIVE_QUAD` index logic to the Metal
+  backend so Metal only ever sees `MTLPrimitiveTypeTriangle` /
+  `TriangleStrip`. Reference: Dolphin
+  `Source/Core/VideoCommon/IndexGenerator.cpp` (`AddFan`, `AddQuads`,
+  with `pr` / non-`pr` template variants).
+- 4c. Framebuffer fetch (Apple GPU only). Gate on
+  `[device supportsFamily:MTLGPUFamilyApple1]`. Maps NV2A register-
+  combiner / blend modes that don't fit Metal fixed-function blending
+  into a single shader pass with MSL `[[color(0)]]` fragment input.
+  Barrier-based fallback for Intel Macs. References: PCSX2 PR #5630,
+  DuckStation `metal_device.mm:387-410`.
+- 4d. VS-Expand for point sprites / wide lines. Static precomputed
+  index buffer in `MTLStorageModePrivate`; two MSL vertex shader
+  variants selected at pipeline-build time via Metal *function
+  constants*. Reference: PCSX2 `m_expand_index_buffer` pattern in
+  `pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm`.
+- 4e. Async pipeline compile + ubershader fallback. Pipeline objects
+  cached; specialized variants compiled in the background; ubershader
+  bound while waiting; swap on completion. Reference: Dolphin PR #5702
+  + the `bSupportsBackgroundCompiling` plumbing. Builds on Phase 2.5
+  if that slice landed first.
+- 4f. Metal shader/pipeline cache persistence. Per-game cache of
+  compiled Metal pipeline states keyed by NV2A render-state hash,
+  mirroring Dolphin and PPSSPP per-game shader caches.
+- 4g. Metal buffer/texture/surface management. `MTLResourceStorageModeShared`
+  for streaming uploads, `MTLStorageModePrivate` for GPU-only resources.
+  Reference: Dolphin PR #10754 ("`bUseUnifiedMemory` toggle was removed,
+  not worth the extra code").
+- 4h. Metal System Trace and frame capture workflow. Capture-by-default
+  presets for the existing PGR2 / Rainbow / Crimson scene snapshots.
+- 4i. Performance and correctness comparison against Phase 0.
 
 ### Phase 5: Performance Hardening
 
 Deliverables:
 
-- Shader cache persistence and prewarming where useful.
+- Shader cache persistence and prewarming where useful (extends Phase 4f).
 - Reduced synchronization stalls.
 - Texture/surface upload/download audit.
 - Game-specific regression suite.
+- 5a. Persistent TCG translation cache (PPTC pattern). Serialize TCG
+  translation blocks across runs, keyed by guest binary hash.
+  First-load win only; will not help steady-state PGR2 / Rainbow /
+  Crimson. Reference:
+  https://blog.ryujinx.org/introducing-profiled-persistent-translation-cache/.
+- 5b. SSE / x87 floating-point helper audit. Already tracked in
+  `handoff.md` Prioritized Next Tasks #3. If SSE float32 ops go through
+  `soft_f32_mul` while NEON float32 is available, lift to hardfloat.
+  Largest potential TCG win on Apple Silicon per
+  `benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`.
+
+## What we ruled out
+
+The 2026-05-01 emulator survey identified several techniques that other
+projects use but that are not on this fork's roadmap, with reasons:
+
+- Custom x86 → ARM64 JIT replacing TCG. RPCS3 PR #12115's documented
+  macOS-on-Apple-Silicon JIT pain catalog (16 KB pages,
+  `MAP_FIXED | MAP_JIT` ban, W^X toggling) is real and the typical
+  game-emulation custom-JIT ceiling over TCG is 2–5×, not 10×. Per
+  workspace rule #1, measurement should drive that decision; the most
+  recent profile (`benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`)
+  attributes ~9 % of TCG-thread time to mutex wait and the bulk of the
+  remainder to floating-point helpers — the SSE / x87 hardfloat audit
+  (5b) is a much cheaper way to address the same surface area.
+- Indirect command buffers, argument buffers, mesh shaders. Tellusim's
+  Metal MDI study (https://tellusim.com/metal-mdi/) shows ICBs win
+  only for many small draws and lose by ~1.5× for larger draws. The
+  win is meaningful only after per-draw shader compile cost is
+  absorbed and the bottleneck has moved into command-encoding overhead
+  — not the case at Xbox-era workloads.
+- Apple Hypervisor.framework for guest CPU. Only useful when guest and
+  host ISA match; xemu's guest is x86 32-bit and the host is ARM64.
 
 ## Risks
 
