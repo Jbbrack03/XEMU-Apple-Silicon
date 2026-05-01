@@ -56,6 +56,8 @@ Known local test games:
 
 - Crimson Skies: `/Users/jbbrack03/XEMU_MacOS/Test_Games/Crimson skies.xiso.iso`
 - Rainbow Six 3: `/Users/jbbrack03/XEMU_MacOS/Test_Games/Rainbow Six 3.xiso.iso`
+- Project Gotham Racing 2:
+  `/Volumes/Final Cut Pro Libraries/Projects/XEMU_MacOS/Test_Games/PGR2.xiso.iso`
 
 Known emulator files:
 
@@ -83,6 +85,29 @@ Known emulator files:
 | V0 | Vulkan-over-Metal prototype | MoltenVK | Crimson Skies | same as B0 | 120s | feature support, FPS, correctness |
 | V1 | Vulkan-over-Metal prototype | KosmicKrisp | Crimson Skies | same as B0 | 120s | feature support, FPS, correctness |
 | M0 | Metal prototype | Metal | Crimson Skies | same as B0 | 120s | FPS, pacing, correctness |
+
+## Retail Gameplay Targets
+
+Performance target floor:
+
+- Sustained 30 FPS in gameplay for all benchmark titles, matching original Xbox
+  hardware expectations.
+- 60 FPS is desirable when possible, but not the minimum stability/performance
+  bar for this Apple Silicon work.
+
+Current observed retail behavior before recorded gameplay routes:
+
+| Game | Smooth Areas | Problem Areas |
+| --- | --- | --- |
+| Project Gotham Racing 2 | Opening cinematics and main menu are smooth. | Gameplay is very choppy in both video and audio. |
+| Crimson Skies | Opening cinematics and main menu are smooth. | Gameplay does not sustain the proper framerate, feels laggy, specific animations such as holding `Y` for plane acceleration are choppy, and audio occasionally skips. |
+| Rainbow Six 3 | Opening cinematics and main menu are smooth. Gameplay is smooth while stationary. | Framerate drops substantially once character movement starts, gameplay becomes choppy, and audio occasionally skips. |
+
+Recorded gameplay routes should prioritize the problem areas above rather than
+only reaching menus or cinematics. PGR2 is the strongest current stress case for
+severe video/audio pacing collapse. Crimson Skies is useful for sustained
+near-target gameplay with animation/audio glitches. Rainbow Six 3 is useful for
+movement-triggered gameplay slowdown and visual artifact coverage.
 
 Current matrix status:
 
