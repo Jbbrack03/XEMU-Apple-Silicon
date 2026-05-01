@@ -188,6 +188,7 @@ EOF
     echo "extra_qemu_args: ${EXTRA_QEMU_ARGS:-none}"
     echo "env_XEMU_NATIVE_TRI_DEPTH: ${XEMU_NATIVE_TRI_DEPTH:-unset}"
     echo "env_XEMU_NATIVE_QUAD: ${XEMU_NATIVE_QUAD:-unset}"
+    echo "env_XEMU_PGRAPH_FAST_READ: ${XEMU_PGRAPH_FAST_READ:-unset}"
     echo "env_XEMU_DIAG_NATIVE_TRI_DEPTH: ${XEMU_DIAG_NATIVE_TRI_DEPTH:-unset}"
     echo "env_XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE: ${XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE:-unset}"
     echo "env_XEMU_DIAG_SKIP_TRI_GEOM: ${XEMU_DIAG_SKIP_TRI_GEOM:-unset}"

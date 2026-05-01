@@ -71,14 +71,60 @@ static void pgraph_trace_shading_method(PGRAPHState *pg, const char *method,
     logged++;
 }
 
+static bool pgraph_fast_read_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_PGRAPH_FAST_READ");
+        enabled = value && value[0] && strcmp(value, "0") != 0;
+        if (enabled) {
+            fprintf(stderr,
+                    "xemu-perf: pgraph_fast_read=1 source=XEMU_PGRAPH_FAST_READ\n");
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
     PGRAPHState *pg = &d->pgraph;
+    uint64_t r = 0;
+
+    /*
+     * Fast path: simple register reads return a uint32_t snapshot without
+     * taking pg->lock. Aligned 32-bit loads are atomic on ARM64 and x86.
+     * The renderer's pfifo thread takes pg->lock for long stretches during
+     * draw submission, and the Xbox CPU polls these registers very
+     * frequently, so skipping the mutex here removes the bulk of CPU-thread
+     * stall time without changing the values seen by the guest.
+     *
+     * Side-effecting registers (currently only NV_PGRAPH_RDI_DATA, which
+     * auto-increments NV_PGRAPH_RDI_INDEX_ADDRESS on read) still need the
+     * full lock because they mutate PGRAPH state.
+     */
+    if (pgraph_fast_read_enabled() && addr != NV_PGRAPH_RDI_DATA) {
+        switch (addr) {
+        case NV_PGRAPH_INTR:
+            r = qatomic_read(&pg->pending_interrupts);
+            break;
+        case NV_PGRAPH_INTR_EN:
+            r = qatomic_read(&pg->enabled_interrupts);
+            break;
+        default:
+            r = qatomic_read(&pg->regs_[addr]);
+            break;
+        }
+        nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
+        return r;
+    }
 
     qemu_mutex_lock(&pg->lock);
 
-    uint64_t r = 0;
     switch (addr) {
     case NV_PGRAPH_INTR:
         r = pg->pending_interrupts;
