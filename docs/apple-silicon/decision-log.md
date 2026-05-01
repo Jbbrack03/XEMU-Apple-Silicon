@@ -494,3 +494,46 @@ primitives, quad/quad-strip expansion, polygon fill, or nonfill triangle modes,
 then choose one category to remove or narrow. Broader retail coverage is still
 required before defaulting `XEMU_NATIVE_TRI_DEPTH=1`, but it is not the next
 implementation blocker.
+
+## 2026-05-01: Use retail gameplay routes as the next performance gate
+
+Status: recorded and tracked.
+
+Decision:
+
+Use the recorded PGR2, Rainbow Six 3, and Crimson Skies gameplay routes as the
+primary user-visible performance gate for the next renderer work. The
+performance floor is sustained 30 FPS in gameplay for all tracked titles; 60 FPS
+is desirable but not the minimum stability/performance bar.
+
+Rationale:
+
+The older smoke routes and scene snapshots are useful for controlled
+diagnostics, but the new routes reproduce the actual manual observations:
+PGR2 collapses in gameplay, Rainbow Six 3 drops when character movement starts,
+and Crimson Skies shows sustained gameplay pacing and acceleration-animation
+choppiness. These routes also expose remaining primitive families that the
+completed triangle-family fill path does not remove.
+
+Verification:
+
+- PGR2:
+  `scripts/apple-silicon/input-scripts/pgr2-gameplay.csv`,
+  `benchmark-runs/20260501-094823-pgr2`, 11.53 average FPS, 1,516,519
+  geometry-shader draws, including 38,785 quad-family draws.
+- Rainbow Six 3:
+  `scripts/apple-silicon/input-scripts/rainbow-gameplay.csv`,
+  `benchmark-runs/20260501-095400-rainbow-six-3`, 24.19 average FPS, 692,438
+  geometry-shader draws, including 1,946 line-family draws.
+- Crimson Skies:
+  `scripts/apple-silicon/input-scripts/crimson-gameplay.csv`,
+  `benchmark-runs/20260501-095905-crimson-skies`, 15.44 average FPS, 786,722
+  geometry-shader draws, including 7,837 quad-family draws.
+
+Consequence:
+
+Start the next implementation session with PGR2 baseline versus
+`XEMU_NATIVE_TRI_DEPTH=1` replay. If quad-family geometry-shader work remains
+the strongest signal, prioritize quad/quad-strip expansion removal or
+narrowing before moving to line primitives, polygon fill, or nonfill triangle
+modes.

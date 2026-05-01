@@ -288,18 +288,21 @@ same-build retail snapshot comparisons. For the current Apple Silicon fork,
 native triangle-depth is the completed current opt-in replacement for
 triangle-family fill draws.
 
-Remaining work should not keep re-proving the same slice. Broader promotion
-work is still needed before defaulting it:
+Remaining work should not keep re-proving the same slice. The 2026-05-01 PGR2,
+Rainbow Six 3, and Crimson Skies gameplay routes add the next retail benchmark
+layer; use those routes for future user-visible performance gates. Broader
+promotion work is still needed before defaulting the path:
 
-1. Add more retail coverage beyond the current Crimson Skies and Rainbow Six 3
-   snapshots.
+1. Replay the retail gameplay routes under baseline and `XEMU_NATIVE_TRI_DEPTH=1`,
+   starting with PGR2.
 2. Keep `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` available for targeted flat-path
    debugging, but leave it disabled for timing runs.
 3. Use the final perf flush when short diagnostic tests place important draws
    near process shutdown.
-4. Move the next geometry-shader removal category to line primitives,
-   quad/quad-strip expansion, polygon fill, or nonfill primitives, which still
-   depend on geometry shaders.
+4. Move the next geometry-shader removal category to quad/quad-strip expansion
+   first if PGR2 confirms the expected quad-family pressure; otherwise use the
+   route counters to choose line primitives, polygon fill, or nonfill
+   primitives.
 
 ## Known Harness Noise
 

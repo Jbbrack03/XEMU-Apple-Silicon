@@ -109,6 +109,19 @@ severe video/audio pacing collapse. Crimson Skies is useful for sustained
 near-target gameplay with animation/audio glitches. Rainbow Six 3 is useful for
 movement-triggered gameplay slowdown and visual artifact coverage.
 
+Current recorded retail gameplay routes:
+
+| ID | Game | Route File | Capture Run | Avg FPS | Post-load Avg FPS | Geometry-shader Draws | Primitive Coverage |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| R1 | Project Gotham Racing 2 | `scripts/apple-silicon/input-scripts/pgr2-gameplay.csv` | `benchmark-runs/20260501-094823-pgr2` | 11.53 | 11.67 | 1,516,519 | 1,477,734 triangle, 38,785 quad |
+| R2 | Rainbow Six 3 | `scripts/apple-silicon/input-scripts/rainbow-gameplay.csv` | `benchmark-runs/20260501-095400-rainbow-six-3` | 24.19 | 24.76 | 692,438 | 690,492 triangle, 1,946 line |
+| R3 | Crimson Skies | `scripts/apple-silicon/input-scripts/crimson-gameplay.csv` | `benchmark-runs/20260501-095905-crimson-skies` | 15.44 | 15.80 | 786,722 | 778,885 triangle, 7,837 quad |
+
+Use PGR2 as the first retail route for the next geometry-shader-removal slice:
+it is furthest below the 30 FPS target and exposes quad-family geometry-shader
+activity during real gameplay. Use Rainbow Six 3 to keep line-family coverage
+visible, and Crimson Skies as the sustained flight/acceleration cross-check.
+
 Current matrix status:
 
 - B0/B1 build, launch, scripted route, and log-based FPS/frame-pacing
@@ -164,7 +177,8 @@ Current matrix status:
   - D7: 28 intervals, average 31.26 FPS, post-load 30.98 FPS / 20.30 MSPF.
   - Both runs kept geometry draw counters at zero, including line counters.
   - Result: Crimson has more frame-time variance here; keep using Rainbow Six 3
-    as the primary geometry-dispatch comparison.
+    as the primary snapshot-level triangle-family comparison. Use PGR2 first
+    for current retail gameplay geometry-dispatch work.
   - Current runs should use the stable `XEMU_NATIVE_TRI_DEPTH=1` spelling; the
     older diagnostic spelling remains a compatibility alias for these records.
 - D8/D10 reran Rainbow Six 3 after tightening the native triangle-depth
@@ -215,9 +229,10 @@ Current matrix status:
   - B1 reaches the Rainbow Six 3 Hereford mission loading screen.
 - V0/V1/M0 should wait until the next geometry-shader-removal slice is chosen.
   Triangle-family fill is validated for current opt-in testing. The next
-  benchmark task is to measure or create coverage for line primitives,
-  quad/quad-strip expansion, polygon fill, and nonfill triangle modes, then use
-  the paired comparison harness once a concrete replacement path exists.
+  benchmark task is to replay PGR2 baseline versus `XEMU_NATIVE_TRI_DEPTH=1`,
+  confirm whether quad-family geometry-shader pressure remains the strongest
+  signal, and then use Rainbow Six 3 / Crimson Skies as line and flight
+  cross-checks once a concrete replacement path exists.
 
 ## Metrics To Add To xemu
 

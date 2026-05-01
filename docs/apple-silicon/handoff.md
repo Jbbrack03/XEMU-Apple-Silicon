@@ -23,6 +23,8 @@ Source code changes made this session:
 - `ui/xemu-input.c`
   - adds opt-in scripted controller input via `XEMU_SCRIPTED_INPUT`, allowing
     repeatable benchmark navigation without physical controller input.
+  - adds opt-in physical controller recording via `XEMU_RECORD_INPUT`, writing
+    the same CSV format used by scripted replay.
 - `hw/xbox/nv2a/debug.h`
 - `hw/xbox/nv2a/pgraph/profile.c`
 - `hw/xbox/nv2a/pgraph/pgraph.c`
@@ -73,7 +75,8 @@ Source code changes made this session:
   - adds `XEMU_SNAPSHOT_NO_THUMBNAIL=1` to skip snapshot thumbnail generation
     for benchmark-created snapshots.
 - `scripts/apple-silicon/run-benchmark.sh`
-  - launches Crimson Skies or Rainbow Six 3 with scripted input, metadata
+  - launches Crimson Skies, Rainbow Six 3, PGR2, or flat-tri-depth with scripted
+    input, metadata
     capture, QMP socket, optional periodic screenshots, logs, and a scratch HDD
     copy.
   - refuses to start if a previous xemu process is still running and cleans up
@@ -87,6 +90,15 @@ Source code changes made this session:
     perf-log flush to run on normal benchmark shutdown.
   - records native triangle-depth and related diagnostic environment toggles in
     benchmark metadata.
+  - supports live controller setup runs through `XEMU_BENCH_LIVE_INPUT=1` and
+    safe prepared-HDD use through `XEMU_BENCH_HDD_IN_PLACE=1`.
+- `scripts/apple-silicon/record-input.sh`
+  - records physical controller input for a selected benchmark target into a
+    stable replay CSV.
+- `scripts/apple-silicon/live-setup.sh`
+  - runs profile setup against a persistent copied HDD at
+    `benchmark-runs/profile-prep/xbox_hdd.qcow2`, avoiding profile creation in
+    the final recorded routes.
 - `scripts/apple-silicon/native-tri-depth-compare.sh`
   - runs paired baseline/native snapshot benchmarks with a shared scratch-HDD
     source and snapshot tag.
@@ -135,6 +147,24 @@ Baseline app status:
   - Crimson Skies through pilot registration into the in-engine sequence.
   - Rainbow Six 3 through default profile creation and Campaign into Hereford
     mission loading.
+- Profile-prepared retail gameplay routes are now recorded and tracked:
+  - PGR2 route:
+    `scripts/apple-silicon/input-scripts/pgr2-gameplay.csv`,
+    `benchmark-runs/20260501-094823-pgr2`, 11.53 average FPS / 11.67 post-load
+    average FPS, 1,516,519 geometry-shader draws, including 38,785 quad-family
+    draws.
+  - Rainbow Six 3 route:
+    `scripts/apple-silicon/input-scripts/rainbow-gameplay.csv`,
+    `benchmark-runs/20260501-095400-rainbow-six-3`, 24.19 average FPS / 24.76
+    post-load average FPS, 692,438 geometry-shader draws, including 1,946
+    line-family draws.
+  - Crimson Skies route:
+    `scripts/apple-silicon/input-scripts/crimson-gameplay.csv`,
+    `benchmark-runs/20260501-095905-crimson-skies`, 15.44 average FPS / 15.80
+    post-load average FPS, 786,722 geometry-shader draws, including 7,837
+    quad-family draws.
+- Retail performance target floor is sustained 30 FPS in gameplay for all
+  tracked titles. 60 FPS is desirable but not the minimum bar.
 - Baseline metrics are recorded in
   `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
 - B0 Crimson Skies baseline:
@@ -168,9 +198,10 @@ Baseline app status:
   - average: 29.23 FPS over 27 intervals
   - post-load average after first five intervals: 30.97 FPS / 17.66 MSPF
   - geometry draws: 149,961, all triangle-family
-- Rainbow Six 3 is currently the better geometry-shader overhead diagnostic
-  scene because it issues roughly six times the geometry-backed draws of the
-  Crimson scene over the same run length.
+- Among the older snapshot scene-entry runs, Rainbow Six 3 is the better
+  triangle-family geometry-shader overhead diagnostic because it issues roughly
+  six times the geometry-backed draws of the Crimson scene over the same run
+  length. For current retail gameplay work, start with PGR2.
 - `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` is available as a temporary diagnostic
   toggle. It keeps triangle-family geometry shaders active but bypasses their
   depth-plane/slope calculation.
@@ -420,11 +451,16 @@ Baseline app status:
 
 ## Next Session Checklist
 
-1. Treat native triangle-depth as the completed current triangle-family fill
+1. Start by reading this checklist plus the three 2026-05-01 retail gameplay
+   route notes:
+   - `docs/apple-silicon/benchmarks/2026-05-01-pgr2-gameplay-route.md`
+   - `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md`
+   - `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md`
+2. Treat native triangle-depth as the completed current triangle-family fill
    replacement category for opt-in Apple Silicon testing. It is still not a
    default renderer path, but the current Rainbow/Crimson/flat-XBE evidence is
    enough to stop re-proving this same slice unless triangle code changes.
-2. Treat flat-tri-depth counter validation as passing for the current path.
+3. Treat flat-tri-depth counter validation as passing for the current path.
    The run to cite is
    `benchmark-runs/20260430-153555-flat-tri-depth`: 480 flat-first native
    draws, 304 flat-nonfirst fallbacks, and 304 triangle-family geometry-shader
@@ -432,16 +468,23 @@ Baseline app status:
    `benchmark-runs/20260430-210159-flat-tri-depth`: 422 flat-first native
    draws, 240 flat-nonfirst fallbacks, and 240 triangle-family geometry-shader
    draws.
-3. Keep `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` available for targeted debugging,
+4. Keep `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` available for targeted debugging,
    but leave it off for timing runs.
-4. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for future same-build
-   comparisons instead of hand-pairing runs.
-5. Start the next implementation session by measuring or creating coverage for
-   the remaining geometry-shader users under `XEMU_NATIVE_TRI_DEPTH=1`.
-6. After coverage is clear, choose one remaining geometry-shader category to
-   remove or narrow: line primitives, quad/quad-strip expansion, polygon fill,
-   or nonfill triangle modes.
-7. Use this wrapper if the flat validation needs to be reproduced:
+5. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for snapshot-level
+   same-build comparisons, but use the retail gameplay route scripts for the
+   user-visible 30 FPS target.
+6. First useful next implementation task: replay PGR2 baseline and
+   `XEMU_NATIVE_TRI_DEPTH=1` using `pgr2-gameplay.csv`, then inspect whether
+   the severe remaining slowdown is dominated by quad-family geometry-shader
+   work.
+7. After PGR2 is measured, choose one remaining geometry-shader category to
+   remove or narrow. Current priority order:
+   - quad/quad-strip expansion, because PGR2 is worst and has quad-family
+     geometry-shader activity.
+   - line primitives, because Rainbow Six 3 has line-family coverage.
+   - polygon fill or nonfill triangle modes, if counters show them in the next
+     focused coverage run.
+8. Use this wrapper if the flat validation needs to be reproduced:
 
 ```sh
 scripts/apple-silicon/validate-native-tri-depth.sh --run 20
@@ -465,13 +508,15 @@ scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
    `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST`, and the last-provoking flat phase
    produces nonzero `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST` plus
    `GEOM_SHADER_DRAW_TRI`.
-8. Run follow-up implementation/diagnostic changes against the saved scene
-   snapshots:
+9. Run follow-up implementation/diagnostic changes against both the retail
+   gameplay routes and the saved scene snapshots:
    - Crimson: load `crimson_scene_b0`
    - Rainbow: load `rainbow_scene_b1_nothumb`
-9. Compare the result against B2/B3/D1/D2/D3/D4, D17, and P1/P2 in
+10. Compare the result against R1/R2/R3 in
+   `docs/apple-silicon/benchmarking.md`, the route notes in
+   `docs/apple-silicon/benchmarks/`, and B2/B3/D1/D2/D3/D4, D17, and P1/P2 in
    `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
-10. Only after the GL geometry-shader replacement work, decide whether V0/V1
+11. Only after the GL geometry-shader replacement work, decide whether V0/V1
    Vulkan-over-Metal experiments are worth doing before the native Metal path.
 
 ## Things Not To Forget
@@ -524,6 +569,39 @@ View PR #2240:
 
 ```sh
 gh pr view 2240 --repo xemu-project/xemu --comments
+```
+
+Replay retail gameplay routes:
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
+```
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/rainbow-gameplay.csv 300
+```
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh crimson \
+  scripts/apple-silicon/input-scripts/crimson-gameplay.csv 300
+```
+
+Replay PGR2 with the completed opt-in triangle-family fill path:
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
 ```
 
 Run snapshot scene-entry benchmarks:
@@ -631,11 +709,13 @@ Recommended next implementation shape:
   The mismatch was a perf-window artifact; graceful final perf flushing now
   captures the flat XBE tail.
 - Treat `XEMU_NATIVE_TRI_DEPTH=1` as the completed triangle-family fill path for
-  this category. Continue using Rainbow Six 3 as the highest-signal retail scene
-  when the next geometry-shader-removal slice needs timing data, but first
-  confirm or create coverage for the remaining primitive category.
-- Start the next session by measuring or creating coverage for one remaining
-  geometry-shader user, then remove or narrow it: line primitives,
-  quad/quad-strip expansion, polygon fill, or nonfill triangle modes.
-- Compare future geometry-shader changes against B3/D1/D2/D3/D5/D17/P1/P2
-  before trying Vulkan-over-Metal.
+  this category. Do not re-prove it unless triangle code changes.
+- Start the next session with the PGR2 gameplay replay, first baseline and then
+  `XEMU_NATIVE_TRI_DEPTH=1`, because PGR2 is farthest below the 30 FPS target
+  and has meaningful quad-family geometry-shader activity.
+- If PGR2 confirms the expected remaining quad-family pressure, prioritize a
+  quad/quad-strip replacement or narrowing slice. Keep Rainbow Six 3 for
+  line-family coverage and Crimson Skies for sustained flight/acceleration
+  cross-checks.
+- Compare future geometry-shader changes against R1/R2/R3 plus
+  B3/D1/D2/D3/D5/D17/P1/P2 before trying Vulkan-over-Metal.

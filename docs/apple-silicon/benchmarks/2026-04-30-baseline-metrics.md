@@ -234,7 +234,10 @@ Baseline measurement, geometry-path attribution, two triangle diagnostics, the
 native triangle-depth replacement path, a dedicated flat-shading XBE, and paired
 same-build retail comparisons are now available. The current
 triangle-family fill slice is validated for current opt-in Apple Silicon testing,
-but remains disabled by default until broader retail coverage exists. Next
-renderer work should measure or create coverage for the remaining
-geometry-shader users, then target one of: line primitives, quad/quad-strip
-expansion, polygon fill, or nonfill primitive paths.
+but remains disabled by default until broader retail coverage exists. Later
+2026-05-01 gameplay route captures provide that next retail benchmark layer:
+PGR2, Rainbow Six 3, and Crimson Skies now have recorded controller routes and
+baseline perf summaries. Next renderer work should start with PGR2, then target
+one remaining geometry-shader user, likely quad/quad-strip expansion first if
+the PGR2 baseline versus `XEMU_NATIVE_TRI_DEPTH=1` replay confirms the expected
+quad-family pressure.

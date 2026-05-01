@@ -58,9 +58,26 @@ visible regressions point first at the renderer.
   - `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`
 - Native triangle-depth validation file:
   - `docs/apple-silicon/benchmarks/2026-04-30-native-tri-depth-validation.md`
-- Baseline gameplay captures:
-  - Crimson Skies: scripted route reaches rendered in-engine sequence
-  - Rainbow Six 3: scripted route reaches Hereford mission loading
+- Retail gameplay route captures:
+  - PGR2:
+    `docs/apple-silicon/benchmarks/2026-05-01-pgr2-gameplay-route.md`
+  - Rainbow Six 3:
+    `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md`
+  - Crimson Skies:
+    `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md`
+- Current retail performance target:
+  - Floor: sustained 30 FPS in gameplay for all tracked titles.
+  - Stretch: 60 FPS where possible.
+- Current retail gameplay baselines:
+  - PGR2 gameplay route: 11.53 FPS average, 11.67 FPS post-load,
+    1,516,519 geometry-shader draws, including 38,785 quad-family draws.
+  - Rainbow Six 3 gameplay route: 24.19 FPS average, 24.76 FPS post-load,
+    692,438 geometry-shader draws, including 1,946 line-family draws.
+  - Crimson Skies gameplay route: 15.44 FPS average, 15.80 FPS post-load,
+    786,722 geometry-shader draws, including 7,837 quad-family draws.
+- Earlier scripted smoke captures:
+  - Crimson Skies: scripted route reaches rendered in-engine sequence.
+  - Rainbow Six 3: scripted route reaches Hereford mission loading.
 - Baseline FPS/frame-pacing metrics:
   - Crimson Skies B0: tail-60 average 30.98 FPS, 27.27 MSPF
   - Rainbow Six 3 B1: tail-60 average 30.98 FPS, 18.23 MSPF
@@ -108,16 +125,19 @@ visible regressions point first at the renderer.
   - `XEMU_NATIVE_TRI_DEPTH=0` explicitly disables the path and overrides the
     old compatibility alias when both are present.
   - Next renderer work should not re-prove triangle-family fill. It should
-    measure or create coverage for the remaining geometry-shader users, then
-    remove or narrow one of: line primitives, quad/quad-strip expansion,
-    polygon fill, or nonfill triangle modes.
+    start from the new retail gameplay routes, especially PGR2, and remove or
+    narrow one of the remaining geometry-shader users: quad/quad-strip
+    expansion, line primitives, polygon fill, or nonfill triangle modes.
 - Local test assets:
   - `/Users/jbbrack03/XEMU_MacOS/Test_Games/Crimson skies.xiso.iso`
   - `/Users/jbbrack03/XEMU_MacOS/Test_Games/Rainbow Six 3.xiso.iso`
   - `/Users/jbbrack03/XEMU_MacOS/Test_Games/flat-tri-depth.xiso.iso`
+  - `/Volumes/Final Cut Pro Libraries/Projects/XEMU_MacOS/Test_Games/PGR2.xiso.iso`
   - `/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/bios/Complex_4627.bin`
   - `/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/mcpx/mcpx_1.0.bin`
   - `/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/hdd/xbox_hdd.qcow2`
+  - prepared profile HDD for route replay:
+    `/Users/jbbrack03/XEMU_MacOS/xemu-fork/benchmark-runs/profile-prep/xbox_hdd.qcow2`
 
 ## Documentation Map
 
@@ -138,11 +158,11 @@ Start in `handoff.md`, section `Next Session Checklist`. The important state is:
   triangle-path change was made.
 - Use `scripts/apple-silicon/validate-native-tri-depth.sh --run 20` only as a
   quick regression gate for the completed triangle-family fill slice.
-- First useful next task: add or refresh coverage for remaining geometry-shader
-  categories under the current opt-in triangle path, then choose one category
-  to remove or narrow.
-- Candidate next categories: line primitives, quad/quad-strip expansion,
-  polygon fill, and nonfill triangle modes.
+- First useful next task: replay the PGR2 gameplay route under baseline and
+  `XEMU_NATIVE_TRI_DEPTH=1`, then inspect whether the remaining severe
+  slowdown is dominated by quad-family geometry-shader work.
+- Candidate next categories: quad/quad-strip expansion first, then line
+  primitives, polygon fill, and nonfill triangle modes.
 
 ## First Principle
 

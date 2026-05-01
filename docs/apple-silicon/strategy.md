@@ -109,8 +109,9 @@ Deliverables:
 - Native arm64 build. Done.
 - Reproducible launch commands for local assets. Done in
   `docs/apple-silicon/benchmarks/2026-04-29-baseline.md`.
-- Benchmark captures for Crimson Skies and Rainbow Six 3. Done for scripted
-  routes and snapshot scene-entry runs, using log-based FPS/frame pacing.
+- Benchmark captures for Crimson Skies, Rainbow Six 3, and PGR2. Done for
+  scripted smoke routes, snapshot scene-entry runs, and retail gameplay routes,
+  using log-based FPS/frame pacing.
 - At least one public regression title if available later.
 - Frame pacing and FPS evidence. Done.
 - CPU and GPU timing evidence. Pending; use Instruments or driver-level timing
@@ -135,6 +136,13 @@ Current Phase 0 status:
 - `XEMU_NATIVE_TRI_DEPTH=1` is the completed current opt-in triangle-family
   fill replacement path. It is still not defaulted because broader retail
   coverage is needed.
+- Retail gameplay route baselines are now captured:
+  - PGR2: 11.53 FPS average, 1,516,519 geometry-shader draws, including 38,785
+    quad-family draws.
+  - Rainbow Six 3: 24.19 FPS average, 692,438 geometry-shader draws, including
+    1,946 line-family draws.
+  - Crimson Skies: 15.44 FPS average, 786,722 geometry-shader draws, including
+    7,837 quad-family draws.
 - `scripts/apple-silicon/validate-native-tri-depth.sh --run 20` is the
   regression gate for that completed slice; do not use the next session to
   re-prove it unless the triangle path changes.
@@ -154,11 +162,12 @@ Deliverables:
 
 - Completed current slice: replace triangle-family fill geometry-shader dispatch
   with the opt-in native triangle-depth path.
-- Next slice entry point: add or refresh coverage for the remaining
-  geometry-shader users under `XEMU_NATIVE_TRI_DEPTH=1`, then replace or narrow
-  one category.
-- Candidate next categories: line primitives, quad/quad-strip expansion,
-  polygon fill, and nonfill triangle modes.
+- Next slice entry point: replay the retail gameplay routes, especially PGR2,
+  under baseline and `XEMU_NATIVE_TRI_DEPTH=1`, then replace or narrow one
+  remaining geometry-shader category.
+- Candidate next categories: quad/quad-strip expansion first because PGR2
+  exposes severe gameplay collapse and quad-family geometry-shader activity;
+  then line primitives, polygon fill, and nonfill triangle modes.
 - Replace geometry-shader primitive expansion with explicit index/vertex
   expansion where native GL rasterization cannot preserve NV2A behavior.
 - Preserve flat shading and provoking-vertex behavior.
@@ -208,6 +217,6 @@ Deliverables:
 - Apple Silicon build defaults to a non-OpenGL fast path.
 - Known macOS 3D regression scenes recover frame pacing.
 - Shader compilation stalls are measurable and substantially reduced.
-- Crimson Skies and Rainbow Six 3 are playable with materially better frame
-  pacing than baseline.
+- PGR2, Crimson Skies, and Rainbow Six 3 sustain at least 30 FPS in gameplay;
+  60 FPS is desirable but not the floor for stability/performance.
 - Correctness regressions are documented, minimized, and tracked.

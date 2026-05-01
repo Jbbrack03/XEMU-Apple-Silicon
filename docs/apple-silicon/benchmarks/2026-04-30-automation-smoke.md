@@ -57,6 +57,8 @@ Date: 2026-04-30
 - The generated flat-tri-depth XBE now validates the flat native/fallback
   counter split. Later paired Rainbow/Crimson comparisons are recorded in
   `docs/apple-silicon/benchmarks/2026-04-30-native-tri-depth-validation.md`.
-  The next benchmark automation work should support the remaining
-  geometry-shader exit categories rather than re-running this same
-  triangle-family fill slice.
+- Later 2026-05-01 retail gameplay routes are recorded for PGR2, Rainbow Six 3,
+  and Crimson Skies. Use those route files for the next user-visible
+  performance gate; the next benchmark/renderer work should start with PGR2
+  and remaining geometry-shader exit categories rather than re-running this
+  same triangle-family fill slice.

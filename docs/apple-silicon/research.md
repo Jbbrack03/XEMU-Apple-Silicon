@@ -294,7 +294,8 @@ the immediate renderer-focused fork work.
    as the local bottleneck. The dedicated flat XBE and paired Rainbow/Crimson
    runs validate `XEMU_NATIVE_TRI_DEPTH=1` for the current opt-in
    triangle-family fill category. `validate-native-tri-depth.sh --run 20` is
-   now the quick regression gate for that slice. Defaulting still needs broader
-   retail coverage, and the next geometry-shader removal session should measure
-   or create coverage for line primitives, quad/quad-strip expansion, polygon
-   fill, or nonfill triangle modes before changing them.
+   now the quick regression gate for that slice. The 2026-05-01 PGR2, Rainbow
+   Six 3, and Crimson Skies gameplay routes add the next retail coverage layer.
+   The next geometry-shader removal session should start with PGR2 baseline
+   versus `XEMU_NATIVE_TRI_DEPTH=1`, then prioritize quad/quad-strip expansion
+   if the route confirms the expected remaining quad-family pressure.

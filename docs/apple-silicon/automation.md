@@ -108,6 +108,44 @@ scripts/apple-silicon/run-benchmark.sh pgr2 \
   scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
 ```
 
+## Captured Retail Gameplay Routes
+
+The current profile-prepared retail gameplay routes are:
+
+| Game | Route File | Benchmark Note | Baseline Capture |
+| --- | --- | --- | --- |
+| PGR2 | `scripts/apple-silicon/input-scripts/pgr2-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-pgr2-gameplay-route.md` | `benchmark-runs/20260501-094823-pgr2` |
+| Rainbow Six 3 | `scripts/apple-silicon/input-scripts/rainbow-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md` | `benchmark-runs/20260501-095400-rainbow-six-3` |
+| Crimson Skies | `scripts/apple-silicon/input-scripts/crimson-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md` | `benchmark-runs/20260501-095905-crimson-skies` |
+
+Replay them from the prepared profile HDD:
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
+```
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh rainbow \
+  scripts/apple-silicon/input-scripts/rainbow-gameplay.csv 300
+```
+
+```sh
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh crimson \
+  scripts/apple-silicon/input-scripts/crimson-gameplay.csv 300
+```
+
+For opt-in triangle-family fill regression checks, add
+`XEMU_NATIVE_TRI_DEPTH=1`. The next implementation session should start with
+PGR2 because it combines the worst gameplay FPS with quad-family
+geometry-shader draw coverage.
+
 ## Profile Setup Runs
 
 Before recording real benchmark routes, use live setup runs to create or select
@@ -421,12 +459,14 @@ present on the scratch HDD.
 
 ## Next Automation Steps
 
-1. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for paired
+1. Use the recorded retail gameplay routes as the main replay targets for the
+   next session, starting with PGR2 baseline versus `XEMU_NATIVE_TRI_DEPTH=1`.
+2. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for paired
    baseline/native checks only when future changes could affect the completed
    triangle-family fill path.
-2. Use `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` only for targeted flat-path
+3. Use `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` only for targeted flat-path
    debugging; the flat XBE counter split is already validated.
-3. Keep the smoke routes as boot/profile/menu setup before refreshing snapshots.
-4. For the next geometry-shader exit slice, extend counters and paired
-   comparison commands before changing line primitives, quad/quad-strip
-   expansion, polygon fill, or nonfill triangle modes.
+4. Keep the smoke routes as boot/profile/menu setup before refreshing snapshots.
+5. For the next geometry-shader exit slice, use PGR2 to confirm quad-family
+   pressure first. Keep Rainbow Six 3 for line-family coverage and Crimson
+   Skies for sustained flight/acceleration cross-checks.
