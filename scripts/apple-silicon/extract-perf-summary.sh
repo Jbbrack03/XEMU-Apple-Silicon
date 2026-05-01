@@ -7,6 +7,21 @@ usage: $0 RUN_DIR|xemu.log [post-load-skip-intervals]
 
 Summarizes xemu-perf interval lines from an Apple Silicon benchmark run.
 The default post-load summary skips the first five intervals.
+
+Outputs averaged FPS / MSPF, NV2A counters, and jitter metrics derived from
+the per-interval mspf_min/max/avg fields. Jitter metrics:
+
+  fps_stddev                  stddev of fps across timed intervals
+  mspf_max_p50/95/99/max      percentile of per-interval worst-frame MSPF
+  mspf_avg_max                worst per-interval mean MSPF
+  stutter_intervals_30fps     count of intervals where mspf_max > 33.3
+  stutter_intervals_45fps     count of intervals where mspf_max > 22.2
+  stutter_intervals_60fps     count of intervals where mspf_max > 16.7
+  longest_stutter_run_30fps   longest contiguous run of >33.3-ms intervals
+  longest_stutter_run_60fps   longest contiguous run of >16.7-ms intervals
+
+Jitter metrics are also emitted as post_load_* variants over the same
+post-load window used for the FPS/MSPF averages.
 EOF
 }
 
@@ -34,10 +49,107 @@ function add_counter(name, value) {
     counters[name] += value
 }
 
+# Track per-interval values for jitter metrics.
+function record_interval(fps, mspf_avg, mspf_max, is_post_load) {
+    all_count++
+    all_fps[all_count] = fps
+    all_mspf_max[all_count] = mspf_max
+    all_mspf_avg[all_count] = mspf_avg
+
+    if (is_post_load) {
+        post_count++
+        post_fps[post_count] = fps
+        post_mspf_max[post_count] = mspf_max
+        post_mspf_avg[post_count] = mspf_avg
+    }
+}
+
+# Sort an array of length n in ascending order (insertion sort; n is small).
+function isort(arr, n,    i, j, key) {
+    for (i = 2; i <= n; i++) {
+        key = arr[i]
+        j = i - 1
+        while (j >= 1 && arr[j] > key) {
+            arr[j+1] = arr[j]
+            j--
+        }
+        arr[j+1] = key
+    }
+}
+
+# Return the value at percentile p (0..100) of sorted array sorted[1..n].
+# Uses nearest-rank for clarity at small n.
+function percentile(sorted, n, p,   rank) {
+    if (n == 0) return 0
+    rank = int((p / 100.0) * n + 0.5)
+    if (rank < 1) rank = 1
+    if (rank > n) rank = n
+    return sorted[rank]
+}
+
+# Compute stddev of arr[1..n].
+function stddev(arr, n,   i, sum, mean, sq) {
+    if (n < 2) return 0
+    sum = 0
+    for (i = 1; i <= n; i++) sum += arr[i]
+    mean = sum / n
+    sq = 0
+    for (i = 1; i <= n; i++) sq += (arr[i] - mean) * (arr[i] - mean)
+    return sqrt(sq / (n - 1))
+}
+
+# Count entries in arr[1..n] strictly greater than threshold.
+function count_above(arr, n, threshold,   i, c) {
+    c = 0
+    for (i = 1; i <= n; i++) if (arr[i] > threshold) c++
+    return c
+}
+
+# Longest contiguous run in arr[1..n] of entries strictly greater than threshold.
+function longest_run_above(arr, n, threshold,   i, run, best) {
+    run = 0; best = 0
+    for (i = 1; i <= n; i++) {
+        if (arr[i] > threshold) {
+            run++
+            if (run > best) best = run
+        } else {
+            run = 0
+        }
+    }
+    return best
+}
+
+# Emit jitter metrics for an array of length n with prefix.
+function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, i, max_avg) {
+    if (n == 0) return
+
+    printf("%sfps_stddev=%.3f\n", prefix, stddev(fps_arr, n))
+
+    for (i = 1; i <= n; i++) sorted[i] = mspf_max_arr[i]
+    isort(sorted, n)
+    printf("%smspf_max_p50=%.2f\n", prefix, percentile(sorted, n, 50))
+    printf("%smspf_max_p95=%.2f\n", prefix, percentile(sorted, n, 95))
+    printf("%smspf_max_p99=%.2f\n", prefix, percentile(sorted, n, 99))
+    printf("%smspf_max_max=%.2f\n", prefix, sorted[n])
+
+    max_avg = 0
+    for (i = 1; i <= n; i++) {
+        if (mspf_avg_arr[i] > max_avg) max_avg = mspf_avg_arr[i]
+    }
+    printf("%smspf_avg_max=%.2f\n", prefix, max_avg)
+
+    printf("%sstutter_intervals_30fps=%d\n", prefix, count_above(mspf_max_arr, n, 33.3))
+    printf("%sstutter_intervals_45fps=%d\n", prefix, count_above(mspf_max_arr, n, 22.2))
+    printf("%sstutter_intervals_60fps=%d\n", prefix, count_above(mspf_max_arr, n, 16.7))
+    printf("%slongest_stutter_run_30fps=%d\n", prefix, longest_run_above(mspf_max_arr, n, 33.3))
+    printf("%slongest_stutter_run_60fps=%d\n", prefix, longest_run_above(mspf_max_arr, n, 16.7))
+}
+
 /xemu-perf: interval_ms=/ {
     intervals++
     interval_fps = 0
     interval_mspf = 0
+    interval_mspf_max = 0
     interval_is_final = 0
 
     for (i = 1; i <= NF; i++) {
@@ -53,6 +165,8 @@ function add_counter(name, value) {
             interval_fps = value
         } else if (key == "mspf_avg") {
             interval_mspf = value
+        } else if (key == "mspf_max") {
+            interval_mspf_max = value
         } else if (key == "final") {
             interval_is_final = value
         } else if (key == "GEOM_SHADER_MODULE_GEN" ||
@@ -111,11 +225,14 @@ function add_counter(name, value) {
     fps_total += interval_fps
     mspf_total += interval_mspf
 
-    if (timed_intervals > skip) {
+    is_post = (timed_intervals > skip)
+    if (is_post) {
         post_intervals++
         post_fps_total += interval_fps
         post_mspf_total += interval_mspf
     }
+
+    record_interval(interval_fps, interval_mspf, interval_mspf_max, is_post)
 }
 
 END {
@@ -187,5 +304,8 @@ END {
     for (i = 1; i <= 43; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
+
+    emit_jitter("",         all_fps, all_mspf_max, all_mspf_avg, all_count)
+    emit_jitter("post_load_", post_fps, post_mspf_max, post_mspf_avg, post_count)
 }
 ' "$LOG_FILE"
