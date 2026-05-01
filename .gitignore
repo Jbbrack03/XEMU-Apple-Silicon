@@ -1,6 +1,12 @@
 /GNUmakefile
 /build/
 /benchmark-runs/
+Test_Games/
+Xbox-Emulator-Files/
+*.xiso.iso
+Complex_*.bin
+mcpx*.bin
+xbox_hdd*.qcow2
 /.cache/
 /.vscode/
 *.pyc
