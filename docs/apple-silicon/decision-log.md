@@ -702,3 +702,84 @@ patterns must be visually validated before being added to the tracked set.
 The next gate to consider flipping any flag default-on is broader retail
 coverage across genres (additional racing, FPS, platforming, and
 menu-heavy titles).
+
+## 2026-05-01: Sub-millisecond perf-log precision and per-frame timing
+
+Status: landed in `hw/xbox/nv2a/pgraph/profile.c` on 2026-05-01.
+
+Decision:
+
+`xemu-perf:` interval lines now emit `mspf_avg`, `mspf_min`, `mspf_max`
+as `%.3f` floats (microsecond precision internally), and an opt-in
+`XEMU_PERF_FRAME_LOG=1` appends a per-frame `frame_mspf_us=v1,v2,...`
+field to each interval line, bounded to 1024 frames per interval with
+overflow recorded in `frame_mspf_us_dropped`. Default off. The HUD plot
+in `ui/xui/debug.cc` keeps its integer-ms `frame_working.mspf` field
+unchanged.
+
+Rationale:
+
+The 60 FPS budget is 16.67 ms; the previous integer-ms perf-log
+resolution rounded away the difference between a frame inside and
+outside that budget. Sub-ms precision is required for the 60 FPS
+pursuit. The optional per-frame log enables true frame-level p99 /
+p99.9 percentiles without changing the always-on log volume.
+
+Consequence:
+
+`scripts/apple-silicon/extract-perf-summary.sh` parses the new precision
+without changes (its arithmetic was already float-tolerant) and gains
+new jitter keys derived from the per-interval `mspf_max` field:
+`fps_stddev`, `mspf_max_p50/p95/p99/max`, `stutter_intervals_30/45/60fps`,
+and `longest_stutter_run_30/60fps` (whole-run and `post_load_*`
+variants). Older runs captured before this change retain integer-ms
+`mspf_max`; new runs are sub-ms accurate. Baseline benchmark notes
+record the format transition so future comparisons can account for it.
+
+## 2026-05-01: XEMU_VOICE_FAST_LOCK not landed
+
+Status: investigated, implemented, measured, **rejected** on
+2026-05-01. Code reverted; the `XEMU_VOICE_FAST_LOCK` flag does not
+exist in the shipped binary.
+
+Decision:
+
+A lock-free `voice_lock()` fast path (atomic OR/AND on
+`d->vp.voice_locked[]`, dropping the `qemu_cond_signal` on the
+audio-worker condvar) was implemented to address the 6.8 % `voice_lock`
+TCG-thread mutex wait identified in
+`docs/apple-silicon/benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`.
+Measurement showed no FPS improvement on either the `pgr2_gameplay_b4`
+snapshot (30.64 → 30.79 FPS, +0.49 % = noise) or the 300 s PGR2 retail
+route (31.76 → 31.84 FPS, +0.25 % = noise), with mixed jitter signals:
+tighter p99 max-frame on the snapshot but +91 % more 30-FPS stutter
+intervals on the retail route. Per the project's data-driven rule, the
+change is not landed.
+
+Rationale:
+
+The post-fast-read sample profile shows the pfifo thread is idle 41.5 %
+of the time on the FIFO condvar at the PGR2 mid-route snapshot — the
+renderer can absorb more work than the CPU thread is producing.
+Removing 6.8 % of TCG-thread mutex wait does not translate to FPS in
+this regime because the freed cycles cannot be put to work. The
+audio-worker's missed-`cond_signal` latency (bounded at 1 ms by its
+existing `cond_timedwait`) appears to introduce a small jitter-shape
+shift that may be net-negative on routes with active audio events.
+Full measurement details and run dirs are in
+`docs/apple-silicon/benchmarks/2026-05-01-voice-fast-lock-investigation.md`.
+
+Consequence:
+
+Lock-elision is exhausted as a primary 60 FPS lever for PGR2-class
+scenes. The remaining ~9 % TCG-thread mutex wait is split across smaller
+contributors (`pgraph_write` 1.4 %, miscellaneous 0.8 %) and not worth
+a flag of its own without first addressing the larger remaining cost:
+real x86 emulation throughput, particularly the floating-point helper
+paths (`helper_mulss`, `helper_fmul_ST0_FT0`, `floatx80_mul`,
+`soft_f32_mul`). The next data-driven slice on the TCG side should
+audit whether SSE / x87 ops are going through softfloat unnecessarily
+on Apple Silicon. On the renderer side, Crimson Skies' documented
+shader-compile stutter (1310 ms worst-frame, 16-second longest stutter
+run) is the highest user-visible jitter target and is independent of
+the TCG path.

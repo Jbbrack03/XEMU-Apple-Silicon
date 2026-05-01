@@ -314,12 +314,40 @@ XEMU_PERF_LOG_INTERVAL_MS=500 scripts/apple-silicon/run-benchmark.sh crimson
 ```
 
 The resulting `xemu.log` contains `xemu-perf:` lines with interval FPS,
-average/min/max frame time, and nonzero NV2A counters. The OpenGL path also
-reports geometry-shader attribution counters:
+sub-millisecond `mspf_avg` / `mspf_min` / `mspf_max` (microsecond
+precision internally, emitted with `%.3f`), and nonzero NV2A counters.
+The OpenGL path also reports geometry-shader attribution counters:
 
 At graceful process exit, xemu emits one final partial interval with
 `final=1`. The benchmark launcher waits briefly for QMP `quit` before falling
 back to termination so this final counter flush can run.
+
+Optional per-frame timing log: `XEMU_PERF_FRAME_LOG=1` appends a
+`frame_mspf_us=v1,v2,...` field to each interval line, recording the
+microsecond mspf of every frame in that interval (bounded to 1024 frames
+per interval; overflow recorded in `frame_mspf_us_dropped`). Default
+off; enable when frame-level p99 / p99.9 percentiles are needed.
+
+`scripts/apple-silicon/extract-perf-summary.sh` derives jitter metrics
+from `mspf_max` per interval:
+- `fps_stddev`, `mspf_max_p50/p95/p99/max`, `mspf_avg_max`.
+- `stutter_intervals_30fps/45fps/60fps` — count of intervals with at
+  least one frame > 33.3 / 22.2 / 16.7 ms.
+- `longest_stutter_run_30fps/60fps` — longest contiguous run.
+Each metric is also emitted with the `post_load_` prefix over the
+post-load window (default skip first 5 intervals).
+
+`scripts/apple-silicon/sample-profile.sh GAME INPUT_CSV BENCH_SECONDS
+[SAMPLE_DURATION] [WARMUP] [LABEL]` is the autonomous helper for
+attaching Apple `sample` to a live xemu process. Runs the benchmark in
+the background, polls for the run dir / xemu pid, sleeps WARMUP, then
+calls `sample` for SAMPLE_DURATION seconds. Output written to
+`<run-dir>/sample-<LABEL>.txt` with a thread-bucket summary alongside.
+
+`scripts/apple-silicon/compare-runs.sh BASELINE CANDIDATE [SKIP]` prints
+a side-by-side jitter+FPS comparison with verdicts (regression /
+improvement / noise). `NOISE_PCT` env var overrides the default 3 %
+threshold. Exit code reflects whether the candidate regresses.
 
 - `GEOM_SHADER_MODULE_GEN`: new geometry shader modules compiled.
 - `GEOM_SHADER_PROGRAM_GEN`: new linked programs that attach a geometry shader.

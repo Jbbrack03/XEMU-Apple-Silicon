@@ -94,8 +94,13 @@ Diagnostic toggles (intentionally not correctness paths):
 
 Logging:
 
-- `XEMU_PERF_LOG=1` — emit `xemu-perf:` interval lines.
+- `XEMU_PERF_LOG=1` — emit `xemu-perf:` interval lines. `mspf_avg` /
+  `mspf_min` / `mspf_max` are sub-millisecond floats; the renderer
+  HUD's integer-ms `frame_working.mspf` is unaffected.
 - `XEMU_PERF_LOG_INTERVAL_MS=N` — interval (default 1000).
+- `XEMU_PERF_FRAME_LOG=1` — append per-frame `frame_mspf_us=v1,v2,...`
+  to each interval line (bounded 1024 frames; overflow noted in
+  `frame_mspf_us_dropped`). Off by default.
 - `XEMU_SNAPSHOT_NO_THUMBNAIL=1` — skip snapshot thumbnail capture.
 
 Input automation:

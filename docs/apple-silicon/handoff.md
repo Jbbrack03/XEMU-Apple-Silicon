@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated: 2026-05-01 (after pgraph fast-read slice — PGR2 now hits 30 FPS gameplay floor)
+Last updated: 2026-05-01 (after measurement-infrastructure expansion and voice-fast-lock investigation)
 
 ## Current State
 
@@ -680,6 +680,101 @@ scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
    slice plan exists, decide whether V0/V1 Vulkan-over-Metal experiments
    are worth doing before the native Metal path.
 
+## Update — 2026-05-01 measurement-infrastructure session
+
+This session focused on the 60 FPS pursuit and explicit jitter
+detection. Major outcomes (no FPS-improving code shipped, but
+infrastructure and findings that scope the next slice):
+
+### Measurement infrastructure landed
+
+- **Sub-millisecond perf-log precision.** `hw/xbox/nv2a/pgraph/profile.c`
+  now tracks frame-time in microseconds internally and emits
+  `mspf_avg/mspf_min/mspf_max` with `%.3f` precision. The HUD plot
+  (`ui/xui/debug.cc`) still consumes the integer-ms `frame_working.mspf`
+  field — that path is unchanged.
+- **Optional per-frame timing log.** `XEMU_PERF_FRAME_LOG=1` appends a
+  `frame_mspf_us=v1,v2,...` field to interval lines (bounded 1024
+  frames/interval, overflow recorded as `frame_mspf_us_dropped`). Default
+  off.
+- **Jitter metrics in `extract-perf-summary.sh`.** New keys both whole-run
+  and `post_load_*`:
+  - `fps_stddev`
+  - `mspf_max_p50/p95/p99/max` over per-interval worst-frames
+  - `mspf_avg_max`
+  - `stutter_intervals_30fps/45fps/60fps` (intervals where
+    `mspf_max > 33.3 / 22.2 / 16.7`)
+  - `longest_stutter_run_30fps/60fps`
+- **`scripts/apple-silicon/sample-profile.sh`.** Background a benchmark
+  run, poll the run dir + xemu pid, attach Apple `sample` for a configured
+  duration, write the full sample text plus a thread-bucket summary into
+  the run dir. Fully autonomous, no user input.
+- **`scripts/apple-silicon/compare-runs.sh`.** Compare two run dirs and
+  emit a side-by-side jitter+FPS comparison plus a "regression /
+  improvement / noise" verdict per metric. Default noise threshold 3 %,
+  configurable via `NOISE_PCT`. Exit code reflects regressions.
+
+### New benchmark notes
+
+- `2026-05-01-baseline-jitter.md` — jitter analysis of the existing
+  post-fast-read 300 s retail-route runs. Bottleneck classification via
+  `avg_mspf` vs `1000/avg_fps`: PGR2 39 % renderer / 61 % CPU-or-lock,
+  Rainbow 21 % / 79 %, Crimson 91 % / 9 %. **Crimson is renderer-bound,
+  not CPU-bound** — lock-elision will not lift Crimson FPS.
+- `2026-05-01-pgr2-bottleneck-postfast.md` — fresh `sample` profile of
+  `pgr2_gameplay_b4` with all three flags on. TCG mutex wait collapsed
+  from 32.6 % (pre-fast-read) to 8.9 %. `voice_lock` is now 6.8 % of TCG
+  thread (essentially unchanged). `pgraph_write` is 1.4 %. **The pfifo
+  thread is idle 41.5 % of the time on the FIFO condvar** — the renderer
+  is no longer the binding constraint at this scene; the CPU emulator's
+  real x86 work is. Floating-point helpers (`helper_mulss`,
+  `helper_fmul_ST0_FT0`, `floatx80_mul`, etc.) show prominently.
+- `2026-05-01-voice-fast-lock-investigation.md` — implemented
+  `XEMU_VOICE_FAST_LOCK=1` (atomic OR/AND on `voice_locked[]` bitmap, no
+  `cond_signal`). Snapshot showed essentially no FPS change with mixed
+  jitter signals; retail route showed +91 % more 30 FPS stutter intervals
+  (within run-to-run variance, but no positive evidence). **Not landed.**
+  Code reverted. Negative result documented.
+
+### Critical jitter finding
+
+Crimson Skies' p99 worst-frame is **892 ms**, max **1310 ms**, with a
+**16-second** longest contiguous stutter run. Per-interval drilldown
+shows every stutter spike coincides with non-zero `SHADER_GEN`,
+`SURF_TO_TEX`, or `TEX_UPLOAD` activity. Interval 15 of the recorded
+Crimson route has 7 triangle draws over 1.3 seconds (≈ 187 ms per draw).
+This is consistent with Apple's OpenGL-on-Metal driver compiling shaders
+synchronously inside `glDrawElements` — a documented behavior in macOS
+GL emulators. Without async shader compilation, sustained 60 FPS on
+Crimson is unattainable regardless of TCG-side wins.
+
+PGR2 retail route p99 is 38 ms, max 117 ms (well-behaved). Rainbow Six 3
+retail route p99 is 139 ms, max 694 ms (bad tail; same shader-compile
+shape).
+
+### Reality check on the 60 FPS goal
+
+The post-fast-read profile makes the upper bound on lock-elision work
+clear: ~9 % of TCG-thread time remains in mutex wait. Even eliminating
+all of it would lift FPS by at most that much. Going from ~31 FPS to 60
+FPS on PGR2 requires roughly doubling TCG-thread throughput, which
+lock-elision alone cannot deliver. The realistic 60 FPS path needs:
+
+1. SSE / x87 floating-point helper audit. `helper_mulss`, `helper_mulps_xmm`,
+   `helper_fmul_ST0_FT0`, `float32_mul`, `floatx80_mul` are all visible
+   in the post-fast-read sample. If SSE float32 ops are going through
+   softfloat (`soft_f32_mul`) when Apple Silicon has perfectly capable
+   NEON float32, that is potentially a major TCG win. **Open
+   investigation** — needs source-side audit of the i386 hardfloat path
+   in QEMU.
+2. TB-chain audit. `helper_lookup_tb_ptr` is 7.6 % of TCG thread; if
+   chaining drops out more than necessary, the JIT spends more time in
+   dispatch than in real code.
+3. Async shader compile (Crimson and Rainbow tail jitter).
+4. The native Metal renderer track (Phase 4 of `strategy.md`). The bigger
+   Crimson lift, and breaks the Apple-OpenGL synchronous-shader-compile
+   ceiling.
+
 ## Prioritized Next Tasks
 
 User visual confirmation on real PGR2, Rainbow Six 3, and Crimson Skies
@@ -689,47 +784,47 @@ three flags are validated for the current tracked title set.
 
 In priority order, the next concrete tasks for a future session:
 
-1. **Capture a fresh `sample` profile** of the PGR2 mid-route snapshot
-   (`pgr2_gameplay_b4`) with all three flags enabled. The previous sample
-   was taken before `XEMU_PGRAPH_FAST_READ=1` landed; the new dominant
-   cost has not been measured. Document under
-   `docs/apple-silicon/benchmarks/<date>-pgr2-bottleneck-sample-postfast.md`
-   or similar.
-2. **Audit `voice_lock`-protected NV_USER writes** (`vp_write`,
-   `gp_write`, `user_write`). Pre-fast-read sample profile measured this
-   at 6.9% of TCG-thread time. Same shape as the `pgraph_read` fix:
-   identify reads/writes that mutate only a single uint32_t and convert
-   them to `qatomic_*`. Gate behind `XEMU_VOICE_FAST_LOCK=1` (or similar)
-   initially.
-3. **Audit `pgraph_write` for safe lock-free fast paths.** Pre-fast-read
-   sample profile measured 2.7% of TCG-thread time. Smaller margin, and
-   most write paths *do* mutate composite state (interrupt pending bits,
-   pfifo kicks), so the audit is more involved than `pgraph_read`. Some
-   simple `default` slot stores may still be safe to lift out of the
-   lock.
-4. **Broader title coverage before defaulting any flag.** Today the
-   three flags are validated against PGR2, Rainbow Six 3, and Crimson
-   Skies. Before flipping any to default-on, exercise additional retail
-   titles (especially genre coverage: another racer, another shooter, a
-   platformer, an RPG menu/inventory). The flags are designed to be
-   conservative (smooth fill only, lock-free reads only on registers
-   without side effects), so wider testing is the sensible gate, not a
-   code rewrite.
-5. **Consider dropping `pg->lock` around the slow OpenGL submission**
-   inside `pgraph_gl_flush_draw` after PGRAPH state has been captured
-   into the renderer's local data. Higher risk than the read fast path,
-   higher upside on contention. Gate behind a separate flag,
-   `XEMU_PGRAPH_RELEASE_LOCK_DURING_GL=1`. Audit which fields of `pg`
-   are actually read by the GL submission code while the lock is dropped;
-   anything read through `pgraph_reg_r()` is already lock-free at the
-   load level, but composite state may still need protection.
-6. **Profile-guided decisions only.** Each of the above slices should be
-   prefaced by a fresh `sample` profile that motivates the change, and
-   each should produce a dated benchmark note that records the before/
-   after numbers. Whole-route averages are now a useful comparator again
-   because the emulator is no longer CPU-starved (variance dropped once
-   the lock contention came out), but the snapshot triplet remains the
-   trusted apples-to-apples comparison.
+1. **Re-run the 300 s retail routes once with `XEMU_PERF_FRAME_LOG=1`**
+   so each title has a frame-level mspf distribution captured. The
+   per-frame log enables true frame-level p99 / p99.9 in
+   `extract-perf-summary.sh` (extension still TODO — current jitter
+   metrics use per-interval `mspf_max` as the percentile basis). Capture
+   under fresh dated benchmark notes.
+2. **Async shader compile for Crimson / Rainbow tail jitter.** Apple
+   GL → Metal compiles synchronously inside `glDrawElements`; the existing
+   `SHADER_GEN` counter only tracks xemu-side GLSL emission. Add a
+   counter `SHADER_COMPILE_MS_TOTAL` per interval (host-side compile time)
+   to attribute jitter to the synchronous compile. Then implement an
+   `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` slice that compiles shaders on a
+   worker thread with a placeholder bind on the renderer's critical
+   path. Expect the largest user-visible jitter improvement on Crimson,
+   minor effect elsewhere.
+3. **SSE / x87 floating-point helper audit.** Confirm whether SSE
+   single-precision ops (`helper_mulss`, `helper_mulps_xmm`,
+   `helper_addss`, etc.) actually go through `soft_f32_mul` /
+   `parts64_uncanon_normal` on Apple Silicon, or whether the QEMU
+   hardfloat path is active for them. If softfloat, lifting them to
+   hardfloat is the single largest potential TCG win on this platform.
+   Document under `<date>-tcg-float-audit.md`.
+4. **`pgraph_write` fast path** (`XEMU_PGRAPH_FAST_WRITE=1`). Smallest
+   remaining lock-elision win at 1.4 % of TCG. Mirror `pgraph_read`:
+   `default` slot writes and `NV_PGRAPH_INTR_EN` are safe; everything
+   else (`NV_PGRAPH_INTR`, `NV_PGRAPH_INCREMENT`, `NV_PGRAPH_RDI_DATA`,
+   `NV_PGRAPH_CHANNEL_CTX_TRIGGER`) mutates composite state and stays on
+   the slow path. Low-risk, completes the read/write symmetry.
+5. **`XEMU_PGRAPH_RELEASE_LOCK_DURING_GL=1`.** On scenes where the
+   pfifo thread is *not* idle (Crimson) this is the bigger lock-elision
+   win. The PGR2 snapshot showed pfifo thread is idle 41.5 % of the time,
+   so this slice will have minor effect on PGR2 but should help Crimson
+   if its bottleneck is partly draw-thread serialization.
+6. **Broader title coverage before defaulting any flag.** Same as before;
+   current three flags need a wider title shakeout (different genre /
+   GPU mix) before flipping any to default-on.
+
+Profile-guided rule still applies: every slice gets a fresh `sample`
+profile (use `scripts/apple-silicon/sample-profile.sh` now) and a dated
+benchmark note. Use `scripts/apple-silicon/compare-runs.sh` for the
+before / after metric diff.
 
 ## Things Not To Forget
 
