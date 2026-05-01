@@ -71,7 +71,57 @@ typedef struct XemuScriptedInput {
     int16_t axis[CONTROLLER_AXIS__COUNT];
 } XemuScriptedInput;
 
+typedef struct XemuRecordedInput {
+    bool enabled;
+    int port;
+    int64_t start_us;
+    bool have_last_state;
+    int axis_delta_threshold;
+    int axis_zero_threshold;
+    FILE *file;
+    uint16_t buttons;
+    int16_t axis[CONTROLLER_AXIS__COUNT];
+} XemuRecordedInput;
+
+typedef struct XemuInputButtonName {
+    const char *name;
+    int mask;
+} XemuInputButtonName;
+
+typedef struct XemuInputAxisName {
+    const char *name;
+    int index;
+} XemuInputAxisName;
+
+static const XemuInputButtonName xemu_input_button_names[] = {
+    { "a", CONTROLLER_BUTTON_A },
+    { "b", CONTROLLER_BUTTON_B },
+    { "x", CONTROLLER_BUTTON_X },
+    { "y", CONTROLLER_BUTTON_Y },
+    { "dpad_left", CONTROLLER_BUTTON_DPAD_LEFT },
+    { "dpad_up", CONTROLLER_BUTTON_DPAD_UP },
+    { "dpad_right", CONTROLLER_BUTTON_DPAD_RIGHT },
+    { "dpad_down", CONTROLLER_BUTTON_DPAD_DOWN },
+    { "back", CONTROLLER_BUTTON_BACK },
+    { "start", CONTROLLER_BUTTON_START },
+    { "white", CONTROLLER_BUTTON_WHITE },
+    { "black", CONTROLLER_BUTTON_BLACK },
+    { "lstick_btn", CONTROLLER_BUTTON_LSTICK },
+    { "rstick_btn", CONTROLLER_BUTTON_RSTICK },
+    { "guide", CONTROLLER_BUTTON_GUIDE },
+};
+
+static const XemuInputAxisName xemu_input_axis_names[] = {
+    { "ltrigger", CONTROLLER_AXIS_LTRIG },
+    { "rtrigger", CONTROLLER_AXIS_RTRIG },
+    { "lstick_x", CONTROLLER_AXIS_LSTICK_X },
+    { "lstick_y", CONTROLLER_AXIS_LSTICK_Y },
+    { "rstick_x", CONTROLLER_AXIS_RSTICK_X },
+    { "rstick_y", CONTROLLER_AXIS_RSTICK_Y },
+};
+
 static XemuScriptedInput scripted_input;
+static XemuRecordedInput recorded_input;
 
 static int xemu_scripted_input_event_compare(const void *a, const void *b)
 {
@@ -91,55 +141,41 @@ static bool xemu_scripted_input_parse_control(const char *name,
                                               XemuScriptedInputKind *kind,
                                               int *index)
 {
-    static const struct {
-        const char *name;
-        int mask;
-    } buttons[] = {
-        { "a", CONTROLLER_BUTTON_A },
-        { "b", CONTROLLER_BUTTON_B },
-        { "x", CONTROLLER_BUTTON_X },
-        { "y", CONTROLLER_BUTTON_Y },
-        { "dpad_left", CONTROLLER_BUTTON_DPAD_LEFT },
-        { "dpad_up", CONTROLLER_BUTTON_DPAD_UP },
-        { "dpad_right", CONTROLLER_BUTTON_DPAD_RIGHT },
-        { "dpad_down", CONTROLLER_BUTTON_DPAD_DOWN },
-        { "back", CONTROLLER_BUTTON_BACK },
-        { "start", CONTROLLER_BUTTON_START },
-        { "white", CONTROLLER_BUTTON_WHITE },
-        { "black", CONTROLLER_BUTTON_BLACK },
-        { "lstick_btn", CONTROLLER_BUTTON_LSTICK },
-        { "rstick_btn", CONTROLLER_BUTTON_RSTICK },
-        { "guide", CONTROLLER_BUTTON_GUIDE },
-    };
-    static const struct {
-        const char *name;
-        int index;
-    } axes[] = {
-        { "ltrigger", CONTROLLER_AXIS_LTRIG },
-        { "rtrigger", CONTROLLER_AXIS_RTRIG },
-        { "lstick_x", CONTROLLER_AXIS_LSTICK_X },
-        { "lstick_y", CONTROLLER_AXIS_LSTICK_Y },
-        { "rstick_x", CONTROLLER_AXIS_RSTICK_X },
-        { "rstick_y", CONTROLLER_AXIS_RSTICK_Y },
-    };
-
-    for (size_t i = 0; i < G_N_ELEMENTS(buttons); i++) {
-        if (!g_ascii_strcasecmp(name, buttons[i].name)) {
+    for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_button_names); i++) {
+        if (!g_ascii_strcasecmp(name, xemu_input_button_names[i].name)) {
             *kind = XEMU_SCRIPTED_INPUT_BUTTON;
-            *index = buttons[i].mask;
+            *index = xemu_input_button_names[i].mask;
             return true;
         }
     }
 
-    for (size_t i = 0; i < G_N_ELEMENTS(axes); i++) {
-        if (!g_ascii_strcasecmp(name, axes[i].name)) {
+    for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_axis_names); i++) {
+        if (!g_ascii_strcasecmp(name, xemu_input_axis_names[i].name)) {
             *kind = XEMU_SCRIPTED_INPUT_AXIS;
-            *index = axes[i].index;
+            *index = xemu_input_axis_names[i].index;
             return true;
         }
     }
 
     return false;
+}
+
+static int xemu_input_parse_port_env(const char *name, int default_port)
+{
+    const char *port_env = getenv(name);
+    if (!port_env || !port_env[0]) {
+        return default_port;
+    }
+
+    char *end = NULL;
+    long port = strtol(port_env, &end, 10);
+    if (end != port_env && *end == '\0' && port >= 1 && port <= 4) {
+        return port - 1;
+    }
+
+    fprintf(stderr, "xemu: invalid %s '%s', using port %d\n",
+            name, port_env, default_port + 1);
+    return default_port;
 }
 
 static void xemu_scripted_input_load(void)
@@ -149,19 +185,7 @@ static void xemu_scripted_input_load(void)
         return;
     }
 
-    scripted_input.port = 0;
-    const char *port_env = getenv("XEMU_SCRIPTED_INPUT_PORT");
-    if (port_env && port_env[0]) {
-        char *end = NULL;
-        long port = strtol(port_env, &end, 10);
-        if (end != port_env && *end == '\0' && port >= 1 && port <= 4) {
-            scripted_input.port = port - 1;
-        } else {
-            fprintf(stderr,
-                    "xemu: invalid XEMU_SCRIPTED_INPUT_PORT '%s', using port 1\n",
-                    port_env);
-        }
-    }
+    scripted_input.port = xemu_input_parse_port_env("XEMU_SCRIPTED_INPUT_PORT", 0);
 
     gchar *contents = NULL;
     gsize contents_len = 0;
@@ -312,6 +336,153 @@ static void xemu_scripted_input_apply(ControllerState *state)
 
     state->buttons = scripted_input.buttons;
     memcpy(state->axis, scripted_input.axis, sizeof(state->axis));
+}
+
+static void xemu_recorded_input_close(void)
+{
+    if (recorded_input.file) {
+        fflush(recorded_input.file);
+        fclose(recorded_input.file);
+        recorded_input.file = NULL;
+    }
+}
+
+static void xemu_recorded_input_load(void)
+{
+    const char *path = getenv("XEMU_RECORD_INPUT");
+    if (!path || !path[0]) {
+        return;
+    }
+
+    gchar *dir = g_path_get_dirname(path);
+    if (dir && g_strcmp0(dir, ".") != 0) {
+        if (g_mkdir_with_parents(dir, 0755) != 0) {
+            fprintf(stderr, "xemu: failed to create input recording directory '%s'\n",
+                    dir);
+            g_free(dir);
+            return;
+        }
+    }
+    g_free(dir);
+
+    recorded_input.file = fopen(path, "w");
+    if (!recorded_input.file) {
+        fprintf(stderr, "xemu: failed to open input recording '%s'\n", path);
+        return;
+    }
+
+    recorded_input.port = xemu_input_parse_port_env("XEMU_RECORD_INPUT_PORT", 0);
+    recorded_input.axis_delta_threshold = 1024;
+    recorded_input.axis_zero_threshold = 256;
+
+    const char *threshold_env = getenv("XEMU_RECORD_INPUT_AXIS_DELTA");
+    if (threshold_env && threshold_env[0]) {
+        char *end = NULL;
+        long threshold = strtol(threshold_env, &end, 10);
+        if (end != threshold_env && *end == '\0' && threshold >= 0 &&
+            threshold <= 32767) {
+            recorded_input.axis_delta_threshold = threshold;
+        } else {
+            fprintf(stderr,
+                    "xemu: invalid XEMU_RECORD_INPUT_AXIS_DELTA '%s', using %d\n",
+                    threshold_env, recorded_input.axis_delta_threshold);
+        }
+    }
+
+    const char *zero_env = getenv("XEMU_RECORD_INPUT_AXIS_DEADZONE");
+    if (zero_env && zero_env[0]) {
+        char *end = NULL;
+        long threshold = strtol(zero_env, &end, 10);
+        if (end != zero_env && *end == '\0' && threshold >= 0 &&
+            threshold <= 32767) {
+            recorded_input.axis_zero_threshold = threshold;
+        } else {
+            fprintf(stderr,
+                    "xemu: invalid XEMU_RECORD_INPUT_AXIS_DEADZONE '%s', using %d\n",
+                    zero_env, recorded_input.axis_zero_threshold);
+        }
+    }
+
+    recorded_input.start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    recorded_input.enabled = true;
+    fprintf(recorded_input.file, "# time_ms,control,value\n");
+    setvbuf(recorded_input.file, NULL, _IOLBF, 0);
+    atexit(xemu_recorded_input_close);
+
+    fprintf(stderr, "xemu: recording input to '%s' for port %d\n",
+            path, recorded_input.port + 1);
+}
+
+static void xemu_recorded_input_emit(int64_t elapsed_us, const char *control,
+                                     int value)
+{
+    fprintf(recorded_input.file, "%" PRId64 ",%s,%d\n",
+            elapsed_us / 1000, control, value);
+}
+
+static int xemu_recorded_input_axis_value(ControllerState *state, int axis)
+{
+    int value = state->axis[axis];
+    if (ABS(value) <= recorded_input.axis_zero_threshold) {
+        return 0;
+    }
+    return value;
+}
+
+static void xemu_recorded_input_update(ControllerState *state)
+{
+    if (!recorded_input.enabled || state->bound != recorded_input.port) {
+        return;
+    }
+
+    int64_t elapsed_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - recorded_input.start_us;
+
+    if (!recorded_input.have_last_state) {
+        for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_button_names); i++) {
+            if (state->buttons & xemu_input_button_names[i].mask) {
+                xemu_recorded_input_emit(elapsed_us,
+                                         xemu_input_button_names[i].name, 1);
+            }
+        }
+        for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_axis_names); i++) {
+            int axis = xemu_input_axis_names[i].index;
+            int value = xemu_recorded_input_axis_value(state, axis);
+            if (value != 0) {
+                xemu_recorded_input_emit(elapsed_us,
+                                         xemu_input_axis_names[i].name,
+                                         value);
+            }
+            recorded_input.axis[axis] = value;
+        }
+
+        recorded_input.buttons = state->buttons;
+        recorded_input.have_last_state = true;
+        return;
+    }
+
+    uint16_t changed_buttons = recorded_input.buttons ^ state->buttons;
+    for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_button_names); i++) {
+        int mask = xemu_input_button_names[i].mask;
+        if (changed_buttons & mask) {
+            xemu_recorded_input_emit(
+                elapsed_us, xemu_input_button_names[i].name,
+                (state->buttons & mask) ? 1 : 0);
+        }
+    }
+
+    for (size_t i = 0; i < G_N_ELEMENTS(xemu_input_axis_names); i++) {
+        int axis = xemu_input_axis_names[i].index;
+        int old_value = recorded_input.axis[axis];
+        int new_value = xemu_recorded_input_axis_value(state, axis);
+        if (ABS(new_value - old_value) >= recorded_input.axis_delta_threshold ||
+            (old_value != 0 && new_value == 0)) {
+            xemu_recorded_input_emit(elapsed_us, xemu_input_axis_names[i].name,
+                                     new_value);
+        }
+    }
+
+    recorded_input.buttons = state->buttons;
 }
 
 #if 0
@@ -563,6 +734,7 @@ void xemu_input_init(void)
     bound_drivers[3] = get_bound_driver(3);
 
     xemu_scripted_input_load();
+    xemu_recorded_input_load();
 
     // Check to see if we should auto-bind the keyboard
     int port = xemu_input_get_controller_default_bind_port(new_con, 0);
@@ -765,6 +937,7 @@ void xemu_input_update_controller(ControllerState *state)
         xemu_input_update_sdl_controller_state(state);
     }
 
+    xemu_recorded_input_update(state);
     xemu_scripted_input_apply(state);
 
     state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);

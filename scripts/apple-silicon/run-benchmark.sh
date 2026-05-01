@@ -9,13 +9,29 @@ MCPX="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/mcpx/mcpx_1.0.bin"
 BIOS="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/bios/Complex_4627.bin"
 HDD="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/hdd/xbox_hdd.qcow2"
 HDD_SOURCE="${XEMU_BENCH_HDD_SOURCE:-$HDD}"
+TEST_GAMES_DIR="${XEMU_TEST_GAMES_DIR:-/Users/jbbrack03/XEMU_MacOS/Test_Games}"
+ALT_TEST_GAMES_DIR="/Volumes/Final Cut Pro Libraries/Projects/XEMU_MacOS/Test_Games"
+
+find_test_disc() {
+    local filename="$1"
+    if [[ -e "${TEST_GAMES_DIR}/${filename}" ]]; then
+        printf '%s\n' "${TEST_GAMES_DIR}/${filename}"
+    elif [[ -e "${ALT_TEST_GAMES_DIR}/${filename}" ]]; then
+        printf '%s\n' "${ALT_TEST_GAMES_DIR}/${filename}"
+    else
+        printf '%s\n' "${TEST_GAMES_DIR}/${filename}"
+    fi
+}
 
 usage() {
     cat <<EOF
-usage: $0 crimson|rainbow|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.
+
+Set XEMU_BENCH_RECORD_INPUT=auto to record physical controller input to the
+run directory instead of replaying a scripted input file.
 EOF
 }
 
@@ -27,13 +43,18 @@ fi
 case "$1" in
     crimson)
         GAME_NAME="crimson-skies"
-        DISC="/Users/jbbrack03/XEMU_MacOS/Test_Games/Crimson skies.xiso.iso"
+        DISC="$(find_test_disc "Crimson skies.xiso.iso")"
         DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/crimson-skies-smoke.csv"
         ;;
     rainbow)
         GAME_NAME="rainbow-six-3"
-        DISC="/Users/jbbrack03/XEMU_MacOS/Test_Games/Rainbow Six 3.xiso.iso"
+        DISC="$(find_test_disc "Rainbow Six 3.xiso.iso")"
         DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/rainbow-six-3-smoke.csv"
+        ;;
+    pgr2)
+        GAME_NAME="pgr2"
+        DISC="$(find_test_disc "PGR2.xiso.iso")"
+        DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/pgr2-smoke.csv"
         ;;
     flat-tri-depth)
         GAME_NAME="flat-tri-depth"
@@ -50,6 +71,12 @@ INPUT_SCRIPT="${2:-$DEFAULT_SCRIPT}"
 DURATION="${3:-180}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 RUN_DIR="${RUN_ROOT}/${STAMP}-${GAME_NAME}"
+RECORD_INPUT_REQUEST="${XEMU_BENCH_RECORD_INPUT:-}"
+if [[ "$RECORD_INPUT_REQUEST" == "1" || "$RECORD_INPUT_REQUEST" == "auto" ]]; then
+    RECORD_INPUT="${RUN_DIR}/recorded-input.csv"
+else
+    RECORD_INPUT="$RECORD_INPUT_REQUEST"
+fi
 SCRATCH_HDD="${RUN_DIR}/xbox_hdd.qcow2"
 LOG_FILE="${RUN_DIR}/xemu.log"
 META_FILE="${RUN_DIR}/metadata.txt"
@@ -68,13 +95,22 @@ LOADVM_TAG="${XEMU_BENCH_LOADVM_TAG:-}"
 LOADVM_AT="${XEMU_BENCH_LOADVM_AT:-2}"
 SNAPSHOT_NO_THUMBNAIL="${XEMU_BENCH_SNAPSHOT_NO_THUMBNAIL:-1}"
 EXTRA_QEMU_ARGS="${XEMU_BENCH_EXTRA_QEMU_ARGS:-}"
+PORT1_BINDING="keyboard"
+if [[ -n "$RECORD_INPUT" ]]; then
+    PORT1_BINDING=""
+fi
 
-for file in "$XEMU" "$MCPX" "$BIOS" "$HDD_SOURCE" "$DISC" "$INPUT_SCRIPT"; do
+for file in "$XEMU" "$MCPX" "$BIOS" "$HDD_SOURCE" "$DISC"; do
     if [[ ! -e "$file" ]]; then
         echo "missing required file: $file" >&2
         exit 1
     fi
 done
+
+if [[ -z "$RECORD_INPUT" && ! -e "$INPUT_SCRIPT" ]]; then
+    echo "missing required file: $INPUT_SCRIPT" >&2
+    exit 1
+fi
 
 EXISTING_XEMU_PIDS="$(pgrep -f "$XEMU" || true)"
 if [[ -n "$EXISTING_XEMU_PIDS" && "${XEMU_BENCH_ALLOW_EXISTING:-0}" != "1" ]]; then
@@ -90,6 +126,10 @@ cat > "$CONFIG_FILE" <<EOF
 [general]
 show_welcome = false
 
+[input]
+auto_bind = true
+background_input_capture = true
+
 [display.window]
 vsync = false
 
@@ -100,7 +140,7 @@ hdd_path = '$SCRATCH_HDD'
 dvd_path = '$DISC'
 
 [input.bindings]
-port1 = 'keyboard'
+port1 = '$PORT1_BINDING'
 port1_driver = 'usb-xbox-gamepad'
 EOF
 
@@ -108,7 +148,12 @@ EOF
     echo "date: $(date)"
     echo "game: $GAME_NAME"
     echo "duration_seconds: $DURATION"
-    echo "input_script: $INPUT_SCRIPT"
+    if [[ -n "$RECORD_INPUT" ]]; then
+        echo "input_script: none"
+    else
+        echo "input_script: $INPUT_SCRIPT"
+    fi
+    echo "record_input: ${RECORD_INPUT:-none}"
     echo "run_dir: $RUN_DIR"
     echo "xemu: $XEMU"
     echo "disc: $DISC"
@@ -220,16 +265,30 @@ trap cleanup EXIT INT TERM
 echo "Starting $GAME_NAME for ${DURATION}s"
 echo "Run directory: $RUN_DIR"
 
-XEMU_SCRIPTED_INPUT="$INPUT_SCRIPT" \
-XEMU_SCRIPTED_INPUT_PORT=1 \
-XEMU_PERF_LOG=1 \
-XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
-XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
-"$XEMU" \
-  -config_path "$CONFIG_FILE" \
-  -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
-  ${EXTRA_QEMU_ARGS} \
-  > "$LOG_FILE" 2>&1 &
+if [[ -n "$RECORD_INPUT" ]]; then
+    echo "Recording controller input: $RECORD_INPUT"
+    XEMU_RECORD_INPUT="$RECORD_INPUT" \
+    XEMU_RECORD_INPUT_PORT=1 \
+    XEMU_PERF_LOG=1 \
+    XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
+    XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    "$XEMU" \
+      -config_path "$CONFIG_FILE" \
+      -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
+      ${EXTRA_QEMU_ARGS} \
+      > "$LOG_FILE" 2>&1 &
+else
+    XEMU_SCRIPTED_INPUT="$INPUT_SCRIPT" \
+    XEMU_SCRIPTED_INPUT_PORT=1 \
+    XEMU_PERF_LOG=1 \
+    XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
+    XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    "$XEMU" \
+      -config_path "$CONFIG_FILE" \
+      -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
+      ${EXTRA_QEMU_ARGS} \
+      > "$LOG_FILE" 2>&1 &
+fi
 
 XEMU_PID=$!
 echo "$XEMU_PID" > "${RUN_DIR}/xemu.pid"

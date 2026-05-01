@@ -49,6 +49,7 @@ Run one of the local benchmark targets:
 ```sh
 scripts/apple-silicon/run-benchmark.sh crimson
 scripts/apple-silicon/run-benchmark.sh rainbow
+scripts/apple-silicon/run-benchmark.sh pgr2
 scripts/apple-silicon/run-benchmark.sh flat-tri-depth
 ```
 
@@ -71,6 +72,41 @@ Each run creates a directory under `benchmark-runs/` containing:
 
 The launcher intentionally uses a scratch HDD copy so benchmark navigation does
 not mutate the source HDD image.
+
+## Recording Input
+
+Physical controller input can be recorded into the same CSV format used by the
+scripted-input replay path:
+
+```sh
+scripts/apple-silicon/record-input.sh pgr2 300
+```
+
+The recording wrapper launches the selected game with port 1 open for a real
+controller, records controller changes to `recorded-input.csv` in the run
+directory, and still captures normal benchmark metadata/logs. Pass an explicit
+output path when a stable route file should be overwritten directly:
+
+```sh
+scripts/apple-silicon/record-input.sh pgr2 300 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv
+```
+
+The recorder is controlled by:
+
+- `XEMU_RECORD_INPUT`: output CSV path.
+- `XEMU_RECORD_INPUT_PORT`: one-based controller port, default `1`.
+- `XEMU_RECORD_INPUT_AXIS_DELTA`: minimum analog-axis change to record,
+  default `1024`.
+- `XEMU_RECORD_INPUT_AXIS_DEADZONE`: small neutral-axis values treated as zero,
+  default `256`.
+
+Replay a captured route with the normal launcher:
+
+```sh
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
+```
 
 Set `XEMU_BENCH_EXTRA_QEMU_ARGS` when a benchmark run needs an extra xemu/QEMU
 argument such as a trace selector:
