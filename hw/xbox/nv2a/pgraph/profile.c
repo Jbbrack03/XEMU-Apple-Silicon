@@ -21,15 +21,31 @@
 
 NV2AStats g_nv2a_stats;
 
+/*
+ * Frame-time tracking is kept in microseconds internally even though the
+ * in-app HUD plot (`g_nv2a_stats.frame_history[].mspf`) still uses integer
+ * milliseconds. The `xemu-perf:` interval lines emit sub-millisecond
+ * precision so jitter percentiles can resolve the 60 FPS budget (16.67 ms)
+ * without integer-rounding away the difference between "ok" and "over
+ * budget" frames.
+ */
+#define NV2A_PROF_FRAME_BUF_LEN 1024
+
 static struct {
     bool initialized;
     bool enabled;
+    bool frame_log_enabled;
     int64_t interval_us;
     int64_t interval_start_us;
     uint64_t frames;
-    int64_t mspf_sum;
-    int mspf_min;
-    int mspf_max;
+    int64_t mspf_us_sum;
+    int64_t mspf_us_min;
+    int64_t mspf_us_max;
+    /* Optional per-frame mspf_us buffer for XEMU_PERF_FRAME_LOG=1.
+     * Bounded to avoid unbounded log lines under extreme frame counts. */
+    int64_t frame_mspf_us[NV2A_PROF_FRAME_BUF_LEN];
+    int frame_buf_count;
+    int frame_buf_overflow;
     uint64_t counters[NV2A_PROF__COUNT];
     bool registered_atexit;
     bool flushed;
@@ -73,6 +89,7 @@ static void nv2a_profile_log_init(void)
 
     perf_log.initialized = true;
     perf_log.enabled = env_flag_enabled("XEMU_PERF_LOG");
+    perf_log.frame_log_enabled = env_flag_enabled("XEMU_PERF_FRAME_LOG");
     perf_log.interval_us = 1000000;
 
     const char *interval_ms_env = getenv("XEMU_PERF_LOG_INTERVAL_MS");
@@ -104,18 +121,22 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
     int64_t elapsed_us = now - perf_log.interval_start_us;
     double elapsed_s = elapsed_us / 1000000.0;
     double fps = elapsed_s > 0 ? perf_log.frames / elapsed_s : 0.0;
-    double avg_mspf =
-        perf_log.frames > 0 ? (double)perf_log.mspf_sum / perf_log.frames : 0;
+    double avg_mspf_ms =
+        perf_log.frames > 0
+            ? (double)perf_log.mspf_us_sum / perf_log.frames / 1000.0
+            : 0;
+    double min_mspf_ms = perf_log.mspf_us_min / 1000.0;
+    double max_mspf_ms = perf_log.mspf_us_max / 1000.0;
 
     fprintf(stderr,
             "xemu-perf: interval_ms=%lld frames=%llu fps=%.2f "
-            "mspf_avg=%.2f mspf_min=%d mspf_max=%d increment_fps=%u",
+            "mspf_avg=%.3f mspf_min=%.3f mspf_max=%.3f increment_fps=%u",
             (long long)(elapsed_us / 1000),
             (unsigned long long)perf_log.frames,
             fps,
-            avg_mspf,
-            perf_log.mspf_min,
-            perf_log.mspf_max,
+            avg_mspf_ms,
+            min_mspf_ms,
+            max_mspf_ms,
             g_nv2a_stats.increment_fps);
 
     if (final) {
@@ -129,39 +150,63 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
                     (unsigned long long)perf_log.counters[i]);
         }
     }
+
+    if (perf_log.frame_log_enabled && perf_log.frame_buf_count > 0) {
+        fprintf(stderr, " frame_mspf_us=");
+        for (int i = 0; i < perf_log.frame_buf_count; i++) {
+            fprintf(stderr, "%s%lld",
+                    i == 0 ? "" : ",",
+                    (long long)perf_log.frame_mspf_us[i]);
+        }
+        if (perf_log.frame_buf_overflow > 0) {
+            fprintf(stderr, " frame_mspf_us_dropped=%d",
+                    perf_log.frame_buf_overflow);
+        }
+    }
+
     fprintf(stderr, "\n");
 
     perf_log.interval_start_us = now;
     perf_log.frames = 0;
-    perf_log.mspf_sum = 0;
-    perf_log.mspf_min = 0;
-    perf_log.mspf_max = 0;
+    perf_log.mspf_us_sum = 0;
+    perf_log.mspf_us_min = 0;
+    perf_log.mspf_us_max = 0;
+    perf_log.frame_buf_count = 0;
+    perf_log.frame_buf_overflow = 0;
     memset(perf_log.counters, 0, sizeof(perf_log.counters));
 }
 
-static void nv2a_profile_log_add_frame(int64_t now, int mspf,
+static void nv2a_profile_log_add_frame(int64_t now, int64_t mspf_us,
                                        const int counters[NV2A_PROF__COUNT])
 {
     if (perf_log.frames == 0 && !counters_nonzero(perf_log.counters)) {
         perf_log.interval_start_us = now;
-        perf_log.mspf_min = mspf;
-        perf_log.mspf_max = mspf;
+        perf_log.mspf_us_min = mspf_us;
+        perf_log.mspf_us_max = mspf_us;
     } else if (perf_log.frames == 0) {
-        perf_log.mspf_min = mspf;
-        perf_log.mspf_max = mspf;
+        perf_log.mspf_us_min = mspf_us;
+        perf_log.mspf_us_max = mspf_us;
     }
 
     perf_log.frames++;
-    perf_log.mspf_sum += mspf;
-    perf_log.mspf_min = MIN(perf_log.mspf_min, mspf);
-    perf_log.mspf_max = MAX(perf_log.mspf_max, mspf);
+    perf_log.mspf_us_sum += mspf_us;
+    if (mspf_us < perf_log.mspf_us_min) perf_log.mspf_us_min = mspf_us;
+    if (mspf_us > perf_log.mspf_us_max) perf_log.mspf_us_max = mspf_us;
+
+    if (perf_log.frame_log_enabled) {
+        if (perf_log.frame_buf_count < NV2A_PROF_FRAME_BUF_LEN) {
+            perf_log.frame_mspf_us[perf_log.frame_buf_count++] = mspf_us;
+        } else {
+            perf_log.frame_buf_overflow++;
+        }
+    }
 
     for (unsigned int i = 0; i < NV2A_PROF__COUNT; i++) {
         perf_log.counters[i] += counters[i];
     }
 }
 
-static void nv2a_profile_log_frame(int64_t now, int mspf,
+static void nv2a_profile_log_frame(int64_t now, int64_t mspf_us,
                                    const int counters[NV2A_PROF__COUNT])
 {
     nv2a_profile_log_init();
@@ -169,7 +214,7 @@ static void nv2a_profile_log_frame(int64_t now, int mspf,
         return;
     }
 
-    nv2a_profile_log_add_frame(now, mspf, counters);
+    nv2a_profile_log_add_frame(now, mspf_us, counters);
 
     int64_t elapsed_us = now - perf_log.interval_start_us;
     if (elapsed_us < perf_log.interval_us) {
@@ -229,13 +274,15 @@ void nv2a_profile_increment(void)
 void nv2a_profile_flip_stall(void)
 {
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-    int64_t render_time = g_nv2a_stats.last_flip_time ?
-                           (now - g_nv2a_stats.last_flip_time) / 1000 : 0;
+    int64_t render_time_us = g_nv2a_stats.last_flip_time ?
+                              (now - g_nv2a_stats.last_flip_time) : 0;
+    int render_time_ms = (int)(render_time_us / 1000);
 
-    g_nv2a_stats.frame_working.mspf = render_time;
+    /* HUD plot in ui/xui/debug.cc still consumes integer-ms mspf. */
+    g_nv2a_stats.frame_working.mspf = render_time_ms;
     g_nv2a_stats.frame_history[g_nv2a_stats.frame_ptr] =
         g_nv2a_stats.frame_working;
-    nv2a_profile_log_frame(now, render_time,
+    nv2a_profile_log_frame(now, render_time_us,
                            g_nv2a_stats.frame_working.counters);
     g_nv2a_stats.frame_ptr =
         (g_nv2a_stats.frame_ptr + 1) % NV2A_PROF_NUM_FRAMES;
@@ -252,7 +299,11 @@ void nv2a_profile_log_flush(const char *reason)
 
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     if (frame_counters_nonzero(g_nv2a_stats.frame_working.counters)) {
-        nv2a_profile_log_add_frame(now, g_nv2a_stats.frame_working.mspf,
+        /* Working-frame mspf is integer-ms; promote to microseconds for the
+         * aggregation path. Sub-ms precision is lost on this final flush
+         * (one frame at most), so the log cost is negligible. */
+        int64_t mspf_us = (int64_t)g_nv2a_stats.frame_working.mspf * 1000;
+        nv2a_profile_log_add_frame(now, mspf_us,
                                    g_nv2a_stats.frame_working.counters);
         memset(&g_nv2a_stats.frame_working, 0,
                sizeof(g_nv2a_stats.frame_working));
