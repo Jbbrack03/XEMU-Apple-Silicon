@@ -296,6 +296,13 @@ the immediate renderer-focused fork work.
    triangle-family fill category. `validate-native-tri-depth.sh --run 20` is
    now the quick regression gate for that slice. The 2026-05-01 PGR2, Rainbow
    Six 3, and Crimson Skies gameplay routes add the next retail coverage layer.
-   The next geometry-shader removal session should start with PGR2 baseline
-   versus `XEMU_NATIVE_TRI_DEPTH=1`, then prioritize quad/quad-strip expansion
-   if the route confirms the expected remaining quad-family pressure.
+   `XEMU_NATIVE_QUAD=1` is the second completed bypass slice, removing the
+   smooth-fill quad/quad-strip-family geometry-shader cost via CPU index
+   expansion to triangles plus the same `gl_FragCoord`-derived depth path the
+   triangle slice introduced. With both flags the snapshot scenes for PGR2,
+   Rainbow Six 3, and Crimson Skies now have zero geometry-shader draws of
+   any kind, but the captured PGR2 mid-route snapshot still only reaches
+   16.56 FPS — the remaining gap to the 30 FPS gameplay floor is not
+   geometry-shader work. The next session should profile that scene under
+   Instruments and `XEMU_PERF_LOG=1` counters to find the new dominant cost
+   before further renderer slices.

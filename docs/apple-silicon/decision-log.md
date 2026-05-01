@@ -537,3 +537,168 @@ Start the next implementation session with PGR2 baseline versus
 the strongest signal, prioritize quad/quad-strip expansion removal or
 narrowing before moving to line primitives, polygon fill, or nonfill triangle
 modes.
+
+## 2026-05-01: Add `XEMU_NATIVE_QUAD=1` smooth-fill quad bypass
+
+Status: implemented and validated.
+
+Decision:
+
+Add a second opt-in geometry-shader removal slice, `XEMU_NATIVE_QUAD=1`, that
+expands `PRIM_TYPE_QUADS` and `PRIM_TYPE_QUAD_STRIP` smooth-fill draws into
+native triangle dispatches and reuses the `gl_FragCoord`-derived depth path
+already used by `XEMU_NATIVE_TRI_DEPTH=1`. The flag is independent of
+`XEMU_NATIVE_TRI_DEPTH`. Flat-shaded quads, line/point polygon modes, and any
+nonfill raster mode stay on the existing geometry-shader path. The quad
+diagonal triangulation matches the geometry shader's `calc_quadz(0, 2)`
+order, so smooth interpolation is unchanged.
+
+Rationale:
+
+The PGR2 retail gameplay route at 11.53 baseline FPS reached only 21.40
+post-load FPS with `XEMU_NATIVE_TRI_DEPTH=1` enabled, and the entire
+remaining geometry-shader workload at that point was quad-family (177,272 of
+177,272 GS draws). Apple's OpenGL geometry-shader path was already
+identified as the dominant Apple Silicon bottleneck for the triangle-fill
+slice; the same removal applied to quad-fill is the obvious next slice.
+
+Verification:
+
+- Triangle regression gate `validate-native-tri-depth.sh --run 22` passed at
+  `benchmark-runs/20260501-105543-flat-tri-depth`. Adding the native-quad
+  infrastructure did not perturb the triangle-fill validator.
+- Rainbow Six 3 snapshot scene
+  (`benchmark-runs/20260501-110557-rainbow-six-3`, 30.97 post-load FPS / 6.71
+  MSPF) is identical within noise to the prior `XEMU_NATIVE_TRI_DEPTH=1`-only
+  D8 result (30.99 FPS / 6.47 MSPF). Quad-free scenes are unaffected by the
+  new code.
+- PGR2 mid-route snapshot triplet (`benchmark-runs/20260501-115623-pgr2`,
+  `20260501-115654-pgr2`, `20260501-115725-pgr2`):
+  - Baseline: 4.39 FPS; 329,044 GS triangle draws + 3,022 GS quad draws.
+  - `XEMU_NATIVE_TRI_DEPTH=1`: 16.02 FPS; 0 GS triangle draws, 11,745 GS
+    quad draws remain.
+  - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1`: 16.56 FPS; 0 GS draws of
+    any kind, 12,193 native-quad draws (all `LIST`, all
+    `CANDIDATE_SMOOTH`, zero fallbacks).
+- Whole-route replays show 36% run-to-run variance (18.20 vs 24.81 post-load
+  FPS for the same flag config) because real-time-paced input drives the
+  emulator into different scene mixes at different host throughputs. Stable
+  comparisons need snapshot replays.
+
+Consequence:
+
+The geometry-shader removal track has now eliminated all triangle-family and
+all smooth-fill quad-family geometry-shader draws across all current
+benchmark scenes. PGR2 still does not hit the 30 FPS gameplay floor at the
+captured snapshot (16.56 FPS), so the next bottleneck is no longer geometry
+shaders. Use Instruments and the existing perf counters at the PGR2
+snapshot scene to identify whether i386 TCG, NV2A PGRAPH command processing,
+surface/texture upload, or fragment shader work is the dominant remaining
+cost. Defer further geometry-shader-specific work (flat-quad bypass,
+nonfill polygon modes) until a benchmark exercises that combination
+non-trivially.
+
+## 2026-05-01: Add `XEMU_PGRAPH_FAST_READ=1` lock-free PGRAPH register reads
+
+Status: implemented and validated.
+
+Decision:
+
+Add an opt-in fast path in `pgraph_read()` that returns a `qatomic_read()`
+snapshot of the requested register without acquiring `pg->lock` for simple
+register reads (`NV_PGRAPH_INTR`, `NV_PGRAPH_INTR_EN`, and the default
+`pg->regs_[]` slot). Only `NV_PGRAPH_RDI_DATA` keeps the full lock because
+its read auto-increments `NV_PGRAPH_RDI_INDEX_ADDRESS`. Independent of
+`XEMU_NATIVE_TRI_DEPTH` and `XEMU_NATIVE_QUAD`, but stacks with them.
+
+Rationale:
+
+A `sample` profile of the PGR2 mid-route snapshot
+(`docs/apple-silicon/benchmarks/2026-05-01-pgr2-bottleneck-sample.md`)
+showed the TCG i386 emulation thread spending ~32% of its wall time
+sleeping in mutex-wait, with `pgraph_read` accounting for ~22% on its own.
+The renderer's pfifo thread holds `pg->lock` across the slow OpenGL
+submission inside `pgraph_method`, so every Xbox-CPU MMIO read of an
+NV_PGRAPH_* register stalls until the renderer is done. Aligned 32-bit
+loads are atomic on aarch64 and x86, so the mutex provides no protection
+that the hardware does not already give for these specific reads — it is
+strict overhead. The Xbox game loop polls these registers very frequently,
+so eliminating the per-call mutex roundtrip recovers a large fraction of
+emulator throughput.
+
+Verification:
+
+- Triangle regression gate
+  (`scripts/apple-silicon/validate-native-tri-depth.sh --run 22`) passed at
+  `benchmark-runs/20260501-123015-flat-tri-depth`. The lock-free read does
+  not affect the flat-shading triangle path.
+- PGR2 mid-route snapshot triplet (paused-input replays of the same Xbox
+  state): adding `XEMU_PGRAPH_FAST_READ=1` on top of
+  `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1` lifts post-load FPS from
+  16.56 to 30.76 (+85.8%) and 30.70 over a 60-second rerun
+  (`benchmark-runs/20260501-123050-pgr2`,
+  `benchmark-runs/20260501-123357-pgr2`). Zero geometry-shader draws,
+  zero native fallbacks.
+- `XEMU_PGRAPH_FAST_READ=1` alone, without the geometry-shader bypasses,
+  produces only a small lift (4.4 → 5.3 FPS post-load). The
+  geometry-shader bypass is what makes the renderer's lock-hold time short
+  enough that removing the per-read mutex matters.
+- PGR2 retail gameplay route replay with all three flags
+  (`benchmark-runs/20260501-123525-pgr2`): 31.76 post-load FPS over 279
+  intervals (~4.7 minutes of real gameplay), zero geometry-shader draws,
+  10.4M native-tri draws, 254K native-quad draws, all smooth, zero
+  fallbacks. Compared to the 11.67 post-load FPS baseline, this is +2.72x.
+
+Consequence:
+
+PGR2 now meets the project's 30 FPS retail-gameplay floor with all three
+opt-in flags enabled. The flags remain opt-in until broader title coverage
+exists. Next slice should audit `pgraph_write` and `voice_lock` for similar
+fast-path opportunities, then revisit whether any further bottleneck
+exists at this scene under Instruments. Whole-route averages are now
+useful comparators again because per-run scene divergence is reduced when
+the emulator is no longer CPU-starved.
+
+## 2026-05-01: Three opt-in flags visually validated for current title set
+
+Status: visually validated by the user on 2026-05-01.
+
+Decision:
+
+Treat `XEMU_NATIVE_TRI_DEPTH=1`, `XEMU_NATIVE_QUAD=1`, and
+`XEMU_PGRAPH_FAST_READ=1` as visually safe for the current tracked-title
+set (PGR2, Rainbow Six 3, Crimson Skies) on Apple Silicon when used
+together. They remain opt-in flags rather than default behavior until a
+broader title-coverage gate is met.
+
+Rationale:
+
+Each of the three slices was code-validated against the flat-tri-depth
+regression XBE and counter sanity checks. After all three landed, the
+user ran each tracked title under combined flags on a real disc and
+confirmed:
+
+- PGR2: no artifacting, 30 FPS feel.
+- Rainbow Six 3: no artifacting, 30 FPS feel.
+- Crimson Skies: no artifacting, 30 FPS feel.
+
+Counter-side guarantees backing this:
+
+- `XEMU_NATIVE_TRI_DEPTH=1` only takes the native path when the eligibility
+  predicate (`pgraph_glsl_native_tri_depth_supported`) holds. Flat-nonfirst
+  triangles still use the geometry shader.
+- `XEMU_NATIVE_QUAD=1` only takes the native path for smooth-fill
+  quad/quad-strip primitives. Flat-shaded quads, line/point polygon modes,
+  and any nonfill raster mode still use the geometry shader.
+- `XEMU_PGRAPH_FAST_READ=1` only skips the lock for atomic 32-bit reads
+  with no side effects. `NV_PGRAPH_RDI_DATA` (the only read-with-side-
+  effect we know about) still locks.
+
+Consequence:
+
+Flags stay off by default. New titles or scenes that exercise quad
+flat-shading, nonfill polygon modes, or unusual PGRAPH register access
+patterns must be visually validated before being added to the tracked set.
+The next gate to consider flipping any flag default-on is broader retail
+coverage across genres (additional racing, FPS, platforming, and
+menu-heavy titles).

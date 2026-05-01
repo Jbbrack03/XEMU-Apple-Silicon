@@ -142,9 +142,27 @@ scripts/apple-silicon/run-benchmark.sh crimson \
 ```
 
 For opt-in triangle-family fill regression checks, add
-`XEMU_NATIVE_TRI_DEPTH=1`. The next implementation session should start with
-PGR2 because it combines the worst gameplay FPS with quad-family
-geometry-shader draw coverage.
+`XEMU_NATIVE_TRI_DEPTH=1`. For opt-in quad/quad-strip-family fill bypass on
+top of that, also add `XEMU_NATIVE_QUAD=1`. For lock-free PGRAPH register
+reads, also add `XEMU_PGRAPH_FAST_READ=1`. All three flags are independent
+and stack:
+
+- `XEMU_NATIVE_TRI_DEPTH=1` removes the triangle-family geometry shader.
+  Flat-first triangles stay native, flat-nonfirst triangle strips and fans
+  fall back to the geometry shader.
+- `XEMU_NATIVE_QUAD=1` removes the quad/quad-strip geometry shader for
+  smooth-shaded fill draws by expanding quads to native triangles on the CPU
+  and reusing the same `gl_FragCoord`-derived depth/slope path the triangle
+  bypass uses. Flat-shaded quads, line/point polygon modes, and any nonfill
+  raster mode fall back to the geometry shader.
+- `XEMU_PGRAPH_FAST_READ=1` skips `pg->lock` for simple PGRAPH register
+  reads (atomic 32-bit loads of `NV_PGRAPH_INTR`, `NV_PGRAPH_INTR_EN`, and
+  the default `pg->regs_[]` slot). Removes the bulk of TCG-thread
+  mutex-wait time when the renderer is holding the lock during a draw.
+  `NV_PGRAPH_RDI_DATA` still locks because the read has a side effect.
+  Biggest gain shows up when combined with the geometry-shader bypasses,
+  because the renderer's lock-hold time is what creates contention in the
+  first place.
 
 ## Profile Setup Runs
 
@@ -310,6 +328,10 @@ back to termination so this final counter flush can run.
 - `GEOM_SHADER_DRAW`: draws using a geometry-backed shader program.
 - `GEOM_SHADER_DRAW_LINE`, `GEOM_SHADER_DRAW_TRI`, `GEOM_SHADER_DRAW_QUAD`,
   `GEOM_SHADER_DRAW_OTHER`: geometry-backed draws grouped by primitive family.
+- `GEOM_SHADER_DRAW_QUAD_LIST`, `GEOM_SHADER_DRAW_QUAD_STRIP`: quad-family GS
+  draws split into PRIM_TYPE_QUADS (4-vertex independent) and
+  PRIM_TYPE_QUAD_STRIP (2-vertex incremental) so the native quad bypass
+  coverage can be reasoned about by subtype.
 - `NATIVE_TRI_DEPTH_DRAW` / `NATIVE_TRI_DEPTH_FALLBACK`: native triangle-depth
   replacement attempts that drew natively or fell back to geometry shaders.
 - `NATIVE_TRI_DEPTH_CANDIDATE`, `NATIVE_TRI_DEPTH_CANDIDATE_SMOOTH`,
@@ -328,6 +350,20 @@ back to termination so this final counter flush can run.
 - `NATIVE_TRI_DEPTH_FALLBACK_FLAT` / `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST`:
   native-path attempts that stayed on geometry shaders because flat shading is
   still outside the validated native path.
+- `NATIVE_QUAD_DRAW` / `NATIVE_QUAD_FALLBACK`: native quad-family bypass
+  attempts that drew natively or fell back to the geometry shader.
+- `NATIVE_QUAD_DRAW_LIST` / `NATIVE_QUAD_DRAW_STRIP`: native quad draws split
+  by primitive subtype (PRIM_TYPE_QUADS vs PRIM_TYPE_QUAD_STRIP).
+- `NATIVE_QUAD_CANDIDATE`, `NATIVE_QUAD_CANDIDATE_SMOOTH`,
+  `NATIVE_QUAD_CANDIDATE_FLAT`: eligibility classification before the
+  draw/fallback split. Smooth-shaded fill quads currently take the native
+  path; everything else falls back.
+- `NATIVE_QUAD_FALLBACK_FLAT` / `NATIVE_QUAD_FALLBACK_NONFILL`: reason for
+  staying on the geometry shader when XEMU_NATIVE_QUAD=1 was set.
+- `NATIVE_QUAD_DRAW_ZPERSPECTIVE` / `NATIVE_QUAD_DRAW_LINEAR_Z`: native quad
+  draws split by depth mode.
+- `NATIVE_QUAD_DRAW_POLY_OFFSET`: native quad draws with fill polygon offset
+  enabled.
 
 Summarize a completed run with:
 

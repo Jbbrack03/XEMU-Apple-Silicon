@@ -136,6 +136,21 @@ Current Phase 0 status:
 - `XEMU_NATIVE_TRI_DEPTH=1` is the completed current opt-in triangle-family
   fill replacement path. It is still not defaulted because broader retail
   coverage is needed.
+- `XEMU_NATIVE_QUAD=1` is the completed current opt-in quad/quad-strip-family
+  fill replacement path. It expands quads to triangles on the CPU and reuses
+  the same `gl_FragCoord`-derived depth path; smooth fill only, flat shading
+  and nonfill polygon modes still fall back to the geometry shader. It is
+  also not defaulted yet.
+- `XEMU_PGRAPH_FAST_READ=1` is the completed current opt-in lock-free
+  PGRAPH register read fast path. It removes the bulk of TCG-thread
+  mutex-wait time on `pg->lock` by skipping the mutex for atomic 32-bit
+  register reads (`NV_PGRAPH_INTR`, `NV_PGRAPH_INTR_EN`, default
+  `pg->regs_[]` slots). `NV_PGRAPH_RDI_DATA` keeps the lock because it has
+  a side effect. Independent of the geometry-shader bypasses.
+- Combined, the three flags eliminate every geometry-shader draw and
+  remove the dominant TCG-thread mutex-wait stall in PGR2, Rainbow Six 3,
+  and Crimson Skies, lifting all three tracked titles past the 30 FPS
+  retail gameplay floor on the recorded routes.
 - Retail gameplay route baselines are now captured:
   - PGR2: 11.53 FPS average, 1,516,519 geometry-shader draws, including 38,785
     quad-family draws.
@@ -143,8 +158,19 @@ Current Phase 0 status:
     1,946 line-family draws.
   - Crimson Skies: 15.44 FPS average, 786,722 geometry-shader draws, including
     7,837 quad-family draws.
+- PGR2 mid-route snapshot triplet
+  (`docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md`) showed
+  the geometry-shader removal slices alone were not enough to reach 30
+  FPS at that scene (16.56 FPS with both flags, zero geometry-shader
+  draws). The follow-up sample profile
+  (`docs/apple-silicon/benchmarks/2026-05-01-pgr2-bottleneck-sample.md`)
+  identified ~32% of TCG-thread time was spent in mutex wait, dominated
+  by `pgraph_read` contention. The lock-free read fast path
+  (`docs/apple-silicon/benchmarks/2026-05-01-pgraph-fast-read.md`) lifted
+  the same snapshot to 30.76 FPS and brought PGR2 retail gameplay route
+  to 31.76 post-load FPS.
 - `scripts/apple-silicon/validate-native-tri-depth.sh --run 20` is the
-  regression gate for that completed slice; do not use the next session to
+  regression gate for the triangle slice; do not use the next session to
   re-prove it unless the triangle path changes.
 
 ### Phase 1: Renderer Control Plane
@@ -160,14 +186,23 @@ Deliverables:
 
 Deliverables:
 
-- Completed current slice: replace triangle-family fill geometry-shader dispatch
-  with the opt-in native triangle-depth path.
-- Next slice entry point: replay the retail gameplay routes, especially PGR2,
-  under baseline and `XEMU_NATIVE_TRI_DEPTH=1`, then replace or narrow one
-  remaining geometry-shader category.
-- Candidate next categories: quad/quad-strip expansion first because PGR2
-  exposes severe gameplay collapse and quad-family geometry-shader activity;
-  then line primitives, polygon fill, and nonfill triangle modes.
+- Completed slice: replace triangle-family fill geometry-shader dispatch
+  with the opt-in native triangle-depth path (`XEMU_NATIVE_TRI_DEPTH=1`).
+- Completed slice: replace quad/quad-strip-family smooth-fill
+  geometry-shader dispatch with native CPU index expansion + the same
+  `gl_FragCoord`-derived depth path (`XEMU_NATIVE_QUAD=1`).
+- Next slice entry point is no longer a geometry-shader category. Combined
+  with the triangle slice, the two flags eliminate every geometry-shader
+  draw at the current snapshot scenes. Profile the PGR2 mid-route snapshot
+  (16.56 FPS with both flags) under Instruments and the existing
+  `XEMU_PERF_LOG=1` counters to identify the next dominant cost (likely
+  candidates: i386 TCG, NV2A PGRAPH command processing, surface/texture
+  upload bandwidth, fragment-shader work).
+- Remaining geometry-shader categories worth eventually addressing if a
+  benchmark exercises them non-trivially: flat-shaded quads, line/point
+  polygon modes, line primitives, polygon fill, and nonfill triangle modes.
+  None are non-trivially exercised by the current Crimson/Rainbow/PGR2
+  routes.
 - Replace geometry-shader primitive expansion with explicit index/vertex
   expansion where native GL rasterization cannot preserve NV2A behavior.
 - Preserve flat shading and provoking-vertex behavior.

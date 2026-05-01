@@ -227,12 +227,39 @@ Current matrix status:
 - B0/B1 scripted setup routes remain available:
   - B0 reaches the Crimson Skies rendered in-engine sequence.
   - B1 reaches the Rainbow Six 3 Hereford mission loading screen.
-- V0/V1/M0 should wait until the next geometry-shader-removal slice is chosen.
-  Triangle-family fill is validated for current opt-in testing. The next
-  benchmark task is to replay PGR2 baseline versus `XEMU_NATIVE_TRI_DEPTH=1`,
-  confirm whether quad-family geometry-shader pressure remains the strongest
-  signal, and then use Rainbow Six 3 / Crimson Skies as line and flight
-  cross-checks once a concrete replacement path exists.
+- 2026-05-01 PGR2 native-tri-depth route replay
+  (`docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-tri-depth.md`):
+  baseline 11.53 → 21.40 post-load FPS with `XEMU_NATIVE_TRI_DEPTH=1`. The
+  remaining geometry-shader work was 100% quad-family (177,272 of 177,272
+  GS draws), motivating the quad bypass.
+- 2026-05-01 PGR2 native-quad implementation and snapshot triplet
+  (`docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md`):
+  - `XEMU_NATIVE_QUAD=1` is the second completed geometry-shader bypass
+    slice; smooth-fill quads/quad-strips dispatch via CPU-expanded triangle
+    indices and reuse the `gl_FragCoord`-derived depth path.
+  - Triangle regression gate
+    (`scripts/apple-silicon/validate-native-tri-depth.sh --run 22`) passed at
+    `benchmark-runs/20260501-105543-flat-tri-depth`.
+  - Rainbow Six 3 snapshot scene with both flags reports 30.97 post-load
+    FPS / 6.71 MSPF — identical within noise to D8.
+  - PGR2 mid-route snapshot triplet (`pgr2_gameplay_b4` from
+    `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`):
+    - Baseline 4.39 FPS, 332,066 GS draws.
+    - `XEMU_NATIVE_TRI_DEPTH=1` 16.02 FPS, 11,745 GS quad draws remain.
+    - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1` 16.56 FPS, zero GS draws,
+      12,193 native-quad draws all `LIST` and `CANDIDATE_SMOOTH` with zero
+      fallbacks.
+  - Whole-route PGR2 averages are not stable across runs (36% variance
+    between two same-config runs), so the snapshot triplet is the trusted
+    comparison. Use the stable `XEMU_NATIVE_TRI_DEPTH=1` and
+    `XEMU_NATIVE_QUAD=1` spellings together for the full geometry-shader
+    bypass.
+- V0/V1/M0 should wait until the next non-geometry-shader bottleneck for
+  PGR2 is identified. With both bypass slices on, the snapshot scene is
+  16.56 FPS and there is no geometry-shader work left to remove. The next
+  benchmark task is to profile that snapshot under Instruments and the
+  existing `XEMU_PERF_LOG=1` counters to find the dominant remaining cost
+  before any further renderer slice.
 
 ## Metrics To Add To xemu
 
@@ -246,7 +273,13 @@ Add logging or HUD counters for:
 - Pipeline cache hits/misses.
 - Number of draw calls per frame.
 - Number of geometry-shader-path draws per frame until removed. Geometry-backed
-  draw counters split line, triangle, quad, and other primitive families.
+  draw counters split line, triangle, quad, and other primitive families,
+  with quad further split into list/strip subtypes
+  (`GEOM_SHADER_DRAW_QUAD_LIST` / `GEOM_SHADER_DRAW_QUAD_STRIP`).
+- Number of native-bypass draws per frame
+  (`NATIVE_TRI_DEPTH_DRAW`, `NATIVE_QUAD_DRAW` and per-subtype/depth
+  splits) plus eligibility/fallback breakdowns
+  (`NATIVE_TRI_DEPTH_FALLBACK_*`, `NATIVE_QUAD_FALLBACK_*`).
 - Texture upload/download bytes per frame.
 - Surface readback count and bytes.
 - Explicit sync/wait count per frame.

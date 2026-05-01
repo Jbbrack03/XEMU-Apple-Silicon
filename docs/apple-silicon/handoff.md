@@ -1,6 +1,6 @@
 # Handoff
 
-Last updated: 2026-05-01
+Last updated: 2026-05-01 (after pgraph fast-read slice — PGR2 now hits 30 FPS gameplay floor)
 
 ## Current State
 
@@ -71,6 +71,49 @@ Source code changes made this session:
     so a shell with both variables set follows the stable flag.
   - the native bypass now applies only to triangle-family fill primitives;
     line primitives remain on the existing geometry-shader path.
+  - extend the fragment-shader native-depth code path so it also activates
+    when `XEMU_NATIVE_QUAD=1` is enabled and the current draw is an eligible
+    smooth-fill quad-family primitive. The depth/slope math is
+    primitive-agnostic.
+- `hw/xbox/nv2a/pgraph/gl/shaders.c`
+  - `get_gl_primitive_mode()` returns `GL_TRIANGLES` for quad-family draws
+    when `XEMU_NATIVE_QUAD=1` is on and the smooth-fill eligibility holds,
+    instead of the geometry-shader-required `GL_LINES_ADJACENCY` /
+    `GL_LINE_STRIP_ADJACENCY`.
+- `hw/xbox/nv2a/pgraph/gl/draw.c`
+  - extend per-dispatch geometry-shader profiling to split
+    `GEOM_SHADER_DRAW_QUAD` into `_QUAD_LIST` and `_QUAD_STRIP`.
+  - add native-quad profiling counters and the
+    `pgraph_gl_native_quad_active()` predicate.
+  - add CPU-side index expansion helpers for both
+    `PRIM_TYPE_QUADS` (4-vertex independent quads) and
+    `PRIM_TYPE_QUAD_STRIP` (2-vertex incremental quads). Diagonal matches
+    the existing geometry shader's `calc_quadz(0, 2)` triangulation so smooth
+    interpolation is unchanged.
+  - extend all four dispatch paths
+    (`pg->draw_arrays_length`, `pg->inline_elements_length`,
+    `pg->inline_buffer_length`, `pg->inline_array_length`) to expand the
+    quad vertex stream to triangle indices, upload them via
+    `glBufferData(GL_STREAM_DRAW)` on a dedicated index buffer, and issue
+    a single `glDrawElements(GL_TRIANGLES, ...)` when the native bypass is
+    active.
+- `hw/xbox/nv2a/pgraph/gl/renderer.h` and `pgraph/gl/vertex.c`
+  - add `gl_native_quad_index_buffer` element-array buffer and a CPU-side
+    growable scratch index array, allocated in
+    `pgraph_gl_init_buffers()` and freed in
+    `pgraph_gl_finalize_buffers()`.
+- `hw/xbox/nv2a/debug.h`
+  - new counters: `GEOM_SHADER_DRAW_QUAD_LIST`, `GEOM_SHADER_DRAW_QUAD_STRIP`,
+    `NATIVE_QUAD_DRAW`, `NATIVE_QUAD_DRAW_LIST`, `NATIVE_QUAD_DRAW_STRIP`,
+    `NATIVE_QUAD_CANDIDATE`, `NATIVE_QUAD_CANDIDATE_SMOOTH`,
+    `NATIVE_QUAD_CANDIDATE_FLAT`, `NATIVE_QUAD_FALLBACK`,
+    `NATIVE_QUAD_FALLBACK_FLAT`, `NATIVE_QUAD_FALLBACK_NONFILL`,
+    `NATIVE_QUAD_DRAW_ZPERSPECTIVE`, `NATIVE_QUAD_DRAW_LINEAR_Z`,
+    `NATIVE_QUAD_DRAW_POLY_OFFSET`.
+- `scripts/apple-silicon/run-benchmark.sh`
+  - records `env_XEMU_NATIVE_QUAD` in benchmark metadata.
+- `scripts/apple-silicon/extract-perf-summary.sh`
+  - surfaces the new `GEOM_SHADER_DRAW_QUAD_*` and `NATIVE_QUAD_*` counters.
 - `ui/xemu-snapshots.c`
   - adds `XEMU_SNAPSHOT_NO_THUMBNAIL=1` to skip snapshot thumbnail generation
     for benchmark-created snapshots.
@@ -437,6 +480,85 @@ Baseline app status:
     texture upload before any `xemu-perf:` interval was emitted.
   - immediate rerun completed and validation later passed as
     `benchmark-runs/20260430-153555-flat-tri-depth`.
+- Two additional Apple OpenGL nondeterministic startup crashes hit during the
+  native-quad implementation session, both crashing in
+  `glgProcessPixelsWithProcessor` /
+  `GLDTextureRec::uploadTextureLevel` before any geometry was issued:
+  - `~/Library/Logs/DiagnosticReports/xemu-2026-05-01-110643.ips`: pid 75358
+    crashed at process launch+1s during a PGR2 retry replay.
+  - `~/Library/Logs/DiagnosticReports/xemu-2026-05-01-111351.ips`: pid 76151
+    crashed about 10s into a PGR2 snapshot-capture run.
+  - Immediate retries succeeded each time. The native-quad code is not
+    implicated; the failures occurred before any quad dispatch ran.
+
+Native quad bypass slice (2026-05-01):
+
+- `XEMU_NATIVE_QUAD=1` is the new opt-in quad/quad-strip-family fill bypass.
+  When set, the renderer:
+  - Skips geometry-shader generation for `PRIM_TYPE_QUADS` and
+    `PRIM_TYPE_QUAD_STRIP` in smooth-fill mode.
+  - Issues `glDrawElements(GL_TRIANGLES, ...)` against a CPU-expanded
+    triangle index buffer that uses the same diagonal triangulation the
+    geometry shader's `calc_quadz(0, 2)` already used, so smooth
+    interpolation is unchanged.
+  - Reuses the `gl_FragCoord`-derived depth and slope path that
+    `XEMU_NATIVE_TRI_DEPTH=1` introduced for triangles. The depth math is
+    primitive-agnostic.
+- Flat-shaded quads, line/point polygon modes, and any nonfill raster mode
+  fall back to the geometry shader, mirroring the conservative
+  triangle-fill flat handling.
+- `XEMU_NATIVE_QUAD` is independent of `XEMU_NATIVE_TRI_DEPTH`; both are
+  needed at the same time for the full geometry-shader bypass. Setting the
+  flag to `0` explicitly disables it.
+- New per-subtype geometry-shader counters
+  (`GEOM_SHADER_DRAW_QUAD_LIST`, `GEOM_SHADER_DRAW_QUAD_STRIP`) and full
+  native-quad counter family
+  (`NATIVE_QUAD_DRAW`, `NATIVE_QUAD_DRAW_LIST`, `NATIVE_QUAD_DRAW_STRIP`,
+  `NATIVE_QUAD_CANDIDATE*`, `NATIVE_QUAD_FALLBACK*`,
+  `NATIVE_QUAD_DRAW_ZPERSPECTIVE`, `NATIVE_QUAD_DRAW_LINEAR_Z`,
+  `NATIVE_QUAD_DRAW_POLY_OFFSET`) are surfaced in `xemu-perf:` lines and
+  in `extract-perf-summary.sh` output.
+- Triangle regression gate
+  (`scripts/apple-silicon/validate-native-tri-depth.sh --run 22`) passed
+  after the native-quad code landed:
+  `benchmark-runs/20260501-105543-flat-tri-depth`.
+- Rainbow Six 3 snapshot scene with both flags on
+  (`benchmark-runs/20260501-110557-rainbow-six-3`) reported 30.97 post-load
+  FPS / 6.71 MSPF, identical within noise to the prior
+  `XEMU_NATIVE_TRI_DEPTH=1`-only result. Quad-free scenes are unaffected.
+- PGR2 retail-gameplay route replays show large per-run variance because
+  real-time-paced input lands the emulator on different scene mixes at
+  different host throughputs:
+  - `XEMU_NATIVE_TRI_DEPTH=1` reference run:
+    `benchmark-runs/20260501-104158-pgr2`, 21.40 post-load FPS, 177,272 GS
+    quad draws remaining.
+  - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1` run 1:
+    `benchmark-runs/20260501-105825-pgr2`, 18.20 post-load FPS, 0 GS draws.
+  - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1` run 2:
+    `benchmark-runs/20260501-110810-pgr2`, 24.81 post-load FPS, 0 GS draws.
+  - The 36% spread between the two same-config runs makes whole-route
+    averages unreliable as a comparator.
+- PGR2 mid-route snapshot triplet (stable, paused-input replays of the same
+  game state):
+  - Snapshot capture: `benchmark-runs/20260501-112001-pgr2`, savevm tag
+    `pgr2_gameplay_b4`.
+  - Baseline (no flags): `benchmark-runs/20260501-115623-pgr2`, 4.39
+    post-load FPS, 332,066 GS draws (329,044 triangle + 3,022 quad).
+  - `XEMU_NATIVE_TRI_DEPTH=1`: `benchmark-runs/20260501-115654-pgr2`,
+    16.02 post-load FPS, 11,745 GS draws (all quad), 1,264,676 native-tri
+    draws.
+  - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1`:
+    `benchmark-runs/20260501-115725-pgr2`, 16.56 post-load FPS, 0 GS
+    draws, 1,317,851 native-tri draws, 12,193 native-quad draws (all
+    `LIST`, all `CANDIDATE_SMOOTH`, zero fallbacks, depth split 2,716
+    z-perspective + 9,477 linear-z).
+- Conclusion from the snapshot triplet: native-tri-depth alone is the big
+  lift at this PGR2 scene (4.39 → 16.02 FPS, 3.6x). Adding native-quad on
+  top is performance-correct but modest at this specific scene
+  (16.02 → 16.56, +3.4%), because only 12,193 quad draws exist in the
+  30-second window. The remaining gap to 30 FPS is no longer
+  geometry-shader work; the next slice should target whichever subsystem
+  Instruments or perf counters identify as dominant.
 - CLI `-loadvm` failed for the Crimson snapshot with a saved USB hub
   device-tree mismatch, so the harness restores after startup through QMP/HMP.
 - Rainbow Six 3 crashed Apple's OpenGL worker path when a thumbnail-bearing
@@ -451,39 +573,71 @@ Baseline app status:
 
 ## Next Session Checklist
 
-1. Start by reading this checklist plus the three 2026-05-01 retail gameplay
-   route notes:
+1. Start by reading this checklist plus the most recent 2026-05-01 notes:
    - `docs/apple-silicon/benchmarks/2026-05-01-pgr2-gameplay-route.md`
    - `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md`
    - `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md`
-2. Treat native triangle-depth as the completed current triangle-family fill
-   replacement category for opt-in Apple Silicon testing. It is still not a
-   default renderer path, but the current Rainbow/Crimson/flat-XBE evidence is
-   enough to stop re-proving this same slice unless triangle code changes.
-3. Treat flat-tri-depth counter validation as passing for the current path.
-   The run to cite is
-   `benchmark-runs/20260430-153555-flat-tri-depth`: 480 flat-first native
-   draws, 304 flat-nonfirst fallbacks, and 304 triangle-family geometry-shader
-   draws. The current packaged-app rerun after the code cleanup is
-   `benchmark-runs/20260430-210159-flat-tri-depth`: 422 flat-first native
-   draws, 240 flat-nonfirst fallbacks, and 240 triangle-family geometry-shader
-   draws.
+   - `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-tri-depth.md`
+   - `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md`
+   - `docs/apple-silicon/benchmarks/2026-05-01-pgr2-bottleneck-sample.md`
+   - `docs/apple-silicon/benchmarks/2026-05-01-pgraph-fast-read.md`
+2. Treat `XEMU_NATIVE_TRI_DEPTH=1`, `XEMU_NATIVE_QUAD=1`, and
+   `XEMU_PGRAPH_FAST_READ=1` as the three completed current opt-in
+   performance flags. They are independent and stack:
+   - tri-depth: removes triangle-family fill geometry shader (flat-first
+     native, flat-nonfirst falls back to GS).
+   - native-quad: removes quad/quad-strip-family smooth-fill geometry
+     shader by CPU-side index expansion to triangles.
+   - fast-read: skips `pg->lock` for simple PGRAPH register reads, where
+     a 32-bit aligned load is already atomic on aarch64/x86 and the mutex
+     was strict overhead.
+   Combined, they bring PGR2 retail gameplay from 11.67 to 31.76 post-load
+   FPS over the full 300-second route. PGR2 now meets the 30 FPS retail
+   gameplay floor.
+3. Triangle regression gate is
+   `scripts/apple-silicon/validate-native-tri-depth.sh --run 22`. Most
+   recent passing run after the native-quad slice landed:
+   `benchmark-runs/20260501-105543-flat-tri-depth`. Cite that run if the
+   gate is invoked again unless triangle code changes.
 4. Keep `XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE=1` available for targeted debugging,
    but leave it off for timing runs.
 5. Use `scripts/apple-silicon/native-tri-depth-compare.sh` for snapshot-level
-   same-build comparisons, but use the retail gameplay route scripts for the
-   user-visible 30 FPS target.
-6. First useful next implementation task: replay PGR2 baseline and
-   `XEMU_NATIVE_TRI_DEPTH=1` using `pgr2-gameplay.csv`, then inspect whether
-   the severe remaining slowdown is dominated by quad-family geometry-shader
-   work.
-7. After PGR2 is measured, choose one remaining geometry-shader category to
-   remove or narrow. Current priority order:
-   - quad/quad-strip expansion, because PGR2 is worst and has quad-family
-     geometry-shader activity.
-   - line primitives, because Rainbow Six 3 has line-family coverage.
-   - polygon fill or nonfill triangle modes, if counters show them in the next
-     focused coverage run.
+   same-build comparisons, but the retail gameplay route scripts are the
+   user-visible 30 FPS target. Whole-route averages are not stable across
+   runs because real-time-paced input drives the emulator into different
+   scene mixes (run 1 18.20 FPS vs run 2 24.81 FPS for the same flag config
+   on PGR2 — see the native-quad note). For trustworthy comparisons use the
+   PGR2 mid-route snapshot below.
+6. PGR2 mid-route snapshot (created in this session):
+   - HDD: `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`
+   - Tag: `pgr2_gameplay_b4`
+   - Snapshot triplet (30 s replays):
+     - Baseline: 4.39 FPS,
+       `benchmark-runs/20260501-115623-pgr2`.
+     - `XEMU_NATIVE_TRI_DEPTH=1`: 16.02 FPS,
+       `benchmark-runs/20260501-115654-pgr2`.
+     - `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1`: 16.56 FPS,
+       `benchmark-runs/20260501-115725-pgr2`.
+   - All three runs use `noop.csv`. The third config has zero
+     geometry-shader draws of any kind.
+7. The PGR2 30 FPS gameplay floor is now met with all three flags on:
+   - Snapshot at `pgr2_gameplay_b4` reaches 30.76 FPS (30 s replay) and
+     30.70 FPS (60 s replay).
+   - Full retail gameplay route reaches 31.76 post-load FPS over 279
+     intervals with zero geometry-shader draws.
+   The remaining session-to-session route variance is dramatically reduced
+   because the emulator is no longer CPU-starved by lock contention.
+   Profiling next steps for the remaining gap to 60 FPS:
+   - Audit `pgraph_write` for safe lock-free fast paths on simple stores
+     (write contention was 2.7% of TCG-thread time in the sample profile).
+   - Audit `voice_lock`-protected NV_USER writes for the same pattern
+     (6.9% of TCG-thread time in the sample profile).
+   - Capture a fresh `sample` profile at the snapshot scene with all
+     three flags on and identify the new dominant cost (likely candidates:
+     remaining i386 TCG, NV2A PGRAPH command processing, surface/texture
+     upload, fragment shader work).
+   Capture a dated benchmark note before any code changes so the next
+   slice stays data-driven.
 8. Use this wrapper if the flat validation needs to be reproduced:
 
 ```sh
@@ -510,14 +664,72 @@ scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
    `GEOM_SHADER_DRAW_TRI`.
 9. Run follow-up implementation/diagnostic changes against both the retail
    gameplay routes and the saved scene snapshots:
-   - Crimson: load `crimson_scene_b0`
-   - Rainbow: load `rainbow_scene_b1_nothumb`
+   - Crimson: load `crimson_scene_b0` from
+     `benchmark-runs/20260430-100438-crimson-skies/xbox_hdd.qcow2`.
+   - Rainbow: load `rainbow_scene_b1_nothumb` from
+     `benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2`.
+   - PGR2: load `pgr2_gameplay_b4` from
+     `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`.
 10. Compare the result against R1/R2/R3 in
    `docs/apple-silicon/benchmarking.md`, the route notes in
-   `docs/apple-silicon/benchmarks/`, and B2/B3/D1/D2/D3/D4, D17, and P1/P2 in
-   `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`.
-11. Only after the GL geometry-shader replacement work, decide whether V0/V1
-   Vulkan-over-Metal experiments are worth doing before the native Metal path.
+   `docs/apple-silicon/benchmarks/`, B2/B3/D1/D2/D3/D4, D17, and P1/P2 in
+   `docs/apple-silicon/benchmarks/2026-04-30-baseline-metrics.md`, and the
+   PGR2 snapshot triplet in
+   `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md`.
+11. Only after the next non-geometry-shader bottleneck is identified and a
+   slice plan exists, decide whether V0/V1 Vulkan-over-Metal experiments
+   are worth doing before the native Metal path.
+
+## Prioritized Next Tasks
+
+User visual confirmation on real PGR2, Rainbow Six 3, and Crimson Skies
+discs: 30 FPS feel with no rendering artifacts on 2026-05-01 with
+`XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1`. The
+three flags are validated for the current tracked title set.
+
+In priority order, the next concrete tasks for a future session:
+
+1. **Capture a fresh `sample` profile** of the PGR2 mid-route snapshot
+   (`pgr2_gameplay_b4`) with all three flags enabled. The previous sample
+   was taken before `XEMU_PGRAPH_FAST_READ=1` landed; the new dominant
+   cost has not been measured. Document under
+   `docs/apple-silicon/benchmarks/<date>-pgr2-bottleneck-sample-postfast.md`
+   or similar.
+2. **Audit `voice_lock`-protected NV_USER writes** (`vp_write`,
+   `gp_write`, `user_write`). Pre-fast-read sample profile measured this
+   at 6.9% of TCG-thread time. Same shape as the `pgraph_read` fix:
+   identify reads/writes that mutate only a single uint32_t and convert
+   them to `qatomic_*`. Gate behind `XEMU_VOICE_FAST_LOCK=1` (or similar)
+   initially.
+3. **Audit `pgraph_write` for safe lock-free fast paths.** Pre-fast-read
+   sample profile measured 2.7% of TCG-thread time. Smaller margin, and
+   most write paths *do* mutate composite state (interrupt pending bits,
+   pfifo kicks), so the audit is more involved than `pgraph_read`. Some
+   simple `default` slot stores may still be safe to lift out of the
+   lock.
+4. **Broader title coverage before defaulting any flag.** Today the
+   three flags are validated against PGR2, Rainbow Six 3, and Crimson
+   Skies. Before flipping any to default-on, exercise additional retail
+   titles (especially genre coverage: another racer, another shooter, a
+   platformer, an RPG menu/inventory). The flags are designed to be
+   conservative (smooth fill only, lock-free reads only on registers
+   without side effects), so wider testing is the sensible gate, not a
+   code rewrite.
+5. **Consider dropping `pg->lock` around the slow OpenGL submission**
+   inside `pgraph_gl_flush_draw` after PGRAPH state has been captured
+   into the renderer's local data. Higher risk than the read fast path,
+   higher upside on contention. Gate behind a separate flag,
+   `XEMU_PGRAPH_RELEASE_LOCK_DURING_GL=1`. Audit which fields of `pg`
+   are actually read by the GL submission code while the lock is dropped;
+   anything read through `pgraph_reg_r()` is already lock-free at the
+   load level, but composite state may still need protection.
+6. **Profile-guided decisions only.** Each of the above slices should be
+   prefaced by a fresh `sample` profile that motivates the change, and
+   each should produce a dated benchmark note that records the before/
+   after numbers. Whole-route averages are now a useful comparator again
+   because the emulator is no longer CPU-starved (variance dropped once
+   the lock contention came out), but the snapshot triplet remains the
+   trusted apples-to-apples comparison.
 
 ## Things Not To Forget
 
@@ -602,6 +814,45 @@ XEMU_BENCH_SCREENSHOT_BACKEND=none \
 XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
 scripts/apple-silicon/run-benchmark.sh pgr2 \
   scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
+```
+
+Replay PGR2 with both opt-in geometry-shader bypass slices (full
+geometry-shader removal):
+
+```sh
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_NATIVE_QUAD=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2 \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 300
+```
+
+Run the PGR2 mid-route snapshot triplet for stable comparisons:
+
+```sh
+SNAPSHOT_HDD=benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2
+TAG=pgr2_gameplay_b4
+# A: baseline
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=$SNAPSHOT_HDD \
+XEMU_BENCH_LOADVM_TAG=$TAG \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+# B: tri-depth only
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=$SNAPSHOT_HDD \
+XEMU_BENCH_LOADVM_TAG=$TAG \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/noop.csv 30
+# C: tri-depth + quad
+XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 \
+XEMU_BENCH_SCREENSHOT_BACKEND=none \
+XEMU_BENCH_HDD_SOURCE=$SNAPSHOT_HDD \
+XEMU_BENCH_LOADVM_TAG=$TAG \
+scripts/apple-silicon/run-benchmark.sh pgr2 \
+  scripts/apple-silicon/input-scripts/noop.csv 30
 ```
 
 Run snapshot scene-entry benchmarks:
@@ -708,14 +959,24 @@ Recommended next implementation shape:
 - The flat-tri-depth begin/bind/flush logging has been added and validated.
   The mismatch was a perf-window artifact; graceful final perf flushing now
   captures the flat XBE tail.
-- Treat `XEMU_NATIVE_TRI_DEPTH=1` as the completed triangle-family fill path for
-  this category. Do not re-prove it unless triangle code changes.
-- Start the next session with the PGR2 gameplay replay, first baseline and then
-  `XEMU_NATIVE_TRI_DEPTH=1`, because PGR2 is farthest below the 30 FPS target
-  and has meaningful quad-family geometry-shader activity.
-- If PGR2 confirms the expected remaining quad-family pressure, prioritize a
-  quad/quad-strip replacement or narrowing slice. Keep Rainbow Six 3 for
-  line-family coverage and Crimson Skies for sustained flight/acceleration
-  cross-checks.
-- Compare future geometry-shader changes against R1/R2/R3 plus
-  B3/D1/D2/D3/D5/D17/P1/P2 before trying Vulkan-over-Metal.
+- Treat `XEMU_NATIVE_TRI_DEPTH=1` and `XEMU_NATIVE_QUAD=1` as the completed
+  geometry-shader bypass slices for smooth-fill triangle and quad/quad-strip
+  primitives. Do not re-prove either slice unless triangle or quad code
+  changes; the snapshot triplet at
+  `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md` is the
+  current paper of record.
+- The next session's first task is to identify what is making PGR2 slow at
+  the `pgr2_gameplay_b4` snapshot (16.56 FPS with both bypass slices on,
+  zero geometry-shader draws). Use Instruments and the existing
+  `XEMU_PERF_LOG=1` counters to measure i386 TCG, NV2A PGRAPH command
+  processing, surface/texture upload, and fragment shader work in turn.
+  Capture a dated benchmark note with the dominant cost before any code
+  change.
+- Defer further geometry-shader removal slices (flat-quad bypass,
+  nonfill polygon modes, line/point primitive bypass) until a benchmark
+  exercises that combination meaningfully. Today none of the
+  Crimson/Rainbow/PGR2 routes do.
+- Compare future renderer changes against R1/R2/R3, the route notes, the
+  baseline-metrics file, and the PGR2 snapshot triplet
+  `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md` before
+  trying Vulkan-over-Metal.
