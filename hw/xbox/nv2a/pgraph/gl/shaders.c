@@ -29,8 +29,17 @@
 #include "debug.h"
 #include "renderer.h"
 
-static GLenum get_gl_primitive_mode(enum ShaderPolygonMode polygon_mode, enum ShaderPrimitiveMode primitive_mode)
+static GLenum get_gl_primitive_mode(const GeomState *geom)
 {
+    enum ShaderPolygonMode polygon_mode = geom->polygon_front_mode;
+    enum ShaderPrimitiveMode primitive_mode = geom->primitive_mode;
+    bool native_quad =
+        geom->native_quad &&
+        pgraph_glsl_native_quad_supported(primitive_mode,
+                                          geom->polygon_front_mode,
+                                          geom->polygon_back_mode,
+                                          geom->smooth_shading);
+
     switch (primitive_mode) {
     case PRIM_TYPE_POINTS: return GL_POINTS;
     case PRIM_TYPE_LINES: return GL_LINES;
@@ -39,8 +48,10 @@ static GLenum get_gl_primitive_mode(enum ShaderPolygonMode polygon_mode, enum Sh
     case PRIM_TYPE_TRIANGLES: return GL_TRIANGLES;
     case PRIM_TYPE_TRIANGLE_STRIP: return GL_TRIANGLE_STRIP;
     case PRIM_TYPE_TRIANGLE_FAN: return GL_TRIANGLE_FAN;
-    case PRIM_TYPE_QUADS: return GL_LINES_ADJACENCY;
-    case PRIM_TYPE_QUAD_STRIP: return GL_LINE_STRIP_ADJACENCY;
+    case PRIM_TYPE_QUADS:
+        return native_quad ? GL_TRIANGLES : GL_LINES_ADJACENCY;
+    case PRIM_TYPE_QUAD_STRIP:
+        return native_quad ? GL_TRIANGLES : GL_LINE_STRIP_ADJACENCY;
     case PRIM_TYPE_POLYGON:
         if (polygon_mode == POLY_MODE_LINE) {
             return GL_LINE_LOOP;
@@ -233,8 +244,7 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
     glUseProgram(program);
 
     binding->gl_program = program;
-    binding->gl_primitive_mode = get_gl_primitive_mode(
-        state->geom.polygon_front_mode, state->geom.primitive_mode);
+    binding->gl_primitive_mode = get_gl_primitive_mode(&state->geom);
     binding->has_geometry_shader = need_geometry_shader;
     binding->initialized = true;
 
@@ -342,9 +352,7 @@ bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
 
     binding->program = NULL;
     binding->gl_program = gl_program;
-    binding->gl_primitive_mode =
-        get_gl_primitive_mode(binding->state.geom.polygon_front_mode,
-                              binding->state.geom.primitive_mode);
+    binding->gl_primitive_mode = get_gl_primitive_mode(&binding->state.geom);
     binding->initialized = true;
 
     set_texture_sampler_uniforms(binding);

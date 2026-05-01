@@ -131,13 +131,223 @@ static void pgraph_gl_profile_geometry_shader_draw(ShaderBinding *binding)
         nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_TRI);
         break;
     case PRIM_TYPE_QUADS:
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_QUAD);
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_QUAD_LIST);
+        break;
     case PRIM_TYPE_QUAD_STRIP:
         nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_QUAD);
+        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_QUAD_STRIP);
         break;
     default:
         nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_DRAW_OTHER);
         break;
     }
+}
+
+static bool pgraph_gl_polygon_offset_fill_enabled(PGRAPHState *pg);
+
+static bool pgraph_gl_native_quad_active(ShaderBinding *binding)
+{
+    if (!binding) {
+        return false;
+    }
+
+    const GeomState *state = &binding->state.geom;
+    if (!state->native_quad) {
+        return false;
+    }
+
+    return pgraph_glsl_native_quad_supported(
+        state->primitive_mode, state->polygon_front_mode,
+        state->polygon_back_mode, state->smooth_shading);
+}
+
+static void pgraph_gl_profile_native_quad_draw(PGRAPHState *pg,
+                                               ShaderBinding *binding)
+{
+    if (!binding) {
+        return;
+    }
+
+    GeomState *state = &binding->state.geom;
+    if (!state->native_quad) {
+        return;
+    }
+
+    if (state->primitive_mode != PRIM_TYPE_QUADS &&
+        state->primitive_mode != PRIM_TYPE_QUAD_STRIP) {
+        return;
+    }
+
+    nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_CANDIDATE);
+    if (state->smooth_shading) {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_CANDIDATE_SMOOTH);
+    } else {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_CANDIDATE_FLAT);
+    }
+
+    bool fill_only = state->polygon_front_mode == POLY_MODE_FILL &&
+                     state->polygon_back_mode == POLY_MODE_FILL;
+
+    if (state->smooth_shading && fill_only) {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW);
+        if (state->primitive_mode == PRIM_TYPE_QUADS) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_LIST);
+        } else {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_STRIP);
+        }
+        if (state->z_perspective) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_ZPERSPECTIVE);
+        } else {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_LINEAR_Z);
+        }
+        if (pgraph_gl_polygon_offset_fill_enabled(pg)) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_POLY_OFFSET);
+        }
+    } else {
+        nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_FALLBACK);
+        if (!state->smooth_shading) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_FALLBACK_FLAT);
+        } else {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_FALLBACK_NONFILL);
+        }
+    }
+}
+
+static uint32_t *pgraph_gl_native_quad_reserve(PGRAPHGLState *r,
+                                               unsigned int index_count)
+{
+    if (r->native_quad_scratch_capacity < index_count) {
+        unsigned int new_capacity = r->native_quad_scratch_capacity ?
+                                        r->native_quad_scratch_capacity : 4096;
+        while (new_capacity < index_count) {
+            new_capacity *= 2;
+        }
+        r->native_quad_scratch_indices =
+            g_realloc(r->native_quad_scratch_indices,
+                      new_capacity * sizeof(uint32_t));
+        r->native_quad_scratch_capacity = new_capacity;
+    }
+
+    return r->native_quad_scratch_indices;
+}
+
+/* Expand a contiguous QUADS vertex range [start, start + count) into 6N
+ * triangle indices using the diagonal A-C of each quad, matching the geometry
+ * shader's order: triangles (1,2,0) and (2,3,0). */
+static unsigned int native_quad_list_expand_range(uint32_t *out,
+                                                  uint32_t start,
+                                                  uint32_t count)
+{
+    unsigned int n = count / 4;
+    for (unsigned int i = 0; i < n; i++) {
+        uint32_t a = start + 4 * i;
+        out[6 * i + 0] = a + 1;
+        out[6 * i + 1] = a + 2;
+        out[6 * i + 2] = a;
+        out[6 * i + 3] = a + 2;
+        out[6 * i + 4] = a + 3;
+        out[6 * i + 5] = a;
+    }
+    return n * 6;
+}
+
+/* Expand an explicit QUADS index list of 4N indices into 6N triangle
+ * indices.  The triangulation matches the geometry shader's order: (1,2,0)
+ * and (2,3,0) inside each quad. */
+static unsigned int native_quad_list_expand_indices(uint32_t *out,
+                                                    const uint32_t *in,
+                                                    unsigned int count)
+{
+    unsigned int n = count / 4;
+    for (unsigned int i = 0; i < n; i++) {
+        uint32_t a = in[4 * i + 0], b = in[4 * i + 1];
+        uint32_t c = in[4 * i + 2], d = in[4 * i + 3];
+        out[6 * i + 0] = b;
+        out[6 * i + 1] = c;
+        out[6 * i + 2] = a;
+        out[6 * i + 3] = c;
+        out[6 * i + 4] = d;
+        out[6 * i + 5] = a;
+    }
+    return n * 6;
+}
+
+/* Expand a contiguous QUAD_STRIP vertex range [start, start + count) into
+ * triangle indices, matching the geometry shader's per-quad emission of
+ * triangles (0,1,2) and (2,1,3) for each successive 4-vertex window. */
+static unsigned int native_quad_strip_expand_range(uint32_t *out,
+                                                   uint32_t start,
+                                                   uint32_t count)
+{
+    if (count < 4) {
+        return 0;
+    }
+    unsigned int q = (count - 2) / 2;
+    for (unsigned int i = 0; i < q; i++) {
+        uint32_t a = start + 2 * i;
+        out[6 * i + 0] = a;
+        out[6 * i + 1] = a + 1;
+        out[6 * i + 2] = a + 2;
+        out[6 * i + 3] = a + 2;
+        out[6 * i + 4] = a + 1;
+        out[6 * i + 5] = a + 3;
+    }
+    return q * 6;
+}
+
+/* Expand an explicit QUAD_STRIP index list into triangles. */
+static unsigned int native_quad_strip_expand_indices(uint32_t *out,
+                                                     const uint32_t *in,
+                                                     unsigned int count)
+{
+    if (count < 4) {
+        return 0;
+    }
+    unsigned int q = (count - 2) / 2;
+    for (unsigned int i = 0; i < q; i++) {
+        uint32_t a = in[2 * i + 0], b = in[2 * i + 1];
+        uint32_t c = in[2 * i + 2], d = in[2 * i + 3];
+        out[6 * i + 0] = a;
+        out[6 * i + 1] = b;
+        out[6 * i + 2] = c;
+        out[6 * i + 3] = c;
+        out[6 * i + 4] = b;
+        out[6 * i + 5] = d;
+    }
+    return q * 6;
+}
+
+static unsigned int pgraph_gl_native_quad_expand_range(
+    enum ShaderPrimitiveMode primitive_mode, uint32_t *out, uint32_t start,
+    uint32_t count)
+{
+    if (primitive_mode == PRIM_TYPE_QUADS) {
+        return native_quad_list_expand_range(out, start, count);
+    }
+    return native_quad_strip_expand_range(out, start, count);
+}
+
+static unsigned int pgraph_gl_native_quad_expand_indices(
+    enum ShaderPrimitiveMode primitive_mode, uint32_t *out, const uint32_t *in,
+    unsigned int count)
+{
+    if (primitive_mode == PRIM_TYPE_QUADS) {
+        return native_quad_list_expand_indices(out, in, count);
+    }
+    return native_quad_strip_expand_indices(out, in, count);
+}
+
+static unsigned int pgraph_gl_native_quad_index_capacity(
+    enum ShaderPrimitiveMode primitive_mode, unsigned int count)
+{
+    if (primitive_mode == PRIM_TYPE_QUADS) {
+        return (count / 4) * 6;
+    }
+    if (count < 4) {
+        return 0;
+    }
+    return ((count - 2) / 2) * 6;
 }
 
 static bool pgraph_gl_polygon_offset_fill_enabled(PGRAPHState *pg)
@@ -593,6 +803,11 @@ void pgraph_gl_flush_draw(NV2AState *d)
     }
     assert(r->shader_binding);
 
+    bool native_quad = pgraph_gl_native_quad_active(r->shader_binding);
+    enum ShaderPrimitiveMode native_quad_prim =
+        native_quad ? r->shader_binding->state.geom.primitive_mode :
+                      PRIM_TYPE_INVALID;
+
     if (pg->draw_arrays_length) {
         NV2A_GL_DPRINTF(false, "Draw Arrays");
         nv2a_profile_inc_counter(NV2A_PROF_DRAW_ARRAYS);
@@ -600,6 +815,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                                "flush", "draw_arrays");
         pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
         pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
+        pgraph_gl_profile_native_quad_draw(pg, r->shader_binding);
         assert(pg->inline_elements_length == 0);
         assert(pg->inline_buffer_length == 0);
         assert(pg->inline_array_length == 0);
@@ -608,10 +824,36 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                       pg->draw_arrays_max_count - 1,
                                       false, 0,
                                       pg->draw_arrays_max_count - 1);
-        glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
-                          pg->draw_arrays_start,
-                          pg->draw_arrays_count,
-                          pg->draw_arrays_length);
+        if (native_quad) {
+            unsigned int total_indices = 0;
+            for (unsigned int i = 0; i < pg->draw_arrays_length; i++) {
+                total_indices += pgraph_gl_native_quad_index_capacity(
+                    native_quad_prim, pg->draw_arrays_count[i]);
+            }
+            if (total_indices > 0) {
+                uint32_t *scratch =
+                    pgraph_gl_native_quad_reserve(r, total_indices);
+                unsigned int written = 0;
+                for (unsigned int i = 0; i < pg->draw_arrays_length; i++) {
+                    written += pgraph_gl_native_quad_expand_range(
+                        native_quad_prim, scratch + written,
+                        pg->draw_arrays_start[i], pg->draw_arrays_count[i]);
+                }
+                assert(written == total_indices);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                             r->gl_native_quad_index_buffer);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             total_indices * sizeof(uint32_t), scratch,
+                             GL_STREAM_DRAW);
+                glDrawElements(GL_TRIANGLES, total_indices, GL_UNSIGNED_INT,
+                               (void *)0);
+            }
+        } else {
+            glMultiDrawArrays(r->shader_binding->gl_primitive_mode,
+                              pg->draw_arrays_start,
+                              pg->draw_arrays_count,
+                              pg->draw_arrays_length);
+        }
     } else if (pg->inline_elements_length) {
         NV2A_GL_DPRINTF(false, "Inline Elements");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ELEMENTS);
@@ -619,6 +861,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                                "flush", "inline_elements");
         pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
         pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
+        pgraph_gl_profile_native_quad_draw(pg, r->shader_binding);
         assert(pg->inline_buffer_length == 0);
         assert(pg->inline_array_length == 0);
 
@@ -633,30 +876,51 @@ void pgraph_gl_flush_draw(NV2AState *d)
                 d, min_element, max_element, false, 0,
                 pg->inline_elements[pg->inline_elements_length - 1]);
 
-        VertexKey k;
-        memset(&k, 0, sizeof(VertexKey));
-        k.count = pg->inline_elements_length;
-        k.gl_type = GL_UNSIGNED_INT;
-        k.gl_normalize = GL_FALSE;
-        k.stride = sizeof(uint32_t);
-        uint64_t h = fast_hash((uint8_t*)pg->inline_elements,
-                               pg->inline_elements_length * 4);
-
-        LruNode *node = lru_lookup(&r->element_cache, h, &k);
-        VertexLruNode *found = container_of(node, VertexLruNode, node);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, found->gl_buffer);
-        if (!found->initialized) {
-            nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                         pg->inline_elements_length * 4,
-                         pg->inline_elements, GL_STATIC_DRAW);
-            found->initialized = true;
+        if (native_quad) {
+            unsigned int total_indices = pgraph_gl_native_quad_index_capacity(
+                native_quad_prim, pg->inline_elements_length);
+            if (total_indices > 0) {
+                uint32_t *scratch =
+                    pgraph_gl_native_quad_reserve(r, total_indices);
+                unsigned int written = pgraph_gl_native_quad_expand_indices(
+                    native_quad_prim, scratch, pg->inline_elements,
+                    pg->inline_elements_length);
+                assert(written == total_indices);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                             r->gl_native_quad_index_buffer);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             total_indices * sizeof(uint32_t), scratch,
+                             GL_STREAM_DRAW);
+                glDrawElements(GL_TRIANGLES, total_indices, GL_UNSIGNED_INT,
+                               (void *)0);
+            }
         } else {
-            nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY);
+            VertexKey k;
+            memset(&k, 0, sizeof(VertexKey));
+            k.count = pg->inline_elements_length;
+            k.gl_type = GL_UNSIGNED_INT;
+            k.gl_normalize = GL_FALSE;
+            k.stride = sizeof(uint32_t);
+            uint64_t h = fast_hash((uint8_t*)pg->inline_elements,
+                                   pg->inline_elements_length * 4);
+
+            LruNode *node = lru_lookup(&r->element_cache, h, &k);
+            VertexLruNode *found = container_of(node, VertexLruNode, node);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, found->gl_buffer);
+            if (!found->initialized) {
+                nv2a_profile_inc_counter(NV2A_PROF_GEOM_BUFFER_UPDATE_4);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             pg->inline_elements_length * 4,
+                             pg->inline_elements, GL_STATIC_DRAW);
+                found->initialized = true;
+            } else {
+                nv2a_profile_inc_counter(
+                    NV2A_PROF_GEOM_BUFFER_UPDATE_4_NOTDIRTY);
+            }
+            glDrawElements(r->shader_binding->gl_primitive_mode,
+                           pg->inline_elements_length, GL_UNSIGNED_INT,
+                           (void *)0);
         }
-        glDrawElements(r->shader_binding->gl_primitive_mode,
-                       pg->inline_elements_length, GL_UNSIGNED_INT,
-                       (void *)0);
     } else if (pg->inline_buffer_length) {
         NV2A_GL_DPRINTF(false, "Inline Buffer");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_BUFFERS);
@@ -664,6 +928,7 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                                "flush", "inline_buffer");
         pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
         pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
+        pgraph_gl_profile_native_quad_draw(pg, r->shader_binding);
         assert(pg->inline_array_length == 0);
 
         if (pg->compressed_attrs) {
@@ -691,8 +956,27 @@ void pgraph_gl_flush_draw(NV2AState *d)
             }
         }
 
-        glDrawArrays(r->shader_binding->gl_primitive_mode,
-                     0, pg->inline_buffer_length);
+        if (native_quad) {
+            unsigned int total_indices = pgraph_gl_native_quad_index_capacity(
+                native_quad_prim, pg->inline_buffer_length);
+            if (total_indices > 0) {
+                uint32_t *scratch =
+                    pgraph_gl_native_quad_reserve(r, total_indices);
+                unsigned int written = pgraph_gl_native_quad_expand_range(
+                    native_quad_prim, scratch, 0, pg->inline_buffer_length);
+                assert(written == total_indices);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                             r->gl_native_quad_index_buffer);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             total_indices * sizeof(uint32_t), scratch,
+                             GL_STREAM_DRAW);
+                glDrawElements(GL_TRIANGLES, total_indices, GL_UNSIGNED_INT,
+                               (void *)0);
+            }
+        } else {
+            glDrawArrays(r->shader_binding->gl_primitive_mode,
+                         0, pg->inline_buffer_length);
+        }
     } else if (pg->inline_array_length) {
         NV2A_GL_DPRINTF(false, "Inline Array");
         nv2a_profile_inc_counter(NV2A_PROF_INLINE_ARRAYS);
@@ -700,10 +984,30 @@ void pgraph_gl_flush_draw(NV2AState *d)
                                                "flush", "inline_array");
         pgraph_gl_profile_geometry_shader_draw(r->shader_binding);
         pgraph_gl_profile_native_tri_depth_draw(pg, r->shader_binding);
+        pgraph_gl_profile_native_quad_draw(pg, r->shader_binding);
 
         unsigned int index_count = pgraph_gl_bind_inline_array(d);
-        glDrawArrays(r->shader_binding->gl_primitive_mode,
-                     0, index_count);
+        if (native_quad) {
+            unsigned int total_indices = pgraph_gl_native_quad_index_capacity(
+                native_quad_prim, index_count);
+            if (total_indices > 0) {
+                uint32_t *scratch =
+                    pgraph_gl_native_quad_reserve(r, total_indices);
+                unsigned int written = pgraph_gl_native_quad_expand_range(
+                    native_quad_prim, scratch, 0, index_count);
+                assert(written == total_indices);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,
+                             r->gl_native_quad_index_buffer);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             total_indices * sizeof(uint32_t), scratch,
+                             GL_STREAM_DRAW);
+                glDrawElements(GL_TRIANGLES, total_indices, GL_UNSIGNED_INT,
+                               (void *)0);
+            }
+        } else {
+            glDrawArrays(r->shader_binding->gl_primitive_mode,
+                         0, index_count);
+        }
     } else {
         NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
         NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");

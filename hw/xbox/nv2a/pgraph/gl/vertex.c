@@ -272,6 +272,10 @@ void pgraph_gl_init_buffers(NV2AState *d)
     glGenBuffers(NV2A_VERTEXSHADER_ATTRIBUTES, r->gl_inline_buffer);
     glGenBuffers(1, &r->gl_inline_array_buffer);
 
+    glGenBuffers(1, &r->gl_native_quad_index_buffer);
+    r->native_quad_scratch_indices = NULL;
+    r->native_quad_scratch_capacity = 0;
+
     glGenBuffers(1, &r->gl_memory_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, r->gl_memory_buffer);
     glBufferData(GL_ARRAY_BUFFER, memory_region_size(d->vram),
@@ -302,6 +306,12 @@ void pgraph_gl_finalize_buffers(PGRAPHState *pg)
 
     glDeleteBuffers(1, &r->gl_inline_array_buffer);
     r->gl_inline_array_buffer = 0;
+
+    glDeleteBuffers(1, &r->gl_native_quad_index_buffer);
+    r->gl_native_quad_index_buffer = 0;
+    g_free(r->native_quad_scratch_indices);
+    r->native_quad_scratch_indices = NULL;
+    r->native_quad_scratch_capacity = 0;
 
     glDeleteBuffers(1, &r->gl_memory_buffer);
     r->gl_memory_buffer = 0;

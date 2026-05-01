@@ -114,6 +114,24 @@ bool pgraph_glsl_native_tri_depth_enabled(void)
     return enabled;
 }
 
+bool pgraph_glsl_native_quad_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        NativeTriDepthFlag flag = native_tri_depth_flag_state("XEMU_NATIVE_QUAD");
+        enabled = flag == NATIVE_TRI_DEPTH_FLAG_ENABLED;
+        if (enabled) {
+            fprintf(stderr,
+                    "xemu-perf: native_quad=1 source=XEMU_NATIVE_QUAD mode=smooth-fill\n");
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
 bool pgraph_glsl_native_tri_depth_supported(enum ShaderPrimitiveMode primitive_mode,
                                             enum ShaderPolygonMode polygon_front_mode,
                                             enum ShaderPolygonMode polygon_back_mode,
@@ -141,6 +159,43 @@ bool pgraph_glsl_native_tri_depth_supported(enum ShaderPrimitiveMode primitive_m
     }
 }
 
+bool pgraph_glsl_native_quad_supported(enum ShaderPrimitiveMode primitive_mode,
+                                       enum ShaderPolygonMode polygon_front_mode,
+                                       enum ShaderPolygonMode polygon_back_mode,
+                                       bool smooth_shading)
+{
+    /*
+     * The native quad path expands quads to triangles on the CPU and lets the
+     * fragment shader derive depth and polygon-slope offset the same way the
+     * native triangle-depth path does. That requires:
+     *
+     *   - The polygon mode is FILL on both faces. POINT/LINE polygon modes
+     *     for quads still need the geometry shader to manufacture the right
+     *     line/point primitives with per-edge depth.
+     *   - Smooth shading. NV2A flat-shaded quads use vertex 3 as the
+     *     provoking vertex, but with GL_FIRST_VERTEX_CONVENTION the diagonal
+     *     A-C triangulation cannot put vertex 3 first in both emitted
+     *     triangles, so flat-shaded quads still need the geometry shader's
+     *     manual flat propagation.
+     */
+    if (polygon_front_mode != POLY_MODE_FILL ||
+        polygon_back_mode != POLY_MODE_FILL) {
+        return false;
+    }
+
+    if (!smooth_shading) {
+        return false;
+    }
+
+    switch (primitive_mode) {
+    case PRIM_TYPE_QUADS:
+    case PRIM_TYPE_QUAD_STRIP:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *state)
 {
     state->primitive_mode = (enum ShaderPrimitiveMode)pg->primitive_mode;
@@ -161,6 +216,7 @@ void pgraph_glsl_set_geom_state(PGRAPHState *pg, GeomState *state)
         diagnostic_simplify_tri_depth_enabled();
     state->diagnostic_skip_tri_geom = diagnostic_skip_tri_geom_enabled();
     state->native_tri_depth = pgraph_glsl_native_tri_depth_enabled();
+    state->native_quad = pgraph_glsl_native_quad_enabled();
 
     if (pg->renderer->ops.get_gpu_properties) {
         GPUProperties *gpu_props = pg->renderer->ops.get_gpu_properties();
@@ -223,6 +279,13 @@ bool pgraph_glsl_need_geom(const GeomState *state)
         return true;
     case PRIM_TYPE_QUADS:
     case PRIM_TYPE_QUAD_STRIP:
+        if (state->native_quad &&
+            pgraph_glsl_native_quad_supported(state->primitive_mode,
+                                              state->polygon_front_mode,
+                                              state->polygon_back_mode,
+                                              state->smooth_shading)) {
+            return false;
+        }
         return true;
     case PRIM_TYPE_POLYGON:
         if (polygon_mode == POLY_MODE_POINT) {

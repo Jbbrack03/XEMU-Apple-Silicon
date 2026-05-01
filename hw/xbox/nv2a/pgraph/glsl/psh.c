@@ -71,6 +71,18 @@ static bool psh_native_tri_depth_available(PGRAPHState *pg)
         pg->smooth_shading, pg->first_vertex_is_provoking);
 }
 
+static bool psh_native_quad_available(PGRAPHState *pg)
+{
+    uint32_t raster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+    enum ShaderPolygonMode front_mode = (enum ShaderPolygonMode)GET_MASK(
+        raster, NV_PGRAPH_SETUPRASTER_FRONTFACEMODE);
+    enum ShaderPolygonMode back_mode = (enum ShaderPolygonMode)GET_MASK(
+        raster, NV_PGRAPH_SETUPRASTER_BACKFACEMODE);
+    return pgraph_glsl_native_quad_supported(
+        (enum ShaderPrimitiveMode)pg->primitive_mode, front_mode, back_mode,
+        pg->smooth_shading);
+}
+
 void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
 {
     state->window_clip_exclusive = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER) &
@@ -97,6 +109,9 @@ void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
     state->native_tri_depth =
         pgraph_glsl_native_tri_depth_enabled() &&
         psh_native_tri_depth_available(pg);
+    state->native_quad =
+        pgraph_glsl_native_quad_enabled() &&
+        psh_native_quad_available(pg);
 
     state->smooth_shading = pg->smooth_shading;
 
@@ -1009,7 +1024,7 @@ static MString* psh_convert(struct PixelShader *ps)
                              "}\n");
     }
 
-    if (ps->state->native_tri_depth) {
+    if (ps->state->native_tri_depth || ps->state->native_quad) {
         if (ps->state->z_perspective) {
             mstring_append(
                 clip,

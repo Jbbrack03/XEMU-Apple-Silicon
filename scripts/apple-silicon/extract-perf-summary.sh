@@ -63,6 +63,8 @@ function add_counter(name, value) {
                    key == "GEOM_SHADER_DRAW_LINE" ||
                    key == "GEOM_SHADER_DRAW_TRI" ||
                    key == "GEOM_SHADER_DRAW_QUAD" ||
+                   key == "GEOM_SHADER_DRAW_QUAD_LIST" ||
+                   key == "GEOM_SHADER_DRAW_QUAD_STRIP" ||
                    key == "GEOM_SHADER_DRAW_OTHER" ||
                    key == "NATIVE_TRI_DEPTH_DRAW" ||
                    key == "NATIVE_TRI_DEPTH_CANDIDATE" ||
@@ -77,6 +79,18 @@ function add_counter(name, value) {
                    key == "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST" ||
                    key == "NATIVE_TRI_DEPTH_FALLBACK_FLAT" ||
                    key == "NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST" ||
+                   key == "NATIVE_QUAD_DRAW" ||
+                   key == "NATIVE_QUAD_DRAW_LIST" ||
+                   key == "NATIVE_QUAD_DRAW_STRIP" ||
+                   key == "NATIVE_QUAD_CANDIDATE" ||
+                   key == "NATIVE_QUAD_CANDIDATE_SMOOTH" ||
+                   key == "NATIVE_QUAD_CANDIDATE_FLAT" ||
+                   key == "NATIVE_QUAD_FALLBACK" ||
+                   key == "NATIVE_QUAD_FALLBACK_FLAT" ||
+                   key == "NATIVE_QUAD_FALLBACK_NONFILL" ||
+                   key == "NATIVE_QUAD_DRAW_POLY_OFFSET" ||
+                   key == "NATIVE_QUAD_DRAW_ZPERSPECTIVE" ||
+                   key == "NATIVE_QUAD_DRAW_LINEAR_Z" ||
                    key == "SHADER_GEN" ||
                    key == "SHADER_BIND" ||
                    key == "BEGIN_ENDS" ||
@@ -134,29 +148,43 @@ END {
     keys[6] = "GEOM_SHADER_DRAW_LINE"
     keys[7] = "GEOM_SHADER_DRAW_TRI"
     keys[8] = "GEOM_SHADER_DRAW_QUAD"
-    keys[9] = "GEOM_SHADER_DRAW_OTHER"
-    keys[10] = "NATIVE_TRI_DEPTH_DRAW"
-    keys[11] = "NATIVE_TRI_DEPTH_CANDIDATE"
-    keys[12] = "NATIVE_TRI_DEPTH_CANDIDATE_SMOOTH"
-    keys[13] = "NATIVE_TRI_DEPTH_CANDIDATE_FLAT_FIRST"
-    keys[14] = "NATIVE_TRI_DEPTH_CANDIDATE_FLAT_NONFIRST"
-    keys[15] = "NATIVE_TRI_DEPTH_FALLBACK"
-    keys[16] = "NATIVE_TRI_DEPTH_DRAW_ZPERSPECTIVE"
-    keys[17] = "NATIVE_TRI_DEPTH_DRAW_LINEAR_Z"
-    keys[18] = "NATIVE_TRI_DEPTH_DRAW_POLY_OFFSET"
-    keys[19] = "NATIVE_TRI_DEPTH_DRAW_SMOOTH"
-    keys[20] = "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST"
-    keys[21] = "NATIVE_TRI_DEPTH_FALLBACK_FLAT"
-    keys[22] = "NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST"
-    keys[23] = "SHADER_GEN"
-    keys[24] = "SHADER_BIND"
-    keys[25] = "BEGIN_ENDS"
-    keys[26] = "DRAW_ARRAYS"
-    keys[27] = "INLINE_ELEMENTS"
-    keys[28] = "INLINE_ARRAYS"
-    keys[29] = "INLINE_BUFFERS"
+    keys[9] = "GEOM_SHADER_DRAW_QUAD_LIST"
+    keys[10] = "GEOM_SHADER_DRAW_QUAD_STRIP"
+    keys[11] = "GEOM_SHADER_DRAW_OTHER"
+    keys[12] = "NATIVE_TRI_DEPTH_DRAW"
+    keys[13] = "NATIVE_TRI_DEPTH_CANDIDATE"
+    keys[14] = "NATIVE_TRI_DEPTH_CANDIDATE_SMOOTH"
+    keys[15] = "NATIVE_TRI_DEPTH_CANDIDATE_FLAT_FIRST"
+    keys[16] = "NATIVE_TRI_DEPTH_CANDIDATE_FLAT_NONFIRST"
+    keys[17] = "NATIVE_TRI_DEPTH_FALLBACK"
+    keys[18] = "NATIVE_TRI_DEPTH_DRAW_ZPERSPECTIVE"
+    keys[19] = "NATIVE_TRI_DEPTH_DRAW_LINEAR_Z"
+    keys[20] = "NATIVE_TRI_DEPTH_DRAW_POLY_OFFSET"
+    keys[21] = "NATIVE_TRI_DEPTH_DRAW_SMOOTH"
+    keys[22] = "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST"
+    keys[23] = "NATIVE_TRI_DEPTH_FALLBACK_FLAT"
+    keys[24] = "NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST"
+    keys[25] = "NATIVE_QUAD_DRAW"
+    keys[26] = "NATIVE_QUAD_DRAW_LIST"
+    keys[27] = "NATIVE_QUAD_DRAW_STRIP"
+    keys[28] = "NATIVE_QUAD_CANDIDATE"
+    keys[29] = "NATIVE_QUAD_CANDIDATE_SMOOTH"
+    keys[30] = "NATIVE_QUAD_CANDIDATE_FLAT"
+    keys[31] = "NATIVE_QUAD_FALLBACK"
+    keys[32] = "NATIVE_QUAD_FALLBACK_FLAT"
+    keys[33] = "NATIVE_QUAD_FALLBACK_NONFILL"
+    keys[34] = "NATIVE_QUAD_DRAW_ZPERSPECTIVE"
+    keys[35] = "NATIVE_QUAD_DRAW_LINEAR_Z"
+    keys[36] = "NATIVE_QUAD_DRAW_POLY_OFFSET"
+    keys[37] = "SHADER_GEN"
+    keys[38] = "SHADER_BIND"
+    keys[39] = "BEGIN_ENDS"
+    keys[40] = "DRAW_ARRAYS"
+    keys[41] = "INLINE_ELEMENTS"
+    keys[42] = "INLINE_ARRAYS"
+    keys[43] = "INLINE_BUFFERS"
 
-    for (i = 1; i <= 29; i++) {
+    for (i = 1; i <= 43; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
 }

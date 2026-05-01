@@ -184,6 +184,10 @@ typedef struct PGRAPHGLState {
     GLuint gl_vertex_array;
     GLuint gl_inline_buffer[NV2A_VERTEXSHADER_ATTRIBUTES];
 
+    GLuint gl_native_quad_index_buffer;
+    uint32_t *native_quad_scratch_indices;
+    unsigned int native_quad_scratch_capacity;
+
     QTAILQ_HEAD(, SurfaceBinding) surfaces;
     SurfaceBinding *color_binding, *zeta_binding;
     bool downloads_pending;
