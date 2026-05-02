@@ -47,6 +47,15 @@ extern bool xemu_spike_log_renderer_enabled;
 extern bool xemu_spike_log_tcg_enabled;
 extern int64_t xemu_spike_threshold_us;
 
+/* V7 cumulative-phase enable. Mirrors XEMU_TCG_PHASE_LOG=1; off by
+ * default. When on, cpu_exec_loop accumulates per-phase wallclock
+ * (tb_lookup, tb_gen_code, cpu_handle_interrupt) into the
+ * TCG_TB_LOOKUP_US_TOTAL / TCG_TB_GEN_CODE_US_TOTAL /
+ * TCG_HANDLE_INTERRUPT_US_TOTAL counters surfaced on the per-interval
+ * xemu-perf line. Initialised once by xemu_spike_log_init alongside
+ * the spike-log flags. */
+extern bool xemu_tcg_phase_log_enabled;
+
 /* Emit a spike line if duration_us >= threshold. The op string is
  * inserted verbatim. extra (may be NULL) is appended after now_us as
  * additional " key=value" fields, allowing TCG sources to attach

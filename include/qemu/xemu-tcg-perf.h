@@ -44,6 +44,18 @@ void xemu_tcg_perf_record_invalidate_burst(uint32_t count);
 void xemu_tcg_perf_add_jmp_cache_zeroed(uint32_t buckets);
 void xemu_tcg_perf_record_invalidate_wall_us(uint64_t us);
 
+/* V7 cumulative-phase counters. Each adds a per-call wallclock sample
+ * (nanoseconds) to the running per-interval total; the emit path
+ * divides by 1000 to surface microseconds in TCG_TB_*_US_TOTAL.
+ * Internal nanosecond accumulation avoids sub-µs per-call truncation
+ * when many fast calls accumulate (e.g. 9000 × 800 ns calls would
+ * truncate to 0 if accumulated as µs). Callers MUST gate the clock-
+ * read on xemu_tcg_phase_log_enabled so the steady-state cost when
+ * off is one global load + branch per call site. */
+void xemu_tcg_perf_add_tb_lookup_ns(uint64_t ns);
+void xemu_tcg_perf_add_tb_gen_code_ns(uint64_t ns);
+void xemu_tcg_perf_add_handle_interrupt_ns(uint64_t ns);
+
 /* V3 attribution: per-second sliding-window rate detectors. Each tick
  * is one event; once the window closes (1 s wallclock) the helper
  * compares the count to the storm threshold and, if exceeded, calls

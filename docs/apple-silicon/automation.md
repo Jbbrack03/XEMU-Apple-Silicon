@@ -791,6 +791,27 @@ the same `xemu-perf:` interval line as the NV2A counters above:
   metrics; if it stays an order of magnitude lower, the worst-frame
   is built from many small invalidations or a non-invalidation
   source.
+- `TCG_TB_LOOKUP_US_TOTAL`, `TCG_TB_GEN_CODE_US_TOTAL`,
+  `TCG_HANDLE_INTERRUPT_US_TOTAL` (V7, 2026-05-02): per-interval
+  sum (microseconds) of wallclock spent inside `tb_lookup`,
+  `tb_gen_code`, and `cpu_handle_interrupt` respectively on the
+  vCPU thread. Internal accumulation is in nanoseconds (avoids
+  sub-µs per-call truncation when thousands of fast calls
+  accumulate); emit divides by 1000 to surface microseconds.
+  **Gated on `XEMU_TCG_PHASE_LOG=1`** (independent of the
+  spike-log threshold). When off, all three counters emit zero
+  and the per-call clock-read is skipped (one global load +
+  branch per phase per inner-loop iteration). When on, ~36 %
+  vCPU overhead worst case at 3M TBs/interval. Decisive
+  measurement of cumulative sub-millisecond translation-churn
+  cost that V6's per-event 1 ms threshold cannot resolve: if
+  `TCG_TB_GEN_CODE_US_TOTAL ≥ 300 ms` in the worst-frame
+  interval, PPTC is justified; if `TCG_TB_LOOKUP_US_TOTAL`
+  dominates instead, the fix is qht hash-chain investigation;
+  if `TCG_HANDLE_INTERRUPT_US_TOTAL` dominates, look at i386
+  IRQ injection cost. If none of the three accounts for the
+  worst-frame mspf, the cost is in `cpu_loop_exec_tb` (TB
+  binary execution) or in another phase not instrumented yet.
 
 APU lock-hold / vCPU-wait counters (audio voice-lock release slice,
 opt-in flag `XEMU_APU_LOCK_RELEASE`, on by default for Apple Silicon

@@ -215,6 +215,19 @@ Logging:
   `docs/apple-silicon/automation.md` for the full list and `extra=`
   field semantics). Hot-path cost when off is one global load +
   branch per call site. Off by default.
+- `XEMU_TCG_PHASE_LOG=1` (V7, 2026-05-02) — enable cumulative
+  per-interval wallclock accumulation of the three V6 phases.
+  Surfaces `TCG_TB_LOOKUP_US_TOTAL`, `TCG_TB_GEN_CODE_US_TOTAL`,
+  `TCG_HANDLE_INTERRUPT_US_TOTAL` (sum, microseconds) on the
+  `xemu-perf:` interval line. Internal accumulation is in
+  nanoseconds to avoid sub-µs per-call truncation. Independent of
+  the spike-log threshold; if both spike-log and phase-log are on,
+  the per-call clock read is shared. Hot-path cost when off is one
+  global load + branch per phase per inner-loop iteration. Cost
+  when on: ~36 % vCPU overhead worst-case at 3M TBs/interval. Off
+  by default. Used to attribute the cumulative sub-millisecond
+  translation-churn cost that V6's per-event 1 ms threshold
+  cannot resolve.
 - `XEMU_SNAPSHOT_NO_THUMBNAIL=1` — skip snapshot thumbnail capture.
 
 Display-pacing counters (D3, 2026-05-02; see `automation.md` for the

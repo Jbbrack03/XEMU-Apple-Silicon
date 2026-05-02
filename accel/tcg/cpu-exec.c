@@ -996,15 +996,21 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              * so attribution can correlate with the interrupt class.
              */
             int64_t int_start_ns = 0;
-            if (xemu_spike_log_tcg_enabled) {
+            bool int_time_this = (xemu_spike_log_tcg_enabled
+                                  | xemu_tcg_phase_log_enabled);
+            if (int_time_this) {
                 int_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
             }
             bool int_exit = cpu_handle_interrupt(cpu, &last_tb);
-            if (xemu_spike_log_tcg_enabled) {
-                int64_t int_us =
-                    (qemu_clock_get_ns(QEMU_CLOCK_HOST) - int_start_ns)
-                    / 1000;
-                if (int_us >= xemu_spike_threshold_us) {
+            if (int_time_this) {
+                int64_t int_ns =
+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - int_start_ns;
+                int64_t int_us = int_ns / 1000;
+                if (xemu_tcg_phase_log_enabled && int_ns > 0) {
+                    xemu_tcg_perf_add_handle_interrupt_ns((uint64_t)int_ns);
+                }
+                if (xemu_spike_log_tcg_enabled
+                    && int_us >= xemu_spike_threshold_us) {
                     char extra[96];
                     snprintf(extra, sizeof(extra),
                              "exit=%d ex_idx=%d int_req=0x%x",
@@ -1047,15 +1053,21 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              * interrupt-handling cost (tcg_handle_interrupt).
              */
             int64_t lookup_start_ns = 0;
-            if (xemu_spike_log_tcg_enabled) {
+            bool lookup_time_this = (xemu_spike_log_tcg_enabled
+                                     | xemu_tcg_phase_log_enabled);
+            if (lookup_time_this) {
                 lookup_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
             }
             tb = tb_lookup(cpu, s);
-            if (xemu_spike_log_tcg_enabled) {
-                int64_t lookup_us =
-                    (qemu_clock_get_ns(QEMU_CLOCK_HOST) - lookup_start_ns)
-                    / 1000;
-                if (lookup_us >= xemu_spike_threshold_us) {
+            if (lookup_time_this) {
+                int64_t lookup_ns =
+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - lookup_start_ns;
+                int64_t lookup_us = lookup_ns / 1000;
+                if (xemu_tcg_phase_log_enabled && lookup_ns > 0) {
+                    xemu_tcg_perf_add_tb_lookup_ns((uint64_t)lookup_ns);
+                }
+                if (xemu_spike_log_tcg_enabled
+                    && lookup_us >= xemu_spike_threshold_us) {
                     char extra[64];
                     snprintf(extra, sizeof(extra),
                              "pc=0x%llx hit=%d",
@@ -1078,17 +1090,23 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  * this, follow-on slice is PPTC (strategy.md Phase 5a).
                  */
                 int64_t gen_start_ns = 0;
-                if (xemu_spike_log_tcg_enabled) {
+                bool gen_time_this = (xemu_spike_log_tcg_enabled
+                                      | xemu_tcg_phase_log_enabled);
+                if (gen_time_this) {
                     gen_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
                 }
                 mmap_lock();
                 tb = tb_gen_code(cpu, s);
                 mmap_unlock();
-                if (xemu_spike_log_tcg_enabled) {
-                    int64_t gen_us =
-                        (qemu_clock_get_ns(QEMU_CLOCK_HOST) - gen_start_ns)
-                        / 1000;
-                    if (gen_us >= xemu_spike_threshold_us) {
+                if (gen_time_this) {
+                    int64_t gen_ns =
+                        qemu_clock_get_ns(QEMU_CLOCK_HOST) - gen_start_ns;
+                    int64_t gen_us = gen_ns / 1000;
+                    if (xemu_tcg_phase_log_enabled && gen_ns > 0) {
+                        xemu_tcg_perf_add_tb_gen_code_ns((uint64_t)gen_ns);
+                    }
+                    if (xemu_spike_log_tcg_enabled
+                        && gen_us >= xemu_spike_threshold_us) {
                         char extra[64];
                         snprintf(extra, sizeof(extra),
                                  "pc=0x%llx cflags=0x%x",

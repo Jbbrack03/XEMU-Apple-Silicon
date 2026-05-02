@@ -36,6 +36,17 @@ static uint64_t tcg_perf_invalidate_burst_max;
 static uint64_t tcg_perf_jmp_cache_zeroed_buckets;
 static uint64_t tcg_perf_invalidate_wall_us_max;
 
+/* V7 counters: per-interval sum of cpu_exec_loop per-phase wallclock,
+ * accumulated in *nanoseconds* and emitted as microseconds. V6
+ * disproved per-event 1 ms+ dominance for these three phases; V7
+ * tracks cumulative cost to catch the sub-millisecond aggregate that
+ * V6's per-event spike threshold misses. Nanosecond accumulation
+ * avoids sub-µs per-call truncation when thousands of fast calls
+ * accumulate. */
+static uint64_t tcg_perf_tb_lookup_ns_total;
+static uint64_t tcg_perf_tb_gen_code_ns_total;
+static uint64_t tcg_perf_handle_interrupt_ns_total;
+
 /* Open-addressing set of (page-aligned) ram_addr_t. 64 entries is
  * plenty for an interval-bounded unique-page approximation; if more
  * than 64 distinct pages trip notdirty per interval the set becomes
@@ -79,6 +90,30 @@ void xemu_tcg_perf_add_jmp_cache_zeroed(uint32_t buckets)
         return;
     }
     qatomic_add(&tcg_perf_jmp_cache_zeroed_buckets, (uint64_t)buckets);
+}
+
+void xemu_tcg_perf_add_tb_lookup_ns(uint64_t ns)
+{
+    if (ns == 0) {
+        return;
+    }
+    qatomic_add(&tcg_perf_tb_lookup_ns_total, ns);
+}
+
+void xemu_tcg_perf_add_tb_gen_code_ns(uint64_t ns)
+{
+    if (ns == 0) {
+        return;
+    }
+    qatomic_add(&tcg_perf_tb_gen_code_ns_total, ns);
+}
+
+void xemu_tcg_perf_add_handle_interrupt_ns(uint64_t ns)
+{
+    if (ns == 0) {
+        return;
+    }
+    qatomic_add(&tcg_perf_handle_interrupt_ns_total, ns);
 }
 
 void xemu_tcg_perf_record_invalidate_wall_us(uint64_t us)
@@ -242,6 +277,12 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
     uint64_t burst_max = qatomic_xchg(&tcg_perf_invalidate_burst_max, 0);
     uint64_t jmp_zeroed = qatomic_xchg(&tcg_perf_jmp_cache_zeroed_buckets, 0);
     uint64_t inv_wall_us_max = qatomic_xchg(&tcg_perf_invalidate_wall_us_max, 0);
+    uint64_t lookup_ns = qatomic_xchg(&tcg_perf_tb_lookup_ns_total, 0);
+    uint64_t gen_ns = qatomic_xchg(&tcg_perf_tb_gen_code_ns_total, 0);
+    uint64_t int_ns = qatomic_xchg(&tcg_perf_handle_interrupt_ns_total, 0);
+    uint64_t lookup_us = lookup_ns / 1000;
+    uint64_t gen_us = gen_ns / 1000;
+    uint64_t int_us = int_ns / 1000;
 
     /* Reset the page set after sampling. Ordering vs concurrent
      * inserts: a vCPU increment racing this loop may have its page
@@ -252,7 +293,7 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
     }
 
     if ((tb_exec | tb_inv | notdirty_trips | notdirty_pages | burst_max
-         | jmp_zeroed | inv_wall_us_max) == 0) {
+         | jmp_zeroed | inv_wall_us_max | lookup_us | gen_us | int_us) == 0) {
         return;
     }
 
@@ -261,12 +302,18 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
             " TCG_NOTDIRTY_TRIPS=%llu TCG_NOTDIRTY_PAGES_HIT=%llu"
             " TCG_TB_INVALIDATE_BURST_MAX=%llu"
             " TCG_JMP_CACHE_ZEROED_BUCKETS=%llu"
-            " TCG_INVALIDATE_WALL_US_MAX=%llu",
+            " TCG_INVALIDATE_WALL_US_MAX=%llu"
+            " TCG_TB_LOOKUP_US_TOTAL=%llu"
+            " TCG_TB_GEN_CODE_US_TOTAL=%llu"
+            " TCG_HANDLE_INTERRUPT_US_TOTAL=%llu",
             (unsigned long long)tb_exec,
             (unsigned long long)tb_inv,
             (unsigned long long)notdirty_trips,
             (unsigned long long)notdirty_pages,
             (unsigned long long)burst_max,
             (unsigned long long)jmp_zeroed,
-            (unsigned long long)inv_wall_us_max);
+            (unsigned long long)inv_wall_us_max,
+            (unsigned long long)lookup_us,
+            (unsigned long long)gen_us,
+            (unsigned long long)int_us);
 }
