@@ -21,6 +21,7 @@
 
 #include "qemu/fast-hash.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/timer.h"
 #include "debug.h"
 #include "renderer.h"
 
@@ -549,6 +550,13 @@ void pgraph_gl_draw_begin(NV2AState *d)
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
 
+    /* Whole-function timing for the draw_begin path. Includes
+     * pgraph_gl_surface_update, pgraph_gl_bind_textures (separately
+     * timed), pgraph_gl_bind_shaders (separately timed), and the
+     * GL state setup. The diff between this counter and the sum of
+     * its children reveals time in plain GL state changes. */
+    int64_t draw_begin_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
     NV2A_GL_DGROUP_BEGIN("NV097_SET_BEGIN_END: 0x%x", pg->primitive_mode);
 
     uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
@@ -565,13 +573,26 @@ void pgraph_gl_draw_begin(NV2AState *d)
     pgraph_gl_surface_update(d, true, true, depth_test || stencil_test);
 
     if (is_nop_draw) {
-        return;
+        goto done;
     }
 
     assert(r->color_binding || r->zeta_binding);
 
     pgraph_gl_bind_textures(d);
     pgraph_gl_bind_shaders(pg);
+
+    /* Async shader compile (XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1): if the
+     * requested shader binding is still being compiled by the worker
+     * thread, pgraph_gl_bind_shaders set shader_skip_draw and left
+     * r->shader_binding at its previous value. Skip this draw entirely so
+     * the renderer never blocks waiting for compile. The next bind call
+     * will pick up the binding once the worker publishes initialized=true.
+     * Vertex accumulation buffers are reset by SET_BEGIN_END regardless. */
+    if (r->shader_skip_draw) {
+        NV2A_GL_DGROUP_END();
+        goto done;
+    }
+
     pgraph_gl_trace_native_tri_depth_state(pg, r->shader_binding,
                                            "draw_begin", "begin");
 
@@ -743,12 +764,29 @@ void pgraph_gl_draw_begin(NV2AState *d)
             r->gl_zpass_pixel_count_query_count - 1] = gl_query;
         glBeginQuery(GL_SAMPLES_PASSED, gl_query);
     }
+
+done:
+    {
+        int64_t draw_begin_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - draw_begin_start_us;
+        nv2a_profile_add_counter(NV2A_PROF_DRAW_BEGIN_US_TOTAL,
+                                 (int)draw_begin_us);
+        nv2a_profile_spike("draw_begin", draw_begin_us);
+    }
 }
 
 void pgraph_gl_draw_end(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
+
+    /* Skip when the corresponding draw_begin determined the requested
+     * shader was not yet compiled. The flag is reset at the top of the
+     * next pgraph_gl_bind_shaders call. */
+    if (r->shader_skip_draw) {
+        NV2A_GL_DGROUP_END();
+        return;
+    }
 
     uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
     bool mask_alpha = control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE;
@@ -802,6 +840,13 @@ void pgraph_gl_flush_draw(NV2AState *d)
         return;
     }
     assert(r->shader_binding);
+
+    /* Time the actual draw dispatch path. This is where Apple's GL-on-
+     * Metal driver does its synchronous MSL->Metal pipeline-state-object
+     * compile on the FIRST glDrawElements with a new program/VAO/state
+     * combination — the suspected source of the Crimson 1.35 s worst-
+     * frame stutter that async shader compile did not fix. */
+    int64_t flush_draw_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     bool native_quad = pgraph_gl_native_quad_active(r->shader_binding);
     enum ShaderPrimitiveMode native_quad_prim =
@@ -1012,4 +1057,10 @@ void pgraph_gl_flush_draw(NV2AState *d)
         NV2A_GL_DPRINTF(true, "EMPTY NV097_SET_BEGIN_END");
         NV2A_UNCONFIRMED("EMPTY NV097_SET_BEGIN_END");
     }
+
+    int64_t flush_draw_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - flush_draw_start_us;
+    nv2a_profile_add_counter(NV2A_PROF_FLUSH_DRAW_US_TOTAL,
+                             (int)flush_draw_us);
+    nv2a_profile_spike("flush_draw", flush_draw_us);
 }

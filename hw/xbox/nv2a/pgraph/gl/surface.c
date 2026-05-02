@@ -22,6 +22,7 @@
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
 #include "ui/xemu-settings.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/timer.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "debug.h"
 #include "renderer.h"
@@ -323,11 +324,12 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     assert(texture_shape->color_format < ARRAY_SIZE(kelvin_color_format_gl_map));
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
+    int64_t surf_to_tex_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     if (!surface_to_texture_can_fastpath(surface, texture_shape)) {
         render_surface_to_texture_slow(d, surface, texture,
                                               texture_shape, texture_unit);
-        return;
+        goto done;
     }
 
     unsigned int width = texture_shape->width, height = texture_shape->height;
@@ -346,6 +348,15 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
     glBindTexture(texture->gl_target, texture->gl_texture);
     glUseProgram(
         r->shader_binding ? r->shader_binding->gl_program : 0);
+
+done:
+    {
+        int64_t surf_to_tex_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - surf_to_tex_start_us;
+        nv2a_profile_add_counter(NV2A_PROF_SURF_TO_TEX_US_TOTAL,
+                                 (int)surf_to_tex_us);
+        nv2a_profile_spike("surf_to_tex", surf_to_tex_us);
+    }
 }
 
 bool pgraph_gl_check_surface_to_texture_compatibility(
@@ -628,7 +639,13 @@ void pgraph_gl_surface_download_if_dirty(NV2AState *d,
                                            SurfaceBinding *surface)
 {
     if (surface->draw_dirty) {
+        int64_t start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         surface_download(d, surface, true);
+        int64_t duration_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_us;
+        nv2a_profile_add_counter(NV2A_PROF_SURF_DOWNLOAD_US_TOTAL,
+                                 (int)duration_us);
+        nv2a_profile_spike("surf_download", duration_us);
     }
 }
 
@@ -874,6 +891,7 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_UPLOAD);
+    int64_t surf_upload_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     trace_nv2a_pgraph_surface_upload(
                  surface->color ? "COLOR" : "ZETA",
@@ -971,6 +989,12 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     glBindTexture(GL_TEXTURE_2D, last_texture_binding);
 
     bind_current_surface(d);
+
+    int64_t surf_upload_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - surf_upload_start_us;
+    nv2a_profile_add_counter(NV2A_PROF_SURF_UPLOAD_US_TOTAL,
+                             (int)surf_upload_us);
+    nv2a_profile_spike("surf_upload", surf_upload_us);
 }
 
 static void compare_surfaces(SurfaceBinding *s1, SurfaceBinding *s2)

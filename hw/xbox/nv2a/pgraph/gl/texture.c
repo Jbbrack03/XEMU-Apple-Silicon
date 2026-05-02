@@ -21,6 +21,7 @@
 
 #include "qemu/fast-hash.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/timer.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "hw/xbox/nv2a/pgraph/s3tc.h"
 #include "hw/xbox/nv2a/pgraph/texture.h"
@@ -207,6 +208,13 @@ void pgraph_gl_bind_textures(NV2AState *d)
     int i;
     PGRAPHState *pg = &d->pgraph;
     PGRAPHGLState *r = pg->gl_renderer_state;
+
+    /* Whole-function timing for the texture-bind path. Catches per-frame
+     * cost spread across cache lookup, surface->texture renders, surface
+     * uploads triggered by texture aliasing, and the actual glTexImage2D
+     * uploads. The fine-grained sub-counters are added separately around
+     * the specific GL calls. */
+    int64_t bind_textures_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     NV2A_GL_DGROUP_BEGIN("%s", __func__);
 
@@ -404,6 +412,12 @@ void pgraph_gl_bind_textures(NV2AState *d)
         pg->texture_dirty[i] = false;
     }
     NV2A_GL_DGROUP_END();
+
+    int64_t bind_textures_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - bind_textures_start_us;
+    nv2a_profile_add_counter(NV2A_PROF_BIND_TEXTURES_US_TOTAL,
+                             (int)bind_textures_us);
+    nv2a_profile_spike("bind_textures", bind_textures_us);
 }
 
 static enum S3TC_DECOMPRESS_FORMAT
@@ -428,6 +442,7 @@ static void upload_gl_texture(GLenum gl_target,
 {
     ColorFormatInfo f = kelvin_color_format_gl_map[s.color_format];
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
+    int64_t tex_upload_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     unsigned int adjusted_width = s.width;
     unsigned int adjusted_height = s.height;
@@ -637,6 +652,11 @@ static void upload_gl_texture(GLenum gl_target,
         assert(false);
         break;
     }
+    int64_t tex_upload_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - tex_upload_start_us;
+    nv2a_profile_add_counter(NV2A_PROF_TEX_UPLOAD_US_TOTAL,
+                             (int)tex_upload_us);
+    nv2a_profile_spike("tex_upload", tex_upload_us);
 }
 
 static TextureBinding* generate_texture(const TextureShape s,

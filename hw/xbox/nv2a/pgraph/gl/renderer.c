@@ -21,16 +21,36 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
+#include "qemu/timer.h"
 #include "debug.h"
 #include "renderer.h"
 
 GloContext *g_nv2a_context_render;
 GloContext *g_nv2a_context_display;
+GloContext *g_nv2a_context_shader_compile;
+
+static bool pgraph_gl_async_shader_compile_env_enabled(void)
+{
+    const char *value = getenv("XEMU_PGRAPH_ASYNC_SHADER_COMPILE");
+    return value && value[0] && strcmp(value, "0") != 0;
+}
 
 static void early_context_init(void)
 {
     g_nv2a_context_render = glo_context_create();
     g_nv2a_context_display = glo_context_create();
+
+    /* Optional third shared context for the async shader compile worker.
+     * Only created when XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1 so default builds
+     * are unaffected. SDL_GL_SHARE_WITH_CURRENT_CONTEXT is set by
+     * glo_context_create(), so the worker context shares program/shader
+     * name space with the render and display contexts. */
+    if (pgraph_gl_async_shader_compile_env_enabled()) {
+        g_nv2a_context_shader_compile = glo_context_create();
+        fprintf(stderr,
+                "xemu-perf: async_shader_compile=1 "
+                "source=XEMU_PGRAPH_ASYNC_SHADER_COMPILE\n");
+    }
 
     // Note: Due to use of shared contexts, this must happen after some other
     // context is created so the temporary context will not become the thread
@@ -101,8 +121,25 @@ static void pgraph_gl_finalize(NV2AState *d)
 
 static void pgraph_gl_flip_stall(NV2AState *d)
 {
+    /* Time the per-frame flip barrier. glFinish drains all queued GL work
+     * on the renderer thread; if Apple's GL command queue has accumulated
+     * pending submissions (or if the Metal layer needs to do present-side
+     * pipeline work), the cost shows up here, not in any per-draw counter.
+     * The bad-interval breakdown for Crimson 2026-05-01 showed near-zero
+     * accumulated draw counters during 1.35-second worst-frame intervals,
+     * which is consistent with the cost being concentrated here at flip
+     * (or upstream in the TCG/pfifo path). */
+    int64_t flip_stall_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     NV2A_GL_DFRAME_TERMINATOR();
+    int64_t glfinish_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     glFinish();
+    int64_t glfinish_end_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    nv2a_profile_add_counter(NV2A_PROF_FLIP_STALL_GLFINISH_US_TOTAL,
+                             (int)(glfinish_end_us - glfinish_start_us));
+    nv2a_profile_spike("flip_stall_glfinish",
+                       glfinish_end_us - glfinish_start_us);
+    nv2a_profile_add_counter(NV2A_PROF_FLIP_STALL_US_TOTAL,
+                             (int)(glfinish_end_us - flip_stall_start_us));
 }
 
 static void pgraph_gl_flush(NV2AState *d)

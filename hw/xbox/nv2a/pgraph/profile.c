@@ -49,6 +49,11 @@ static struct {
     uint64_t counters[NV2A_PROF__COUNT];
     bool registered_atexit;
     bool flushed;
+    /* XEMU_PERF_SPIKE_LOG=1: emit `xemu-spike:` lines for any timed
+     * operation exceeding spike_threshold_us (default 50 ms, tunable
+     * via XEMU_PERF_SPIKE_LOG_THRESHOLD_US). Off by default. */
+    bool spike_log_enabled;
+    int64_t spike_threshold_us;
 } perf_log;
 
 static bool env_flag_enabled(const char *name)
@@ -90,6 +95,16 @@ static void nv2a_profile_log_init(void)
     perf_log.initialized = true;
     perf_log.enabled = env_flag_enabled("XEMU_PERF_LOG");
     perf_log.frame_log_enabled = env_flag_enabled("XEMU_PERF_FRAME_LOG");
+    perf_log.spike_log_enabled = env_flag_enabled("XEMU_PERF_SPIKE_LOG");
+    perf_log.spike_threshold_us = 50000;
+    const char *threshold_env = getenv("XEMU_PERF_SPIKE_LOG_THRESHOLD_US");
+    if (threshold_env && threshold_env[0]) {
+        char *end = NULL;
+        long t = strtol(threshold_env, &end, 10);
+        if (end != threshold_env && *end == '\0' && t >= 1000) {
+            perf_log.spike_threshold_us = t;
+        }
+    }
     perf_log.interval_us = 1000000;
 
     const char *interval_ms_env = getenv("XEMU_PERF_LOG_INTERVAL_MS");
@@ -316,6 +331,23 @@ void nv2a_profile_log_flush(const char *reason)
 static void nv2a_profile_log_atexit(void)
 {
     nv2a_profile_log_flush("atexit");
+}
+
+void nv2a_profile_spike(const char *op, int64_t duration_us)
+{
+    nv2a_profile_log_init();
+    if (!perf_log.spike_log_enabled) {
+        return;
+    }
+    if (duration_us < perf_log.spike_threshold_us) {
+        return;
+    }
+    int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    fprintf(stderr,
+            "xemu-spike: op=%s duration_us=%lld now_us=%lld\n",
+            op ? op : "?",
+            (long long)duration_us,
+            (long long)now_us);
 }
 
 const char *nv2a_profile_get_counter_name(unsigned int cnt)

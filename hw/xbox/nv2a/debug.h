@@ -94,6 +94,11 @@
     _X(NV2A_PROF_SHADER_GEN) \
     _X(NV2A_PROF_SHADER_BIND) \
     _X(NV2A_PROF_SHADER_BIND_NOTDIRTY) \
+    _X(NV2A_PROF_SHADER_COMPILE_COUNT) \
+    _X(NV2A_PROF_SHADER_COMPILE_US_TOTAL) \
+    _X(NV2A_PROF_SHADER_COMPILE_ASYNC_QUEUED) \
+    _X(NV2A_PROF_SHADER_COMPILE_ASYNC_COMPLETED) \
+    _X(NV2A_PROF_SHADER_DRAWS_SKIPPED_PENDING) \
     _X(NV2A_PROF_GEOM_SHADER_MODULE_GEN) \
     _X(NV2A_PROF_GEOM_SHADER_PROGRAM_GEN) \
     _X(NV2A_PROF_GEOM_SHADER_BIND) \
@@ -150,6 +155,15 @@
     _X(NV2A_PROF_QUEUE_SUBMIT_3) \
     _X(NV2A_PROF_QUEUE_SUBMIT_4) \
     _X(NV2A_PROF_QUEUE_SUBMIT_5) \
+    _X(NV2A_PROF_BIND_TEXTURES_US_TOTAL) \
+    _X(NV2A_PROF_TEX_UPLOAD_US_TOTAL) \
+    _X(NV2A_PROF_SURF_TO_TEX_US_TOTAL) \
+    _X(NV2A_PROF_SURF_UPLOAD_US_TOTAL) \
+    _X(NV2A_PROF_SURF_DOWNLOAD_US_TOTAL) \
+    _X(NV2A_PROF_FLUSH_DRAW_US_TOTAL) \
+    _X(NV2A_PROF_DRAW_BEGIN_US_TOTAL) \
+    _X(NV2A_PROF_FLIP_STALL_US_TOTAL) \
+    _X(NV2A_PROF_FLIP_STALL_GLFINISH_US_TOTAL) \
 
 enum NV2A_PROF_COUNTERS_ENUM {
     #define _X(x) x,
@@ -184,9 +198,22 @@ void nv2a_profile_flip_stall(void);
 void nv2a_profile_log_startup(const char *renderer_name);
 void nv2a_profile_log_flush(const char *reason);
 
+/* Per-event spike log. When XEMU_PERF_SPIKE_LOG=1 is set and a single
+ * timed operation exceeds the configured threshold (default 50 ms,
+ * tunable via XEMU_PERF_SPIKE_LOG_THRESHOLD_US), emits a line of the
+ * form `xemu-spike: op=<name> duration_us=<n> ...`. Cheap when no
+ * spike fires; only the threshold compare runs in steady state. */
+void nv2a_profile_spike(const char *op, int64_t duration_us);
+
 static inline void nv2a_profile_inc_counter(enum NV2A_PROF_COUNTERS_ENUM cnt)
 {
     g_nv2a_stats.frame_working.counters[cnt] += 1;
+}
+
+static inline void nv2a_profile_add_counter(enum NV2A_PROF_COUNTERS_ENUM cnt,
+                                            int delta)
+{
+    g_nv2a_stats.frame_working.counters[cnt] += delta;
 }
 
 #ifdef CONFIG_RENDERDOC

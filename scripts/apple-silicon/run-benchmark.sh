@@ -131,6 +131,8 @@ else
     cp -c "$HDD_SOURCE" "$SCRATCH_HDD" 2>/dev/null || cp "$HDD_SOURCE" "$SCRATCH_HDD"
 fi
 
+SURFACE_SCALE="${XEMU_BENCH_SURFACE_SCALE:-1}"
+
 cat > "$CONFIG_FILE" <<EOF
 [general]
 show_welcome = false
@@ -141,6 +143,9 @@ background_input_capture = true
 
 [display.window]
 vsync = false
+
+[display.quality]
+surface_scale = $SURFACE_SCALE
 
 [sys.files]
 bootrom_path = '$MCPX'

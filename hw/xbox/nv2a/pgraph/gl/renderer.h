@@ -122,6 +122,14 @@ typedef struct ShaderBinding {
     GLenum gl_primitive_mode;
     bool has_geometry_shader;
 
+    /* Async shader compile (XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1):
+     * pending_compile is set when a worker thread has been asked to compile
+     * this binding. Cleared by the worker once initialized=true is committed.
+     * Updated under PGRAPHGLState::shader_cache_lock by both the renderer and
+     * the worker. */
+    bool pending_compile;
+    QSIMPLEQ_ENTRY(ShaderBinding) compile_queue_link;
+
     struct {
         PshUniformLocs psh;
         VshUniformLocs vsh;
@@ -207,6 +215,27 @@ typedef struct PGRAPHGLState {
 
     Lru shader_module_cache;
     ShaderModuleCacheEntry *shader_module_cache_entries;
+    /* Held by the renderer and the async-compile worker around any access
+     * to shader_module_cache. Separate from shader_cache_lock so that the
+     * renderer can perform a fast cache lookup while the worker is mid-
+     * compile holding the module-cache lock. */
+    QemuMutex shader_module_cache_lock;
+
+    /* Async shader compile (XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1).
+     * shader_skip_draw is set by pgraph_gl_bind_shaders when the requested
+     * shader binding is still being compiled by the worker. The draw entry
+     * points (draw_begin / draw_end) early-return when this is set so the
+     * renderer never blocks on synchronous compile. */
+    bool async_shader_compile_enabled;
+    bool shader_skip_draw;
+    QemuThread compile_thread;
+    bool compile_thread_started;
+    bool compile_thread_stop;
+    QemuMutex compile_queue_lock;
+    QemuCond compile_queue_cond;
+    QSIMPLEQ_HEAD(, ShaderBinding) compile_queue;
+    int compile_queue_depth;
+    PGRAPHState *compile_thread_pg;
 
     unsigned int zpass_pixel_count_result;
     unsigned int gl_zpass_pixel_count_query_count;
@@ -247,6 +276,7 @@ typedef struct PGRAPHGLState {
 
 extern GloContext *g_nv2a_context_render;
 extern GloContext *g_nv2a_context_display;
+extern GloContext *g_nv2a_context_shader_compile;
 
 unsigned int pgraph_gl_bind_inline_array(NV2AState *d);
 void pgraph_gl_bind_shaders(PGRAPHState *pg);

@@ -22,6 +22,16 @@ the per-interval mspf_min/max/avg fields. Jitter metrics:
 
 Jitter metrics are also emitted as post_load_* variants over the same
 post-load window used for the FPS/MSPF averages.
+
+When intervals carry `frame_mspf_us=...` (XEMU_PERF_FRAME_LOG=1), true
+frame-level metrics are also emitted:
+
+  frame_mspf_us_p50/p95/p99/p999/max  per-frame mspf percentiles (us)
+  frame_mspf_us_count                 total frame samples
+  frame_mspf_us_dropped_total         sum of per-interval dropped counts
+  stutter_frames_30fps/45fps/60fps    frames > 33.3 / 22.2 / 16.7 ms
+
+Frame-level metrics are also emitted with the post_load_ prefix.
 EOF
 }
 
@@ -207,6 +217,20 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "NATIVE_QUAD_DRAW_LINEAR_Z" ||
                    key == "SHADER_GEN" ||
                    key == "SHADER_BIND" ||
+                   key == "SHADER_COMPILE_COUNT" ||
+                   key == "SHADER_COMPILE_US_TOTAL" ||
+                   key == "SHADER_COMPILE_ASYNC_QUEUED" ||
+                   key == "SHADER_COMPILE_ASYNC_COMPLETED" ||
+                   key == "SHADER_DRAWS_SKIPPED_PENDING" ||
+                   key == "BIND_TEXTURES_US_TOTAL" ||
+                   key == "TEX_UPLOAD_US_TOTAL" ||
+                   key == "SURF_TO_TEX_US_TOTAL" ||
+                   key == "SURF_UPLOAD_US_TOTAL" ||
+                   key == "SURF_DOWNLOAD_US_TOTAL" ||
+                   key == "FLUSH_DRAW_US_TOTAL" ||
+                   key == "DRAW_BEGIN_US_TOTAL" ||
+                   key == "FLIP_STALL_US_TOTAL" ||
+                   key == "FLIP_STALL_GLFINISH_US_TOTAL" ||
                    key == "BEGIN_ENDS" ||
                    key == "DRAW_ARRAYS" ||
                    key == "INLINE_ELEMENTS" ||
@@ -295,13 +319,27 @@ END {
     keys[36] = "NATIVE_QUAD_DRAW_POLY_OFFSET"
     keys[37] = "SHADER_GEN"
     keys[38] = "SHADER_BIND"
-    keys[39] = "BEGIN_ENDS"
-    keys[40] = "DRAW_ARRAYS"
-    keys[41] = "INLINE_ELEMENTS"
-    keys[42] = "INLINE_ARRAYS"
-    keys[43] = "INLINE_BUFFERS"
+    keys[39] = "SHADER_COMPILE_COUNT"
+    keys[40] = "SHADER_COMPILE_US_TOTAL"
+    keys[41] = "SHADER_COMPILE_ASYNC_QUEUED"
+    keys[42] = "SHADER_COMPILE_ASYNC_COMPLETED"
+    keys[43] = "SHADER_DRAWS_SKIPPED_PENDING"
+    keys[44] = "BIND_TEXTURES_US_TOTAL"
+    keys[45] = "TEX_UPLOAD_US_TOTAL"
+    keys[46] = "SURF_TO_TEX_US_TOTAL"
+    keys[47] = "SURF_UPLOAD_US_TOTAL"
+    keys[48] = "SURF_DOWNLOAD_US_TOTAL"
+    keys[49] = "FLUSH_DRAW_US_TOTAL"
+    keys[50] = "DRAW_BEGIN_US_TOTAL"
+    keys[51] = "FLIP_STALL_US_TOTAL"
+    keys[52] = "FLIP_STALL_GLFINISH_US_TOTAL"
+    keys[53] = "BEGIN_ENDS"
+    keys[54] = "DRAW_ARRAYS"
+    keys[55] = "INLINE_ELEMENTS"
+    keys[56] = "INLINE_ARRAYS"
+    keys[57] = "INLINE_BUFFERS"
 
-    for (i = 1; i <= 43; i++) {
+    for (i = 1; i <= 57; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
 
@@ -309,3 +347,112 @@ END {
     emit_jitter("post_load_", post_fps, post_mspf_max, post_mspf_avg, post_count)
 }
 ' "$LOG_FILE"
+
+# Frame-level percentile post-processing.
+#
+# When XEMU_PERF_FRAME_LOG=1 was set during the run, each interval line
+# carries frame_mspf_us=v1,v2,... (microsecond mspf for every frame in
+# that interval, bounded 1024 frames per interval; overflow recorded in
+# frame_mspf_us_dropped). Aggregate those across all timed intervals
+# (final=1 intervals excluded, matching the existing timing averages)
+# and emit true frame-level percentiles. If no frame_mspf_us= field is
+# present the script emits nothing here.
+python3 - "$LOG_FILE" "$SKIP" <<'PY'
+import sys
+
+log_path = sys.argv[1]
+skip = int(sys.argv[2])
+
+def parse_kv(line):
+    out = {}
+    for tok in line.split():
+        if "=" not in tok:
+            continue
+        k, _, v = tok.partition("=")
+        out[k] = v
+    return out
+
+all_frames = []
+post_frames = []
+dropped_total = 0
+post_dropped_total = 0
+timed_intervals = 0
+have_frame_field = False
+
+with open(log_path, "r", errors="replace") as fh:
+    for line in fh:
+        if "xemu-perf:" not in line or "interval_ms=" not in line:
+            continue
+        kv = parse_kv(line)
+        is_final = kv.get("final", "0") not in ("0", "")
+        frame_field = kv.get("frame_mspf_us")
+        if frame_field is not None:
+            have_frame_field = True
+        if is_final:
+            # Match existing convention: final=1 partial-exit interval is
+            # excluded from timing-average windows. Apply the same to
+            # frame-level percentiles so the metrics describe live
+            # gameplay, not shutdown frames.
+            continue
+        timed_intervals += 1
+        is_post = timed_intervals > skip
+        try:
+            dropped = int(kv.get("frame_mspf_us_dropped", "0"))
+        except ValueError:
+            dropped = 0
+        dropped_total += dropped
+        if is_post:
+            post_dropped_total += dropped
+        if frame_field:
+            samples = []
+            for v in frame_field.split(","):
+                if not v:
+                    continue
+                try:
+                    samples.append(int(v))
+                except ValueError:
+                    continue
+            all_frames.extend(samples)
+            if is_post:
+                post_frames.extend(samples)
+
+if not have_frame_field:
+    sys.exit(0)
+
+def pct(sorted_samples, p):
+    n = len(sorted_samples)
+    if n == 0:
+        return 0
+    rank = int((p / 100.0) * n + 0.5)
+    if rank < 1:
+        rank = 1
+    if rank > n:
+        rank = n
+    return sorted_samples[rank - 1]
+
+def emit(prefix, samples, dropped_sum):
+    n = len(samples)
+    if n == 0:
+        # Field was present somewhere in the run but this window had no
+        # samples (e.g. post-load skip exceeds total intervals). Emit a
+        # zero count so consumers can detect the gap unambiguously.
+        print(f"{prefix}frame_mspf_us_count=0")
+        print(f"{prefix}frame_mspf_us_dropped_total={dropped_sum}")
+        return
+    s = sorted(samples)
+    print(f"{prefix}frame_mspf_us_p50={pct(s, 50)}")
+    print(f"{prefix}frame_mspf_us_p95={pct(s, 95)}")
+    print(f"{prefix}frame_mspf_us_p99={pct(s, 99)}")
+    print(f"{prefix}frame_mspf_us_p999={pct(s, 99.9)}")
+    print(f"{prefix}frame_mspf_us_max={s[-1]}")
+    print(f"{prefix}frame_mspf_us_count={n}")
+    print(f"{prefix}frame_mspf_us_dropped_total={dropped_sum}")
+    # Stutter frame counts: strictly greater than the per-target mspf.
+    # Thresholds match the per-interval stutter_intervals_* keys.
+    print(f"{prefix}stutter_frames_60fps={sum(1 for v in samples if v > 16700)}")
+    print(f"{prefix}stutter_frames_45fps={sum(1 for v in samples if v > 22200)}")
+    print(f"{prefix}stutter_frames_30fps={sum(1 for v in samples if v > 33300)}")
+
+emit("", all_frames, dropped_total)
+emit("post_load_", post_frames, post_dropped_total)
+PY

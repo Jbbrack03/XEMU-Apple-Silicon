@@ -20,8 +20,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/atomic.h"
 #include "qemu/fast-hash.h"
 #include "qemu/mstring.h"
+#include "qemu/timer.h"
 
 #include "xemu-version.h"
 #include "ui/xemu-settings.h"
@@ -201,16 +203,55 @@ static GLuint get_shader_module_for_key(PGRAPHGLState *r,
     return module->gl_shader;
 }
 
-static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
+/* Counter increment that is safe from the async-compile worker thread.
+ * The worker may race against the renderer's per-frame counter reset; using
+ * atomic add keeps individual counter writes well-defined, and the worst
+ * outcome is one event being attributed to an adjacent frame. */
+static inline void nv2a_profile_inc_counter_atomic(
+    enum NV2A_PROF_COUNTERS_ENUM cnt)
 {
+    qatomic_inc(&g_nv2a_stats.frame_working.counters[cnt]);
+}
+
+static inline void nv2a_profile_add_counter_atomic(
+    enum NV2A_PROF_COUNTERS_ENUM cnt, int delta)
+{
+    qatomic_add(&g_nv2a_stats.frame_working.counters[cnt], delta);
+}
+
+/* Compile + link the program described by binding->state. Safe to call from
+ * either the renderer or the async-compile worker; the caller must ensure
+ * the appropriate GloContext is current on this thread. Module-cache access
+ * is locked so the renderer's synchronous path and the worker do not race
+ * on shader_module_cache. Counters are incremented atomically so async
+ * worker accumulation does not corrupt the renderer's per-frame counter
+ * reset.
+ *
+ * validate_program: glValidateProgram against the currently-bound GL state
+ * (a debug-only sanity check). The async-compile worker context has no
+ * VAO bound, so validation fails there with "No vertex array object
+ * bound." Pass false from the worker; the link itself catches the
+ * compile-level errors that matter, and any runtime state errors will
+ * surface on the renderer's first glUseProgram + draw. */
+static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding,
+                             bool validate_program)
+{
+    /* Time the entire compile+link path. On Apple's GL-on-Metal driver
+     * glLinkProgram synchronously translates GLSL to MSL and compiles, which
+     * is the dominant per-shader-bind cost (and the source of Crimson Skies'
+     * worst-frame stutter). The counter is microseconds accumulated per
+     * frame; interval averages roll up via the existing profile aggregation. */
+    int64_t compile_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     GLuint program = glCreateProgram();
 
     ShaderState *state = &binding->state;
     ShaderModuleCacheKey key;
 
     bool need_geometry_shader = pgraph_glsl_need_geom(&state->geom);
+
+    qemu_mutex_lock(&r->shader_module_cache_lock);
     if (need_geometry_shader) {
-        nv2a_profile_inc_counter(NV2A_PROF_GEOM_SHADER_PROGRAM_GEN);
+        nv2a_profile_inc_counter_atomic(NV2A_PROF_GEOM_SHADER_PROGRAM_GEN);
         memset(&key, 0, sizeof(key));
         key.kind = GL_GEOMETRY_SHADER;
         key.geom.state = state->geom;
@@ -229,6 +270,7 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
     key.kind = GL_FRAGMENT_SHADER;
     key.psh.state = state->psh;
     glAttachShader(program, get_shader_module_for_key(r, &key));
+    qemu_mutex_unlock(&r->shader_module_cache_lock);
 
     /* link the program */
     glLinkProgram(program);
@@ -246,22 +288,44 @@ static void generate_shaders(PGRAPHGLState *r, ShaderBinding *binding)
     binding->gl_program = program;
     binding->gl_primitive_mode = get_gl_primitive_mode(&state->geom);
     binding->has_geometry_shader = need_geometry_shader;
-    binding->initialized = true;
 
     set_texture_sampler_uniforms(binding);
 
-    /* validate the program */
-    GLint valid = 0;
-    glValidateProgram(program);
-    glGetProgramiv(program, GL_VALIDATE_STATUS, &valid);
-    if (!valid) {
-        GLchar log[1024];
-        glGetProgramInfoLog(program, 1024, NULL, log);
-        fprintf(stderr, "nv2a: shader validation failed: %s\n", log);
-        abort();
+    /* validate the program (skipped on the async-compile worker because its
+     * context has no VAO bound). */
+    if (validate_program) {
+        GLint valid = 0;
+        glValidateProgram(program);
+        glGetProgramiv(program, GL_VALIDATE_STATUS, &valid);
+        if (!valid) {
+            GLchar log[1024];
+            glGetProgramInfoLog(program, 1024, NULL, log);
+            fprintf(stderr, "nv2a: shader validation failed: %s\n", log);
+            abort();
+        }
     }
 
     update_shader_uniform_locs(binding);
+
+    /* Push the worker's GL command stream so the renderer thread can pick
+     * up the linked program. glFlush is sufficient on shared-name-space
+     * contexts and avoids the p999 regression that glFinish caused by
+     * serializing against Apple's GL command queue (1,345 ms worst-frame
+     * unchanged but p999 went 104 ms -> 382 ms in the 2026-05-01 paired
+     * Crimson runs). The renderer's later glUseProgram on the same
+     * GLuint will pick up the worker's writes either way. */
+    glFlush();
+
+    /* Publish the binding only after all compile work is observable, so
+     * the renderer's check on binding->initialized synchronizes with the
+     * worker's writes. */
+    smp_wmb();
+    qatomic_set(&binding->initialized, true);
+
+    int64_t compile_end_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    nv2a_profile_inc_counter_atomic(NV2A_PROF_SHADER_COMPILE_COUNT);
+    nv2a_profile_add_counter_atomic(NV2A_PROF_SHADER_COMPILE_US_TOTAL,
+                                    (int)(compile_end_us - compile_start_us));
 }
 
 static const char *shader_gl_vendor = NULL;
@@ -325,6 +389,11 @@ bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
         return false;
     }
 
+    /* Time the disk-cached binary load. On Apple's GL-on-Metal driver
+     * glProgramBinary may still translate the cached binary to a Metal
+     * function and compile, so this counter belongs alongside the cold
+     * compile path even though the cost is typically lower. */
+    int64_t compile_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     GLuint gl_program = glCreateProgram();
     glProgramBinary(gl_program, binding->program_format, binding->program,
                     binding->program_size);
@@ -369,6 +438,11 @@ bool pgraph_gl_shader_load_from_memory(ShaderBinding *binding)
     }
 
     update_shader_uniform_locs(binding);
+
+    int64_t compile_end_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    nv2a_profile_inc_counter(NV2A_PROF_SHADER_COMPILE_COUNT);
+    nv2a_profile_add_counter(NV2A_PROF_SHADER_COMPILE_US_TOTAL,
+                             (int)(compile_end_us - compile_start_us));
 
     return true;
 }
@@ -523,6 +597,20 @@ static void shader_cache_entry_post_evict(Lru *lru, LruNode *node)
 {
     ShaderBinding *binding = container_of(node, ShaderBinding, node);
 
+    if (binding->pending_compile) {
+        /* Eviction collided with an in-flight async compile. The cache is
+         * 50K entries and at most a handful of compiles are in flight at
+         * any time, so this should never trigger. If it does, the slice
+         * needs additional coordination (wait-for-compile or refuse-evict
+         * with a retry) — abort so the bug surfaces immediately rather
+         * than racing the worker's generate_shaders. */
+        fprintf(stderr,
+                "nv2a: shader_cache eviction collided with pending async "
+                "compile (binding=%p hash=%llx)\n",
+                binding, (unsigned long long)binding->node.hash);
+        abort();
+    }
+
     if (binding->save_thread) {
         qemu_thread_join(binding->save_thread);
         g_free(binding->save_thread);
@@ -546,11 +634,14 @@ static bool shader_cache_entry_compare(Lru *lru, LruNode *node, const void *key)
     return memcmp(&binding->state, key, sizeof(ShaderState));
 }
 
+static void *pgraph_gl_shader_compile_worker(void *arg);
+
 void pgraph_gl_init_shaders(PGRAPHState *pg)
 {
     PGRAPHGLState *r = pg->gl_renderer_state;
 
     qemu_mutex_init(&r->shader_cache_lock);
+    qemu_mutex_init(&r->shader_module_cache_lock);
     qemu_event_init(&r->shader_cache_writeback_complete, false);
 
     if (!shader_gl_vendor) {
@@ -588,11 +679,42 @@ void pgraph_gl_init_shaders(PGRAPHState *pg)
     r->shader_module_cache.init_node = shader_module_cache_entry_init;
     r->shader_module_cache.compare_nodes = shader_module_cache_entry_compare;
     r->shader_module_cache.post_node_evict = shader_module_cache_entry_post_evict;
+
+    /* Async shader compile worker (XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1).
+     * The third shared GloContext is created in early_context_init only
+     * when the env var was set, so its presence is the canonical signal
+     * that async is enabled here. */
+    r->async_shader_compile_enabled = (g_nv2a_context_shader_compile != NULL);
+    if (r->async_shader_compile_enabled) {
+        qemu_mutex_init(&r->compile_queue_lock);
+        qemu_cond_init(&r->compile_queue_cond);
+        QSIMPLEQ_INIT(&r->compile_queue);
+        r->compile_queue_depth = 0;
+        r->compile_thread_stop = false;
+        r->compile_thread_pg = pg;
+        qemu_thread_create(&r->compile_thread, "pgraph.gl_async_compile",
+                           pgraph_gl_shader_compile_worker, pg,
+                           QEMU_THREAD_JOINABLE);
+        r->compile_thread_started = true;
+    }
 }
 
 void pgraph_gl_finalize_shaders(PGRAPHState *pg)
 {
     PGRAPHGLState *r = pg->gl_renderer_state;
+
+    /* Stop the async compile worker first so it cannot touch the cache or
+     * GL state during teardown. */
+    if (r->compile_thread_started) {
+        qemu_mutex_lock(&r->compile_queue_lock);
+        r->compile_thread_stop = true;
+        qemu_cond_signal(&r->compile_queue_cond);
+        qemu_mutex_unlock(&r->compile_queue_lock);
+        qemu_thread_join(&r->compile_thread);
+        qemu_cond_destroy(&r->compile_queue_cond);
+        qemu_mutex_destroy(&r->compile_queue_lock);
+        r->compile_thread_started = false;
+    }
 
     // Clear out shader cache
     pgraph_gl_shader_write_cache_reload_list(pg); // FIXME: also flushes, rename for clarity
@@ -603,7 +725,76 @@ void pgraph_gl_finalize_shaders(PGRAPHState *pg)
     g_free(r->shader_module_cache_entries);
     r->shader_module_cache_entries = NULL;
 
+    qemu_mutex_destroy(&r->shader_module_cache_lock);
     qemu_mutex_destroy(&r->shader_cache_lock);
+}
+
+/* Async shader compile worker thread.
+ *
+ * Pulls ShaderBinding* entries off PGRAPHGLState::compile_queue and runs
+ * generate_shaders() against the dedicated g_nv2a_context_shader_compile GL
+ * context. Programs/shaders are in the SDL shared name space, so the
+ * renderer's later glUseProgram on g_nv2a_context_render picks up the work
+ * the worker did here. The renderer's bind path checks
+ * binding->pending_compile under shader_cache_lock and skips the draw while
+ * a compile is outstanding, so this thread holds no shader_cache_lock during
+ * the slow generate_shaders call.
+ *
+ * The worker is the only thread that ever sets binding->initialized=true on
+ * the async path; the renderer's synchronous path also sets it but only
+ * when pending_compile is false, so the two writers do not race on a
+ * single binding.
+ */
+static void *pgraph_gl_shader_compile_worker(void *arg)
+{
+    PGRAPHState *pg = (PGRAPHState *)arg;
+    PGRAPHGLState *r = pg->gl_renderer_state;
+
+    glo_set_current(g_nv2a_context_shader_compile);
+
+    while (true) {
+        ShaderBinding *binding = NULL;
+
+        qemu_mutex_lock(&r->compile_queue_lock);
+        while (QSIMPLEQ_EMPTY(&r->compile_queue) && !r->compile_thread_stop) {
+            qemu_cond_wait(&r->compile_queue_cond, &r->compile_queue_lock);
+        }
+        if (r->compile_thread_stop && QSIMPLEQ_EMPTY(&r->compile_queue)) {
+            qemu_mutex_unlock(&r->compile_queue_lock);
+            break;
+        }
+        binding = QSIMPLEQ_FIRST(&r->compile_queue);
+        QSIMPLEQ_REMOVE_HEAD(&r->compile_queue, compile_queue_link);
+        r->compile_queue_depth--;
+        qemu_mutex_unlock(&r->compile_queue_lock);
+
+        /* Compile + link without holding shader_cache_lock. The binding
+         * pointer is stable because the LRU eviction path aborts on
+         * pending_compile (see shader_cache_entry_post_evict). The
+         * shader_module_cache is guarded by its own lock inside
+         * generate_shaders. validate_program=false because the worker
+         * context has no VAO bound. */
+        generate_shaders(r, binding, false);
+
+        if (g_config.perf.cache_shaders) {
+            pgraph_gl_shader_cache_to_disk(binding);
+        }
+
+        /* Publish completion. Order matters: clear pending_compile only
+         * AFTER initialized is set inside generate_shaders, so any
+         * renderer thread that observes pending_compile==false on a
+         * binding will also observe initialized==true. */
+        smp_wmb();
+        qemu_mutex_lock(&r->shader_cache_lock);
+        binding->pending_compile = false;
+        qemu_mutex_unlock(&r->shader_cache_lock);
+
+        nv2a_profile_inc_counter_atomic(
+            NV2A_PROF_SHADER_COMPILE_ASYNC_COMPLETED);
+    }
+
+    glo_set_current(NULL);
+    return NULL;
 }
 
 static void *shader_write_to_disk(void *arg)
@@ -781,6 +972,10 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
 {
     PGRAPHGLState *r = pg->gl_renderer_state;
 
+    /* Reset the skip flag at the top of every bind. Async path may set it
+     * back to true if the requested shader is not yet compiled. */
+    r->shader_skip_draw = false;
+
     bool binding_changed = false;
     if (r->shader_binding &&
         !pgraph_glsl_check_shader_state_dirty(pg, &r->shader_binding->state)) {
@@ -805,14 +1000,55 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
     LruNode *node = lru_lookup(&r->shader_cache, shader_state_hash, &state);
     ShaderBinding *binding = container_of(node, ShaderBinding, node);
 
-    if (!binding->initialized && !pgraph_gl_shader_load_from_memory(binding)) {
+    bool initialized = qatomic_read(&binding->initialized);
+
+    /* Disk-cache fast path: try only when no async compile is already in
+     * flight for this binding. With async enabled, the worker may already
+     * own this binding and be mid-compile via generate_shaders. */
+    if (!initialized && !binding->pending_compile) {
+        if (pgraph_gl_shader_load_from_memory(binding)) {
+            initialized = true;
+        }
+    }
+
+    if (!initialized && r->async_shader_compile_enabled) {
+        if (!binding->pending_compile) {
+            binding->pending_compile = true;
+            nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
+            nv2a_profile_inc_counter(NV2A_PROF_SHADER_COMPILE_ASYNC_QUEUED);
+
+            qemu_mutex_lock(&r->compile_queue_lock);
+            QSIMPLEQ_INSERT_TAIL(&r->compile_queue, binding,
+                                 compile_queue_link);
+            r->compile_queue_depth++;
+            qemu_cond_signal(&r->compile_queue_cond);
+            qemu_mutex_unlock(&r->compile_queue_lock);
+        }
+
+        /* Skip the draw while compile is in flight. r->shader_binding is
+         * left at its previous value (or NULL) so downstream draw paths
+         * never act on a half-initialized binding. The renderer's flow
+         * still terminates the GL debug group and releases the cache
+         * lock. */
+        nv2a_profile_inc_counter(NV2A_PROF_SHADER_DRAWS_SKIPPED_PENDING);
+        r->shader_skip_draw = true;
+        qemu_mutex_unlock(&r->shader_cache_lock);
+        NV2A_GL_DGROUP_END();
+        return;
+    }
+
+    if (!initialized) {
+        /* Synchronous fallback (default path when async is off, or async
+         * is on but the binding still needs an initial compile that
+         * cannot be deferred for some future reason). */
         nv2a_profile_inc_counter(NV2A_PROF_SHADER_GEN);
-        generate_shaders(r, binding);
+        generate_shaders(r, binding, true);
         if (g_config.perf.cache_shaders) {
             pgraph_gl_shader_cache_to_disk(binding);
         }
     }
-    assert(binding->initialized);
+
+    assert(qatomic_read(&binding->initialized));
     r->shader_binding = binding;
     pg->program_data_dirty = false;
     pgraph_gl_trace_native_tri_depth_state(pg, binding, "bind", "shader");
@@ -832,7 +1068,7 @@ void pgraph_gl_bind_shaders(PGRAPHState *pg)
 
 update_uniforms:
     assert(r->shader_binding);
-    assert(r->shader_binding->initialized);
+    assert(qatomic_read(&r->shader_binding->initialized));
     update_shader_uniforms(pg, r->shader_binding);
 }
 
