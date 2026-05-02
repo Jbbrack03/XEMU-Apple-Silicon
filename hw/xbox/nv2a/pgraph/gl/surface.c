@@ -32,6 +32,27 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
                                        bool swizzle, bool flip, bool downscale,
                                        uint8_t *pixels);
 static void surface_get_dimensions(PGRAPHState *pg, unsigned int *width, unsigned int *height);
+static void bind_current_surface(NV2AState *d);
+
+/* XEMU_GL_MSAA: parse the env var into a sample count. Returns 0 when the
+ * var is unset, 0, or unparseable. Any other value is clamped to the
+ * implementation's GL_MAX_SAMPLES at init time. */
+static unsigned int pgraph_gl_msaa_env_samples(void)
+{
+    const char *value = getenv("XEMU_GL_MSAA");
+    if (!value || !value[0]) {
+        return 0;
+    }
+    char *endp = NULL;
+    unsigned long parsed = strtoul(value, &endp, 10);
+    if (!endp || *endp != '\0') {
+        return 0;
+    }
+    if (parsed <= 1) {
+        return 0;
+    }
+    return (unsigned int)parsed;
+}
 
 void pgraph_gl_set_surface_scale_factor(NV2AState *d, unsigned int scale)
 {
@@ -108,15 +129,142 @@ void pgraph_gl_set_surface_dirty(PGRAPHState *pg, bool color, bool zeta)
         r->color_binding->draw_dirty |= color;
         r->color_binding->frame_time = pg->frame_time;
         r->color_binding->cleared = false;
-
+        if (color) {
+            /* New draws made the resolved texture stale. */
+            r->color_binding->msaa_resolved = false;
+        }
     }
 
     if (r->zeta_binding) {
         r->zeta_binding->draw_dirty |= zeta;
         r->zeta_binding->frame_time = pg->frame_time;
         r->zeta_binding->cleared = false;
-
+        if (zeta) {
+            r->zeta_binding->msaa_resolved = false;
+        }
     }
+}
+
+/* XEMU_GL_MSAA: blit-resolve from the surface's multisample renderbuffer
+ * (attached to the draw FBO) into its single-sample texture (attached to
+ * the resolve FBO). Idempotent within a draw_dirty epoch — once resolved,
+ * subsequent calls are no-ops until pgraph_gl_set_surface_dirty marks the
+ * surface dirty again or pgraph_gl_upload_surface_data overwrites the
+ * texture (which also implies the texture is current).
+ *
+ * Caller responsibility: the renderer's draw FBO (gl_framebuffer) must
+ * remain bound on entry; this function restores it on exit. */
+void pgraph_gl_resolve_surface_msaa(NV2AState *d, SurfaceBinding *surface)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHGLState *r = pg->gl_renderer_state;
+
+    if (!surface || !surface->gl_buffer_msaa || surface->msaa_resolved) {
+        return;
+    }
+    if (!surface->width || !surface->height) {
+        surface->msaa_resolved = true;
+        return;
+    }
+
+    int64_t resolve_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    unsigned int width = surface->width, height = surface->height;
+    pgraph_apply_scaling_factor(pg, &width, &height);
+
+    /* Set up the read-side FBO from the multisample renderbuffer and the
+     * draw-side FBO from the surface's resolved single-sample texture.
+     *
+     * We use the resolve FBO for BOTH source and destination: attach the
+     * surface's multisample renderbuffer to the resolve FBO (read), and
+     * the surface's single-sample texture (draw). This keeps the read-side
+     * isolated to a single attachment matching the draw-side, avoiding
+     * any cross-attachment dimension/format constraints Apple's GL-on-
+     * Metal driver imposes (the renderer's main FBO can have color and
+     * zeta attachments at different sizes, which empirically causes
+     * GL_INVALID_OPERATION on multisample resolve on Apple's GL even
+     * when the per-attachment dimensions match the blit rectangle). */
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->gl_resolve_framebuffer);
+    glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, surface->fmt.gl_attachment,
+                              GL_RENDERBUFFER, surface->gl_buffer_msaa);
+    /* Use a sister single-sample renderbuffer or separate FBO for the
+     * draw side. Since we only have one resolve FBO, attach the texture
+     * via glFramebufferTexture2D to the renderer's main FBO (which we
+     * temporarily repurpose as draw — the renderer's renderbuffer
+     * attachments at the same gl_attachment will be replaced by the
+     * texture and restored via bind_current_surface afterward). */
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, r->gl_framebuffer);
+    /* Detach all attachments from the draw FBO that don't match this
+     * surface's gl_attachment so the draw FBO has a single attachment
+     * matching the read side. */
+    if (surface->fmt.gl_attachment != GL_COLOR_ATTACHMENT0) {
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                  GL_RENDERBUFFER, 0);
+    }
+    if (surface->fmt.gl_attachment != GL_DEPTH_ATTACHMENT) {
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, 0);
+    }
+    if (surface->fmt.gl_attachment != GL_DEPTH_STENCIL_ATTACHMENT) {
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER,
+                                  GL_DEPTH_STENCIL_ATTACHMENT,
+                                  GL_RENDERBUFFER, 0);
+    }
+    /* Replace the matching attachment's renderbuffer with the texture. */
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, surface->fmt.gl_attachment,
+                           GL_TEXTURE_2D, surface->gl_buffer, 0);
+
+    GLbitfield mask;
+    if (surface->color) {
+        mask = GL_COLOR_BUFFER_BIT;
+        GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, draw_buffers);
+    } else {
+        mask = GL_DEPTH_BUFFER_BIT;
+        if (surface->fmt.gl_attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+            mask |= GL_STENCIL_BUFFER_BIT;
+        }
+        /* Depth-only draw FBO: explicitly disable color draw buffers so
+         * the FBO is FRAMEBUFFER_COMPLETE (the default DRAW_BUFFER0 is
+         * GL_COLOR_ATTACHMENT0, which would reference a non-existent
+         * attachment). */
+        GLenum draw_buffers[] = { GL_NONE };
+        glDrawBuffers(1, draw_buffers);
+    }
+    /* glBlitFramebuffer is affected by GL_SCISSOR_TEST — the renderer
+     * leaves the scissor enabled to a per-draw rectangle, so disable it
+     * for the resolve. Saved and restored to match prior renderer state.*/
+    GLboolean prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    if (prev_scissor) {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    /* Per spec: depth/stencil resolves require GL_NEAREST. Color resolves
+     * with multisample sources also use GL_NEAREST — the resolve filter is
+     * implicit in the multisample-to-single-sample blit; the GL_NEAREST
+     * argument is the spec-required value, not the visual filter. */
+    glBlitFramebuffer(0, 0, (GLint)width, (GLint)height,
+                      0, 0, (GLint)width, (GLint)height, mask, GL_NEAREST);
+    if (prev_scissor) {
+        glEnable(GL_SCISSOR_TEST);
+    }
+
+    /* Detach the texture from the renderer's main FBO and detach the
+     * renderbuffer from the resolve FBO. bind_current_surface restores
+     * the renderer's main FBO to its multisample-renderbuffer-attached
+     * state. */
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, surface->fmt.gl_attachment,
+                           GL_TEXTURE_2D, 0, 0);
+    glFramebufferRenderbuffer(GL_READ_FRAMEBUFFER, surface->fmt.gl_attachment,
+                              GL_RENDERBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, r->gl_framebuffer);
+    bind_current_surface(d);
+
+    surface->msaa_resolved = true;
+
+    int64_t resolve_us =
+        qemu_clock_get_us(QEMU_CLOCK_REALTIME) - resolve_start_us;
+    nv2a_profile_add_counter(NV2A_PROF_MSAA_RESOLVE_US_TOTAL,
+                             (int)resolve_us);
 }
 
 static void init_render_to_texture(PGRAPHState *pg)
@@ -325,6 +473,14 @@ void pgraph_gl_render_surface_to_texture(NV2AState *d, SurfaceBinding *surface,
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
     int64_t surf_to_tex_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    /* XEMU_GL_MSAA: both fast (sample surface->gl_buffer in render_surface_to)
+     * and slow (download via surface_download_to_buffer) paths read from the
+     * single-sample texture. Make sure it mirrors the multisample buffer
+     * before either path runs. */
+    if (surface->gl_buffer_msaa && !surface->msaa_resolved) {
+        pgraph_gl_resolve_surface_msaa(d, surface);
+    }
 
     if (!surface_to_texture_can_fastpath(surface, texture_shape)) {
         render_surface_to_texture_slow(d, surface, texture,
@@ -593,6 +749,10 @@ void pgraph_gl_surface_invalidate(NV2AState *d, SurfaceBinding *surface)
     unregister_cpu_access_callback(d, surface);
 
     glDeleteTextures(1, &surface->gl_buffer);
+    if (surface->gl_buffer_msaa) {
+        glDeleteRenderbuffers(1, &surface->gl_buffer_msaa);
+        surface->gl_buffer_msaa = 0;
+    }
 
     QTAILQ_REMOVE(&r->surfaces, surface, entry);
     g_free(surface);
@@ -655,13 +815,29 @@ static void bind_current_surface(NV2AState *d)
     PGRAPHGLState *r = pg->gl_renderer_state;
 
     if (r->color_binding) {
-        glFramebufferTexture2D(GL_FRAMEBUFFER, r->color_binding->fmt.gl_attachment,
-                               GL_TEXTURE_2D, r->color_binding->gl_buffer, 0);
+        if (r->color_binding->gl_buffer_msaa) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, r->color_binding->fmt.gl_attachment,
+                GL_RENDERBUFFER, r->color_binding->gl_buffer_msaa);
+        } else {
+            glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                   r->color_binding->fmt.gl_attachment,
+                                   GL_TEXTURE_2D,
+                                   r->color_binding->gl_buffer, 0);
+        }
     }
 
     if (r->zeta_binding) {
-        glFramebufferTexture2D(GL_FRAMEBUFFER, r->zeta_binding->fmt.gl_attachment,
-                               GL_TEXTURE_2D, r->zeta_binding->gl_buffer, 0);
+        if (r->zeta_binding->gl_buffer_msaa) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, r->zeta_binding->fmt.gl_attachment,
+                GL_RENDERBUFFER, r->zeta_binding->gl_buffer_msaa);
+        } else {
+            glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                   r->zeta_binding->fmt.gl_attachment,
+                                   GL_TEXTURE_2D,
+                                   r->zeta_binding->gl_buffer, 0);
+        }
     }
 
     if (r->color_binding || r->zeta_binding) {
@@ -707,6 +883,11 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
 
     if (!surface->width || !surface->height) {
         return;
+    }
+
+    /* XEMU_GL_MSAA: ensure the resolved texture is current before reading. */
+    if (surface->gl_buffer_msaa && !surface->msaa_resolved) {
+        pgraph_gl_resolve_surface_msaa(d, surface);
     }
 
     trace_nv2a_pgraph_surface_download(
@@ -974,15 +1155,81 @@ void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
 
     glBindTexture(GL_TEXTURE_2D, surface->gl_buffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
-                 height, 0, surface->fmt.gl_format, surface->fmt.gl_type,
-                 gl_read_buf);
+    if (surface->gl_buffer_msaa) {
+        /* XEMU_GL_MSAA: the texture is immutable storage (glTexStorage2D);
+         * use glTexSubImage2D to keep the sized internal format stable so
+         * the multisample resolve blit stays valid. */
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                        surface->fmt.gl_format, surface->fmt.gl_type,
+                        gl_read_buf);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, surface->fmt.gl_internal_format, width,
+                     height, 0, surface->fmt.gl_format, surface->fmt.gl_type,
+                     gl_read_buf);
+    }
     glPixelStorei(GL_UNPACK_ALIGNMENT, prev_unpack_alignment);
     if (optimal_buf != buf) {
         g_free(optimal_buf);
     }
     if (surface->swizzle) {
         g_free(buf);
+    }
+
+    /* XEMU_GL_MSAA: seed the multisample renderbuffer from the freshly
+     * uploaded texture so subsequent partial-coverage draws see the
+     * uploaded content rather than stale renderbuffer contents. The blit
+     * spec allows single-sample to multisample copies (the source value is
+     * broadcast to all destination samples), which is exactly what we need
+     * here: VRAM has only one sample per texel. */
+    if (surface->gl_buffer_msaa) {
+        PGRAPHGLState *r = pg->gl_renderer_state;
+        /* Use the renderer's draw FBO as the read source (texture) and the
+         * resolve FBO as the draw destination (multisample renderbuffer).
+         * This is the inverse of pgraph_gl_resolve_surface_msaa, which
+         * normally reads from the renderbuffer and writes to the texture.
+         * Keeping draw_buffers state mutations on the resolve FBO (which
+         * we own end-to-end) keeps the renderer's main FBO state
+         * untouched. */
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, r->gl_framebuffer);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER,
+                               surface->fmt.gl_attachment, GL_TEXTURE_2D,
+                               surface->gl_buffer, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, r->gl_resolve_framebuffer);
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER,
+                                  surface->fmt.gl_attachment,
+                                  GL_RENDERBUFFER, surface->gl_buffer_msaa);
+        GLbitfield mask;
+        if (surface->color) {
+            mask = GL_COLOR_BUFFER_BIT;
+            GLenum draw_buffers[] = { GL_COLOR_ATTACHMENT0 };
+            glDrawBuffers(1, draw_buffers);
+        } else {
+            mask = GL_DEPTH_BUFFER_BIT;
+            if (surface->fmt.gl_attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+                mask |= GL_STENCIL_BUFFER_BIT;
+            }
+            GLenum draw_buffers[] = { GL_NONE };
+            glDrawBuffers(1, draw_buffers);
+        }
+        int64_t seed_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        glBlitFramebuffer(0, 0, (GLint)width, (GLint)height,
+                          0, 0, (GLint)width, (GLint)height,
+                          mask, GL_NEAREST);
+        int64_t seed_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - seed_start_us;
+        nv2a_profile_add_counter(NV2A_PROF_MSAA_RESOLVE_US_TOTAL,
+                                 (int)seed_us);
+        /* Detach the renderbuffer from the resolve FBO and the texture
+         * from the renderer FBO so the next caller sees a clean slate. */
+        glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER,
+                                  surface->fmt.gl_attachment,
+                                  GL_RENDERBUFFER, 0);
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER,
+                               surface->fmt.gl_attachment, GL_TEXTURE_2D,
+                               0, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, r->gl_framebuffer);
+        /* Renderbuffer and texture now match. */
+        surface->msaa_resolved = true;
     }
 
     // Rebind previous framebuffer binding
@@ -1077,6 +1324,8 @@ static void populate_surface_binding_entry_sized(NV2AState *d, bool color,
     entry->shape = (color || !r->color_binding) ? pg->surface_shape :
                                                    r->color_binding->shape;
     entry->gl_buffer = 0;
+    entry->gl_buffer_msaa = 0;
+    entry->msaa_resolved = true;
     entry->fmt = fmt;
     entry->color = color;
     entry->swizzle =
@@ -1249,9 +1498,31 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             unsigned int width = entry.width ? entry.width : 1;
             unsigned int height = entry.height ? entry.height : 1;
             pgraph_apply_scaling_factor(pg, &width, &height);
-            glTexImage2D(GL_TEXTURE_2D, 0, entry.fmt.gl_internal_format, width,
-                         height, 0, entry.fmt.gl_format, entry.fmt.gl_type,
-                         NULL);
+            /* XEMU_GL_MSAA: when MSAA is enabled, allocate the texture with
+             * immutable storage (glTexStorage2D). This guarantees the sized
+             * internal format is exactly what we ask for and prevents later
+             * glTexImage2D calls (in pgraph_gl_upload_surface_data) from
+             * re-allocating the texture with a different driver-interpreted
+             * sized format, which would break the multisample resolve blit
+             * (spec requires "internal color formats identical" between the
+             * multisample read source and the single-sample resolve target).
+             * The upload path is patched separately to use glTexSubImage2D
+             * when the texture is immutable. */
+            if (r->msaa_samples > 0) {
+                glTexStorage2D(GL_TEXTURE_2D, 1,
+                               entry.fmt.gl_internal_format, width, height);
+                glGenRenderbuffers(1, &entry.gl_buffer_msaa);
+                glBindRenderbuffer(GL_RENDERBUFFER, entry.gl_buffer_msaa);
+                glRenderbufferStorageMultisample(
+                    GL_RENDERBUFFER, (GLsizei)r->msaa_samples,
+                    entry.fmt.gl_internal_format, width, height);
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+                entry.msaa_resolved = false;
+            } else {
+                glTexImage2D(GL_TEXTURE_2D, 0, entry.fmt.gl_internal_format,
+                             width, height, 0, entry.fmt.gl_format,
+                             entry.fmt.gl_type, NULL);
+            }
             found = surface_put(d, entry.vram_addr, &entry);
 
             /* FIXME: Refactor */
@@ -1290,8 +1561,15 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         }
 #undef TRACE_ARGS
 
-        glFramebufferTexture2D(GL_FRAMEBUFFER, entry.fmt.gl_attachment,
-                               GL_TEXTURE_2D, found->gl_buffer, 0);
+        if (found->gl_buffer_msaa) {
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                      entry.fmt.gl_attachment,
+                                      GL_RENDERBUFFER,
+                                      found->gl_buffer_msaa);
+        } else {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, entry.fmt.gl_attachment,
+                                   GL_TEXTURE_2D, found->gl_buffer, 0);
+        }
         assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                GL_FRAMEBUFFER_COMPLETE);
 
@@ -1319,19 +1597,34 @@ void pgraph_gl_unbind_surface(NV2AState *d, bool color)
 
     if (color) {
         if (r->color_binding) {
-            glFramebufferTexture2D(GL_FRAMEBUFFER,
-                                   GL_COLOR_ATTACHMENT0,
-                                   GL_TEXTURE_2D, 0, 0);
+            if (r->color_binding->gl_buffer_msaa) {
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                          GL_COLOR_ATTACHMENT0,
+                                          GL_RENDERBUFFER, 0);
+            } else {
+                glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                       GL_COLOR_ATTACHMENT0,
+                                       GL_TEXTURE_2D, 0, 0);
+            }
             r->color_binding = NULL;
         }
     } else {
         if (r->zeta_binding) {
-            glFramebufferTexture2D(GL_FRAMEBUFFER,
-                                   GL_DEPTH_ATTACHMENT,
-                                   GL_TEXTURE_2D, 0, 0);
-            glFramebufferTexture2D(GL_FRAMEBUFFER,
-                                   GL_DEPTH_STENCIL_ATTACHMENT,
-                                   GL_TEXTURE_2D, 0, 0);
+            if (r->zeta_binding->gl_buffer_msaa) {
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                          GL_DEPTH_ATTACHMENT,
+                                          GL_RENDERBUFFER, 0);
+                glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                          GL_DEPTH_STENCIL_ATTACHMENT,
+                                          GL_RENDERBUFFER, 0);
+            } else {
+                glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                       GL_DEPTH_ATTACHMENT,
+                                       GL_TEXTURE_2D, 0, 0);
+                glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                       GL_DEPTH_STENCIL_ATTACHMENT,
+                                       GL_TEXTURE_2D, 0, 0);
+            }
             r->zeta_binding = NULL;
         }
     }
@@ -1440,6 +1733,33 @@ void pgraph_gl_init_surfaces(PGRAPHState *pg)
     pgraph_gl_reload_surface_scale_factor(pg);
     glGenFramebuffers(1, &r->gl_framebuffer);
     glBindFramebuffer(GL_FRAMEBUFFER, r->gl_framebuffer);
+
+    /* XEMU_GL_MSAA: clamp the requested sample count to GL_MAX_SAMPLES on
+     * the active context. 0 means MSAA disabled (default). */
+    unsigned int requested = pgraph_gl_msaa_env_samples();
+    r->msaa_samples = 0;
+    r->gl_resolve_framebuffer = 0;
+    if (requested > 0) {
+        GLint max_samples = 0;
+        glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
+        if (max_samples < 2) {
+            fprintf(stderr,
+                    "xemu-perf: gl_msaa=0 source=XEMU_GL_MSAA "
+                    "requested=%u clamped=0 reason=GL_MAX_SAMPLES=%d\n",
+                    requested, (int)max_samples);
+        } else {
+            unsigned int clamped =
+                requested > (unsigned int)max_samples ?
+                    (unsigned int)max_samples : requested;
+            r->msaa_samples = clamped;
+            glGenFramebuffers(1, &r->gl_resolve_framebuffer);
+            fprintf(stderr,
+                    "xemu-perf: gl_msaa=%u source=XEMU_GL_MSAA "
+                    "requested=%u max_samples=%d\n",
+                    clamped, requested, (int)max_samples);
+        }
+    }
+
     QTAILQ_INIT(&r->surfaces);
     r->downloads_pending = false;
     qemu_event_init(&r->downloads_complete, false);
@@ -1477,6 +1797,11 @@ void pgraph_gl_finalize_surfaces(PGRAPHState *pg)
     flush_surfaces(d);
     glDeleteFramebuffers(1, &r->gl_framebuffer);
     r->gl_framebuffer = 0;
+
+    if (r->gl_resolve_framebuffer) {
+        glDeleteFramebuffers(1, &r->gl_resolve_framebuffer);
+        r->gl_resolve_framebuffer = 0;
+    }
 
     finalize_render_to_texture(pg);
 }

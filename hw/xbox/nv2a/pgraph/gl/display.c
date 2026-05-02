@@ -387,6 +387,14 @@ void pgraph_gl_sync(NV2AState *d)
 
     /* Wait for queued commands to complete */
     pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+    /* XEMU_GL_MSAA: ensure the multisample-rendered content is resolved
+     * into the single-sample texture before the display context samples
+     * it. The render context is current here; the resolve uses the render
+     * FBO. The subsequent gl_fence() ensures the resolve completes before
+     * the display context reads the (shared) texture. */
+    if (surface->gl_buffer_msaa && !surface->msaa_resolved) {
+        pgraph_gl_resolve_surface_msaa(d, surface);
+    }
     gl_fence();
     assert(glGetError() == GL_NO_ERROR);
 

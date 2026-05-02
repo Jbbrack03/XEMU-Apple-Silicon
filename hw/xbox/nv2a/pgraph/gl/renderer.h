@@ -63,6 +63,15 @@ typedef struct SurfaceBinding {
     bool upload_pending;
 
     GLuint gl_buffer;
+    /* XEMU_GL_MSAA: when MSAA is enabled, gl_buffer_msaa is a multisample
+     * renderbuffer attached to the draw FBO; gl_buffer remains the single-
+     * sample texture used for sampling, readback, and display. The texture
+     * is kept up to date with gl_buffer_msaa via a blit-resolve performed
+     * lazily before any consumer (download / surface_to_texture / display
+     * render) touches the texture. msaa_resolved is true when the texture
+     * already mirrors the renderbuffer for the current draw_dirty epoch. */
+    GLuint gl_buffer_msaa;
+    bool msaa_resolved;
     SurfaceFormatInfo fmt;
 } SurfaceBinding;
 
@@ -178,6 +187,11 @@ typedef struct QueryReport {
 
 typedef struct PGRAPHGLState {
     GLuint gl_framebuffer;
+    /* XEMU_GL_MSAA={0,2,4,8}: 0 disables MSAA, anything else clamped to
+     * GL_MAX_SAMPLES at init. gl_resolve_framebuffer is a sibling FBO
+     * used as the read-side target during the MSAA blit-resolve. */
+    GLuint gl_resolve_framebuffer;
+    unsigned int msaa_samples;
     GLuint gl_display_buffer;
     GLint gl_display_buffer_internal_format;
     GLsizei gl_display_buffer_width;
@@ -324,6 +338,7 @@ SurfaceBinding *pgraph_gl_surface_get_within(NV2AState *d, hwaddr addr);
 void pgraph_gl_surface_invalidate(NV2AState *d, SurfaceBinding *e);
 void pgraph_gl_unbind_surface(NV2AState *d, bool color);
 void pgraph_gl_upload_surface_data(NV2AState *d, SurfaceBinding *surface, bool force);
+void pgraph_gl_resolve_surface_msaa(NV2AState *d, SurfaceBinding *surface);
 void pgraph_gl_shader_cache_to_disk(ShaderBinding *snode);
 bool pgraph_gl_shader_load_from_memory(ShaderBinding *snode);
 void pgraph_gl_shader_write_cache_reload_list(PGRAPHState *pg);
