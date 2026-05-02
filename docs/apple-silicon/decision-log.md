@@ -1643,3 +1643,83 @@ Verification:
   run).
 - V3 composite-goal validation:
   `benchmarks/2026-05-02-composite-goal-validation.md`.
+
+
+## 2026-05-02: V6 rules out per-event 1 ms hypotheses; V7 cumulative-counter slice queued
+
+V6 added three new spike sources inside `cpu_exec_loop`
+(`tcg_tb_lookup`, `tcg_tb_gen_code`, `tcg_handle_interrupt`) to
+decompose the 1 ms-class `tcg_tb_chain` events D3 attributed at
+Xbox kernel PC `0x80030e4c`. A 300 s Crimson retail route at the
+1 ms threshold produced **zero** `tcg_tb_lookup` events, **zero**
+`tcg_tb_gen_code` events, and one **`tcg_handle_interrupt`** event
+(2.4 ms one-off). The Crimson 1.375 s worst-frame interval contains
+**zero** V6 spike events. Combined with D3 (zero
+`qemu_main_loop_iter`, zero `aio_run_iter`, zero `bql_acquire_wait`,
+zero `mmio_helper_block` in the same window), every 1 ms+ event
+class instrumented across V3 + D3 + V6 is empty inside the worst
+frame except `tcg_tb_chain` itself.
+
+The `tcg_tb_chain` events themselves are reframed: 99.97 % of the
+run's 55,684 chains fall in the 1000-1099 µs bucket (mean
+`tb_count=1918` at ~500 ns per inner-loop iteration). This is
+**normal hot-path TCG execution**, not a host-side wait. D3's
+"per-1 kHz timer-driven sleep/yield" hypothesis is **disproved** —
+no host-side wait spike fires at 1 ms inside the inner loop.
+
+The dominant new V6 finding is in the **always-on per-interval
+TCG counters** (added in earlier V2/V3 work, not V6):
+worst-frame interval shows `TCG_TB_INVALIDATE_COUNT=8954` (~6×
+steady state), `TCG_NOTDIRTY_PAGES_HIT=1200` (~24× steady state),
+`TCG_TB_INVALIDATE_BURST_MAX=438`, and
+`TCG_JMP_CACHE_ZEROED_BUCKETS=74,490`. These together describe a
+**translation-churn storm** distributed across many sub-millisecond
+events — the hypothesis V6's per-event threshold cannot resolve.
+The render loop is blocked during the worst frame
+(`NV2A_PRESENT_HEARTBEAT=4` in 1.4 s, vs ~30/s steady state).
+Worst-frame guest PC remains `0x80030e4c` (98 % of chains, same
+as D3), in the Xbox kernel range.
+
+**Decision:** V6 ships **as instrumentation only** (no default-on
+behavior change, no flag promotion). The three new spike sources
+remain permanently in the tree gated on `XEMU_PERF_SPIKE_LOG_TCG=1`
+with one untaken-branch cost when off — useful for future
+regression triage even with a NEGATIVE per-event result.
+
+**Next slice (top of stack): V7 — cumulative per-interval
+`TCG_TB_LOOKUP_US_TOTAL` / `TCG_TB_GEN_CODE_US_TOTAL` /
+`TCG_HANDLE_INTERRUPT_US_TOTAL` counters.** Gate the wallclock
+measurement on a new `XEMU_TCG_PHASE_LOG=1` env var (cost when
+on: ~36 % vCPU overhead worst case at 3M TBs/interval; cost when
+off: zero). Counter emission stays unconditional. Decision criterion:
+if V7 confirms `TCG_TB_GEN_CODE_US_TOTAL ≥ 300 ms` in the
+worst-frame interval, the **PPTC slice (strategy.md Phase 5a) is
+justified** — Ryujinx-style persistent translation cache that
+survives `tb_flush`, eliminating the cumulative re-translation
+cost. Estimated ceiling: drop the worst frame from 1.375 s to
+~900 ms. If V7 instead points at `TCG_TB_LOOKUP_US_TOTAL` or
+`TCG_HANDLE_INTERRUPT_US_TOTAL`, the fix is qht hash-chain
+investigation or i386 IRQ-injection cost respectively.
+
+**Tools rule (project rule #5):** V6 added the new instrumentation
+inline in `accel/tcg/cpu-exec.c` rather than building a new helper
+module. The pattern is identical to V3 / D3 (gated atomic-flag
+test + structured spike emit), and reuses the existing
+`xemu_spike_emit()` helper. No new tool to document.
+
+**Audio gate ordering (re-affirmed by user 2026-05-02):** The
+`XEMU_APU_LOCK_RELEASE` audio listen-test gate stays **deferred**
+until the video-judder pillar is fully closed. Judder-induced
+audio skips would confound the listen-test; the slice remains
+default-on under "PARTIAL — audio gate deferred" status. Same
+ordering applies to any future audio-side optimization.
+
+Verification:
+
+- V6: `benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md`,
+  `benchmark-runs/20260502-105232-crimson-skies/` (M1 attribution
+  run, 300 s Crimson retail route, 1 ms spike threshold).
+- Sanity: `benchmark-runs/20260502-105141-pgr2/` (M0 PGR2 mid-route
+  snapshot, 15 s, confirmed V6 emit path works end-to-end).
+- Build commit: `ac49afee696654e3e74b9c8430dd52801d3447d6` (dirty,
+  V6 instrumentation in working tree).

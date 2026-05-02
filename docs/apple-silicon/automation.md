@@ -577,6 +577,39 @@ Two enable bits, each off by default:
     on `mr=mcpx-apu-vp` at `addr=0xfe8202fc` corresponds to
     `NV1BA0_PIO_VOICE_LOCK` blocking on `MCPXAPUState::lock` while
     the audio worker's `se_frame()` is mid-iteration.
+  - `tcg_handle_interrupt` (V6, 2026-05-02) — one
+    `cpu_handle_interrupt` call exceeded threshold. The function
+    early-exits in <1 µs when no interrupt is pending; spikes here
+    at the 1 ms threshold mean either (a) `bql_lock()` inside the
+    `unlikely(cpu_test_interrupt(...))` branch waited for another
+    thread to release the BQL, or (b) the target
+    `cpu_exec_interrupt` callback itself did expensive work
+    (i386 IRQ injection, exception delivery, SVM/VMX hooks).
+    `extra` carries `exit=N ex_idx=N int_req=0xN` (post-call
+    state — `interrupt_request` may have been cleared by the
+    handler). One of the three V6 sources used to decompose the
+    1 ms-class `tcg_tb_chain` events at Xbox kernel PC `0x80030e4c`
+    that dominate the residual Crimson worst-frame attribution.
+  - `tcg_tb_lookup` (V6) — one `tb_lookup` call (per-CPU jmp-cache
+    probe + qht hash lookup on miss) exceeded threshold. Cost is
+    sub-microsecond in steady state; a 1 ms-class spike points the
+    bottleneck at jmp-cache thrash (recently-flushed cache after
+    `tb_flush` / `tb_invalidate_phys_page_range__locked`) or a
+    pathological qht hash chain walk. `extra` carries
+    `pc=0xPC hit=0|1` (1 = lookup found a TB, 0 = miss → translation
+    follows). Distinct from translation cost (`tcg_tb_gen_code`)
+    and interrupt-handling cost (`tcg_handle_interrupt`).
+  - `tcg_tb_gen_code` (V6) — one `tb_gen_code` call (the TCG
+    translation pass plus its `mmap_lock`/`mmap_unlock` bracket)
+    exceeded threshold. Only fires after a `tb_lookup` miss. **The
+    leading hypothesis for the unattributed Crimson worst-frame
+    remainder**: 11.8 % of vCPU wallclock spent in 1 ms-class
+    chains starting at kernel PC `0x80030e4c` is consistent with
+    code re-translation churn driven by self-modifying code or
+    icache-cold paths. `extra` carries `pc=0xPC cflags=0xN`. If V6
+    confirms tb_gen_code dominance, follow-on slice is **PPTC**
+    (strategy.md Phase 5a — Ryujinx-style persistent profile-guided
+    translation cache that survives across `tb_flush`).
 
   All TCG-side instrumentation is gated on `xemu_spike_log_tcg_enabled`
   so the steady-state cost when off is one global load + branch per

@@ -209,9 +209,12 @@ Logging:
   Adds: `tcg_tb_chain`, `tcg_invalidate_burst`, `tcg_notdirty_storm`,
   `tcg_x87_storm`, `tcg_pg_lock_wait`, `renderer_pg_lock_wait` (V3),
   plus `qemu_main_loop_iter`, `bql_acquire_wait`, `aio_run_iter`,
-  `mmio_helper_block` (D3 — see `docs/apple-silicon/automation.md`
-  for the full list and `extra=` field semantics). Hot-path cost when
-  off is one global load + branch per call site. Off by default.
+  `mmio_helper_block` (D3), plus `tcg_handle_interrupt`,
+  `tcg_tb_lookup`, `tcg_tb_gen_code` (V6 — per-phase decomposition
+  of the cpu_exec_loop inner iteration; see
+  `docs/apple-silicon/automation.md` for the full list and `extra=`
+  field semantics). Hot-path cost when off is one global load +
+  branch per call site. Off by default.
 - `XEMU_SNAPSHOT_NO_THUMBNAIL=1` — skip snapshot thumbnail capture.
 
 Display-pacing counters (D3, 2026-05-02; see `automation.md` for the

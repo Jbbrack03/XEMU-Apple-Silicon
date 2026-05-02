@@ -199,17 +199,35 @@ Start in `handoff.md`, section `Next Session Checklist` (top of the
   titles' engines render at 30 Hz on real Xbox hardware. See
   decision-log "2026-05-02: Confirm 30 FPS cap … is title-intrinsic
   …".
-- **Highest-priority next task: V6 `cpu_exec_loop` per-phase
-  instrumentation.** Attribute the residual ~970 ms of unattributed
-  sub-1 ms `tb_gen_code` churn + kernel-PC `0x80030e4c` 1 ms-class
-  TB chains in the Crimson 1.28-s worst frame. Leading follow-on
-  fix: PPTC (strategy.md Phase 5a). See decision-log "2026-05-02: V3
-  + D3 attribute the residual Crimson worst-frame to TCG-internal
-  sub-1 ms churn (V6 next)".
+- **V6 `cpu_exec_loop` per-phase instrumentation landed 2026-05-02
+  as instrumentation only — NEGATIVE per-event 1 ms result.**
+  Three new spike sources (`tcg_tb_lookup`, `tcg_tb_gen_code`,
+  `tcg_handle_interrupt`) gated on `XEMU_PERF_SPIKE_LOG_TCG=1`.
+  Crimson 300 s at 1 ms threshold: 0 / 0 / 1 events; zero V6 events
+  in the 1.375 s worst-frame interval. The 1 ms-class
+  `tcg_tb_chain` events are reframed as **normal hot-path
+  execution** (mean tb_count = 1918 × ~500 ns/iter), disproving
+  D3's host-side-wait hypothesis. The dominant new finding is the
+  worst-frame TCG counter storm: `TCG_TB_INVALIDATE_COUNT = 8954`
+  (~6× steady state), `TCG_NOTDIRTY_PAGES_HIT = 1200` (~24× steady
+  state) — translation churn distributed across many sub-millisecond
+  events. See decision-log "2026-05-02: V6 rules out per-event
+  1 ms hypotheses; V7 cumulative-counter slice queued" and
+  `benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md`.
+- **Highest-priority next task: V7 — cumulative per-interval
+  `TCG_TB_*_US_TOTAL` counters.** Add
+  `TCG_TB_LOOKUP_US_TOTAL` / `TCG_TB_GEN_CODE_US_TOTAL` /
+  `TCG_HANDLE_INTERRUPT_US_TOTAL` (sum) gated on a new
+  `XEMU_TCG_PHASE_LOG=1` env var. Decision criterion: if
+  `TCG_TB_GEN_CODE_US_TOTAL ≥ 300 ms` in the worst-frame interval,
+  **PPTC (strategy.md Phase 5a — Ryujinx pattern)** is the right
+  follow-on fix. Estimated PPTC ceiling: drop the worst frame from
+  1.375 s to ~900 ms.
 - **V4 broader-title sweep validates default flag stack across the
   broader Xbox library.** 6 of 6 titles pass; 0 new pathologies; 4
   surface the same catalogued Crimson-class TCG TB-invalidation
-  worst-frame pathology — one V6 fix would address them all. See
+  worst-frame pathology — one V7-derived fix (likely PPTC) would
+  address them all. See
   `benchmarks/2026-05-02-broader-title-sweep.md`.
 - Diagnostic infrastructure for community measurement on any Apple
   Silicon Mac: per-subsystem timing counters

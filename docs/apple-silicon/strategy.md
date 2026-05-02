@@ -365,16 +365,30 @@ Sub-deliverables informed by the 2026-05-01 emulator survey
 > `benchmarks/2026-05-02-apu-lock-release-validation.md`) eliminated
 > the `0x23dd47` MMIO-block contention (vCPU lock-wait −97.9 %, p999
 > −35 %, steady-state stutter intervals −61 %) but the headline
-> 1.28-s frame is still unchanged at the 500 ms PASS threshold. The
-> next active investigation is V6 — `cpu_exec_loop` per-phase
-> instrumentation (`tcg_tb_lookup` / `tcg_tb_gen_code` /
-> `tcg_handle_interrupt` spike sources) to attribute the
-> unattributed remainder.
+> 1.28-s frame is still unchanged at the 500 ms PASS threshold. V6
+> (`benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md`, landed
+> 2026-05-02 as instrumentation only) ruled out per-event 1 ms
+> dominance for `tb_lookup`, `tb_gen_code`, and `cpu_handle_interrupt`
+> across 300 s of Crimson (0 / 0 / 1 events respectively; zero V6
+> events inside the worst-frame interval). The 1 ms-class
+> `tcg_tb_chain` events are reframed as **normal hot-path
+> execution** (mean `tb_count = 1918` × ~500 ns/iter), not pathology;
+> D3's "host-side wait" hypothesis is disproved. The dominant new
+> finding is the worst-frame TCG counter storm:
+> `TCG_TB_INVALIDATE_COUNT = 8954` and `TCG_NOTDIRTY_PAGES_HIT =
+> 1200` (both ~6-24× steady state), distributed across many
+> sub-millisecond translation events. The next active investigation
+> is V7 — cumulative per-interval `TCG_TB_*_US_TOTAL` counters —
+> to confirm whether translation cost dominates the cumulative axis;
+> if yes, **PPTC (Phase 5a downstream entry)** is justified as the
+> follow-on fix.
 
 Deliverables:
 
 - 5a. **TCG TB-invalidation cost reduction on Apple Silicon
-  (partially landed; V6 in flight).** The 2026-05-01 sample profile
+  (partially landed; V6 instrumentation done 2026-05-02 with
+  NEGATIVE per-event 1 ms result; V7 cumulative-counter slice
+  queued).** The 2026-05-01 sample profile
   attributed Crimson's 1.35-second worst-frame to the JIT TB
   invalidation chain (`tb_invalidate_phys_range_fast` →
   `do_tb_phys_invalidate` → `tcg_flush_jmp_cache`) plus
@@ -398,18 +412,41 @@ Deliverables:
     worst-frame mspf), confirming the worst frame is built from many
     small invalidations or a non-invalidation source. Verification:
     `benchmarks/2026-05-02-tcg-jmp-cache-targeted-validation.md`.
-  - **V6 `cpu_exec_loop` per-phase instrumentation (queued, next).**
-    Add `tcg_tb_lookup` / `tcg_tb_gen_code` /
+  - **V6 `cpu_exec_loop` per-phase instrumentation (landed
+    2026-05-02 as instrumentation only; NEGATIVE per-event 1 ms
+    result).** Added `tcg_tb_lookup` / `tcg_tb_gen_code` /
     `tcg_handle_interrupt` spike sources gated on
-    `XEMU_PERF_SPIKE_LOG_TCG=1`. The unattributed ~970 ms of the
-    1.28-s worst frame at the 1 ms threshold is the target;
-    `tb_gen_code` churn and the kernel-PC `0x80030e4c` 1 ms-class
-    chains are the leading hypotheses
-    (`benchmarks/2026-05-02-apu-lock-release-validation.md`,
-    Recommended next action #3).
-  - Persistent TCG translation cache (PPTC pattern). Serialize TCG
-    translation blocks across runs, keyed by guest binary hash.
-    First-load and warmup-stutter win. Reference:
+    `XEMU_PERF_SPIKE_LOG_TCG=1`. 300 s Crimson route at 1 ms
+    threshold: 0 / 0 / 1 events respectively across the full run;
+    zero V6 events inside the worst-frame interval. The 1 ms-class
+    `tcg_tb_chain` events are reframed as **normal hot-path
+    execution** (mean `tb_count=1918` × ~500 ns/iter), not
+    pathology. The dominant new finding is in always-on per-interval
+    TCG counters: worst-frame interval shows `TCG_TB_INVALIDATE_COUNT
+    = 8954` (~6× steady state) and `TCG_NOTDIRTY_PAGES_HIT = 1200`
+    (~24× steady state) — a translation-churn storm distributed
+    across many sub-millisecond events. V6 verification:
+    `benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md`.
+  - **V7 `TCG_*_US_TOTAL` cumulative per-interval phase counters
+    (queued, next).** V6 ruled out per-event 1 ms+ dominance, so
+    cumulative wallclock measurement is required. Add
+    `TCG_TB_LOOKUP_US_TOTAL` / `TCG_TB_GEN_CODE_US_TOTAL` /
+    `TCG_HANDLE_INTERRUPT_US_TOTAL` (sum, per interval) gated on
+    a new `XEMU_TCG_PHASE_LOG=1` env var. Decision criterion: if
+    `TCG_TB_GEN_CODE_US_TOTAL ≥ 300 ms` in the worst-frame
+    interval, **PPTC (next entry) is the right slice**; if not,
+    follow up with host-thread profiling (Apple `sample` via
+    `scripts/apple-silicon/sample-profile.sh`).
+  - **Persistent TCG translation cache (PPTC pattern) — gated on
+    V7 outcome.** Serialize TCG translation blocks across runs
+    AND across in-process `tb_flush` events, keyed by guest binary
+    hash + cflags. First-load and warmup-stutter win. The Crimson
+    worst-frame's `TCG_TB_INVALIDATE_COUNT = 8954` translates to
+    ~450 ms of cumulative re-translation cost (8954 × ~50 µs)
+    consistent with the observed 446 ms of `tcg_tb_chain` time;
+    PPTC eliminates this re-translation entirely. Estimated
+    ceiling: drop the worst frame from 1.375 s to ~900 ms.
+    Reference:
     https://blog.ryujinx.org/introducing-profiled-persistent-translation-cache/.
   - W^X toggle batching in `accel/tcg/tb-maint.c`. Lower priority
     now that V1 splitwx-on path removes the per-TB toggle entirely.
@@ -524,10 +561,26 @@ projects use but that are not on this fork's roadmap, with reasons:
   sub-1 ms events centered on `tb_gen_code` churn + a kernel-PC
   `0x80030e4c` 1 ms-class TB-chain tail. APU voice-lock release (I5)
   cut steady-state stutter intervals 61 % and improved p999 by 35 %
-  but did not move the worst-frame either. The next investigation is
-  V6 — `cpu_exec_loop` per-phase instrumentation (tcg_tb_lookup /
-  tcg_tb_gen_code / tcg_handle_interrupt spike sources) to attribute
-  the residual.
+  but did not move the worst-frame either. **V6 (landed 2026-05-02
+  as instrumentation only) ruled out per-event 1 ms dominance for
+  `tb_lookup`, `tb_gen_code`, and `cpu_handle_interrupt`** — 0 / 0 /
+  1 events respectively across 300 s; zero V6 events inside the
+  1.375 s worst-frame interval. The 1 ms-class `tcg_tb_chain` events
+  are reframed as **normal hot-path execution** (mean tb_count =
+  1918 × ~500 ns/iter), disproving D3's host-side-wait hypothesis.
+  Worst-frame correlates with a translation-churn storm in always-on
+  per-interval counters (`TCG_TB_INVALIDATE_COUNT = 8954`,
+  `TCG_NOTDIRTY_PAGES_HIT = 1200`, both 6-24× steady state). Render
+  loop is blocked during the worst frame
+  (`NV2A_PRESENT_HEARTBEAT = 4` in 1.4 s vs ~30/s steady state).
+  The next investigation is V7 — cumulative per-interval
+  `TCG_TB_*_US_TOTAL` counters — to confirm whether translation
+  cost dominates the cumulative axis. If yes, **PPTC (Phase 5a
+  downstream) is the right slice**; estimated ceiling drops the
+  worst frame from 1.375 s to ~900 ms. Audio listen-test for
+  `XEMU_APU_LOCK_RELEASE` stays deferred until the judder pillar
+  is closed (judder-induced audio skips would confound the
+  listen-test).
 - **1080p output (internal scale 2×) on tracked titles, with
   anti-aliasing as a player-visible option.** Met as of 2026-05-02:
   Apple Silicon system builds default `surface_scale = 2` on first

@@ -984,7 +984,40 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             chain_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
         }
 
-        while (!cpu_handle_interrupt(cpu, &last_tb)) {
+        for (;;) {
+            /* V6 attribution: time the cpu_handle_interrupt call. The
+             * outer cpu_handle_interrupt early-exits in <1 µs when
+             * there is no pending interrupt; spikes here at the 1 ms
+             * threshold mean either (a) bql_lock() inside the
+             * "unlikely(cpu_test_interrupt(...))" branch waited for
+             * another thread to release the BQL, or (b) the target
+             * cpu_exec_interrupt callback itself did expensive work.
+             * Captures post-call interrupt_request / exception_index
+             * so attribution can correlate with the interrupt class.
+             */
+            int64_t int_start_ns = 0;
+            if (xemu_spike_log_tcg_enabled) {
+                int_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            }
+            bool int_exit = cpu_handle_interrupt(cpu, &last_tb);
+            if (xemu_spike_log_tcg_enabled) {
+                int64_t int_us =
+                    (qemu_clock_get_ns(QEMU_CLOCK_HOST) - int_start_ns)
+                    / 1000;
+                if (int_us >= xemu_spike_threshold_us) {
+                    char extra[96];
+                    snprintf(extra, sizeof(extra),
+                             "exit=%d ex_idx=%d int_req=0x%x",
+                             (int)int_exit,
+                             cpu->exception_index,
+                             cpu->interrupt_request);
+                    xemu_spike_emit("tcg_handle_interrupt", int_us, extra);
+                }
+            }
+            if (int_exit) {
+                break;
+            }
+
             TranslationBlock *tb;
             TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
             s.cflags = cpu->cflags_next_tb;
@@ -1006,14 +1039,64 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 break;
             }
 
+            /* V6 attribution: time tb_lookup. Cost includes the
+             * per-CPU jmp-cache probe plus, on miss, the qht hash
+             * lookup. A 1 ms-class spike here points the bottleneck
+             * at jmp-cache thrash or a pathological qht chain walk
+             * — distinct from translation cost (tcg_tb_gen_code) and
+             * interrupt-handling cost (tcg_handle_interrupt).
+             */
+            int64_t lookup_start_ns = 0;
+            if (xemu_spike_log_tcg_enabled) {
+                lookup_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            }
             tb = tb_lookup(cpu, s);
+            if (xemu_spike_log_tcg_enabled) {
+                int64_t lookup_us =
+                    (qemu_clock_get_ns(QEMU_CLOCK_HOST) - lookup_start_ns)
+                    / 1000;
+                if (lookup_us >= xemu_spike_threshold_us) {
+                    char extra[64];
+                    snprintf(extra, sizeof(extra),
+                             "pc=0x%llx hit=%d",
+                             (unsigned long long)s.pc,
+                             tb != NULL);
+                    xemu_spike_emit("tcg_tb_lookup", lookup_us, extra);
+                }
+            }
             if (tb == NULL) {
                 CPUJumpCache *jc;
                 uint32_t h;
 
+                /* V6 attribution: time tb_gen_code (the actual TCG
+                 * translation pass) inclusive of the mmap_lock /
+                 * mmap_unlock bracket. Only fires on jmp-cache + qht
+                 * miss, so steady-state cost when off is one branch.
+                 * A spike here is the leading hypothesis for the
+                 * unattributed Crimson worst-frame remainder — TB
+                 * churn driven by code re-translation. If V6 confirms
+                 * this, follow-on slice is PPTC (strategy.md Phase 5a).
+                 */
+                int64_t gen_start_ns = 0;
+                if (xemu_spike_log_tcg_enabled) {
+                    gen_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                }
                 mmap_lock();
                 tb = tb_gen_code(cpu, s);
                 mmap_unlock();
+                if (xemu_spike_log_tcg_enabled) {
+                    int64_t gen_us =
+                        (qemu_clock_get_ns(QEMU_CLOCK_HOST) - gen_start_ns)
+                        / 1000;
+                    if (gen_us >= xemu_spike_threshold_us) {
+                        char extra[64];
+                        snprintf(extra, sizeof(extra),
+                                 "pc=0x%llx cflags=0x%x",
+                                 (unsigned long long)s.pc,
+                                 s.cflags);
+                        xemu_spike_emit("tcg_tb_gen_code", gen_us, extra);
+                    }
+                }
 
                 /*
                  * We add the TB in the virtual pc hash table

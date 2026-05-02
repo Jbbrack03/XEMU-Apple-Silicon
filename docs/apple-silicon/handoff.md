@@ -1,6 +1,131 @@
 # Handoff
 
-Last updated: 2026-05-02 (after V1/V2/V3/V4/V5/D2/D3 — seven default-on flags shipped; 30 FPS cap reframed as title-intrinsic; residual jitter pillar opened)
+Last updated: 2026-05-02 (after V6 — `cpu_exec_loop` per-phase spike attribution; three hypotheses ruled out at 1 ms threshold; V7 cumulative-counter slice queued)
+
+## Update — 2026-05-02 V6 cpu_exec_loop per-phase spike attribution
+
+V6 added three new spike sources inside `cpu_exec_loop` per the D3
+note's recommendation (`tcg_tb_lookup`, `tcg_tb_gen_code`,
+`tcg_handle_interrupt`), built clean, and ran a 300 s Crimson retail
+route at 1 ms threshold. Outcome:
+
+- **NEGATIVE on all three V6 hypotheses at the per-event 1 ms level.**
+  Across 300 s: 0 `tcg_tb_lookup` events, 0 `tcg_tb_gen_code` events,
+  1 `tcg_handle_interrupt` event (2.4 ms one-off, EXCP_INTERRUPT path).
+  Worst-frame interval (1.375 s) contains zero V6 spike events.
+- **The 1 ms-class `tcg_tb_chain` events are normal hot-path
+  execution.** 99.97 % of the run's 55,684 chains fall in the
+  1000-1099 µs bucket; mean `tb_count=1918` at ~500 ns/iter; the cost
+  is genuine guest-code execution, not host-side wait. D3's
+  "host-side wait inside cpu_exec_loop" hypothesis is **disproved**.
+- **Worst frame correlates with a translation-churn storm in the
+  always-on TCG counters:** `TCG_TB_INVALIDATE_COUNT=8954` (~6×
+  steady state), `TCG_NOTDIRTY_PAGES_HIT=1200` (~24× steady state),
+  `TCG_TB_INVALIDATE_BURST_MAX=438` (~3× steady state),
+  `TCG_JMP_CACHE_ZEROED_BUCKETS=74,490` (~13× steady state). The
+  cost is sub-millisecond per event but cumulatively significant.
+- **Render loop is blocked during the worst frame.** Only 4
+  `NV2A_FLIP_STALL_WRITES` and 4 `NV2A_PRESENT_HEARTBEAT` in 1.4 s
+  (vs ~30/s steady state); guest's render thread is not producing
+  frames during the stall. xemu offered 86 vblanks
+  (`NV2A_VBLANK_FIRES=86`) — pacing is not the cap.
+- **Worst-frame guest PC dominator unchanged from D3:** 98 % of
+  worst-frame chain events start at Xbox kernel PC `0x80030e4c`.
+  Without kernel symbols, function identity is unresolved.
+
+V6 ships **as instrumentation only** (no default-on behavior change).
+The three new spike sources are gated on `XEMU_PERF_SPIKE_LOG_TCG=1`
+with one untaken-branch cost when off; they stay in the tree
+permanently for future regression triage.
+
+### V6 code changes (3 files modified)
+
+- `accel/tcg/cpu-exec.c` — three per-phase spike timers added inside
+  `cpu_exec_loop`'s inner for-loop (the inner `while
+  (!cpu_handle_interrupt(...))` was rewritten to `for (;;) { ... if
+  (int_exit) break; ... }` to permit post-call timing of
+  `cpu_handle_interrupt`). ~85 lines added; chain timing and
+  emission unchanged.
+- `xemu-fork/CLAUDE.md` — `XEMU_PERF_SPIKE_LOG_TCG=1` flag list
+  extended with the three V6 op tags.
+- `docs/apple-silicon/automation.md` — per-event spike-log table
+  extended with three new entries; documents the
+  `extra=` field semantics (`exit/ex_idx/int_req`,
+  `pc/hit`, `pc/cflags`).
+
+### V6 benchmark note
+
+`benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md` — full
+attribution including the 99.97 % chain-clustering analysis, the
+worst-frame TCG-counter storm signal, and the V7 / kernel-
+symbolication / host-thread-profiling next-slice candidate analysis.
+
+### Critical reframings
+
+1. **"`tb_gen_code` churn drives the worst frame" (D3's leading
+   hypothesis)** — disproved at the per-event level. Aggregate
+   sub-millisecond churn remains plausible but unmeasured. V7
+   cumulative-counter slice is required to confirm or refute.
+2. **"The 1 ms-class chain duration is a host-side wait" (D3's
+   secondary hypothesis)** — disproved. The 1 ms cost is normal
+   TCG execution at ~500 ns/iter × ~1900 inner-loop iterations.
+3. **"The worst frame is on the vCPU thread"** — partially true.
+   The vCPU is busy (`TCG_TB_EXEC_COUNT=5,707,812` in the
+   worst-frame interval, slightly elevated above steady state),
+   but the GUEST's render thread is **blocked** (only 4 page-flips
+   in 1.4 s vs ~30/s steady state). The kernel is doing
+   non-rendering work during the stall, and that work
+   (translation-churn-amplified by xemu) is what the chain spikes
+   measure.
+
+### Top-of-stack next-slice priority (supersedes the V6 entry below)
+
+1. **V7 — cumulative per-interval `TCG_*_US_TOTAL` counters.** Add
+   `TCG_TB_LOOKUP_US_TOTAL`, `TCG_TB_GEN_CODE_US_TOTAL`,
+   `TCG_HANDLE_INTERRUPT_US_TOTAL` (sum, per interval). Gate the
+   wallclock measurement on a new `XEMU_TCG_PHASE_LOG=1` env var
+   (cost when off: zero; cost when on: ~36 % vCPU overhead at
+   3M TBs/interval). Counter emission stays unconditional. Run
+   the same Crimson 300 s route and check whether
+   `TCG_TB_GEN_CODE_US_TOTAL` ≥ 300 ms in the worst-frame
+   interval. If yes → PPTC slice (strategy.md Phase 5a) is
+   justified; estimated ceiling reduces the worst frame from
+   1.375 s to ~900 ms. If no → host-thread profiling cross-check
+   (priority 3 below) becomes the next step.
+2. **Guest kernel symbolication for PC `0x80030e4c` (deferred
+   until V7 confirms direction).** Dump xboxkrnl.exe from the
+   snapshot HDD via QEMU `pmemsave` HMP, parse PE export table,
+   apply public XBOXKRNL RE notes. Useful only if V7 points back
+   at kernel-driven cost rather than translation churn.
+3. **Host-thread profiling cross-check.** Run Apple `sample` via
+   `scripts/apple-silicon/sample-profile.sh` against the live
+   xemu vCPU thread during a Crimson stutter window. Direct
+   ground-truth on what the TCG thread is doing without needing
+   kernel symbols. Quick to run; deferred only because V7 is
+   structurally cleaner data.
+4. **Audio listen-test gate for `XEMU_APU_LOCK_RELEASE` is
+   DEFERRED** until the video-judder pillar is fully closed.
+   Project policy: judder-induced audio skips would confound the
+   listen-test; the slice stays default-on under "PARTIAL —
+   audio gate deferred" status. Re-evaluate after the worst-frame
+   stutter is below the 500 ms judder gate on each tracked title.
+5. **Do not pursue:**
+   - Lower the spike threshold to 100 µs in another full run —
+     log volume explodes and ambiguity worsens. Use V7 cumulative
+     counters instead.
+   - Renderer slices for the worst frame — renderer-side spikes
+     in the worst-frame window total 22 ms across 6 events, vs
+     446 ms of TCG events. Not the binding constraint.
+   - Iothread / BQL / AIO / MMIO slices — D3 already ruled all
+     of these out at the worst-frame timescale.
+6. **Do not re-prove the seven default-on flags.** Use the
+   established regression gates:
+   - `validate-native-tri-depth.sh --run 22` for the triangle
+     gate (pre-existing harness flake, not a real regression —
+     see V1 note Honest-limits §1).
+   - PGR2 mid-route snapshot triplet (`pgr2_gameplay_b4` from
+     `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`).
+   - V4 broader-sweep run dirs as cross-checks.
 
 ## Update — 2026-05-02 multi-slice session (V1/V2/V3/V4/V5/D2/D3)
 
