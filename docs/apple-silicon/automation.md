@@ -791,6 +791,23 @@ the same `xemu-perf:` interval line as the NV2A counters above:
   metrics; if it stays an order of magnitude lower, the worst-frame
   is built from many small invalidations or a non-invalidation
   source.
+- `TCG_INVALIDATE_WALL_US_TOTAL` (V10, 2026-05-02): per-interval
+  SUM (microseconds) of wallclock cost across all
+  `tb_invalidate_phys_page_range__locked` invocations on the vCPU
+  thread. Companion to the existing `TCG_INVALIDATE_WALL_US_MAX`
+  (per-call max). Always-on; no env gating. Decisive measurement
+  for the V9-residual 1.3 s class stutter hypothesis: V9 confirmed
+  the worst frame is RDTSC-quiet but `TCG_TB_INVALIDATE_COUNT=8954`
+  with 1200 distinct notdirty pages — if average call cost is
+  ~100 µs, the SUM = ~900 ms which would account for the bulk of
+  the 1.3 s frame. If `TCG_INVALIDATE_WALL_US_TOTAL ≥ 500 ms` in
+  the worst-frame interval, the fix is **smarter notdirty handling
+  / lazy TB invalidation** (Phase 5a downstream entry — defer
+  invalidation until next tb_lookup miss for that page, or use
+  byte-range tracking to skip TBs that don't overlap the modified
+  bytes). If well below the worst-frame mspf, invalidation is not
+  the bottleneck and the cost lives in raw JIT'd guest code (likely
+  guest-intrinsic).
 - `HELPER_RDTSC_CALLS` (V9, 2026-05-02): per-interval count of
   guest RDTSC instructions executed (atomic; counted by
   `cpu_get_tsc` in `hw/i386/x86-cpu.c`). Always-on, no env

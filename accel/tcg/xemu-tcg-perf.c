@@ -35,6 +35,7 @@ static uint64_t tcg_perf_invalidate_burst_max;
  * small ones. */
 static uint64_t tcg_perf_jmp_cache_zeroed_buckets;
 static uint64_t tcg_perf_invalidate_wall_us_max;
+static uint64_t tcg_perf_invalidate_wall_us_total;
 
 /* V7 counters: per-interval sum of cpu_exec_loop per-phase wallclock,
  * accumulated in *nanoseconds* and emitted as microseconds. V6
@@ -118,10 +119,18 @@ void xemu_tcg_perf_add_handle_interrupt_ns(uint64_t ns)
 
 void xemu_tcg_perf_record_invalidate_wall_us(uint64_t us)
 {
-    /* Lock-free max via CAS-loop. Contention is rare (the SMC chain runs
-     * from any vCPU thread that triggers a notdirty trap; multiple vCPUs
-     * collide only when several pages happen to be invalidated within
-     * nanoseconds of each other). */
+    /* V10: per-interval SUM of invalidation wall time. A worst-frame
+     * interval with TCG_TB_INVALIDATE_COUNT=8954 + average call cost
+     * 100 µs would sum to 900 ms — directly attributing the headline
+     * 1.3 s class stutter to the invalidation chain itself rather than
+     * to translation churn (V7 disproved tb_gen_code dominance) or
+     * RDTSC overhead (V9 confirmed RDTSC-quiet during stall). */
+    qatomic_add(&tcg_perf_invalidate_wall_us_total, us);
+
+    /* V2: lock-free max via CAS-loop. Contention is rare (the SMC chain
+     * runs from any vCPU thread that triggers a notdirty trap; multiple
+     * vCPUs collide only when several pages happen to be invalidated
+     * within nanoseconds of each other). */
     uint64_t cur = qatomic_read(&tcg_perf_invalidate_wall_us_max);
     while (us > cur) {
         uint64_t prev = qatomic_cmpxchg(&tcg_perf_invalidate_wall_us_max,
@@ -277,6 +286,8 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
     uint64_t burst_max = qatomic_xchg(&tcg_perf_invalidate_burst_max, 0);
     uint64_t jmp_zeroed = qatomic_xchg(&tcg_perf_jmp_cache_zeroed_buckets, 0);
     uint64_t inv_wall_us_max = qatomic_xchg(&tcg_perf_invalidate_wall_us_max, 0);
+    uint64_t inv_wall_us_total =
+        qatomic_xchg(&tcg_perf_invalidate_wall_us_total, 0);
     uint64_t lookup_ns = qatomic_xchg(&tcg_perf_tb_lookup_ns_total, 0);
     uint64_t gen_ns = qatomic_xchg(&tcg_perf_tb_gen_code_ns_total, 0);
     uint64_t int_ns = qatomic_xchg(&tcg_perf_handle_interrupt_ns_total, 0);
@@ -293,7 +304,8 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
     }
 
     if ((tb_exec | tb_inv | notdirty_trips | notdirty_pages | burst_max
-         | jmp_zeroed | inv_wall_us_max | lookup_us | gen_us | int_us) == 0) {
+         | jmp_zeroed | inv_wall_us_max | inv_wall_us_total
+         | lookup_us | gen_us | int_us) == 0) {
         return;
     }
 
@@ -303,6 +315,7 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
             " TCG_TB_INVALIDATE_BURST_MAX=%llu"
             " TCG_JMP_CACHE_ZEROED_BUCKETS=%llu"
             " TCG_INVALIDATE_WALL_US_MAX=%llu"
+            " TCG_INVALIDATE_WALL_US_TOTAL=%llu"
             " TCG_TB_LOOKUP_US_TOTAL=%llu"
             " TCG_TB_GEN_CODE_US_TOTAL=%llu"
             " TCG_HANDLE_INTERRUPT_US_TOTAL=%llu",
@@ -313,6 +326,7 @@ void xemu_tcg_perf_emit_and_reset(FILE *out)
             (unsigned long long)burst_max,
             (unsigned long long)jmp_zeroed,
             (unsigned long long)inv_wall_us_max,
+            (unsigned long long)inv_wall_us_total,
             (unsigned long long)lookup_us,
             (unsigned long long)gen_us,
             (unsigned long long)int_us);

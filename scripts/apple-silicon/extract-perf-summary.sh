@@ -250,6 +250,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "TCG_NOTDIRTY_TRIPS" ||
                    key == "TCG_NOTDIRTY_PAGES_HIT" ||
                    key == "TCG_JMP_CACHE_ZEROED_BUCKETS" ||
+                   key == "TCG_INVALIDATE_WALL_US_TOTAL" ||
                    key == "TCG_TB_LOOKUP_US_TOTAL" ||
                    key == "TCG_TB_GEN_CODE_US_TOTAL" ||
                    key == "TCG_HANDLE_INTERRUPT_US_TOTAL" ||
@@ -380,8 +381,9 @@ END {
     keys[70] = "TCG_TB_GEN_CODE_US_TOTAL"
     keys[71] = "TCG_HANDLE_INTERRUPT_US_TOTAL"
     keys[72] = "HELPER_RDTSC_CALLS"
+    keys[73] = "TCG_INVALIDATE_WALL_US_TOTAL"
 
-    for (i = 1; i <= 72; i++) {
+    for (i = 1; i <= 73; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
     # Per-interval-max counters: report the running max across intervals.
