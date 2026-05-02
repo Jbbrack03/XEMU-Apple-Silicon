@@ -1723,3 +1723,97 @@ Verification:
   snapshot, 15 s, confirmed V6 emit path works end-to-end).
 - Build commit: `ac49afee696654e3e74b9c8430dd52801d3447d6` (dirty,
   V6 instrumentation in working tree).
+
+## 2026-05-02: V7 + V8 attribute Crimson worst-frame to TB binary execution; V9 RDTSC fast-path queued; PPTC downgraded
+
+V7 added cumulative per-interval `TCG_TB_LOOKUP_US_TOTAL` /
+`TCG_TB_GEN_CODE_US_TOTAL` / `TCG_HANDLE_INTERRUPT_US_TOTAL`
+counters (gated on `XEMU_TCG_PHASE_LOG=1`; nanosecond accumulation
+to avoid sub-µs per-call truncation). Crimson 300 s attribution at
+the 1.314 s worst-frame interval: `gen_us = 44 ms` (3 %),
+`lookup_us = 205 ms` (16 %), `int_us = 238 ms` (18 %), V7 phase
+total 488 ms (37 %). Across the top-5 worst-frame intervals,
+`gen_us` peaks at 111 ms.
+
+**Decision: PPTC is NOT the right judder fix.** The strategy.md
+Phase 5a leading hypothesis was that `tb_gen_code` churn drives
+the headline 1.3 s frame; V7 quantifies the upper bound at 111 ms.
+PPTC at 100 % efficacy could move a 1.3 s frame to ~1.2 s — still
+well above the 500 ms judder gate. PPTC remains queued as a
+**steady-state perf improvement** (eliminates ~13 s of cumulative
+gen work / 300 s = 4 % steady-state speedup) but is **downgraded
+as a judder fix**.
+
+V8 ran Apple `sample` against the live xemu vCPU thread
+(`scripts/apple-silicon/sample-profile.sh crimson … 90 75 5`).
+The 75 s sample window captured 3 worst-frame intervals
+(`mspf_max=1350.78, 1323.58, 1317.85`). `cpu_tb_exec` accounts for
+67 % of vCPU thread time, confirming V7's "830 ms unattributed
+remainder is in TB binary execution".
+
+The decisive V8 finding is the **top named function inside
+`cpu_tb_exec`**: `helper_rdtsc` (1342 samples, ~4 % of cpu_tb_exec
+time). The call chain is **7-9 functions deep** — `helper_rdtsc →
+cpu_get_tsc → qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) →
+cpu_get_clock (with seqlock) → cpu_get_clock_locked → get_clock →
+clock_gettime(CLOCK_MONOTONIC) → libsystem internals →
+mach_absolute_time`. **Estimated ~80-100 ns per RDTSC on M3 Ultra
+vs ~5 ns native.**
+
+The Xbox kernel busy-wait hypothesis is **consistent with all
+evidence**:
+
+- D3/V6 found worst-frame chains start at Xbox kernel PC
+  `0x80030e4c` (98 % of chains).
+- V7 found `tb_exec = 13.5M` in worst-frame (~4× steady state).
+- V8 found `helper_rdtsc` is the top named function under
+  `cpu_tb_exec`.
+- Render loop is blocked (4 page-flips / 1.4 s vs ~30/s).
+
+A canonical Xbox kernel busy-wait `RDTSC; cmp; jb @loop` deadline-
+check would call helper_rdtsc once per iteration. With ~100 ns
+per RDTSC × millions of iterations = hundreds of ms of pure
+overhead per worst-frame interval.
+
+**Decision (top-of-stack next slice): V9 — RDTSC fast-path +
+per-interval call counter.** Implement `cpu_get_tsc` Apple Silicon
+fast-path that bypasses the QEMU clock abstraction. Use
+`mach_absolute_time()` directly + cached `mach_timebase_info`
+(which is `{1,1}` on M-series) + `muldiv64(ns, 733333333, 1e9)`.
+Add per-interval `HELPER_RDTSC_CALLS` counter to validate the
+call rate. Ship default-on under `XEMU_FAST_RDTSC=1` if the fix
+drops `mspf_max_max` below 1100 ms.
+
+Other named V8 hot paths analyzed:
+
+- **x87 80-bit helpers** (~6 % vCPU): irreducibly soft on Apple
+  Silicon (no native 80-bit float on aarch64). Already
+  documented in strategy.md / 2026-05-01-tcg-float-audit.md.
+  No fix path.
+- **`helper_lookup_tb_ptr` + qht lookup** (~5 % vCPU):
+  indirect-branch TB lookup from JIT. Optimization: per-vCPU
+  1-entry cache before falling back to qht. **Queued as V10**
+  (deferred until V9 outcome).
+
+**Audio gate ordering re-affirmed (project policy 2026-05-02):**
+`XEMU_APU_LOCK_RELEASE` listen-test stays deferred until the
+video-judder pillar is fully closed. The current judder is the
+gating issue.
+
+**Tools rule (project rule #5):** V7 added cumulative counters
+following the established `xemu-tcg-perf` pattern (atomic
+accumulators + xchg-on-emit). V8 used the existing
+`scripts/apple-silicon/sample-profile.sh` helper and the existing
+`extract-perf-summary.sh`. No new tools required.
+
+Verification:
+
+- V7: `benchmarks/2026-05-02-v7-cumulative-phase-attribution.md`,
+  `benchmark-runs/20260502-112845-crimson-skies/` (M1 attribution
+  run, 300 s Crimson retail route, `XEMU_TCG_PHASE_LOG=1`).
+- V7 sanity: `benchmark-runs/20260502-112753-pgr2/` (M0 PGR2 mid-
+  route snapshot, 15 s, all three V7 counters non-zero).
+- V8: `benchmark-runs/20260502-113656-crimson-skies/sample-v8-
+  stutter.txt` + `sample-v8-stutter-summary.txt` (90 s Crimson
+  with 75 s sample window).
+- Build commit: `b6bce572ec` (V7 in tree).

@@ -1,6 +1,121 @@
 # Handoff
 
-Last updated: 2026-05-02 (after V6 — `cpu_exec_loop` per-phase spike attribution; three hypotheses ruled out at 1 ms threshold; V7 cumulative-counter slice queued)
+Last updated: 2026-05-02 (after V7 cumulative + V8 sample-profile; PPTC downgraded; helper_rdtsc identified as top named hot path; V9 RDTSC fast-path queued)
+
+## Update — 2026-05-02 V7 cumulative-phase counters + V8 sample profile
+
+**V7** added always-on per-interval `TCG_TB_LOOKUP_US_TOTAL` /
+`TCG_TB_GEN_CODE_US_TOTAL` / `TCG_HANDLE_INTERRUPT_US_TOTAL`
+counters (gated on `XEMU_TCG_PHASE_LOG=1`; nanosecond accumulation,
+microsecond emit). Crimson 300 s worst-frame attribution at the
+1.314 s frame:
+
+- `gen_us = 44 ms` (3 % of interval) — **PPTC ceiling is small**
+- `lookup_us = 205 ms` (16 %) — mostly V7 instrumentation overhead
+- `int_us = 238 ms` (18 %) — mostly V7 instrumentation overhead
+- V7 phase total = 488 ms (37 %)
+- **Remaining 830 ms (63 %) is in `cpu_loop_exec_tb`** — actual TB
+  binary execution. V7 cannot decompose this further.
+- `tb_exec = 13.5M` in the worst-frame interval (~4× steady state).
+  vCPU is doing many more inner-loop iterations than usual.
+
+Across the top-5 worst-frame intervals, `gen_us` peaks at 111 ms.
+**PPTC, even at 100 % efficacy, can save at most 111 ms — not a fix
+for a 1.3 s frame.** PPTC remains a useful steady-state perf win
+(eliminates ~13 s of cumulative gen work / 300 s = 4 % steady-state
+speedup) but is **downgraded as a judder fix.**
+
+**V8** ran Apple `sample` against the live xemu vCPU thread during
+a 90 s Crimson route (75 s sample window, captured 3 worst-frame
+intervals). Decisive findings:
+
+- `cpu_tb_exec = 34,894 samples (67 % of vCPU thread)` — confirms
+  V7's "830 ms is TB binary execution".
+- **Top named function inside `cpu_tb_exec`: `helper_rdtsc`** (1342
+  samples). The call chain is **7-9 functions deep** —
+  `helper_rdtsc → cpu_get_tsc → qemu_clock_get_ns → cpu_get_clock
+  (with seqlock) → cpu_get_clock_locked → get_clock → clock_gettime
+  → libsystem internals → mach_absolute_time`. **Estimated ~80-100
+  ns per RDTSC on M3 Ultra vs ~5 ns native.**
+- Other named hot paths: x87 80-bit helpers (~6 % vCPU,
+  irreducibly soft on Apple Silicon — no fix path),
+  `helper_lookup_tb_ptr` + qht lookup (~5 % vCPU, deferred for V10).
+- **The Xbox kernel busy-wait hypothesis is consistent**: a tight
+  `RDTSC; cmp; jb @loop` deadline-check would call helper_rdtsc
+  every iteration and explain why `tb_exec` is 4× steady-state.
+
+### V7 + V8 code changes (8 files modified, V7 only)
+
+- `accel/tcg/cpu-exec.c` — clock-read sharing across V6/V7 paths.
+- `accel/tcg/xemu-tcg-perf.c` — three new ns accumulators + helpers.
+- `include/qemu/xemu-tcg-perf.h` — three new public API helpers.
+- `include/qemu/xemu-spike-log.h` — `xemu_tcg_phase_log_enabled`.
+- `util/xemu-spike-log.c` — phase-log env-var init.
+- `scripts/apple-silicon/extract-perf-summary.sh` — three new keys.
+- `xemu-fork/CLAUDE.md` — `XEMU_TCG_PHASE_LOG` flag doc.
+- `docs/apple-silicon/automation.md` — counter docs.
+
+### V7 + V8 benchmark notes
+
+- `benchmarks/2026-05-02-v7-cumulative-phase-attribution.md` — full
+  V7 attribution + V8 sample-profile analysis.
+- `benchmark-runs/20260502-112753-pgr2/` (V7 sanity).
+- `benchmark-runs/20260502-112845-crimson-skies/` (V7 attribution,
+  300 s).
+- `benchmark-runs/20260502-113656-crimson-skies/` (V8 sample profile,
+  90 s with 75 s sample window — `sample-v8-stutter.txt`).
+
+### Critical reframings
+
+1. **PPTC is not the judder fix.** V7 quantified the worst-frame
+   `tb_gen_code` cost at 44-111 ms across top-5 worst intervals.
+   Even 100 % PPTC efficacy can't move a 1.3 s frame below 1.2 s.
+   PPTC remains queued as a steady-state perf improvement (~4 %
+   speedup over the full route).
+2. **The judder root cause is in `cpu_tb_exec` (TB binary
+   execution) — i.e., the GUEST is genuinely doing more work
+   during the worst frame.** xemu emulates that work faithfully.
+   The actionable optimization is to make specific helper
+   functions cheaper.
+3. **`helper_rdtsc` is the top named optimization target.** 7-9
+   function calls per RDTSC = ~80-100 ns on M3 Ultra vs ~5 ns
+   native. If the guest kernel busy-waits on RDTSC (likely),
+   eliminating the call-chain overhead gives a meaningful
+   worst-frame speedup.
+
+### Top-of-stack next-slice priority (supersedes the V6 entry below)
+
+1. **V9 — RDTSC fast-path + call counter (highest priority).**
+   Implement `cpu_get_tsc` Apple Silicon fast-path bypassing the
+   QEMU clock abstraction. Use `mach_absolute_time()` directly +
+   cached `mach_timebase_info` (which is `{1,1}` on M-series so
+   the result is already nanoseconds) + `muldiv64(ns, 733333333,
+   1e9)`. Add per-interval `HELPER_RDTSC_CALLS` counter to
+   validate the call rate during the worst frame. Decision: if
+   the fix drops `mspf_max_max` below 1100 ms, ship default-on
+   under `XEMU_FAST_RDTSC=1`.
+2. **V10 — `helper_lookup_tb_ptr` indirect-branch cache (if V9
+   isn't enough).** Per-vCPU 1-entry cache keyed on indirect
+   branch source PC, falling back to qht. ~5 % vCPU win
+   estimated.
+3. **PPTC (downgraded — steady-state perf, not judder fix).**
+   Strategy.md Phase 5a. Implement after judder is closed (so
+   the impact can be measured cleanly against a flat baseline).
+4. **Audio listen-test for `XEMU_APU_LOCK_RELEASE` stays
+   DEFERRED** until video judder is closed (project policy
+   2026-05-02). Same ordering applies to any future audio-side
+   optimization.
+5. **Do not pursue:**
+   - x87 80-bit helper optimization (irreducibly soft on Apple
+     Silicon — strategy.md / 2026-05-01 audit).
+   - Iothread / BQL / AIO / MMIO slices (D3 ruled out).
+   - Renderer slices (V4 sweep ruled out).
+   - More V6/V7 spike sources at lower thresholds (V8 sample
+     profile is the right tool now).
+6. **Do not re-prove the seven default-on flags.** Use the
+   established regression gates (validate-native-tri-depth.sh
+   --run 22; PGR2 mid-route snapshot triplet; V4 broader sweep
+   run dirs).
 
 ## Update — 2026-05-02 V6 cpu_exec_loop per-phase spike attribution
 
