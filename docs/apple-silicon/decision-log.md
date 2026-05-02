@@ -855,3 +855,390 @@ agnostic and trivially measurable; the async shader compile slice
 should follow because Crimson is the largest user-visible jitter target
 and its bottleneck has been profiled to synchronous shader compile in
 the Apple OpenGL-on-Metal driver.
+
+## 2026-05-01: XEMU_PGRAPH_FAST_WRITE deferred (not pursued this session)
+
+Status: source-audited, **deferred**. No code shipped. The flag does not
+exist in the binary.
+
+Decision:
+
+The `XEMU_PGRAPH_FAST_WRITE=1` slice listed as Prioritized Next Tasks #4
+in `handoff.md` is deferred. The handoff entry framed it as "low-risk,
+mirror `pgraph_read`," but a source audit of `pgraph_write`
+(`hw/xbox/nv2a/pgraph/pgraph.c:161`) and `pgraph_reg_w`
+(`hw/xbox/nv2a/pgraph/pgraph.h:311`) shows the `default` slot write is
+not a simple atomic store: it does a compare-then-set (`if (pg->regs_[r]
+!= v)`) and updates the `regs_dirty` bitmap via `bitmap_set`. The
+renderer consumes `regs_dirty` to decide shader recompiles
+(`hw/xbox/nv2a/pgraph/glsl/shaders.c:57` and the Vulkan equivalent at
+`hw/xbox/nv2a/pgraph/vk/draw.c:643`). A naive lock-free fast path could
+either lose dirty bits to a producer/clearer race
+(`pgraph_clear_dirty_reg_map` is called from the renderer thread) or
+present a producer/consumer ordering hole where the consumer reads
+`dirty=0, value=new` and skips a needed recompile, causing visual
+corruption. A correct fast-write would need explicit acquire/release
+ordering on both producer and consumer plus an atomic `set_bit` on the
+`regs_dirty` word; that's no longer "mirror pgraph_read."
+
+Beyond correctness, the prior decision-log entry "2026-05-01:
+XEMU_VOICE_FAST_LOCK not landed" already concluded that lock-elision
+is exhausted as a primary 60 FPS lever for PGR2-class scenes when the
+pfifo thread is idle 41.5% of the time on the FIFO condvar — removing
+1.4 % of TCG-thread mutex wait cannot translate to FPS in that regime.
+The Amdahl ceiling on this slice is therefore ~1 % even if all the
+correctness questions resolved.
+
+Rationale:
+
+Per workspace `CLAUDE.md` rule #1 (no guessing — every decision
+data-driven), implementing a slice the project's own measurements
+already predict won't lift FPS, with a non-trivial correctness risk the
+handoff entry undercounted, fails the "high confidence" bar. Per rule #3
+(be honest about limits), this entry replaces the handoff's "low-risk,
+completes the read/write symmetry" framing with the actual analysis.
+
+Verification:
+
+- `pgraph_write` source ground truth: `hw/xbox/nv2a/pgraph/pgraph.c:161-256`.
+- `pgraph_reg_w` `regs_dirty` side effect:
+  `hw/xbox/nv2a/pgraph/pgraph.h:311-318`.
+- Consumers of `regs_dirty`: `hw/xbox/nv2a/pgraph/glsl/shaders.c:57-92`,
+  `hw/xbox/nv2a/pgraph/vk/draw.c:643-708`.
+- Prior lock-elision-Amdahl conclusion:
+  "2026-05-01: XEMU_VOICE_FAST_LOCK not landed" (decision-log entry above).
+- Underlying sample profile:
+  `docs/apple-silicon/benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`.
+
+Consequence:
+
+`handoff.md` Prioritized Next Tasks should be re-ordered so this slice is
+deprioritized below (a) async shader compile (Crimson 1310 ms worst-frame
+jitter — the largest user-visible win), (b) SSE / x87 hardfloat audit
+outcome, and (c) frame-pacing emulation-rate slewing (Phase 2.5,
+graphics-API-agnostic). Should fast-write be revisited later — for
+example after the renderer is no longer the binding constraint and
+freed TCG cycles can actually be put to work — the implementation must
+include atomic set_bit on `regs_dirty` with explicit acquire/release
+ordering on the consumer side, or accept the cost of always-mark-dirty
+(which costs renderer recompiles to gain producer simplicity).
+
+## 2026-05-01: SSE hardfloat already active on aarch64; x87 80-bit irreducibly soft
+
+Status: source-audited. **Original hypothesis disproved.** No code shipped.
+
+Decision:
+
+The `handoff.md` Prioritized Next Tasks #3 hypothesis — "SSE single-precision
+ops (`helper_mulss`, `helper_mulps_xmm`) actually go through `soft_f32_mul` /
+`parts64_uncanon_normal` on Apple Silicon and lifting them to hardfloat is
+the single largest potential TCG win" — is wrong. The SSE hardfloat fast
+path already exists and is already active on aarch64. The remaining
+`parts64_*` time visible in the post-fast-read sample profile is the
+necessary cost of softfloat's correctness fallback (NaN/denormal inputs,
+denormal results, first-op-after-MXCSR-reset, non-default rounding modes),
+not an unconditional softfloat trip.
+
+`helper_fmul_ST0_FT0` and the rest of the x87 surface are irreducibly
+soft on Apple Silicon. The fork's existing `__hard` x87 path is correctly
+gated to `XBOX && __x86_64__` because Apple Silicon `long double` is
+8-byte (64-bit), not 80-bit. There is no native 80-bit float on aarch64
+to dispatch to.
+
+The original handoff #3 framing should be retired. The follow-up work is
+either (i) confirm the hard-take ratio with a counter pair, then redirect
+to a non-float TCG subsystem, or (ii) treat x87 as a separate Phase-2
+NEON-kernel effort which is real work but only justified after
+Instruments confirms x87 is dominant in real-game inner loops.
+
+Rationale:
+
+Source-only audit at `docs/apple-silicon/benchmarks/2026-05-01-tcg-float-audit.md`
+walks the call chain from `helper_mulss` →
+`target/i386/ops_sse.h:514-533` (`FPU_MUL` macro and
+`SSE_HELPER_S(mul, FPU_MUL)`) → `float32_mul`
+(`fpu/softfloat.c:2169-2174`) → `float32_gen2`
+(`fpu/softfloat.c:337-366`) → `hard_f32_mul = a * b`
+(`fpu/softfloat.c:2159-2162`, a single arm64 `fmul`).
+
+The `can_use_fpu` gate (`fpu/softfloat.c:230-237`) is satisfied in the
+common Xbox-game MXCSR state: `QEMU_NO_HARDFLOAT` is 0 (no `-ffast-math`),
+`float_flag_inexact` is sticky after the first soft op (SSE arithmetic
+helpers do not clear flags per-op — only `WRAP_FLOATCONV` at
+`target/i386/ops_sse.h:703-718` does), and `float_rounding_mode ==
+float_round_nearest_even` matches MXCSR RC=00 which Xbox titles set
+overwhelmingly. Per-call gates `f32_is_zon2` (zero-or-normal inputs after
+FTZ flush) and `f32_addsubmul_post` (denormal result fallback) at
+`fpu/softfloat.c:270-292` and `fpu/softfloat.c:1975-1990` apply only to
+edge cases, not the steady-state inner loop.
+
+The x87 path has no `floatx80_gen2` analogue. `floatx80_mul`
+(`fpu/softfloat.c:2218-2230`) unconditionally calls `parts_mul`. The
+fork's `__hard` shim (`target/i386/tcg/fpu_helper_hard.c`) requires
+80-bit `long double`, which Apple's clang on aarch64 does not provide.
+The `XBOX && __x86_64__` gate at `target/i386/helper.h:104-121`,
+`target/i386/tcg/fpu_helper.c:76-267`, `target/i386/tcg/translate.c:38-124`,
+and `ui/xui/main-menu.cc:62-66` correctly excludes the hard path on
+Apple Silicon — there is nothing to dispatch to.
+
+Verification:
+
+- `docs/apple-silicon/benchmarks/2026-05-01-tcg-float-audit.md` —
+  full file:line citation chain.
+- `fpu/softfloat.c:230-237` — `can_use_fpu` gate.
+- `fpu/softfloat.c:337-397` — `float32_gen2`/`float64_gen2` dispatcher.
+- `fpu/softfloat.c:2159-2174` — hard/soft `f32_mul` wiring.
+- `target/i386/tcg/fpu_helper.c:780-785` — `helper_fmul_ST0_FT0` body
+  (unconditional soft via `floatx80_mul`).
+- `target/i386/tcg/fpu_helper_hard.c:1-4` — empty translation unit on
+  non-`XBOX && __x86_64__`.
+- `ui/xui/main-menu.cc:62-66` — Hard FPU UI toggle visible only on
+  `__x86_64__`.
+
+Consequence:
+
+`handoff.md` Prioritized Next Tasks #3 is rewritten in place to reflect
+this finding plus a recommended cheap follow-up: a counter pair around
+`float32_gen2`/`float64_gen2` (`sse_hard_taken` vs `sse_soft_fallback`,
+split by fall-through reason: `!can_use_fpu`, `!pre`, `denormal_result`),
+run on the `pgr2_gameplay_b4` snapshot for 30 s. If hard-take ratio > 0.9,
+confirm the `parts64_uncanon_normal` time is irreducible correctness work
+and redirect future TCG investigations to the next dominant subsystem
+Instruments identifies (TLB / memory-op helpers, NV2A PGRAPH command
+parsing, or surface/texture upload — handoff Prioritized Next Tasks #5/#6
+are still on the table). The async shader compile slice (Crimson 1310 ms
+worst-frame jitter, biggest user-visible win) and Phase 2.5 frame-pacing
+slewing remain the two most impactful next-implementation slices on the
+roadmap; nothing about this audit changes their priority.
+
+
+## 2026-05-01: Add external Xbox library and `package-game.sh` packaging tool
+
+Decision:
+
+Adopt `/Volumes/Josh-Backup-Files/Console Games/Original Xbox` as the
+canonical external Xbox game library for this fork, and add
+`scripts/apple-silicon/package-game.sh` as the project-supported way to
+pull a game from that library into a xemu-loadable XISO ISO.
+`xdvdfs-cli` (MIT-licensed; antangelo/xdvdfs) is installed via `cargo
+install xdvdfs-cli` at `$HOME/.cargo/bin/xdvdfs`; the binary is not
+vendored into the repo. The packaging script auto-installs it on first
+use unless `--no-install` is passed.
+
+Default output is `$XEMU_TEST_GAMES_DIR/<game>.xiso.iso` (i.e.
+`/Users/jbbrack03/XEMU_MacOS/Test_Games/<game>.xiso.iso`). The script
+refuses to overwrite an existing output file without `--force`, so
+rule #9 (do not modify `Test_Games/` or `Xbox-Emulator-Files/` in
+place) is preserved while still allowing additive packaging into the
+existing test-games directory.
+
+Rationale:
+
+Future sessions will identify reported xemu issues for games we do not
+currently track (PGR2, Rainbow Six 3, Crimson Skies, flat-tri-depth)
+and need a reproducible way to bring those games into the benchmark
+harness. The library volume contains the extracted game trees;
+`xdvdfs pack` produces a valid XISO from such a tree in seconds. A
+project-supported wrapper avoids ad-hoc invocations that could
+accidentally overwrite tracked test ISOs or skip verification. Cargo
+install (vs vendoring a binary or a Homebrew formula) keeps the repo
+small and lets the tool stay current with upstream xdvdfs without a
+maintenance commit.
+
+Verification:
+
+- `xdvdfs-cli` v0.8.3 installed and reachable at
+  `/Users/jbbrack03/.cargo/bin/xdvdfs`.
+- `package-game.sh` packs `scripts/apple-silicon/xbe-tests/flat-tri-depth/bin/`
+  into a 256 KiB ISO that `xdvdfs info` reports `Valid: true`.
+- End-to-end name-lookup pack of `Grooverider - Slot Car Thunder` from
+  the external library produces a 96 MiB ISO that `xdvdfs info` reports
+  `Valid: true` and that `xdvdfs ls` enumerates correctly.
+- All negative paths (bogus name, ambiguous name, missing source, bad
+  flag) return non-zero with descriptive messages.
+- Idempotent rerun is a no-op; `--force` rebuilds.
+
+Consequence:
+
+Slice closed: any future session can run
+`scripts/apple-silicon/package-game.sh "<game name>"` to grab a game
+from the library on demand. The next adjacent slice (deferred) is
+extending `run-benchmark.sh` with a `custom <iso>` target so packaged
+games can flow through the harness without per-target hardcoding; the
+packaging tool itself is complete.
+
+
+## 2026-05-01: Async shader compile shipped opt-in; not the source of Crimson worst-frame stutter
+
+Decision:
+
+Ship `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` as a documented opt-in flag.
+Default off. Do not pursue further async-side work until the actual
+source of the 1.35-second Crimson worst-frame stutter is identified.
+
+Rationale:
+
+Implemented per the research-informed roadmap (Dolphin / RPCS3 pattern,
+PR #4876 "Async (Skip Draws)"): a third shared
+`g_nv2a_context_shader_compile` GL context, a `pgraph.gl_async_compile`
+worker thread, a per-binding `pending_compile` flag, an early-return
+"skip the draw" fallback in `pgraph_gl_draw_begin/end`. End-to-end
+correctness is validated: the worker compiles, programs publish into the
+shared name space, the renderer skips draws while compiling, and FPS
+does not regress on the PGR2 snapshot or default-path runs.
+
+Crimson Skies retail-route paired runs (same build, same input script,
+both with `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1
+XEMU_PGRAPH_FAST_READ=1`) showed:
+
+- `SHADER_COMPILE_US_TOTAL` 399 ms (sync) vs 347 ms (async): the
+  worker successfully moved nearly all `glLinkProgram` cost off the
+  renderer thread.
+- `post_load_frame_mspf_us_max`: 1,345,831 us (sync) vs 1,351,887 us
+  (async). Identical within run-to-run variance.
+- The stutter spikes occur at the **same gameplay points** (same
+  interval offsets +-1 from the script timing roll) with **near-
+  identical magnitudes** (e.g. 1,345.8 ms baseline vs 1,343.7 ms
+  async, 1,321.5 ms baseline vs 1,351.9 ms async).
+
+This is conclusive: the headline 1.35 s worst-frame is **not**
+`glLinkProgram` synchronous time on the renderer thread. The likely
+cause is Apple's GL-on-Metal driver doing MSL->Metal pipeline-state-
+object compile inside the **first `glDrawElements`** with a new
+program/VAO/state combination. That work cannot be moved to a worker
+thread without also setting up the renderer's VAO and surface state on
+the worker context, which is a much larger refactor.
+
+`p999` regressed from 104 ms (sync) to 382 ms (async) - consistent with
+the worker's `glFinish()` blocking on Apple's GL command queue, which
+serializes against the renderer's command buffer. Worth a follow-up
+A/B with `glFlush()` in place of `glFinish()`.
+
+Consequence:
+
+- Async slice is **complete and shipped opt-in**, with a benchmark note
+  at `docs/apple-silicon/benchmarks/2026-05-01-async-shader-compile.md`.
+- The roadmap "async shader compile" task in `handoff.md` is closed.
+- Future Apple-side judder work must first identify what actually fires
+  during the worst-frame interval. The next investigation should add a
+  per-event timestamp log inside `pgraph_gl_draw_begin / draw_end /
+  flush_draw` and across `TEX_UPLOAD`, `SURF_TO_TEX`, `SURF_UPLOAD`,
+  `SURF_DOWNLOAD`, then correlate against `frame_mspf_us > 100,000`.
+- Phase 4 (native Metal renderer) remains the right long-term path:
+  it is the only way to escape Apple's GL-on-Metal MSL compile and
+  command-queue serialization.
+
+Verification:
+
+- Build `./build.sh -a arm64` succeeds; codesign verified.
+- Smoke run `benchmark-runs/20260501-182456-flat-tri-depth` shows the
+  `xemu-perf: async_shader_compile=1 source=...` startup banner and
+  `SHADER_COMPILE_ASYNC_QUEUED == SHADER_COMPILE_ASYNC_COMPLETED` per
+  interval (queue drains).
+- Counter validation across `benchmark-runs/20260501-181049-crimson-skies`
+  (sync), `20260501-182613-crimson-skies` (async), `20260501-183005-pgr2`
+  (snapshot, sync), `20260501-183046-pgr2` (snapshot, async). All four
+  runs surfaced the new keys via `extract-perf-summary.sh` without
+  breaking older logs.
+- `shader_cache_entry_post_evict()` abort-on-pending guard never fired
+  in any run (50K-entry cache vs at most a few in-flight compiles).
+
+
+## 2026-05-01: Stay on OpenGL; the headline bottleneck is TCG TB invalidation, not the renderer
+
+Decision:
+
+The fork stays on Apple's OpenGL-on-Metal as the active renderer path.
+Native Metal (strategy.md Phase 4) is **not** the next priority. The
+project goals (sustained 60 FPS, no judder, 1080p output, anti-
+aliasing, higher-quality textures, broad Xbox library coverage) can
+be delivered on the existing GL renderer once the upstream-of-renderer
+bottleneck is fixed.
+
+Rationale:
+
+This session ran a per-event timing diagnostic followed by an Apple
+`sample` profile during a known-bad Crimson interval. Key results:
+
+1. **Renderer is essentially idle during Crimson's 1.35-s worst-frame
+   intervals** (all renderer counters under 24 ms of 1000 ms). The
+   Xbox CPU emulator only flips 2–10 frames in those windows.
+2. **`sample` profile attributes the dominant TCG cost to JIT TB
+   invalidation:** `tb_invalidate_phys_range_fast` →
+   `do_tb_phys_invalidate` → `tcg_flush_jmp_cache` (382 samples)
+   plus `pthread_jit_write_protect_np` (12 samples) and
+   `sys_icache_invalidate` (45 samples). This is the documented
+   Apple-Silicon-specific QEMU MTTCG W^X / i-cache cost.
+3. **Apple GL handles 4× internal scale (~2560×1920) on PGR2 with
+   only 7 % growth in `FLUSH_DRAW_US_TOTAL` and p99 stable at
+   ~35 ms.** No per-pipeline-state-object pathology under heavier
+   renderer load.
+4. **Crimson at scale 4 puts renderer cost at 27 % of wallclock at
+   30 FPS.** Doubling to 60 FPS lands at ~54 %, well inside budget.
+
+Headroom math (renderer cost = `DRAW_BEGIN + SURF_DOWNLOAD +
+FLIP_STALL`):
+
+| Scale × FPS combination       | Projected wallclock budget |
+| ----------------------------- | -------------------------- |
+| 1× scale, 60 FPS              | 41 %                        |
+| 2× scale (~1080p), 60 FPS     | 46 %                        |
+| 4× scale (~2160p), 60 FPS     | 56 %                        |
+| 2× + MSAA 2× (estimated), 60  | ~60 %                       |
+| 2× + MSAA 4× (estimated), 60  | ~72 %                       |
+
+All goals fit inside Apple's GL once TCG is unblocked.
+
+What would change this verdict (none observed yet):
+
+- Title-specific Apple GL pathologies in the broader Xbox library that
+  the four tested titles do not exhibit. Not yet measured at scale.
+- MSAA pipeline-variant explosion when AA is implemented. Not yet
+  measured because xemu's GL framebuffer setup is not multisample.
+- Texture-mod bandwidth saturation. Currently `TEX_UPLOAD_US_TOTAL` is
+  0.27 % of wallclock — has plenty of room.
+
+Consequence:
+
+- **Stop investing in renderer-side fixes for the headline judder.**
+  The async shader compile slice (`XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`)
+  was correct but unrelated to the actual cause; it remains shipped
+  opt-in.
+- **The next implementation slice is TCG TB-invalidation cost
+  reduction on Apple Silicon.** Specific paths to investigate:
+  persistent TCG translation cache (PPTC, strategy.md Phase 5a),
+  `pthread_jit_write_protect_np` toggle batching, smarter softmmu
+  notdirty/dirty page handling, and upstream QEMU MTTCG Apple-
+  Silicon patches.
+- **MSAA implementation on the existing GL path is the renderer-side
+  follow-up** (not Metal). Add multisample renderbuffer support to
+  `pgraph_gl_init_surfaces` and verify the new
+  `SHADER_COMPILE_*` counters do not show pathological pipeline-
+  variant compile bursts.
+- **A broader title sweep using `package-game.sh`** is the diversity
+  validation step before declaring GL definitively viable for the
+  whole library.
+- **Phase 4 native Metal renderer remains documented in
+  `strategy.md` as a long-term ceiling-removing effort**, but it is
+  not the next priority. Reconsider only if MSAA implementation or
+  the broader title sweep surface a renderer-side ceiling.
+
+Verification:
+
+- Build `./build.sh -a arm64` clean; `dist/xemu.app` codesign
+  verified.
+- Per-event timing data: `benchmark-runs/20260501-190239-crimson-skies`
+  (300 s retail route with all opt-in flags + diagnostic counters).
+- TCG sample profile:
+  `benchmark-runs/20260501-203802-crimson-skies/sample-tcg-bad-interval.txt`
+  (14,638 lines of `sample` output with thread-bucket summary).
+- Scale stress tests:
+  `benchmark-runs/20260501-204006-pgr2` (scale 1),
+  `benchmark-runs/20260501-204044-pgr2` (scale 2),
+  `benchmark-runs/20260501-204123-pgr2` (scale 4).
+- Crimson scale-4 stress: `benchmark-runs/20260501-204246-crimson-skies`.
+- Full analysis at
+  `docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md`
+  and the supporting attribution note
+  `docs/apple-silicon/benchmarks/2026-05-01-renderer-vs-tcg-stutter-attribution.md`.
+

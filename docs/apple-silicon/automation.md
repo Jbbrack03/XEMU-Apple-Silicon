@@ -1,6 +1,6 @@
 # Benchmark Automation
 
-Last updated: 2026-05-01
+Last updated: 2026-05-01 (game-packaging-tool session)
 
 This fork has a small scripted-input harness for repeatable Apple Silicon
 benchmark runs. It is opt-in and does not affect normal xemu launches.
@@ -337,6 +337,22 @@ from `mspf_max` per interval:
 Each metric is also emitted with the `post_load_` prefix over the
 post-load window (default skip first 5 intervals).
 
+When the run was captured with `XEMU_PERF_FRAME_LOG=1`, the summary
+also emits true frame-level metrics derived from the per-frame
+`frame_mspf_us=...` field, aggregated across all timed intervals
+(`final=1` partial-exit interval excluded, matching the timing
+averages):
+- `frame_mspf_us_p50`, `frame_mspf_us_p95`, `frame_mspf_us_p99`,
+  `frame_mspf_us_p999`, `frame_mspf_us_max` — per-frame mspf
+  percentiles in microseconds (nearest-rank).
+- `frame_mspf_us_count` — total frame samples aggregated.
+- `frame_mspf_us_dropped_total` — sum of `frame_mspf_us_dropped`
+  across intervals (frames over the 1024/interval cap).
+- `stutter_frames_30fps/45fps/60fps` — count of individual frames
+  with mspf > 33.3 / 22.2 / 16.7 ms (33300 / 22200 / 16700 us).
+Each frame-level metric is also emitted with the `post_load_` prefix.
+Logs without `frame_mspf_us=` produce none of these keys.
+
 `scripts/apple-silicon/sample-profile.sh GAME INPUT_CSV BENCH_SECONDS
 [SAMPLE_DURATION] [WARMUP] [LABEL]` is the autonomous helper for
 attaching Apple `sample` to a live xemu process. Runs the benchmark in
@@ -392,6 +408,54 @@ threshold. Exit code reflects whether the candidate regresses.
   draws split by depth mode.
 - `NATIVE_QUAD_DRAW_POLY_OFFSET`: native quad draws with fill polygon offset
   enabled.
+- `SHADER_COMPILE_COUNT`: number of GL program compile/link events per
+  interval (cold-compile path `generate_shaders()` plus disk-cache
+  `pgraph_gl_shader_load_from_memory()`). Cache hits do not count.
+- `SHADER_COMPILE_US_TOTAL`: total microseconds spent in the GL program
+  compile/link path per interval. On Apple's GL-on-Metal driver this is
+  the synchronous GLSL→MSL translation cost the renderer thread blocks on
+  inside `glLinkProgram` / `glProgramBinary`. Divide by
+  `SHADER_COMPILE_COUNT` for per-event cost. This is the direct
+  attribution counter for shader-compile-driven jitter — pair with
+  `frame_mspf_us_max` and the longest-stutter-run keys to confirm the
+  Crimson/Rainbow worst-frame source. With
+  `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`, the timing accumulates on the
+  worker thread (clock time), not the renderer thread, so this counter
+  no longer maps 1:1 to renderer-thread block time.
+- `SHADER_COMPILE_ASYNC_QUEUED`: per interval, number of shader compile
+  requests the renderer dispatched to the async worker. Only nonzero
+  with `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`.
+- `SHADER_COMPILE_ASYNC_COMPLETED`: per interval, number of compile
+  requests the worker finished and published. Cumulative
+  `QUEUED - COMPLETED` is the live queue depth.
+- `SHADER_DRAWS_SKIPPED_PENDING`: per interval, number of `draw_begin /
+  draw_end` calls that were skipped because the requested shader
+  binding was still being compiled by the async worker. Each skipped
+  draw is one frame of pop-in for that geometry. The count should
+  drop sharply once the working set of shader variants is warm.
+
+Async shader compile (opt-in flag `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`):
+
+- Spawns a single `pgraph.gl_async_compile` worker thread bound to a
+  shared `g_nv2a_context_shader_compile` GL context. The worker pulls
+  bindings off `PGRAPHGLState::compile_queue` and runs
+  `generate_shaders()` (compile + link + glFinish) without blocking the
+  renderer.
+- The renderer's `pgraph_gl_bind_shaders` enqueues a compile request
+  the first time it sees a new shader state hash, sets
+  `r->shader_skip_draw=true`, and the corresponding draw is skipped via
+  early-returns in `pgraph_gl_draw_begin` / `pgraph_gl_draw_end`.
+  Subsequent bind calls on the same hash also skip until the worker
+  publishes `binding->initialized=true`.
+- LRU eviction of a binding with `pending_compile=true` would race the
+  worker; `shader_cache_entry_post_evict` aborts in that case. The
+  shader cache is 50K entries and worst-case queue depth is small, so
+  this is documented as a guardrail, not an expected path.
+- Trade-off: visible pop-in for the first few frames after a new shader
+  appears, in exchange for never blocking the renderer on synchronous
+  GLSL→MSL compile. Matches the RPCS3 `Async (Skip Draws)` pattern.
+  Aimed at the Crimson Skies / Rainbow Six 3 worst-frame stutter
+  documented in the post-fast-read jitter analysis.
 
 Summarize a completed run with:
 
@@ -438,6 +502,73 @@ perf summaries, metadata, and a cropped screenshot comparison under a
 argument for perf-only comparisons. Retries default to two attempts per side to
 absorb the nondeterministic Apple OpenGL texture-upload startup crash seen in
 Crimson Skies.
+
+## Game Library Packaging
+
+`scripts/apple-silicon/package-game.sh` packages an extracted Original Xbox
+game directory into a XISO ISO that xemu can load. It wraps
+[xdvdfs](https://github.com/antangelo/xdvdfs) (`xdvdfs pack`) with
+project-aware defaults so Claude can pull a game from the external library
+on demand for stress-testing reported xemu issues against this build.
+
+External library default location:
+
+```text
+/Volumes/Josh-Backup-Files/Console Games/Original Xbox
+```
+
+The library is organized into three letter-range subdirectories
+(`XBOX HDD ready (#-I)`, `XBOX HDD ready (J-Q)`, `XBOX HDD ready (R-Z)`)
+plus a `DLC/` directory. Each game is an extracted Xbox game tree
+(`default.xbe` plus subdirectories), exactly what `xdvdfs pack` consumes.
+
+Usage:
+
+```sh
+# List games (optionally filtered)
+scripts/apple-silicon/package-game.sh --list
+scripts/apple-silicon/package-game.sh --list "rainbow"
+
+# Pack by name (case-insensitive substring match against folder names)
+scripts/apple-silicon/package-game.sh "Grooverider - Slot Car Thunder"
+
+# Pack with explicit source / output overrides
+scripts/apple-silicon/package-game.sh \
+  --source "/path/to/extracted/game" \
+  --output Test_Games/some-game.xiso.iso
+```
+
+Default output location is `$XEMU_TEST_GAMES_DIR/<game>.xiso.iso` (which
+defaults to `/Users/jbbrack03/XEMU_MacOS/Test_Games`). The launcher
+`run-benchmark.sh` only knows about its four hardcoded targets
+(`crimson`, `rainbow`, `pgr2`, `flat-tri-depth`); for an arbitrary
+packaged game, pass the disc path through `XEMU_BENCH_EXTRA_QEMU_ARGS`
+or invoke xemu directly with `-dvd_path` until the launcher learns a
+`custom` target.
+
+Behavior:
+
+- Refuses to overwrite an existing output ISO unless `--force` is passed.
+  This honors workspace rule #9 (do not modify `Test_Games/` in place).
+- Writes a `<output>.meta.txt` sidecar with source path, byte size, pack
+  duration, xdvdfs version, and a UTC timestamp.
+- Verifies the produced ISO with `xdvdfs info` (skip via `--no-verify`).
+- Auto-installs xdvdfs via `cargo install xdvdfs-cli --root
+  $XEMU_XDVDFS_INSTALL_ROOT` (default `$HOME/.cargo`) when the binary is
+  missing. Pass `--no-install` to disable.
+
+Environment variables:
+
+- `XEMU_GAME_LIBRARY` — external library root override.
+- `XEMU_TEST_GAMES_DIR` — default output directory override.
+- `XEMU_XDVDFS_BIN` — xdvdfs binary path override.
+- `XEMU_XDVDFS_INSTALL_ROOT` — `cargo install --root` target for the
+  autoinstall path.
+
+Exit codes: `0` success (or already-packed no-op), `1` runtime/IO error,
+`2` usage error or ambiguous name match.
+
+The tool reads the external library only; it never modifies it.
 
 ## Diagnostic Toggles
 

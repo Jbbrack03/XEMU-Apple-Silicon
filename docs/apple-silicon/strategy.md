@@ -212,38 +212,65 @@ Deliverables:
 
 ### Phase 2.5: Frame Pacing & Async Shader Compile
 
+> **Status (updated 2026-05-01): the async shader compile slice
+> shipped as `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` opt-in but does NOT
+> address the headline Crimson Skies 1.35-second worst-frame stutter.
+> The GL-vs-Metal decision diagnostic
+> (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) proved the
+> renderer is idle during those bad intervals — the bottleneck is the
+> TCG vCPU thread (Apple Silicon-specific TB-invalidation cost). The
+> frame pacing slewing piece below is still graphics-API-agnostic and
+> still useful, but it cannot fix the headline judder either; PPTC
+> (Phase 5a) is now the highest-priority slice.**
+
 These two slices are independent of graphics-API choice and can land on
-the current OpenGL path before Phase 3 or Phase 4. They address the
-user-visible jitter sources documented in
-`benchmarks/2026-05-01-baseline-jitter.md`:
+the current OpenGL path. Original framing was that they would address
+the user-visible jitter sources documented in
+`benchmarks/2026-05-01-baseline-jitter.md`. The 2026-05-01 diagnostic
+session refined that picture:
 
-- Crimson Skies' 1310 ms worst-frame from synchronous shader compilation
-  in Apple's GL-on-Metal driver (P99 = 892 ms, longest stutter run = 16
-  s). Identified as the highest user-visible jitter cost.
-- PGR2 / Rainbow tail jitter from emulation-clock drift relative to host
-  vsync.
+- Crimson Skies' 1.35-second worst-frame is **NOT** Apple's GL
+  synchronous shader compile. The renderer thread is idle during
+  those intervals (5–23 ms of busy time per 1000 ms wallclock); the
+  cost lives in TCG TB invalidation. See
+  `benchmarks/2026-05-01-renderer-vs-tcg-stutter-attribution.md`.
+- Frame-pacing slewing remains valuable for general smoothness on
+  scenes that ARE renderer-paced (PGR2 / Rainbow tail jitter from
+  emulation-clock drift relative to host vsync), but it does not
+  unblock the headline goal.
 
-Deliverables:
+Deliverables (status):
 
-- Frame pacing — emulation-rate slewing. Lock guest 60 Hz to host vsync
-  via fractional clock adjustment of ≤ 1 %, mirroring DuckStation's
-  "Sync to Host Refresh Rate" (PCSX2 PR #5488). Graphics-API-agnostic;
-  measurable on the existing OpenGL build via the per-interval
-  `mspf_max` jitter keys in `extract-perf-summary.sh`.
-- Async shader compile (`XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`). Worker
-  thread compiles shader programs off the renderer's critical path;
-  placeholder/ubershader bind while waiting; swap on completion. Pattern
-  from Dolphin's hybrid ubershader (PR #5702) and RPCS3's 2018 async
-  shader pipeline. Verification gate: Crimson route's `SHADER_GEN` /
-  `SURF_TO_TEX` / `TEX_UPLOAD` co-occurring stutter intervals dropping
-  by ≥ 80 %.
+- **Async shader compile (shipped opt-in 2026-05-01).**
+  `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`. Worker thread on a third
+  shared GL context (`g_nv2a_context_shader_compile`) compiles shader
+  programs off the renderer's critical path; "skip the draw" fallback
+  (RPCS3 PR #4876 pattern). Counters
+  `SHADER_COMPILE_ASYNC_QUEUED/COMPLETED` and
+  `SHADER_DRAWS_SKIPPED_PENDING` confirm the worker drains correctly.
+  Verdict: correct & shipped, does not fix Crimson stutter; remains
+  off by default. See
+  `benchmarks/2026-05-01-async-shader-compile.md`.
+- Frame pacing — emulation-rate slewing. **Deferred until after the
+  TCG fix lands.** Lock guest 60 Hz to host vsync via fractional clock
+  adjustment of ≤ 1 %, mirroring DuckStation's "Sync to Host Refresh
+  Rate" (PCSX2 PR #5488). Graphics-API-agnostic; measurable on the
+  existing OpenGL build via the per-interval `mspf_max` jitter keys
+  in `extract-perf-summary.sh`.
 
 Both slices are research-informed; named source references are in
 `research.md` "Apple Silicon Emulator Survey (2026-05-01)".
 
 ### Phase 3: Vulkan-over-Metal Prototype
 
-Deliverables:
+> **Status (updated 2026-05-01): deprioritized.** The GL-vs-Metal
+> decision diagnostic showed Apple's GL has measured headroom for
+> 60 FPS at 1080p (and even 4×-scale) on tracked titles. Vulkan-over-
+> Metal evaluation no longer has a forcing function. Reconsider only
+> if MSAA-on-GL or broader-title coverage surface a renderer-side
+> ceiling.
+
+Deliverables (deferred):
 
 - Darwin Vulkan discovery and surface creation.
 - MoltenVK/KosmicKrisp test matrix.
@@ -251,6 +278,21 @@ Deliverables:
 - Decision whether Vulkan-over-Metal is production-worthy or only a test path.
 
 ### Phase 4: Native Metal Renderer
+
+> **Status (updated 2026-05-01): deprioritized — not the next
+> implementation slice.** The GL-vs-Metal decision diagnostic
+> (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) demonstrated that
+> Apple's GL-on-Metal is not the gating constraint for any project
+> goal: PGR2 snapshot at 4× internal scale (~2560×1920) showed only
+> 7 % growth in `FLUSH_DRAW_US_TOTAL` and stable p99. The renderer
+> has measured headroom for 60 FPS at 1080p plus AA on tracked
+> titles. Phase 4 remains the long-term ceiling-removing path
+> (cleaner code, Apple-extension access, framebuffer-fetch-class
+> features unreachable from GL or MoltenVK), but it is not what
+> blocks the project's stated goals. Reconsider when MSAA-on-GL or
+> the broader-title sweep surface a renderer-side ceiling, or when
+> the long-term code-quality / future-proofing case becomes the next
+> highest-leverage investment.
 
 Sub-deliverables informed by the 2026-05-01 emulator survey
 (`research.md`):
@@ -295,22 +337,67 @@ Sub-deliverables informed by the 2026-05-01 emulator survey
 
 ### Phase 5: Performance Hardening
 
+> **Status (updated 2026-05-01): 5a (PPTC + Apple Silicon TCG TB-
+> invalidation cost) is now the highest-priority active slice.** The
+> GL-vs-Metal decision diagnostic moved this from "future hardening"
+> to "the only thing that gates every project goal" — see decision-
+> log entry "2026-05-01: Stay on OpenGL; the headline bottleneck is
+> TCG TB invalidation, not the renderer."
+
 Deliverables:
 
-- Shader cache persistence and prewarming where useful (extends Phase 4f).
+- 5a. **TCG TB-invalidation cost reduction on Apple Silicon (active).**
+  The 2026-05-01 sample profile attributed Crimson's 1.35-second
+  worst-frame to the JIT TB invalidation chain
+  (`tb_invalidate_phys_range_fast` → `do_tb_phys_invalidate` →
+  `tcg_flush_jmp_cache`) plus `pthread_jit_write_protect_np` and
+  `sys_icache_invalidate`. Apple Silicon pays real syscall cost per
+  TB flush. Investigation paths in priority order:
+  - Persistent TCG translation cache (PPTC pattern). Serialize TCG
+    translation blocks across runs, keyed by guest binary hash.
+    First-load and warmup-stutter win. Reference:
+    https://blog.ryujinx.org/introducing-profiled-persistent-translation-cache/.
+  - W^X toggle batching in `accel/tcg/tb-maint.c`. Apple recommends
+    batching writes under a single `pthread_jit_write_protect_np`
+    flip; xemu likely toggles per invalidation. Investigate whether
+    the invalidation burst can be wrapped in a single toggle.
+  - Smarter softmmu notdirty page handling — reduce the rate at
+    which writes through `do_st4_mmu` trigger
+    `tb_invalidate_phys_range_fast`. The Xbox CPU emulator may
+    currently treat all writes through softmmu as potentially-
+    invalidating.
+  - Upstream QEMU MTTCG patches for Apple Silicon JIT handling.
+    Search qemu-devel and qemu-project/qemu for `MAP_JIT`,
+    `pthread_jit_write_protect_np`, and `tb_flush` patches.
+- Shader cache persistence and prewarming where useful (extends
+  existing on-disk cache; would extend Phase 4f if Metal lands).
 - Reduced synchronization stalls.
 - Texture/surface upload/download audit.
 - Game-specific regression suite.
-- 5a. Persistent TCG translation cache (PPTC pattern). Serialize TCG
-  translation blocks across runs, keyed by guest binary hash.
-  First-load win only; will not help steady-state PGR2 / Rainbow /
-  Crimson. Reference:
-  https://blog.ryujinx.org/introducing-profiled-persistent-translation-cache/.
-- 5b. SSE / x87 floating-point helper audit. Already tracked in
-  `handoff.md` Prioritized Next Tasks #3. If SSE float32 ops go through
-  `soft_f32_mul` while NEON float32 is available, lift to hardfloat.
-  Largest potential TCG win on Apple Silicon per
-  `benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`.
+- 5b. SSE / x87 floating-point helper audit — **completed 2026-05-01,
+  hypothesis disproved for SSE.** See
+  `benchmarks/2026-05-01-tcg-float-audit.md` and decision-log entry
+  "2026-05-01: SSE hardfloat already active on aarch64; x87 80-bit
+  irreducibly soft". Source-level finding:
+  `float32_gen2`/`float64_gen2` already dispatches to a hard arm64
+  `fmul` when the guest's MXCSR is in the common state — no
+  `__x86_64__` gate disables the shortcut on aarch64. The visible
+  `parts64_uncanon_normal` time in the post-fast-read sample is the
+  necessary soft fallback for first-op-after-MXCSR-reset, NaN/Inf/
+  denormal inputs, denormal results, and non-default rounding modes.
+  `helper_fmul_ST0_FT0` (x87 80-bit) is irreducibly soft on Apple
+  Silicon because there is no native 80-bit float on aarch64; the
+  fork's existing `__hard` x87 path is correctly gated to `XBOX
+  && __x86_64__`. **Remaining 5b work** (deferred, real but
+  Phase-2-scope): (i) cheap counter-pair experiment around
+  `float32_gen2` (`sse_hard_taken` vs `sse_soft_fallback` per reason)
+  to confirm the steady-state hard-take ratio > 0.9 on the PGR2
+  snapshot before any further float work; (ii) NEON-based
+  `floatx80_mul`/`floatx80_add` Dekker / TwoProduct kernel for x87
+  bit-exact 80-bit math; (iii) opt-in `XEMU_X87_RELAXED_PRECISION=1`
+  honoring the guest FPU control word's PC field, gated per-title and
+  off by default. Both (ii) and (iii) are real work and only justified
+  after Instruments confirms x87 is dominant in real-game inner loops.
 
 ## What we ruled out
 
@@ -324,8 +411,15 @@ projects use but that are not on this fork's roadmap, with reasons:
   workspace rule #1, measurement should drive that decision; the most
   recent profile (`benchmarks/2026-05-01-pgr2-bottleneck-postfast.md`)
   attributes ~9 % of TCG-thread time to mutex wait and the bulk of the
-  remainder to floating-point helpers — the SSE / x87 hardfloat audit
-  (5b) is a much cheaper way to address the same surface area.
+  remainder to floating-point helpers. The 5b audit
+  (`benchmarks/2026-05-01-tcg-float-audit.md`) showed the SSE
+  float32/float64 helpers already take the hardfloat shortcut on
+  aarch64 in steady state, so the float-helper time visible in the
+  profile is split between irreducible x87 80-bit cost and
+  correctness-required softfloat fallback for SSE edge cases — not
+  unconditional softfloat trips. A custom JIT cannot recover that
+  surface area either, since the irreducible portion is genuinely
+  irreducible without precision-relaxing semantics.
 - Indirect command buffers, argument buffers, mesh shaders. Tellusim's
   Metal MDI study (https://tellusim.com/metal-mdi/) shows ICBs win
   only for many small draws and lose by ~1.5× for larger draws. The
@@ -346,9 +440,26 @@ projects use but that are not on this fork's roadmap, with reasons:
 
 ## Success Criteria
 
-- Apple Silicon build defaults to a non-OpenGL fast path.
-- Known macOS 3D regression scenes recover frame pacing.
-- Shader compilation stalls are measurable and substantially reduced.
-- PGR2, Crimson Skies, and Rainbow Six 3 sustain at least 30 FPS in gameplay;
-  60 FPS is desirable but not the floor for stability/performance.
+> **Updated 2026-05-01 to match the GL-vs-Metal verdict.** The fork
+> stays on OpenGL as the active renderer. "Defaults to non-OpenGL"
+> was based on an incorrect bottleneck attribution.
+
+- **TCG TB-invalidation cost on Apple Silicon is reduced** so that
+  Crimson Skies-class self-modifying-code scenes do not produce
+  1-second-class worst-frame stalls.
+- **PGR2, Crimson Skies, and Rainbow Six 3 sustain 60 FPS in
+  gameplay** at native Xbox internal resolution after the TCG fix.
+  30 FPS floor is already met (2026-05-01).
+- **1080p output (internal scale 2×) at sustained 60 FPS** on
+  tracked titles, with anti-aliasing as a player-visible option.
+- **Apple GL renderer pipeline-variant cost remains non-pathological
+  under MSAA enable** (validated by `SHADER_COMPILE_*` counters
+  during a stress test that we have not yet run).
+- **Broader title coverage** — at least 5 titles from the external
+  Xbox library exhibit no Apple-GL pathologies that the tracked
+  three did not.
 - Correctness regressions are documented, minimized, and tracked.
+- Phase 4 native Metal renderer becomes a Phase-2 quality
+  investment, justified by code-base health or by a measured
+  renderer-side ceiling — not by the headline judder, which Metal
+  would not address.

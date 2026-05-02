@@ -154,24 +154,41 @@ visible regressions point first at the renderer.
 
 Start in `handoff.md`, section `Next Session Checklist`. The important state is:
 
-- Do not spend the next session revalidating `XEMU_NATIVE_TRI_DEPTH=1` unless a
-  triangle-path change was made.
-- Use `scripts/apple-silicon/validate-native-tri-depth.sh --run 20` only as a
-  quick regression gate for the completed triangle-family fill slice.
-- All three opt-in flags (`XEMU_NATIVE_TRI_DEPTH=1`, `XEMU_NATIVE_QUAD=1`,
-  `XEMU_PGRAPH_FAST_READ=1`) are landed and visually validated; PGR2 /
-  Rainbow Six 3 / Crimson Skies all meet the 30 FPS gameplay floor with
-  the three flags on. Do not re-prove these unless the underlying code
-  changes.
-- First useful next task: async shader compile
-  (`XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`) to address Crimson Skies'
-  documented 1310 ms worst-frame from synchronous compile in Apple's
-  GL-on-Metal driver. See `strategy.md` Phase 2.5 and the 2026-05-01
-  emulator-survey research session in `research.md` for the
-  research-informed roadmap.
-- Parallel small slice: emulation-rate slewing (also Phase 2.5),
-  graphics-API-agnostic and trivially measurable on the existing OpenGL
-  path via `mspf_max` jitter keys.
+- Do not spend the next session revalidating `XEMU_NATIVE_TRI_DEPTH=1`,
+  `XEMU_NATIVE_QUAD=1`, or `XEMU_PGRAPH_FAST_READ=1` unless their
+  underlying code paths change. All three flags are landed, visually
+  validated, and verified to meet the 30 FPS gameplay floor on PGR2 /
+  Rainbow Six 3 / Crimson Skies.
+- A fourth opt-in flag landed 2026-05-01:
+  `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` (worker-thread shader compile
+  via a third shared GL context, RPCS3 PR #4876 "skip the draw"
+  pattern). It is **correct and shipped opt-in** but does **NOT**
+  fix Crimson Skies' 1.35-second worst-frame stutter. Default off.
+  See `benchmarks/2026-05-01-async-shader-compile.md`.
+- Strategic verdict (2026-05-01, decisive): **stay on OpenGL.** The
+  GL-vs-Metal decision diagnostic
+  (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) showed Apple's
+  GL has measured headroom for 60 FPS at 1080p (and even at 4×-scale
+  internal resolution) on tracked titles. The headline 1.35-second
+  Crimson stutter is in the **TCG vCPU thread**, not the renderer —
+  Apple Silicon-specific QEMU MTTCG TB-invalidation cost
+  (`tb_invalidate_phys_range_fast` → `do_tb_phys_invalidate` plus
+  `pthread_jit_write_protect_np` and `sys_icache_invalidate`).
+  Native Metal would not address it.
+- **Highest-priority next task: TCG TB-invalidation cost reduction
+  on Apple Silicon (strategy.md Phase 5a).** PPTC, W^X-toggle
+  batching, smarter softmmu notdirty handling, or upstream QEMU
+  patches. Everything else (MSAA-on-GL, broader title sweep, frame
+  pacing) is downstream.
+- Diagnostic infrastructure for community measurement on any Apple
+  Silicon Mac: per-subsystem timing counters
+  (`BIND_TEXTURES_US_TOTAL`, `TEX_UPLOAD_US_TOTAL`,
+  `SURF_TO_TEX_US_TOTAL`, `SURF_UPLOAD_US_TOTAL`,
+  `SURF_DOWNLOAD_US_TOTAL`, `FLUSH_DRAW_US_TOTAL`,
+  `DRAW_BEGIN_US_TOTAL`, `FLIP_STALL_US_TOTAL`,
+  `FLIP_STALL_GLFINISH_US_TOTAL`), per-event spike log
+  (`XEMU_PERF_SPIKE_LOG=1`), and renderer-load A/B knob
+  (`XEMU_BENCH_SURFACE_SCALE=N`).
 
 ## First Principle
 

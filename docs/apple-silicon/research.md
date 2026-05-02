@@ -470,6 +470,20 @@ IR-transform model is the cheaper template if a JIT change ever does
 become necessary; see `strategy.md` "What we ruled out" for why a custom
 x86→ARM64 JIT is not on the current roadmap.
 
+**Direct relevance to xemu's headline judder (added 2026-05-01).** The
+2026-05-01 sample profile during a known-bad Crimson interval
+(`benchmarks/2026-05-01-renderer-vs-tcg-stutter-attribution.md`,
+`benchmarks/2026-05-01-gl-vs-metal-decision.md`) attributed the
+1.35-second worst-frame to xemu's existing TCG hitting exactly this
+catalog: `tb_invalidate_phys_range_fast` →
+`do_tb_phys_invalidate` → `tcg_flush_jmp_cache` plus
+`pthread_jit_write_protect_np` (W^X toggle) and
+`sys_icache_invalidate`. Each TB invalidation pays real syscall cost
+on Apple Silicon. The fix lives on the TCG side — strategy.md Phase
+5a is now the highest-priority active slice — and the natural
+reference for what to investigate is Ryujinx's PPTC pattern below
+plus the RPCS3 PR #12115 anti-pattern list above.
+
 ### Ryujinx (Switch)
 
 Vulkan via MoltenVK on macOS. (Project DMCA'd by Nintendo October 2024;

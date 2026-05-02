@@ -82,6 +82,19 @@ Stable opt-in:
   geometry-shader bypasses; biggest payoff comes when both bypasses are on
   (so the renderer holds the lock for shorter intervals). Set `=0` to
   disable explicitly.
+- `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` — opt-in async shader compile
+  worker. A `pgraph.gl_async_compile` thread bound to a third shared
+  `g_nv2a_context_shader_compile` GL context runs `glLinkProgram` /
+  `generate_shaders()` off the renderer's critical path; the renderer
+  uses a "skip the draw" fallback while a binding is still being
+  compiled (RPCS3 PR #4876 pattern). Counters
+  `SHADER_COMPILE_ASYNC_QUEUED`, `SHADER_COMPILE_ASYNC_COMPLETED`,
+  `SHADER_DRAWS_SKIPPED_PENDING` confirm worker drain and skipped-
+  draw count. **Note:** correct & shipped opt-in, but does NOT fix
+  Crimson Skies' 1.35-second worst-frame stutter (proved 2026-05-01;
+  the stutter is on the TCG vCPU thread, not the renderer). Default
+  off. See `docs/apple-silicon/benchmarks/2026-05-01-async-shader-compile.md`
+  and `docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md`.
 
 Diagnostic toggles (intentionally not correctness paths):
 
@@ -101,6 +114,14 @@ Logging:
 - `XEMU_PERF_FRAME_LOG=1` — append per-frame `frame_mspf_us=v1,v2,...`
   to each interval line (bounded 1024 frames; overflow noted in
   `frame_mspf_us_dropped`). Off by default.
+- `XEMU_PERF_SPIKE_LOG=1` — emit `xemu-spike: op=<name>
+  duration_us=<n> now_us=<n>` per-event spike lines whenever a single
+  timed renderer operation exceeds the spike threshold. Used to
+  pinpoint which renderer path is slow during a stutter. Off by
+  default.
+- `XEMU_PERF_SPIKE_LOG_THRESHOLD_US=N` — minimum operation duration
+  (microseconds) that triggers a spike line. Default 50000
+  (50 ms). Lower values catch finer events at the cost of log volume.
 - `XEMU_SNAPSHOT_NO_THUMBNAIL=1` — skip snapshot thumbnail capture.
 
 Input automation:
@@ -115,7 +136,10 @@ Benchmark launcher knobs (read in `scripts/apple-silicon/run-benchmark.sh`):
   `XEMU_BENCH_SCREENSHOT_INTERVAL`, `XEMU_BENCH_SCREENSHOT_START_DELAY`,
   `XEMU_BENCH_SAVEVM_AT`, `XEMU_BENCH_SAVEVM_TAG`, `XEMU_BENCH_LOADVM_TAG`,
   `XEMU_BENCH_LOADVM_AT`, `XEMU_BENCH_EXTRA_QEMU_ARGS`,
-  `XEMU_BENCH_ALLOW_EXISTING`.
+  `XEMU_BENCH_ALLOW_EXISTING`,
+  `XEMU_BENCH_SURFACE_SCALE` (injects `[display.quality] surface_scale = N`
+  into the per-run config; used for the GL renderer-load A/B test
+  documented in `benchmarks/2026-05-01-gl-vs-metal-decision.md`).
 
 When adding a new flag, also extend `extract-perf-summary.sh` and
 `automation.md` so the value shows up in summaries and is documented.

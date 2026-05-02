@@ -254,6 +254,38 @@ Current matrix status:
     comparison. Use the stable `XEMU_NATIVE_TRI_DEPTH=1` and
     `XEMU_NATIVE_QUAD=1` spellings together for the full geometry-shader
     bypass.
+- 2026-05-01 per-frame mspf retail-route capture
+  (`docs/apple-silicon/benchmarks/2026-05-01-frame-log-retail-routes.md`):
+  all three R1/R2/R3 routes were re-run under
+  `XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1
+  XEMU_PERF_LOG=1 XEMU_PERF_FRAME_LOG=1` for 300 s each so every
+  per-interval `xemu-perf:` line carries `frame_mspf_us=v1,v2,...` for
+  future frame-level p99/p99.9 work. Run dirs:
+  `benchmark-runs/20260501-173435-pgr2`,
+  `benchmark-runs/20260501-173959-rainbow-six-3`,
+  `benchmark-runs/20260501-174514-crimson-skies`. Per-interval
+  post-load summaries: PGR2 32.07 FPS / 117.84 ms max-frame; Rainbow
+  30.16 FPS / 717.18 ms max-frame; Crimson 30.43 FPS / 1375.50 ms
+  max-frame and 16-interval longest 30 FPS stutter run. Crimson's
+  worst-frame distribution matches the Apple GL-on-Metal synchronous-
+  shader-compile fingerprint already documented in
+  `docs/apple-silicon/benchmarks/2026-05-01-baseline-jitter.md`. The
+  data is the input for a future `extract-perf-summary.sh` extension
+  that parses `frame_mspf_us=` to compute true frame-level percentiles;
+  no emulator code change is required for that follow-up.
+- 2026-05-01 TCG SSE/x87 hardfloat audit
+  (`docs/apple-silicon/benchmarks/2026-05-01-tcg-float-audit.md`): pure
+  source audit, no benchmark runs. Conclusion: SSE float32/float64
+  helpers already take the hardfloat shortcut on aarch64
+  (`fpu/softfloat.c:337-397`); the visible `parts64_uncanon_normal`
+  time in `2026-05-01-pgr2-bottleneck-postfast.md` is the necessary
+  soft fallback for first-op-after-MXCSR-reset, NaN/Inf/denormal
+  inputs, denormal results, and non-default rounding modes. x87 80-bit
+  is irreducibly soft on Apple Silicon. Recommended cheap follow-up:
+  add an `sse_hard_taken`/`sse_soft_fallback` counter pair around
+  `float32_gen2`/`float64_gen2` and run on the `pgr2_gameplay_b4`
+  snapshot for 30 s; if hard-take ratio > 0.9, redirect away from
+  float-helper work.
 - V0/V1/M0 should wait until the next non-geometry-shader bottleneck for
   PGR2 is identified. With both bypass slices on, the snapshot scene is
   16.56 FPS and there is no geometry-shader work left to remove. The next
