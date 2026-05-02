@@ -1,6 +1,6 @@
 # Benchmark Automation
 
-Last updated: 2026-05-01 (game-packaging-tool session)
+Last updated: 2026-05-02 (V1/V2/V3/V4/V5/D2/D3 multi-slice session: TCG splitwx + jmp-cache-targeted, APU lock-release, MSAA opt-in, 1080p first-launch default, broader title sweep)
 
 This fork has a small scripted-input harness for repeatable Apple Silicon
 benchmark runs. It is opt-in and does not affect normal xemu launches.
@@ -72,6 +72,18 @@ Each run creates a directory under `benchmark-runs/` containing:
 
 The launcher intentionally uses a scratch HDD copy so benchmark navigation does
 not mutate the source HDD image.
+
+The per-run config writes `[display.quality] surface_scale = N`, where
+`N` defaults to **2** (matching the Apple Silicon system build's
+first-run default — 1080p-class internal resolution). Override per
+invocation with `XEMU_BENCH_SURFACE_SCALE=N` (e.g. for the GL renderer
+A/B sweep documented in
+`benchmarks/2026-05-01-gl-vs-metal-decision.md`). The harness's
+`XEMU_BENCH_SURFACE_SCALE` and the runtime
+`XEMU_DISPLAY_SCALE={1,2,3,4}` flag are parallel knobs at different
+layers — the harness controls the per-run xemu.toml, while
+`XEMU_DISPLAY_SCALE` overrides the loaded value at xemu startup
+without touching any toml.
 
 ## Recording Input
 
@@ -163,6 +175,167 @@ and stack:
   Biggest gain shows up when combined with the geometry-shader bypasses,
   because the renderer's lock-hold time is what creates contention in the
   first place.
+- `XEMU_TCG_SPLITWX={0,1}` overrides the splitwx auto-default for the TCG
+  JIT. Apple Silicon system builds default to splitwx-on (the
+  `mach_vm_remap` dual-mapping path in `tcg/region.c`), which removes the
+  per-TB-execution `pthread_jit_write_protect_np()` syscall measured at
+  ~16 % of TCG-thread on-CPU time during the Crimson Skies 1.35-second
+  worst-frame stutter on 2026-05-01. Set `XEMU_TCG_SPLITWX=0` to fall back
+  to the upstream MAP_JIT path (correctness-equivalent, same per-TB toggle
+  cost). Set `XEMU_TCG_SPLITWX=1` to force splitwx on platforms where the
+  auto-default is off. Memory implication: the splitwx path keeps two VA
+  aliases of the JIT region, so committed virtual address space for the JIT
+  buffer doubles (physical pages are shared via the same backing). Explicit
+  `-accel tcg,split-wx=on|off` always wins over the env var; the env var
+  wins over the auto-default. If splitwx allocation fails at startup the
+  TCG init falls back to MAP_JIT and logs the failure once.
+- `XEMU_TCG_JMP_CACHE_TARGETED={0,1}` overrides the per-page-targeted
+  jmp-cache invalidation auto-default. Apple Silicon system builds default
+  to ON. The slice replaces the unconditional 4096-entry jmp-cache zero
+  inside `tb_jmp_cache_inval_tb`'s `CF_PCREL` branch (which i386
+  system-mode sets globally; see `target/i386/cpu.c:9325`) with a single
+  bucket clear per invalidated TB, batched after the
+  `tb_invalidate_phys_page_range__locked` loop. The dominant residual cost
+  in the V1 splitwx-on Crimson sample profile is `tcg_flush_jmp_cache`
+  (1,982 of 20,680 TCG-thread samples = 9.6 %); shrinking it by a factor
+  ~1/4096 per call is the leverage. Correctness: the lookup in
+  `cpu-exec.c::tb_lookup` (line 267) validates `tb_cflags(tb) == s.cflags`
+  and `do_tb_phys_invalidate` sets `CF_INVALID` (line 942) before removing
+  the TB from `tb_ctx.htable` (line 949), so a stale `tb*` left in an
+  unrelated jmp-cache bucket fails the cflags compare and falls through to
+  `tb_htable_lookup`, which won't find the (already-removed) invalidated
+  TB and translates fresh. Set `XEMU_TCG_JMP_CACHE_TARGETED=0` to fall
+  back to the upstream full-zero path (rollback for A/B testing or
+  correctness-regression triage); set `XEMU_TCG_JMP_CACHE_TARGETED=1` to
+  force on where the auto-default is off. Non-PCREL TBs and the
+  `tb_flush` / cputlb full-flush callers continue to use the unmodified
+  full-zero path. The accompanying `TCG_JMP_CACHE_ZEROED_BUCKETS` and
+  `TCG_INVALIDATE_WALL_US_MAX` perf counters (below) attribute the slice's
+  effect on a per-interval basis.
+- `XEMU_GL_MSAA={0,2,4,8}` opts in to multisample anti-aliasing on the
+  OpenGL renderer path. Default: 0 (off; byte-identical to today). When
+  set to 2/4/8, the renderer allocates each surface's color and depth
+  attachments as multisample renderbuffers via
+  `glRenderbufferStorageMultisample(samples, internal_format, w, h)` and
+  attaches them to the draw FBO; the existing `gl_buffer` GL_TEXTURE_2D
+  is kept as the resolved single-sample target that downstream consumers
+  (surface download, surface-to-texture, display render) sample/read.
+  Resolves are lazy: a per-surface `msaa_resolved` flag suppresses
+  redundant blits, and the surface is marked dirty by
+  `pgraph_gl_set_surface_dirty`. The requested sample count is clamped
+  to `GL_MAX_SAMPLES` reported by the active GL context at init; the
+  effective value is logged once at startup as
+  `xemu-perf: gl_msaa=N source=XEMU_GL_MSAA requested=R max_samples=M`.
+  Composes cleanly with `XEMU_DISPLAY_SCALE`/`surface_scale`: render
+  dimensions feed both, so `surface_scale=2` plus `XEMU_GL_MSAA=4`
+  yields a 2x supersampled, 4x multisampled internal target. New per-
+  frame counter `MSAA_RESOLVE_US_TOTAL` (below) reports the wall-clock
+  spent in the blit-resolves; `SHADER_COMPILE_*` counters should be
+  watched the first time MSAA is enabled to confirm Apple's GL-on-Metal
+  driver does not balloon pipeline-variant compile cost under the
+  multisample render-target state, which is the renderer-side success
+  criterion documented in `decision-log.md` ("Stay on OpenGL ...").
+- `XEMU_DISPLAY_SCALE={1,2,3,4}` overrides the loaded
+  `display.quality.surface_scale` value for this xemu session without
+  modifying the user's saved preference. Mirrors the per-run
+  `XEMU_BENCH_SURFACE_SCALE` knob the benchmark harness uses (see
+  "Benchmark Launcher" below): the harness writes
+  `[display.quality] surface_scale = N` into the per-run xemu.toml,
+  while `XEMU_DISPLAY_SCALE` is the runtime-env equivalent for direct
+  xemu launches and CI invocations. Out-of-range values (anything not
+  parseable as an integer 1..10) are silently ignored. Stacks with the
+  geometry-shader bypasses; correctness-equivalent — only the internal
+  framebuffer/texture render-target dimensions change. Apple Silicon
+  system builds default `surface_scale` to 2 on first launch (1080p-class
+  internal resolution, ~7 % renderer-cost growth on PGR2 vs scale 1; see
+  `benchmarks/2026-05-01-gl-vs-metal-decision.md`); existing users with
+  a stored config keep their current value untouched.
+- `XEMU_APU_LOCK_RELEASE={0,1}` overrides the audio voice-lock release
+  auto-default. Apple Silicon system builds default to ON. Slice
+  mechanism: in `hw/xbox/mcpx/apu/vp/vp.c::voice_work_dispatch`, after
+  the worker batch is signaled (`qemu_cond_broadcast(&vwd->work_pending)`)
+  the APU worker thread releases `MCPXAPUState::lock` for the duration of
+  `qemu_cond_wait(&vwd->work_finished, &vwd->lock)`, then re-acquires
+  `d->lock` (and re-acquires `vwd->lock` after, preserving the legacy
+  `d->lock` outer / `vwd->lock` inner lock ordering) before draining the
+  worker mixbins into the caller's per-frame mixbins. The released window
+  unblocks any vCPU MMIO write that takes `d->lock` —
+  `NV1BA0_PIO_VOICE_LOCK` writes through `voice_lock()`, plus DSP X/Y/P
+  memory writes through `gp_write` and `ep_write` — so they no longer
+  block for the full ~5.33 ms VP frame. Targets D3-attributed Crimson
+  voice-lock contention (21.3 s / 300 s of vCPU thread time on
+  `mcpx-apu-vp/0xfe8202fc` = NV1BA0_PIO_VOICE_LOCK; see
+  `benchmarks/2026-05-02-tcg-30fps-cap-attribution.md`).
+
+  This slice is *distinct from* the prior reverted
+  `XEMU_VOICE_FAST_LOCK` slice (decision-log entry "2026-05-01:
+  XEMU_VOICE_FAST_LOCK not landed", note
+  `benchmarks/2026-05-01-voice-fast-lock-investigation.md`): that slice
+  tried atomic OR/AND on the `d->vp.voice_locked[]` bitmap and dropped
+  the cond_signal — lock-elision at the bitmap level. It was rejected
+  because the contention is at the audio-frame level, not the
+  bit-update level. The new slice keeps `voice_lock()` exactly as it
+  was on the vCPU side (still acquires `d->lock`, still updates the
+  bitmap atomically, still signals `d->cond`) and instead shrinks the
+  APU thread's `d->lock` hold so the vCPU's existing acquire is no
+  longer contended for most of the VP frame.
+
+  Snapshot/process/publish boundary: the snapshot is the existing
+  `vwd->queue[]` (built under `d->lock` during the voice-list walk in
+  `mcpx_apu_vp_frame`), holding voice handles + list ids. Voice config
+  itself lives in *guest RAM* (read by workers via `voice_get_mask`
+  from `address_space_memory`), already lock-free in upstream. The
+  process phase is the worker threads consuming `vwd->queue[]` and
+  running envelope / resample / SVF / HRTF math into per-worker
+  `self->mixbins`. The publish phase re-acquires `d->lock`, then
+  `vwd->lock`, drains `vwd->mixbins` into the caller's stack-allocated
+  `mixbins[]`, and releases.
+
+  Race widening (correctness): a vCPU `voice_lock(true)` MMIO write
+  can now succeed while a worker is mid-process on the same voice.
+  The worker reads voice config from guest RAM at the start of
+  `voice_process` and may see partially-modified config if the vCPU
+  then writes `voice_set_mask` between two of the worker's reads. This
+  widens an existing race class — `vp_write` paths such as
+  `SET_VOICE_TAR_VOLA` / `SET_VOICE_TAR_PITCH` / `SET_VOICE_LFO_ENV`
+  already modify guest RAM without acquiring `d->lock` or
+  `voice_lock`, so worker reads of those fields are already racy in
+  upstream. The widening adds the same exposure to fields touched
+  between `voice_lock(true)` and `voice_lock(false)` in `VOICE_ON` /
+  `VOICE_RELEASE` sequences (envelope start / release-rate fields).
+  Per-frame impact is bounded to ~256 samples (5.33 ms) of
+  slightly-stale audio for affected voices on the worst case — well
+  below the perceptual threshold for the volume / envelope deltas the
+  race exposes.
+
+  Set `XEMU_APU_LOCK_RELEASE=0` to fall back to the legacy
+  lock-held-throughout-frame behavior (rollback for A/B testing or
+  audio-correctness regression triage); set `=1` to force on where
+  the auto-default is off. The env var is consulted once at APU
+  device init (`mcpx_apu_realize`); the resolved value is logged at
+  startup as `xemu-perf: apu_lock_release=N
+  source=XEMU_APU_LOCK_RELEASE|auto-default`. The env var beats the
+  build default. Accompanying counters `APU_LOCK_HOLD_US_TOTAL` and
+  `APU_VCPU_LOCK_WAIT_US_MAX` (below) attribute the slice's effect.
+
+### Apple Silicon defaults
+
+The Apple Silicon system build (`CONFIG_DARWIN && __aarch64__`) ships
+with these auto-defaults applied at startup; each is overridable as
+documented above:
+
+- `display.quality.surface_scale = 2` on first launch (no
+  `xemu.toml` present yet). Existing installs keep their stored value;
+  set it via the in-app "Internal resolution scale" combo or override
+  per-session with `XEMU_DISPLAY_SCALE=N`.
+- `tcg,split-wx=on` (via the `mach_vm_remap` dual-mapping path);
+  override with `XEMU_TCG_SPLITWX={0,1}` or
+  `-accel tcg,split-wx=on|off`.
+- Per-page-targeted jmp-cache invalidation; override with
+  `XEMU_TCG_JMP_CACHE_TARGETED={0,1}`.
+- APU voice-lock release (`MCPXAPUState::lock` released during the
+  per-frame voice-worker batch wait); override with
+  `XEMU_APU_LOCK_RELEASE={0,1}`.
 
 ## Profile Setup Runs
 
@@ -328,6 +501,98 @@ microsecond mspf of every frame in that interval (bounded to 1024 frames
 per interval; overflow recorded in `frame_mspf_us_dropped`). Default
 off; enable when frame-level p99 / p99.9 percentiles are needed.
 
+### Per-event spike log (`XEMU_PERF_SPIKE_LOG`, `XEMU_PERF_SPIKE_LOG_TCG`)
+
+For attribution of single-frame stutters that the per-interval
+`xemu-perf:` line cannot explain, the per-event spike log emits one
+`xemu-spike:` line per timed operation that exceeds a duration
+threshold. Format:
+
+```
+xemu-spike: op=<name> duration_us=<n> now_us=<n> [extra=fields...]
+```
+
+`now_us` is `qemu_clock_get_us(QEMU_CLOCK_REALTIME)` — the same clock
+domain used by the `xemu-perf:` interval timestamps, so spike lines can
+be correlated to the per-interval `mspf_max` they fired inside.
+
+Two enable bits, each off by default:
+
+- `XEMU_PERF_SPIKE_LOG=1` — renderer-thread spike sources only:
+  `draw_begin`, `flush_draw`, `surf_to_tex`, `surf_download`,
+  `surf_upload`, `flip_stall_glfinish`, `bind_textures`, `tex_upload`.
+  Used since the V0/V1 baseline to attribute renderer-thread cost.
+- `XEMU_PERF_SPIKE_LOG_TCG=1` (V3, 2026-05-02) — TCG-thread and
+  pfifo-thread spike sources:
+  - `tcg_tb_chain` — one full pass through `cpu_exec_loop`'s inner
+    while-handle-interrupt loop. `extra` carries `tb_count=N
+    first_pc=0xADDR` so a spike here attributes the cost to a specific
+    chained-TB sequence on the vCPU thread.
+  - `tcg_invalidate_burst` — one call to
+    `tb_invalidate_phys_page_range__locked` exceeded the threshold.
+    `extra` carries `burst=N page=0xADDR`. V2 evidence shows per-call
+    max is ~700us so this rarely fires at the default 50ms threshold;
+    that's the point — if it fires during the worst frame, R2's
+    "invalidation cost is not the source" verdict was wrong.
+  - `tcg_notdirty_storm` — sliding 1-second window detected
+    >100,000 `notdirty_write` trips per second (SMC re-trapping
+    storm). `extra` carries `events=N rate_per_s=N`.
+  - `tcg_x87_storm` — sliding 1-second window detected >50,000,000
+    x87 helper calls per second across `helper_fmul_ST0_FT0`,
+    `helper_fadd_STN_ST0`, `helper_fsub_STN_ST0`,
+    `helper_fdiv_STN_ST0`. `extra` carries `events=N rate_per_s=N`.
+  - `tcg_pg_lock_wait` — TCG vCPU thread waited >threshold to acquire
+    `pg->lock` for an MMIO read/write (`pgraph_read` /
+    `pgraph_write`). Spike here means the renderer/pfifo thread held
+    the GL critical section beyond the threshold.
+  - `renderer_pg_lock_wait` — pfifo (renderer) thread waited
+    >threshold to acquire `pg->lock` in `pfifo_run_puller`. Spike
+    here means the TCG vCPU thread held `pg->lock` (rare; useful as
+    a cross-check).
+  - `qemu_main_loop_iter` (D3, 2026-05-02) — full `main_loop_wait`
+    iteration's *post-poll dispatch* phase exceeded threshold. The
+    blocking `os_host_main_loop_wait` (which can sleep up to the
+    soonest-timer deadline) is excluded from the duration; only the
+    BH dispatch + timer fire phase counts. `extra` carries
+    `total_us=N nonblocking=0|1` so the sleep portion is visible.
+    A spike here means an iothread BH or main-loop timer ran for
+    >threshold, blocking everything else from running on the iothread.
+  - `bql_acquire_wait` (D3) — a single `bql_lock()` call waited
+    >threshold to acquire the BQL. `extra` carries
+    `from=<file>:<line>` (the bql_lock_impl call site, captured by
+    the `__FILE__/__LINE__` macro). A vCPU spike here means another
+    thread (iothread, pfifo, GL worker, audio worker) held the BQL
+    while doing slow work; identify which thread by checking
+    `qemu_main_loop_iter` / `aio_run_iter` / `mmio_helper_block`
+    spikes that fired in the same window.
+  - `aio_run_iter` (D3) — one `aio_dispatch()` pass (BH dispatch +
+    fd handlers + timer dispatch) exceeded threshold. Useful for
+    catching slow BHs or block-layer callbacks that are not visible
+    on the main `qemu_main_loop_iter` axis.
+  - `mmio_helper_block` (D3) — a single guest MMIO store helper
+    (`do_st_mmio_leN`) including BQL acquisition, dispatch, and
+    return exceeded threshold. `extra` carries
+    `size=N addr=0xADDR mr=<name>` so the implicated MMIO region is
+    obvious. **Critical for the D3 Crimson investigation**: a spike
+    on `mr=mcpx-apu-vp` at `addr=0xfe8202fc` corresponds to
+    `NV1BA0_PIO_VOICE_LOCK` blocking on `MCPXAPUState::lock` while
+    the audio worker's `se_frame()` is mid-iteration.
+
+  All TCG-side instrumentation is gated on `xemu_spike_log_tcg_enabled`
+  so the steady-state cost when off is one global load + branch per
+  call site.
+
+Threshold: `XEMU_PERF_SPIKE_LOG_THRESHOLD_US=N` (default 50000 = 50 ms,
+floor 1 ms). Lower values catch finer events at the cost of log volume.
+The same threshold is used for both renderer and TCG sources.
+
+Typical attribution workflow (V3): run a 300 s Crimson route with
+`XEMU_PERF_LOG=1 XEMU_PERF_FRAME_LOG=1 XEMU_PERF_SPIKE_LOG=1
+XEMU_PERF_SPIKE_LOG_TCG=1`, locate the worst-frame interval in the
+per-interval log (highest `mspf_max`), and grep `xemu-spike:` lines
+whose `now_us` falls inside that interval. The op type that fires there
+identifies the bottleneck class for the next slice.
+
 `scripts/apple-silicon/extract-perf-summary.sh` derives jitter metrics
 from `mspf_max` per interval:
 - `fps_stddev`, `mspf_max_p50/p95/p99/max`, `mspf_avg_max`.
@@ -433,6 +698,144 @@ threshold. Exit code reflects whether the candidate regresses.
   binding was still being compiled by the async worker. Each skipped
   draw is one frame of pop-in for that geometry. The count should
   drop sharply once the working set of shader variants is warm.
+- `MSAA_RESOLVE_US_TOTAL`: total microseconds per interval spent in
+  `glBlitFramebuffer` resolving the per-surface multisample renderbuffer
+  into the resolved single-sample texture (and the inverse seed-blit
+  performed after `pgraph_gl_upload_surface_data` overwrites the
+  texture from VRAM). Zero when `XEMU_GL_MSAA` is unset or 0; non-zero
+  any time the renderer touches a multisample-backed surface. Use this
+  counter together with `SHADER_COMPILE_US_TOTAL` and
+  `SHADER_COMPILE_COUNT` when first turning MSAA on to confirm that the
+  resolve cost is bounded and that Apple's GL-on-Metal driver does not
+  produce a pipeline-variant compile burst under the new multisample
+  render-target state (the renderer-side success criterion in
+  `decision-log.md` "Stay on OpenGL ...").
+
+TCG hot-path counters (Apple Silicon performance fork). Atomic
+increments on the TCG vCPU thread; emitted as additional fields on
+the same `xemu-perf:` interval line as the NV2A counters above:
+
+- `TCG_TB_EXEC_COUNT`: translation-block dispatches per interval. Use
+  as the denominator when comparing TB-invalidation pressure across
+  intervals or builds (e.g. invalidate ratio = `TCG_TB_INVALIDATE_COUNT
+  / TCG_TB_EXEC_COUNT`).
+- `TCG_TB_INVALIDATE_COUNT`: TBs invalidated per interval (top of
+  `do_tb_phys_invalidate` in `accel/tcg/tb-maint.c`). High counts
+  during stutter intervals point at SMC / notdirty thrashing rather
+  than steady-state translation cost.
+- `TCG_NOTDIRTY_TRIPS`: notdirty TLB trips per interval (top of
+  `notdirty_write` in `accel/tcg/cputlb.c`). Each trip is a guest
+  store that hit a code-bearing page and forces the slow path.
+- `TCG_NOTDIRTY_PAGES_HIT`: distinct guest-physical pages observed
+  by `notdirty_write` in the interval. Open-addressing 64-entry
+  lossy set; saturates at 64 unique pages per interval, which is
+  fine for order-of-magnitude attribution. Higher values mean the
+  guest is scattering writes across many code pages instead of one
+  hot page; lower values with high `TCG_NOTDIRTY_TRIPS` mean
+  repeated re-dirtying of a small working set.
+- `TCG_TB_INVALIDATE_BURST_MAX`: maximum number of TBs invalidated
+  by a single `tb_invalidate_phys_page_range__locked` call in the
+  interval. Spikes correlate with whole-page invalidation events
+  (e.g. JIT-ed pages getting rewritten). Used to identify whether a
+  worst-frame stutter coincides with one large invalidation burst
+  versus many small ones.
+- `TCG_JMP_CACHE_ZEROED_BUCKETS`: total per-CPU jmp-cache buckets
+  cleared per interval (sum across all callers). Each
+  `tcg_flush_jmp_cache` call counts `TB_JMP_CACHE_SIZE` (4096); each
+  `tb_jmp_cache_inval_tb_targeted` (the I2 fast path) and the
+  non-PCREL branch of `tb_jmp_cache_inval_tb` count one per CPU
+  inspected. Used by the I2 slice to compute the achieved jmp-cache
+  reduction ratio: with the slice on, the value should drop by
+  roughly `4096 / (CF_PCREL_invalidations * NCPU)` versus the slice
+  off arm.
+- `TCG_INVALIDATE_WALL_US_MAX`: per-interval MAX wallclock cost
+  (microseconds) of a single `tb_invalidate_phys_page_range__locked`
+  invocation, measured via `qemu_clock_get_ns(QEMU_CLOCK_HOST)`.
+  Recorded regardless of `XEMU_TCG_JMP_CACHE_TARGETED`. Decisively
+  answers "is the worst per-frame stutter one giant invalidation
+  chain": if `TCG_INVALIDATE_WALL_US_MAX` approaches the worst-frame
+  mspf, the chain is the cause and the I2 slice should drop both
+  metrics; if it stays an order of magnitude lower, the worst-frame
+  is built from many small invalidations or a non-invalidation
+  source.
+
+APU lock-hold / vCPU-wait counters (audio voice-lock release slice,
+opt-in flag `XEMU_APU_LOCK_RELEASE`, on by default for Apple Silicon
+system builds) — emitted alongside the TCG / display counters above on
+the same `xemu-perf:` interval line. Always-on atomics; only become
+visible when `XEMU_PERF_LOG=1`.
+
+- `APU_LOCK_HOLD_US_TOTAL`: per-interval sum (microseconds) of
+  wall-clock that the APU worker thread holds `MCPXAPUState::lock`
+  during the dispatched VP-frame section in
+  `voice_work_dispatch`. Measured around the held portion only; with
+  `XEMU_APU_LOCK_RELEASE=1` the released worker-finished wait window
+  is excluded from the accumulator, so the counter drops by exactly
+  the slice's lock-release window. Decisive measurement of the
+  slice's effect on the audio-frame critical section: with the slice
+  off this is dominated by the worker-finished wait (~5 ms × 188
+  frames/s = ~940 ms/s); with the slice on it should drop to the
+  pre/post-wait setup + drain cost (typically <100 ms/s).
+- `APU_VCPU_LOCK_WAIT_US_MAX`: per-interval MAX wallclock cost
+  (microseconds) of a single vCPU acquire of `MCPXAPUState::lock`,
+  recorded via CAS-loop max from `voice_lock()`, `gp_write`, and
+  `ep_write`. Decisive measure of whether the slice unblocked vCPU
+  contention: with the slice off this approaches the VP-frame period
+  (~5 ms) under audio contention because the vCPU has to wait for
+  the APU thread's worker batch + DSP + monitor frame to complete;
+  with the slice on it should drop to the un-contended acquire cost
+  plus the still-held setup/drain sections of the dispatch loop.
+  Cross-checks against the D3 `mmio_helper_block` spike attribution
+  (which counts BQL acquire + dispatch + return for the
+  `mcpx-apu-vp/0xfe8202fc` MMIO write end-to-end) — APU_VCPU_LOCK_WAIT_US_MAX
+  is the inner mutex-acquire portion of that.
+
+Display-pacing counters (D3, 2026-05-02) — also emitted as additional
+fields on the `xemu-perf:` interval line, alongside the TCG counters
+above. Always-on atomics; only become visible when `XEMU_PERF_LOG=1`.
+Used to attribute the 30 FPS cap on tracked titles (PGR2 / Rainbow /
+Crimson) to either xemu-side pacing, host-side pacing, or
+guest-intrinsic engine pacing.
+
+- `NV2A_VBLANK_FIRES`: number of times the xemu vblank-timer thread
+  (`ui/xemu.c::vblank_timer_thread`) called `nv2a_vga_gfx_update` and
+  set `NV_PCRTC_INTR_0_VBLANK` on the guest. Driven by
+  `vblank_interval_ns` (hardcoded 16,666,666 ns = 60 Hz). If this
+  reads ~60/s but `NV2A_PRESENT_HEARTBEAT` reads ~30/s, the cap is
+  *not* xemu vblank pacing — the guest is choosing not to present
+  every vblank.
+- `NV2A_FLIP_STALL_WRITES`: guest writes to `NV097_FLIP_STALL`. The
+  guest's "I have finished a frame, please present it" signal. Roughly
+  equal to `NV2A_PRESENT_HEARTBEAT` in steady state, but lags by one
+  frame during stalls.
+- `NV2A_PRESENT_HEARTBEAT`: guest writes to
+  `NV_PGRAPH_INCREMENT_READ_3D` — the actual READ_3D pointer advance
+  that completes a page flip. Same value as
+  `g_nv2a_stats.increment_fps` integrated over the interval, but
+  expressed as a count rather than a rate.
+- `XEMU_GL_SWAPS`: host calls to `SDL_GL_SwapWindow` from
+  `ui/xemu.c::gl_render_frame`. Coupled to `NV2A_PRESENT_HEARTBEAT`
+  through `pgraph_gl_get_framebuffer_surface`'s
+  `qemu_event_wait(&pg->sync_complete)` — the SDL display thread
+  blocks until pfifo signals a sync point, so this counter cannot
+  exceed the present-heartbeat rate. **Caveat:** the per-interval
+  emit is driven by `nv2a_profile_log_emit_interval` which runs from
+  `pfifo_thread`, while the swap counter is incremented from the
+  separate SDL display thread. The interval emit racing the swap
+  increment can read 0 even when swaps are happening at the
+  present rate; sum the counter across all intervals (or over a
+  longer interval) for a meaningful per-second value. The
+  measurement noise floor on this counter is therefore O(1
+  swap/interval), useful only as a "is the host loop alive" check.
+
+Decisive ratio for the 30 FPS cap diagnostic:
+- `NV2A_VBLANK_FIRES > 30/s` and `NV2A_PRESENT_HEARTBEAT == 30/s`:
+  cap is *intrinsic to the guest engine* (xemu offers more vblanks
+  than the engine elects to use). Confirmed for Crimson / PGR2 /
+  Rainbow on this fork by the D3 sanity-check measurements.
+- `NV2A_VBLANK_FIRES == 30/s`: cap is xemu's vblank pacing; raise
+  `vblank_interval_ns` (currently hardcoded). Not observed on this
+  fork — `NV2A_VBLANK_FIRES` reads ~60/s on every tracked title.
 
 Async shader compile (opt-in flag `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`):
 

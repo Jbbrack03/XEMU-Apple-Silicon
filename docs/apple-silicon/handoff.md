@@ -1,6 +1,229 @@
 # Handoff
 
-Last updated: 2026-05-01 (after GL-vs-Metal decision diagnostic — stay on GL, fix TCG)
+Last updated: 2026-05-02 (after V1/V2/V3/V4/V5/D2/D3 — seven default-on flags shipped; 30 FPS cap reframed as title-intrinsic; residual jitter pillar opened)
+
+## Update — 2026-05-02 multi-slice session (V1/V2/V3/V4/V5/D2/D3)
+
+This session shipped four additional default-on flags plus one opt-in
+renderer flag and the 1080p first-launch default, validated the full
+goal stack against the broader Xbox library, and reframed the headline
+"60 FPS on PGR2/Rainbow/Crimson" goal as title-intrinsic-impossible
+based on a Soul Calibur 2 sanity test that sustained 60.57 FPS on the
+same build/flag stack.
+
+### What landed (default-on for Apple Silicon system builds, all overridable)
+
+- **`XEMU_TCG_SPLITWX={0,1}`** (V1, default ON). Selects the
+  `mach_vm_remap` dual-mapping splitwx path so TB execution no longer
+  pays the per-TB `pthread_jit_write_protect_np()` syscall. W^X
+  toggle wrappers in `include/qemu/osdep.h` are diff-guarded. Per-arm
+  Crimson 300 s evidence: `pthread_jit_write_protect_np` count 11 →
+  0; headline worst-frame +0.33 % (PARTIAL on the judder pillar,
+  PASS on mechanical correctness). Decision-log: "2026-05-02: Ship
+  XEMU_TCG_SPLITWX default-on (V1, …)". Note:
+  `benchmarks/2026-05-01-tcg-splitwx-validation.md`.
+- **`XEMU_TCG_JMP_CACHE_TARGETED={0,1}`** (V2, default ON).
+  Replaces the unconditional 4096-entry per-CPU jmp-cache zero in the
+  `CF_PCREL` branch of `tb_jmp_cache_inval_tb` with a single-bucket
+  clear per invalidated TB. `TCG_JMP_CACHE_ZEROED_BUCKETS` collapses
+  from 4096-per-invalidation to 1; `TCG_INVALIDATE_WALL_US_MAX`
+  per-call max ~700 µs (well below 1.27 s worst frame — decisive
+  evidence the worst frame is not one giant invalidation chain).
+  Decision-log: "2026-05-02: Ship XEMU_TCG_JMP_CACHE_TARGETED
+  default-on …". Note:
+  `benchmarks/2026-05-02-tcg-jmp-cache-targeted-validation.md`.
+- **`XEMU_APU_LOCK_RELEASE={0,1}`** (I5, default ON). APU worker
+  thread releases `MCPXAPUState::lock` during the per-frame
+  voice-worker batch wait inside `voice_work_dispatch`
+  (`hw/xbox/mcpx/apu/vp/vp.c`), then re-acquires before publishing
+  mixbins. Measured deltas: `APU_VCPU_LOCK_WAIT_US_MAX` −97.9 % (5.07
+  ms → 105 µs), steady-state stutter intervals −61 %, p999 −35 %,
+  headline worst-frame −4.35 ms (PARTIAL on the 500 ms judder gate;
+  PASS on every steady-state pillar). Race widening: ~5.33 ms slightly-
+  stale audio per affected voice per frame — within existing
+  upstream-loose patterns; **audio listen-test on each tracked title
+  is the gating step before fully-shipped status.** Decision-log:
+  "2026-05-02: Ship XEMU_APU_LOCK_RELEASE default-on (I5, …)". Note:
+  `benchmarks/2026-05-02-apu-lock-release-validation.md`.
+- **`display.quality.surface_scale = 2`** on first launch (Apple
+  Silicon system builds only). Existing user configs preserved.
+  Per-session override via `XEMU_DISPLAY_SCALE={1..10}` (out-of-range
+  values silently ignored). The benchmark harness's
+  `XEMU_BENCH_SURFACE_SCALE` parallel knob also defaults to 2.
+  Decision-log: "2026-05-02: Default display.quality.surface_scale to
+  2 on first launch …".
+- **`XEMU_GL_MSAA={0,2,4,8}`** opt-in (default 0). Per-surface
+  multisample renderbuffers via `glRenderbufferStorageMultisample`,
+  lazy `glBlitFramebuffer` resolve, sample count clamped to
+  `GL_MAX_SAMPLES` (4 on Apple GL-on-Metal). Per-frame cost reported
+  as `MSAA_RESOLVE_US_TOTAL`. Composes with
+  `XEMU_DISPLAY_SCALE`/`surface_scale`. Decision-log:
+  "2026-05-02: Add XEMU_GL_MSAA opt-in …".
+
+### Diagnostic toggles added this session
+
+- **`XEMU_PERF_SPIKE_LOG_TCG=1`** — enables TCG / iothread / MMIO
+  spike sources independently of the renderer-side spike log.
+  Sources: `tcg_tb_chain`, `tcg_invalidate_burst`,
+  `tcg_notdirty_storm`, `tcg_x87_storm`, `tcg_pg_lock_wait`,
+  `renderer_pg_lock_wait`, `qemu_main_loop_iter`, `aio_run_iter`,
+  `bql_acquire_wait`, `mmio_helper_block`. See `automation.md`
+  "Per-event spike log" section for the per-source `extra=` field
+  semantics. Off by default; hot-path cost when off is one global
+  load + branch per call site.
+
+### New code files
+
+- `accel/tcg/xemu-tcg-perf.c` + `include/qemu/xemu-tcg-perf.h`
+- `util/xemu-spike-log.c` + `include/qemu/xemu-spike-log.h`
+- `util/xemu-apu-perf.c` + `include/qemu/xemu-apu-perf.h`
+- `util/xemu-display-perf.c` + `include/qemu/xemu-display-perf.h`
+
+### New perf counters (all surfaced in `extract-perf-summary.sh`)
+
+TCG hot-path (sum / max as noted):
+
+- `TCG_TB_EXEC_COUNT` (sum) — per-interval TB executions.
+- `TCG_TB_INVALIDATE_COUNT` (sum) — TBs invalidated per interval.
+- `TCG_NOTDIRTY_TRIPS` (sum) — `notdirty_write` trips per interval.
+- `TCG_NOTDIRTY_PAGES_HIT` (sum, lossy 64-entry set) — distinct
+  guest-physical pages tripping notdirty per interval.
+- `TCG_TB_INVALIDATE_BURST_MAX` (max) — TBs invalidated in one
+  `tb_invalidate_phys_page_range__locked` call.
+- `TCG_JMP_CACHE_ZEROED_BUCKETS` (sum) — bucket clears per interval
+  (4096 per full zero, 1 per targeted clear).
+- `TCG_INVALIDATE_WALL_US_MAX` (max) — wallclock cost of a single
+  `tb_invalidate_phys_page_range__locked`.
+
+Renderer / MSAA / display:
+
+- `MSAA_RESOLVE_US_TOTAL` (sum) — `glBlitFramebuffer` resolve cost
+  per interval.
+- `NV2A_VBLANK_FIRES` (sum, ~per-second) — vblank IRQ deliveries
+  driven by `vblank_interval_ns = 16,666,666 ns = 60 Hz`.
+- `NV2A_PRESENT_HEARTBEAT` (sum, ~per-second) — guest presents
+  (`NV_PGRAPH_INCREMENT_READ_3D` writes).
+- `NV2A_FLIP_STALL_WRITES` (sum) — guest writes to
+  `NV097_FLIP_STALL`.
+- `XEMU_GL_SWAPS` (sum, race-noisy) — `SDL_GL_SwapWindow` calls
+  (cross-thread emit-vs-increment race; sum across the run for a
+  meaningful per-second value).
+
+APU lock-hold / vCPU-wait:
+
+- `APU_LOCK_HOLD_US_TOTAL` (sum) — APU worker thread d->lock hold
+  time per interval. With the slice on, drops by exactly the
+  worker-finished-wait window.
+- `APU_VCPU_LOCK_WAIT_US_MAX` (max) — max vCPU wait for d->lock
+  per interval.
+
+### New benchmark notes (this session)
+
+- `benchmarks/2026-05-01-tcg-splitwx-validation.md` — V1, PARTIAL.
+- `benchmarks/2026-05-02-tcg-jmp-cache-targeted-validation.md` — V2,
+  PARTIAL.
+- `benchmarks/2026-05-02-tcg-spike-attribution.md` — V3, ruled out
+  TCG-internal hypothesis classes for the headline frame at 10 ms
+  threshold; partial attribution at 1 ms.
+- `benchmarks/2026-05-02-composite-goal-validation.md` — V3 composite
+  goal stack across PGR2 / Rainbow / Crimson at scale=2 + MSAA=4;
+  found 30 FPS cap is **not** renderer-bound. Reframe needed.
+- `benchmarks/2026-05-02-60hz-title-sanity-test.md` — Soul Calibur 2
+  sustained **60.57 FPS** for 109 consecutive intervals on the same
+  build/flag stack. Proves the cap on PGR2/Rainbow/Crimson is
+  title-intrinsic (engine renders at 30 Hz on real Xbox).
+- `benchmarks/2026-05-02-tcg-30fps-cap-attribution.md` — D3, 1 ms
+  spike-log breakdown of the Crimson 1.39-s worst frame; ruled out
+  iothread / BQL / mmio-blocking hypotheses; attributed the bulk of
+  the spike-attributed cost (422 ms / 1386 ms) to one
+  `tcg_tb_chain` at guest PC `0x23dd47` (game-app
+  `fe_method` → `voice_lock` MMIO write). Remaining 963 ms
+  unattributed at 1 ms threshold.
+- `benchmarks/2026-05-02-apu-lock-release-validation.md` — I5,
+  PARTIAL: huge steady-state win (−61 % stutter intervals, −97.9 %
+  vCPU wait), headline 1.28 s worst frame unchanged. Confirms D3's
+  prediction that closing the audio voice-lock path was necessary
+  but not sufficient for the headline.
+- `benchmarks/2026-05-02-broader-title-sweep.md` — V4, library-wide
+  viability across 6 titles (5 new + SC2 cross-ref). PASS. Identified
+  a future-slice candidate (NGB exercises 87,243 line draws via the
+  geometry shader → `XEMU_NATIVE_LINE` bypass would close the last
+  primitive-family GS workload).
+
+### Critical reframings
+
+1. **The 30 FPS cap on PGR2 / Rainbow / Crimson is title-intrinsic.**
+   Confirmed by SC2 sustaining 60.57 FPS on the same build/flag
+   stack. The decisive ratio is `NV2A_VBLANK_FIRES > 30/s` while
+   `NV2A_PRESENT_HEARTBEAT == 30/s` — xemu offers 60 vblanks/s, the
+   guest engine elects to present every other vblank. This makes the
+   literal "60 FPS on PGR2/Rainbow/Crimson" goal in strategy.md
+   Success Criteria technically impossible. The reframed goal:
+   **console-native FPS for each tracked title, no 1-second-class
+   judder, plus 1080p + AA available**. Decision-log: "2026-05-02:
+   Confirm 30 FPS cap … is title-intrinsic, supersede the literal
+   '60 FPS on tracked-3' success criterion".
+2. **Headline 1.3-s Crimson worst-frame is NOT TCG-internal in any
+   single attributed source.** Successive attribution work ruled out
+   TB invalidation (V1 splitwx), jmp-cache zero (V2), iothread /
+   main-loop blocking (D3), BQL acquisition (D3), MMIO-helper
+   blocking (D3), audio voice-lock contention (V5/I5). The remaining
+   ~970 ms unattributed at 1 ms threshold lives in `tb_gen_code`
+   churn + the kernel-PC `0x80030e4c` 1 ms-class TB chains. **Next
+   slice: V6 — `cpu_exec_loop` per-phase instrumentation
+   (`tcg_tb_lookup` / `tcg_tb_gen_code` / `tcg_handle_interrupt`
+   spike sources gated on `XEMU_PERF_SPIKE_LOG_TCG=1`)** to attribute
+   the residual.
+3. **All 7 default-on flags pass the V4 broader sweep.** Splitwx,
+   jmp-cache-targeted, native-tri-depth, native-quad,
+   pgraph-fast-read, apu-lock-release, plus the 1080p first-launch
+   default; with `XEMU_GL_MSAA=4` opt-in. 6 of 6 tested titles pass
+   FPS / pathology gate; 0 new title-specific Apple-GL pathologies;
+   0 MSAA-driven pipeline-variant explosions. 4 of 6 surface the
+   same catalogued Crimson-class worst-frame pathology — one V6 fix
+   would address all of them.
+
+### Next Session Checklist (top of stack — supersedes the older list below)
+
+1. **V6 — `cpu_exec_loop` per-phase spike instrumentation.** Add
+   `tcg_tb_lookup` / `tcg_tb_gen_code` / `tcg_handle_interrupt`
+   spike sources gated on `XEMU_PERF_SPIKE_LOG_TCG=1`. Then run a
+   Crimson 300 s route at 1 ms spike threshold and bucket the
+   per-frame attribution. Leading hypotheses: `tb_gen_code` churn
+   (~9 % of vCPU thread time post-I5), kernel-PC `0x80030e4c`
+   1 ms-class TB chains. If V6 confirms `tb_gen_code` churn, the
+   follow-on fix is **PPTC** (strategy.md Phase 5a — Ryujinx
+   pattern). See decision-log "2026-05-02: V3 + D3 attribute the
+   residual Crimson worst-frame to TCG-internal sub-1 ms churn (V6
+   next)".
+2. **Audio listen-test gate for `XEMU_APU_LOCK_RELEASE`.** A human
+   listener plays each tracked title (Crimson, Rainbow, PGR2) for ≥
+   5 minutes with the slice on, listening for stuck voices, dropped
+   sound effects, audible glitches, or stale samples (the bounded
+   ~5.33 ms race class the implementer flagged). If clean: declare
+   the slice fully shipped. If glitches: revert or design a
+   finer-grained lock split (separate `voice_config_lock`).
+3. **`XEMU_NATIVE_LINE` bypass slice (deferred until needed).** V4
+   identified NGB as a title that exercises 87,243 geometry-shader
+   line draws. Mirror the existing `XEMU_NATIVE_TRI_DEPTH` /
+   `XEMU_NATIVE_QUAD` pattern. Defer until NGB-class titles become
+   a priority focus.
+4. **Promote `/tmp/xbe_disasm.py` to
+   `scripts/apple-silicon/xbe-disasm.py`** if guest-PC investigation
+   becomes recurring (D3 used a transient version; project rule #5).
+5. Do not re-prove the seven landed default-on flags. Use:
+   - `validate-native-tri-depth.sh --run 22` for the triangle gate
+     (pre-existing harness flake, not a real regression — see V1
+     note Honest-limits §1).
+   - PGR2 mid-route snapshot triplet (`pgr2_gameplay_b4` from
+     `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`) for
+     PGR2 stability checks.
+   - V4 broader sweep run dirs as cross-checks.
+6. Continue using `compare-runs.sh` for paired metric comparisons
+   and `sample-profile.sh` for autonomous Apple `sample` capture
+   inside a benchmark run.
+
+
 
 ## Current State
 

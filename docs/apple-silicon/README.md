@@ -1,6 +1,6 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run
@@ -65,9 +65,24 @@ visible regressions point first at the renderer.
     `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md`
   - Crimson Skies:
     `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md`
-- Current retail performance target:
-  - Floor: sustained 30 FPS in gameplay for all tracked titles.
-  - Stretch: 60 FPS where possible.
+- Current retail performance target (updated 2026-05-02 after the
+  Soul Calibur 2 sanity test):
+  - Floor: sustained **console-native** FPS in gameplay for each
+    tracked title. PGR2 / Crimson Skies / Rainbow Six 3 are 30 Hz
+    Xbox engines (cap is title-intrinsic, confirmed by `NV2A_VBLANK_FIRES
+    > 30/s` while `NV2A_PRESENT_HEARTBEAT == 30/s`); 30 FPS floor met
+    2026-05-01.
+  - Quality: 1080p (`surface_scale=2`, default on first launch on
+    Apple Silicon), opt-in MSAA up to 4× via `XEMU_GL_MSAA`.
+  - Residual-stutter pillar: eliminate 1-second-class worst-frame
+    judder. Currently open: V6 — `cpu_exec_loop` per-phase
+    instrumentation to attribute the residual ~970 ms of unattributed
+    sub-1 ms `tb_gen_code` churn + kernel-PC `0x80030e4c` 1 ms-class
+    TB chains. See benchmarks/2026-05-02-apu-lock-release-validation.md
+    "Recommended next action #3".
+  - 60 FPS-capable titles (Soul Calibur 2, Burnout 3, OutRun 2, Ninja
+    Gaiden Black, etc.) reach native 60 Hz at scale=2 + MSAA=4 per
+    the V4 broader sweep.
 - Current retail gameplay baselines:
   - PGR2 gameplay route: 11.53 FPS average, 11.67 FPS post-load,
     1,516,519 geometry-shader draws, including 38,785 quad-family draws.
@@ -152,43 +167,67 @@ visible regressions point first at the renderer.
 
 ## Next Session Start
 
-Start in `handoff.md`, section `Next Session Checklist`. The important state is:
+Start in `handoff.md`, section `Next Session Checklist` (top of the
+2026-05-02 update block). The important state is:
 
-- Do not spend the next session revalidating `XEMU_NATIVE_TRI_DEPTH=1`,
-  `XEMU_NATIVE_QUAD=1`, or `XEMU_PGRAPH_FAST_READ=1` unless their
-  underlying code paths change. All three flags are landed, visually
-  validated, and verified to meet the 30 FPS gameplay floor on PGR2 /
-  Rainbow Six 3 / Crimson Skies.
-- A fourth opt-in flag landed 2026-05-01:
-  `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` (worker-thread shader compile
-  via a third shared GL context, RPCS3 PR #4876 "skip the draw"
-  pattern). It is **correct and shipped opt-in** but does **NOT**
-  fix Crimson Skies' 1.35-second worst-frame stutter. Default off.
-  See `benchmarks/2026-05-01-async-shader-compile.md`.
-- Strategic verdict (2026-05-01, decisive): **stay on OpenGL.** The
+- **Seven default-on flags ship on Apple Silicon system builds**
+  (overridable via env vars):
+  - `XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`,
+    `XEMU_PGRAPH_FAST_READ` — geometry-shader bypasses + lock-free
+    PGRAPH register reads (closed 2026-05-01).
+  - `XEMU_TCG_SPLITWX` — splitwx on (V1, 2026-05-02).
+  - `XEMU_TCG_JMP_CACHE_TARGETED` — per-page targeted jmp-cache
+    invalidation (V2, 2026-05-02).
+  - `XEMU_APU_LOCK_RELEASE` — APU worker releases d->lock during
+    voice-worker batch wait (I5, 2026-05-02). **Has an audio
+    listen-test gate before fully-shipped status.**
+  - `display.quality.surface_scale = 2` — 1080p first-launch
+    default; existing user configs preserved.
+- **One opt-in renderer flag**: `XEMU_GL_MSAA={2,4,8}` (default 0;
+  clamped to `GL_MAX_SAMPLES`, 4 on Apple GL-on-Metal).
+- **One opt-in additional flag**: `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`
+  (correct & shipped, does NOT fix the headline judder; default off).
+- **Strategic verdict (2026-05-01, decisive): stay on OpenGL.** The
   GL-vs-Metal decision diagnostic
   (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) showed Apple's
-  GL has measured headroom for 60 FPS at 1080p (and even at 4×-scale
-  internal resolution) on tracked titles. The headline 1.35-second
-  Crimson stutter is in the **TCG vCPU thread**, not the renderer —
-  Apple Silicon-specific QEMU MTTCG TB-invalidation cost
-  (`tb_invalidate_phys_range_fast` → `do_tb_phys_invalidate` plus
-  `pthread_jit_write_protect_np` and `sys_icache_invalidate`).
-  Native Metal would not address it.
-- **Highest-priority next task: TCG TB-invalidation cost reduction
-  on Apple Silicon (strategy.md Phase 5a).** PPTC, W^X-toggle
-  batching, smarter softmmu notdirty handling, or upstream QEMU
-  patches. Everything else (MSAA-on-GL, broader title sweep, frame
-  pacing) is downstream.
+  GL has measured headroom for AA / 1080p on tracked titles. Native
+  Metal is not the next priority.
+- **30 FPS cap on PGR2 / Rainbow / Crimson is title-intrinsic
+  (2026-05-02 SC2 sanity test).** Soul Calibur 2 sustains 60.57 FPS
+  on the same build/flag stack. The literal "60 FPS on
+  PGR2/Rainbow/Crimson" goal is technically impossible — those
+  titles' engines render at 30 Hz on real Xbox hardware. See
+  decision-log "2026-05-02: Confirm 30 FPS cap … is title-intrinsic
+  …".
+- **Highest-priority next task: V6 `cpu_exec_loop` per-phase
+  instrumentation.** Attribute the residual ~970 ms of unattributed
+  sub-1 ms `tb_gen_code` churn + kernel-PC `0x80030e4c` 1 ms-class
+  TB chains in the Crimson 1.28-s worst frame. Leading follow-on
+  fix: PPTC (strategy.md Phase 5a). See decision-log "2026-05-02: V3
+  + D3 attribute the residual Crimson worst-frame to TCG-internal
+  sub-1 ms churn (V6 next)".
+- **V4 broader-title sweep validates default flag stack across the
+  broader Xbox library.** 6 of 6 titles pass; 0 new pathologies; 4
+  surface the same catalogued Crimson-class TCG TB-invalidation
+  worst-frame pathology — one V6 fix would address them all. See
+  `benchmarks/2026-05-02-broader-title-sweep.md`.
 - Diagnostic infrastructure for community measurement on any Apple
   Silicon Mac: per-subsystem timing counters
   (`BIND_TEXTURES_US_TOTAL`, `TEX_UPLOAD_US_TOTAL`,
   `SURF_TO_TEX_US_TOTAL`, `SURF_UPLOAD_US_TOTAL`,
   `SURF_DOWNLOAD_US_TOTAL`, `FLUSH_DRAW_US_TOTAL`,
   `DRAW_BEGIN_US_TOTAL`, `FLIP_STALL_US_TOTAL`,
-  `FLIP_STALL_GLFINISH_US_TOTAL`), per-event spike log
-  (`XEMU_PERF_SPIKE_LOG=1`), and renderer-load A/B knob
-  (`XEMU_BENCH_SURFACE_SCALE=N`).
+  `FLIP_STALL_GLFINISH_US_TOTAL`); TCG hot-path counters
+  (`TCG_TB_EXEC_COUNT`, `TCG_TB_INVALIDATE_COUNT`,
+  `TCG_NOTDIRTY_TRIPS`, `TCG_NOTDIRTY_PAGES_HIT`,
+  `TCG_TB_INVALIDATE_BURST_MAX`, `TCG_JMP_CACHE_ZEROED_BUCKETS`,
+  `TCG_INVALIDATE_WALL_US_MAX`); APU counters
+  (`APU_LOCK_HOLD_US_TOTAL`, `APU_VCPU_LOCK_WAIT_US_MAX`); display
+  pacing counters (`NV2A_VBLANK_FIRES`, `NV2A_PRESENT_HEARTBEAT`,
+  `NV2A_FLIP_STALL_WRITES`, `XEMU_GL_SWAPS`); MSAA cost
+  (`MSAA_RESOLVE_US_TOTAL`); per-event spike log
+  (`XEMU_PERF_SPIKE_LOG=1`, `XEMU_PERF_SPIKE_LOG_TCG=1`); and
+  renderer-load A/B knob (`XEMU_BENCH_SURFACE_SCALE=N`).
 
 ## First Principle
 

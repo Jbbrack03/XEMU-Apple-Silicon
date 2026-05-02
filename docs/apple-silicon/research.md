@@ -1,6 +1,6 @@
 # Research Notes
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 ## Local Source Findings
 
@@ -583,8 +583,19 @@ xemu's current bottleneck profile.
 
 ## Current Conclusions
 
-1. The final performance path should be Metal-first or Vulkan-over-Metal with a
-   serious fallback plan.
+1. **Updated 2026-05-01 (binding) and 2026-05-02 (broader-sweep
+   confirmation): the active renderer path is Apple OpenGL.** The
+   GL-vs-Metal decision diagnostic
+   (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) showed Apple
+   GL-on-Metal has measured headroom for AA / 1080p on tracked
+   titles, and the V4 broader sweep
+   (`benchmarks/2026-05-02-broader-title-sweep.md`) confirmed no
+   new title-specific Apple-GL pathologies surface across 5
+   additional titles. Native Metal (strategy.md Phase 4) remains
+   documented as a long-term ceiling-removing investment but is
+   **not** the next priority. (Original 2026-04-29 framing —
+   "Metal-first or Vulkan-over-Metal" — superseded by the 2026-05-01
+   decision-log entry "Stay on OpenGL …".)
 2. Geometry-shader dependency is the key blocker. It hurts macOS OpenGL, makes
    MoltenVK uncertain, and is directly implicated in the current macOS 3D
    regression.

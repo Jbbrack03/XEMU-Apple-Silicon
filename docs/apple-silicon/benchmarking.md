@@ -1,6 +1,6 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 ## Benchmarking Rules
 
@@ -85,6 +85,25 @@ Known emulator files:
 | V0 | Vulkan-over-Metal prototype | MoltenVK | Crimson Skies | same as B0 | 120s | feature support, FPS, correctness |
 | V1 | Vulkan-over-Metal prototype | KosmicKrisp | Crimson Skies | same as B0 | 120s | feature support, FPS, correctness |
 | M0 | Metal prototype | Metal | Crimson Skies | same as B0 | 120s | FPS, pacing, correctness |
+
+### 2026-05-02 multi-slice session entries
+
+> The "V"-prefixed labels in this session refer to **validation
+> slices** for default-on flag candidates, not the older
+> Vulkan-over-Metal V0/V1/M0 cells above. Both naming conventions
+> are kept; the V1/V2/V3/V4/V5 entries below are unrelated to V0/V1.
+
+| ID | Slice / target | Renderer | Game / scene | Duration | Verdict | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| V1 | `XEMU_TCG_SPLITWX` validation | OpenGL | Crimson 300s + PGR2 snapshot regression | 300s + 30s | PARTIAL (mechanical PASS; headline FAIL) | `benchmarks/2026-05-01-tcg-splitwx-validation.md` |
+| V2 | `XEMU_TCG_JMP_CACHE_TARGETED` validation | OpenGL | Crimson 300s + PGR2 snapshot regression | 300s + 30s | PARTIAL (per-call wallclock collapsed; headline FAIL) | `benchmarks/2026-05-02-tcg-jmp-cache-targeted-validation.md` |
+| V3 | TCG / renderer per-event spike attribution | OpenGL | Crimson 300s @ 10ms threshold | 300s | PARTIAL ATTRIBUTION (~10% of worst frame attributed) | `benchmarks/2026-05-02-tcg-spike-attribution.md` |
+| V3-composite | Composite goal stack (4 flags + scale=2 + MSAA=4) | OpenGL | PGR2 / Rainbow / Crimson | 300s each | 30 FPS cap NOT renderer-bound; reframe needed | `benchmarks/2026-05-02-composite-goal-validation.md` |
+| V4-SC2 | 60Hz title sanity test | OpenGL | Soul Calibur 2, attract demo | 240s | PASS — 60.57 FPS sustained 109 intervals | `benchmarks/2026-05-02-60hz-title-sanity-test.md` |
+| V4-sweep | Broader-title library sweep | OpenGL | Burnout 3, Halo CE, Splinter Cell, NGB, OutRun 2 | 240s each | PASS — library-wide viable | `benchmarks/2026-05-02-broader-title-sweep.md` |
+| D2 | TCG 30 FPS cap + worst-frame attribution | OpenGL | Crimson 300s, 1ms spike threshold | 300s | Attributed 422ms / 1386ms; 963ms unattributed | `benchmarks/2026-05-02-tcg-30fps-cap-attribution.md` |
+| I5 | `XEMU_APU_LOCK_RELEASE` validation | OpenGL | Crimson 300s + PGR2 / Rainbow snapshot | 300s + 30s + 30s | PARTIAL (steady-state PASS; headline FAIL) | `benchmarks/2026-05-02-apu-lock-release-validation.md` |
+
 
 ## Retail Gameplay Targets
 

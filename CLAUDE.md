@@ -95,6 +95,88 @@ Stable opt-in:
   the stutter is on the TCG vCPU thread, not the renderer). Default
   off. See `docs/apple-silicon/benchmarks/2026-05-01-async-shader-compile.md`
   and `docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md`.
+- `XEMU_TCG_SPLITWX={0,1}` — overrides the splitwx auto-default for
+  the TCG JIT. Apple Silicon system builds default to splitwx-on
+  (`mach_vm_remap` dual-mapping path in `tcg/region.c`), which
+  removes the per-TB-execution `pthread_jit_write_protect_np()`
+  syscall on every `cpu_tb_exec`. The W^X toggle wrappers in
+  `include/qemu/osdep.h` are diff-guarded so they no-op when
+  `tcg_splitwx_diff != 0`. Set `=0` to fall back to the upstream
+  MAP_JIT path (correctness-equivalent, same per-TB toggle cost);
+  set `=1` to force splitwx where the auto-default is off. Explicit
+  `-accel tcg,split-wx=on|off` always wins over the env var; env
+  var wins over auto-default. See `docs/apple-silicon/automation.md`
+  for memory implications and the `TCG_*` perf counters used to
+  validate the slice.
+- `XEMU_TCG_JMP_CACHE_TARGETED={0,1}` — overrides the per-page
+  targeted jmp-cache invalidation auto-default. Apple Silicon system
+  builds default to ON. Replaces the unconditional 4096-entry
+  per-CPU jmp-cache zero in the `CF_PCREL` branch of
+  `tb_jmp_cache_inval_tb` (i386 system-mode globally sets `CF_PCREL`)
+  with a single-bucket clear per invalidated TB, batched after the
+  `tb_invalidate_phys_page_range__locked` loop. Correctness rests on
+  the existing `CF_INVALID` + cflags-equality check in
+  `cpu-exec.c::tb_lookup` (line 267). Set `=0` to fall back to the
+  upstream full-zero path (rollback for A/B testing or correctness
+  triage); set `=1` to force on where the auto-default is off. The
+  non-PCREL `tb_jmp_cache_inval_tb` and `tb_flush` / cputlb full-flush
+  paths are unchanged. See `docs/apple-silicon/automation.md` for
+  the correctness argument and the `TCG_JMP_CACHE_ZEROED_BUCKETS` /
+  `TCG_INVALIDATE_WALL_US_MAX` perf counters used to attribute the
+  slice's effect.
+- `XEMU_GL_MSAA={0,2,4,8}` — opt-in multisample anti-aliasing on the
+  OpenGL renderer. Default 0 (off; byte-identical behavior). Non-zero
+  values allocate per-surface multisample renderbuffers
+  (`glRenderbufferStorageMultisample`) attached to the draw FBO and
+  perform a lazy `glBlitFramebuffer` resolve into the existing
+  single-sample texture before any consumer (surface download,
+  surface-to-texture, display render) reads from it. Sample count is
+  clamped to `GL_MAX_SAMPLES`; the effective value is logged once at
+  startup as `xemu-perf: gl_msaa=N source=XEMU_GL_MSAA requested=R
+  max_samples=M`. Composes with `XEMU_DISPLAY_SCALE`/`surface_scale`
+  (e.g. scale 2 + MSAA 4 = 1080p-class supersampled, 4x multisampled).
+  Per-frame cost is reported as the new `MSAA_RESOLVE_US_TOTAL`
+  counter; watch `SHADER_COMPILE_*` when first enabling to confirm
+  Apple's GL-on-Metal driver does not balloon pipeline-variant compile
+  cost under the multisample render-target state. Implemented in
+  `hw/xbox/nv2a/pgraph/gl/surface.c` and `hw/xbox/nv2a/pgraph/gl/display.c`.
+- `XEMU_DISPLAY_SCALE={1,2,3,4}` — overrides the loaded
+  `display.quality.surface_scale` value for this xemu session
+  without modifying the user's saved preference. Mirrors
+  `XEMU_BENCH_SURFACE_SCALE` (the benchmark-runner equivalent that
+  injects `[display.quality] surface_scale = N` into the per-run
+  config). Apple Silicon system builds default `surface_scale` to 2
+  (1080p-class internal resolution; ~7 % renderer-cost growth on
+  PGR2 vs scale 1, see
+  `docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md`)
+  on **first launch only**; existing users with a stored config
+  keep their current value untouched. Out-of-range / unparseable env
+  values are silently ignored. The renderer also clamps factor < 1
+  to 1 in `pgraph_*_reload_surface_scale_factor`. Bridge implemented
+  in `ui/xemu-settings.cc::xemu_settings_apply_display_scale_env`;
+  first-run platform default in
+  `xemu_settings_first_run_default_surface_scale`.
+- `XEMU_APU_LOCK_RELEASE={0,1}` — overrides the audio voice-lock
+  release auto-default. Apple Silicon system builds default to ON.
+  Releases `MCPXAPUState::lock` while the APU worker thread is
+  waiting for the per-frame voice-worker batch to finish inside
+  `voice_work_dispatch` (`hw/xbox/mcpx/apu/vp/vp.c`), then
+  re-acquires before publishing the frame's mixbins. Targets the
+  D3-attributed Crimson voice-lock contention (21.3 s / 300 s of
+  vCPU thread time spent blocked on
+  `mcpx-apu-vp/0xfe8202fc` = NV1BA0_PIO_VOICE_LOCK; see
+  `docs/apple-silicon/benchmarks/2026-05-02-tcg-30fps-cap-attribution.md`).
+  Distinct from the prior reverted `XEMU_VOICE_FAST_LOCK` slice
+  (decision-log entry "2026-05-01: XEMU_VOICE_FAST_LOCK not
+  landed"): that slice tried bitmap-level lock-elision; this slice
+  shrinks the APU thread's lock-hold so the vCPU's `voice_lock()` /
+  `gp_write` / `ep_write` acquires no longer block for the full
+  ~5.33 ms VP frame. Set `=0` to fall back to the legacy
+  lock-held-throughout-frame behavior (rollback for A/B testing or
+  audio-correctness regression triage); set `=1` to force on where
+  the auto-default is off. Accompanying counters
+  `APU_LOCK_HOLD_US_TOTAL` and `APU_VCPU_LOCK_WAIT_US_MAX` (below)
+  attribute the slice's effect.
 
 Diagnostic toggles (intentionally not correctness paths):
 
@@ -122,7 +204,36 @@ Logging:
 - `XEMU_PERF_SPIKE_LOG_THRESHOLD_US=N` — minimum operation duration
   (microseconds) that triggers a spike line. Default 50000
   (50 ms). Lower values catch finer events at the cost of log volume.
+- `XEMU_PERF_SPIKE_LOG_TCG=1` — enable TCG / iothread / MMIO spike
+  sources independently of the renderer-side `XEMU_PERF_SPIKE_LOG=1`.
+  Adds: `tcg_tb_chain`, `tcg_invalidate_burst`, `tcg_notdirty_storm`,
+  `tcg_x87_storm`, `tcg_pg_lock_wait`, `renderer_pg_lock_wait` (V3),
+  plus `qemu_main_loop_iter`, `bql_acquire_wait`, `aio_run_iter`,
+  `mmio_helper_block` (D3 — see `docs/apple-silicon/automation.md`
+  for the full list and `extra=` field semantics). Hot-path cost when
+  off is one global load + branch per call site. Off by default.
 - `XEMU_SNAPSHOT_NO_THUMBNAIL=1` — skip snapshot thumbnail capture.
+
+Display-pacing counters (D3, 2026-05-02; see `automation.md` for the
+full text). Always-on atomics emitted on the `xemu-perf:` interval
+line when `XEMU_PERF_LOG=1`:
+
+- `NV2A_VBLANK_FIRES` — xemu-side vblank IRQ deliveries to the guest
+  per interval (driven by `vblank_interval_ns = 16,666,666 ns =
+  60 Hz`, hardcoded in `ui/xemu.c`).
+- `NV2A_FLIP_STALL_WRITES` — guest writes to `NV097_FLIP_STALL`.
+- `NV2A_PRESENT_HEARTBEAT` — actual page-flip completions
+  (NV_PGRAPH_INCREMENT_READ_3D writes); same as `increment_fps`
+  integrated over the interval.
+- `XEMU_GL_SWAPS` — host calls to `SDL_GL_SwapWindow`. Subject to
+  cross-thread emit-vs-increment race noise at the per-interval
+  granularity; sum across the run for a meaningful per-second value.
+
+Decisive ratio for cap attribution: `NV2A_VBLANK_FIRES > 30/s` while
+`NV2A_PRESENT_HEARTBEAT == 30/s` ⇒ guest-intrinsic 30 FPS engine cap
+(observed on PGR2/Rainbow/Crimson; the cap is **not** xemu pacing).
+`NV2A_VBLANK_FIRES == 30/s` ⇒ xemu's vblank pacing is the cap (not
+observed on this fork).
 
 Input automation:
 
