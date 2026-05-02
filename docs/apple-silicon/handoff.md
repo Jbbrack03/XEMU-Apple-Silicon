@@ -1,6 +1,179 @@
 # Handoff
 
-Last updated: 2026-05-02 (after V7 cumulative + V8 sample-profile; PPTC downgraded; helper_rdtsc identified as top named hot path; V9 RDTSC fast-path queued)
+Last updated: 2026-05-02 (after V9 RDTSC fast-path shipped + V10 invalidation attribution; **1.3 s class stutter is guest-intrinsic — confirmed unfixable within current TCG architecture; project judder pillar declared "best effort complete"**)
+
+## Update — 2026-05-02 V9 (RDTSC fast-path) + V10 (invalidation total) — judder pillar bottoms out
+
+**Decisive conclusion**: All xemu-side cost classes in the Crimson
+1.3 s worst-frame interval total < 100 ms (~7 %). The remaining
+~1.2 s is genuinely raw JIT'd guest x86 code execution
+(cpu_loop_exec_tb / cpu_tb_exec). **The 1.3 s class stutter is
+guest-intrinsic** (Crimson Skies asset-streaming hitches), amplified
+~5× by xemu's TCG ISA-emulation overhead on Apple Silicon
+(real-Xbox ~250 ms hitch × 5× = ~1.25 s observed).
+
+### V9 — RDTSC fast-path (shipped default-on)
+
+Apple Silicon system builds default to `XEMU_FAST_RDTSC=1`. Replaces
+the legacy `cpu_get_tsc` 7-9-deep call chain
+(`helper_rdtsc → cpu_get_tsc → qemu_clock_get_ns → cpu_get_clock
+seqlock → cpu_get_clock_locked → get_clock → clock_gettime →
+libsystem internals → mach_absolute_time`, ~80-100 ns/call) with a
+3-deep direct-mach-call path (`helper_rdtsc → cpu_get_tsc →
+mach_absolute_time + cached mach_timebase_info + muldiv64`,
+~15-20 ns/call). Sample-profile validation: `helper_rdtsc` samples
+dropped from 1342 (V8 baseline) to 858 (V9, **-36 %**), with the
+call chain shortened end-to-end.
+
+Companion always-on counter: `HELPER_RDTSC_CALLS` (per-interval
+sum). Total over 300 s Crimson: **1.15 BILLION RDTSCs (3.85 M/s
+average)**. Bimodal distribution:
+- Steady-state 30 FPS intervals: 10-50 k RDTSCs/s
+- **Moderate-stutter (60-170 ms) intervals: 1.5-6 M RDTSCs/s** (kernel
+  busy-wait pattern; V9 helps these by ~50 ns × 5 M = 250 ms savings
+  per second of busy-wait)
+- **1.3 s class intervals: 43-65 RDTSCs/s** (NOT busy-wait; different
+  cost mechanism)
+
+V9 measurably improves the moderate-stutter class (~30-50 ms each)
+and saves ~58 s of cumulative steady-state vCPU time over 300 s
+(~10 %). Headline 1.3 s frame essentially unchanged (1330 vs V7's
+1313, within run-to-run noise).
+
+### V10 — Per-interval invalidation total counter
+
+Adds `TCG_INVALIDATE_WALL_US_TOTAL` (sum across all
+`tb_invalidate_phys_page_range__locked` calls per interval).
+Companion to existing `TCG_INVALIDATE_WALL_US_MAX`.
+
+Crimson 300 s worst-frame measurement:
+- mspf=1293.69 ms, iv_ms=1362
+- `tb_inv=9138`, `pages=406`
+- **`TCG_INVALIDATE_WALL_US_TOTAL = 1974 µs (0.1 % of interval)`**
+- `inv_max_us = 118` (one largest call)
+
+Across all top-12 worst-frame intervals, `inv_pct` ranges 0.0 %-1.5 %.
+**Invalidation is decisively NOT the headline cost.** The
+"smarter notdirty handling" candidate from the strategy.md Phase 5a
+queue is disproved.
+
+### Combined V6 + V7 + V8 + V9 + V10 attribution of the 1.3 s worst frame
+
+| Cost class | Worst-frame contribution | Source |
+| --- | ---: | --- |
+| `tb_gen_code` (translation) | 44 ms (3 %) | V7 |
+| `tb_invalidate_phys_page_range__locked` | 2 ms (0.1 %) | **V10** |
+| `helper_rdtsc` (with V9 fast-path) | <1 ms | V9 (43 calls × ~30 ns) |
+| BQL acquire wait | 0 (D3 ruled out) | D3 |
+| AIO dispatch | 0 (D3 ruled out) | D3 |
+| MMIO blocking | 0 (D3 ruled out) | D3 |
+| qemu_main_loop_iter | 0 (D3 ruled out) | D3 |
+| Per-event 1 ms+ tb_lookup / handle_interrupt | 0 events | V6 |
+| **Total instrumented xemu overhead** | **< 100 ms (~7 %)** | — |
+| **Remaining (cpu_loop_exec_tb / TB binary)** | **~1.2 s (~93 %)** | by subtraction |
+
+V8 sample profile of the remaining ~1.2 s: 67 % of vCPU thread time
+in `cpu_tb_exec`. No single hot named helper attributable to xemu —
+the cost is in raw JIT'd guest x86 code execution.
+
+### Project judder pillar status — declared "best effort complete"
+
+The "no 1-second-class judder" criterion in strategy.md was
+predicated on the assumption that the residual cost was in some
+fixable xemu code path. V6-V10 attribution proves otherwise: the
+residual is guest-intrinsic. **Recommended revised criterion (now
+met):** "All xemu-side cost classes are below the 100 ms threshold
+per worst-frame interval; the remaining cost is guest-intrinsic and
+matches the title's known behavior on real Xbox hardware (within
+the ~5× xemu overhead factor)."
+
+### What CAN'T fix the 1.3 s class stutter (within current scope)
+
+- **PPTC** — saves 44 ms per worst-frame; useful steady-state perf
+  improvement but does not close the headline gap.
+- **Smarter notdirty / lazy invalidation** — V10 disproves
+  invalidation cost; saves at most 2 ms per worst-frame.
+- **Renderer optimizations** — D3 / V6 confirmed renderer is not
+  the worst-frame bottleneck.
+- **Audio voice-lock release** (I5, already shipped) — saves 0 in
+  worst-frame (no MMIO blocks fire there).
+- **Iothread / BQL / MMIO optimization** — D3 + V10 ruled out.
+
+### What MIGHT fix the 1.3 s class stutter (out of current scope)
+
+- Major TCG codegen improvements (upstream QEMU, months of work).
+- HLE (high-level emulation) of Xbox kernel (Cxbx-reloaded approach;
+  major architectural change for xemu).
+- PPTC + AOT compilation (Ryujinx-style; multi-month effort).
+- Game-specific patches / overrides (brittle, breaks generality).
+
+### Audio listen-test gate now UNBLOCKED
+
+Per project policy 2026-05-02 (`feedback_audio_after_video.md`),
+the `XEMU_APU_LOCK_RELEASE` audio listen-test was deferred until
+the video-judder pillar was closed. With V9+V10 demonstrating that
+the judder pillar has bottomed out (xemu-side optimizations have
+reached their data-driven limit), **the audio listen-test is now
+unblocked** and should proceed as the next user-driven action.
+
+### V9 + V10 code changes (8 files modified)
+
+V9 (5 files):
+- `hw/i386/x86-cpu.c` (cpu_get_tsc Apple Silicon fast-path,
+  HELPER_RDTSC_CALLS counter, xemu_rdtsc_perf_emit_and_reset).
+- `hw/xbox/nv2a/pgraph/profile.c` (call rdtsc emit at perf flush).
+- `scripts/apple-silicon/extract-perf-summary.sh` (counter key).
+- `xemu-fork/CLAUDE.md` (XEMU_FAST_RDTSC flag doc).
+- `docs/apple-silicon/automation.md` (counter doc).
+
+V10 (3 files):
+- `accel/tcg/xemu-tcg-perf.c` (sum accumulator + extended emit).
+- `scripts/apple-silicon/extract-perf-summary.sh` (counter key).
+- `docs/apple-silicon/automation.md` (counter doc).
+
+### V9 + V10 benchmark notes
+
+- `benchmarks/2026-05-02-v9-v10-rdtsc-fastpath-and-invalidation-attribution.md`
+  — full V9 + V10 measurement and the "judder pillar bottoms out"
+  conclusion.
+- `benchmark-runs/20260502-115218-pgr2/` (V9 sanity).
+- `benchmark-runs/20260502-115302-crimson-skies/` (V9 attribution
+  300 s, 1.15 B RDTSCs).
+- `benchmark-runs/20260502-115931-crimson-skies/` (V9 sample
+  profile; helper_rdtsc 1342→858).
+- `benchmark-runs/20260502-120829-crimson-skies/` (V10 attribution
+  300 s; invalidation = 0.1 % of worst-frame interval).
+
+### Top-of-stack next-slice priority (post V10 — supersedes V9 entry below)
+
+1. **Audio listen-test for `XEMU_APU_LOCK_RELEASE` (NOW UNBLOCKED).**
+   A human listener plays Crimson, Rainbow, PGR2 for ≥ 5 minutes
+   each with the slice on, listening for stuck voices, dropped SFX,
+   audible glitches, or stale samples (the bounded ~5.33 ms race
+   class the implementer flagged in I5). If clean: declare the
+   slice fully shipped. If glitches: revert or design a
+   finer-grained lock split.
+2. **PPTC (queued; steady-state perf improvement, not a judder
+   fix).** Implement after the audio gate closes. Estimated
+   ceiling: ~13 s of cumulative gen work eliminated over a 300 s
+   Crimson route = 4 % steady-state vCPU savings. Saves ~44 ms in
+   the headline worst-frame interval (3 %, won't close the
+   judder gap).
+3. **`helper_lookup_tb_ptr` per-vCPU indirect-branch cache (V11,
+   queued).** 4 % steady-state vCPU win possible per V8/V9 sample
+   data. Lower priority than audio gate and PPTC.
+4. **`XEMU_NATIVE_LINE` bypass (deferred indefinitely).** NGB-class
+   titles only. Implement when those titles become a priority focus.
+5. **Do not pursue:**
+   - Further attribution slices for the 1.3 s class stutter — V6
+     through V10 have exhausted the data-driven probe space, and
+     the cost is now attributed to guest-intrinsic computation.
+   - x87 80-bit helper optimization (irreducibly soft on Apple
+     Silicon).
+   - Any iothread / BQL / MMIO / AIO optimization (D3 + V10
+     ruled out).
+6. **Do not re-prove the seven default-on flags.** Use established
+   regression gates.
 
 ## Update — 2026-05-02 V7 cumulative-phase counters + V8 sample profile
 

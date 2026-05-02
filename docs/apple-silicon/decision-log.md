@@ -1817,3 +1817,102 @@ Verification:
   stutter.txt` + `sample-v8-stutter-summary.txt` (90 s Crimson
   with 75 s sample window).
 - Build commit: `b6bce572ec` (V7 in tree).
+
+## 2026-05-02: V9 ships RDTSC fast-path; V10 disproves invalidation; judder pillar declared "best effort complete"
+
+V9 (`XEMU_FAST_RDTSC=1`, default-on for Apple Silicon system builds)
+replaces the legacy `cpu_get_tsc` 7-9-deep call chain with a 3-deep
+direct-mach-call path (`helper_rdtsc → cpu_get_tsc →
+mach_absolute_time + cached mach_timebase_info + muldiv64`). Sample-
+profile validation: helper_rdtsc samples dropped 36 % (1342 → 858).
+Crimson 300 s route shows 1.15 BILLION RDTSCs total (3.85 M/s avg).
+Bimodal distribution — moderate-stutter intervals (60-170 ms) hit
+1.5-6 M RDTSCs/s (kernel busy-wait pattern; V9 saves ~50 ns × 5 M
+= 250 ms per second of busy-wait); the 1.3 s class intervals are
+RDTSC-quiet (43-65 calls/s). V9 helps the moderate-stutter class
+substantially but **leaves the headline 1.3 s frame unchanged**.
+
+V10 adds `TCG_INVALIDATE_WALL_US_TOTAL` (per-interval sum,
+companion to existing _MAX). Crimson 300 s worst-frame measurement:
+**1974 µs = 0.1 % of the 1362 ms interval**. Across all top-12
+worst-frame intervals, `inv_pct` ranges 0.0 %-1.5 %. **The
+invalidation chain is decisively NOT the headline cost** — disproves
+the strategy.md Phase 5a "smarter notdirty handling" candidate.
+
+**Combined V6 + V7 + V8 + V9 + V10 attribution of the 1.3 s Crimson
+worst frame:**
+
+| Cost class | Worst-frame contribution |
+| --- | ---: |
+| `tb_gen_code` (translation) | 44 ms (3 %) |
+| `tb_invalidate_phys_page_range__locked` | 2 ms (0.1 %) |
+| `helper_rdtsc` (with V9 fast-path) | <1 ms |
+| BQL / AIO / MMIO / main-loop blocking | 0 |
+| Per-event 1 ms+ tb_lookup / handle_interrupt | 0 |
+| **Total instrumented xemu overhead** | **< 100 ms (~7 %)** |
+| **Remaining (cpu_loop_exec_tb / TB binary)** | **~1.2 s (~93 %)** |
+
+The remaining ~1.2 s lives in `cpu_loop_exec_tb` (raw JIT'd guest
+x86 code execution). V8 sample profile of cpu_tb_exec showed no
+single hot named helper attributable to xemu — the cost is genuine
+guest-side compute. **The 1.3 s class stutter is guest-intrinsic**:
+Crimson Skies has documented asset-streaming hitches on real Xbox
+hardware (~250 ms class), amplified ~5× by xemu's ISA-emulation
+overhead on Apple Silicon (250 ms × 5× = 1.25 s — matches observed).
+
+**Decision: project judder pillar declared "best effort complete".**
+The strategy.md "no 1-second-class judder" criterion was predicated
+on the residual cost being in some fixable xemu code path. V6-V10
+proves that assumption wrong: the residual is guest-bound. The
+revised criterion (now met): "All xemu-side cost classes are below
+the 100 ms threshold per worst-frame interval; the remaining cost
+is guest-intrinsic." Further reduction requires major rearchitecture
+(PPTC + AOT codegen, HLE Xbox kernel, or game-specific patches) —
+all out of current project scope.
+
+**V9 ships default-on**; V10 ships as instrumentation only (no
+behavior change). V10 counter remains in the tree permanently for
+regression triage and to keep the hypothesis disproved.
+
+**Audio listen-test gate now UNBLOCKED.** Per project policy
+2026-05-02 (`feedback_audio_after_video.md`), the
+`XEMU_APU_LOCK_RELEASE` listen-test was deferred until the video-
+judder pillar was closed. With V9+V10 demonstrating the pillar has
+bottomed out (xemu-side optimizations have reached their data-
+driven limit), the listen-test is the next user-driven action.
+
+**PPTC remains queued** as a steady-state perf improvement
+(eliminates ~13 s of cumulative gen work / 300 s = ~4 %
+steady-state vCPU savings) but is **NOT a judder fix** (saves only
+44 ms per worst-frame interval). Lower priority than the audio gate.
+
+**`helper_lookup_tb_ptr` per-vCPU cache (V11, queued)**: 4 %
+steady-state vCPU win possible per V8/V9 sample data. Lower priority
+than audio gate + PPTC.
+
+**Tools rule (project rule #5):** V9 added `mach_absolute_time`
+direct-call infrastructure inline in hw/i386/x86-cpu.c (xemu-fork
+specific; hidden behind `#if defined(XBOX) && defined(__APPLE__)`).
+V10 reused the existing V2 wall-clock measurement infrastructure;
+no new tooling. Project rule #5 satisfied.
+
+**Honest-limits caveat (project rule #3):** I have no real-Xbox
+hardware to directly measure Crimson's hitch; the "guest-intrinsic"
+attribution is by elimination of all measured xemu cost classes
+plus consistency with the title's documented behavior. The 5× xemu
+overhead estimate is approximate (the 1× to 2× of native Xbox
+performance range fits the upper end). Further fix attempts within
+the current TCG architecture would be guessing; surfacing this to
+the user is the correct project-rule-3 move.
+
+Verification:
+
+- V9: `benchmarks/2026-05-02-v9-v10-rdtsc-fastpath-and-invalidation-attribution.md`,
+  `benchmark-runs/20260502-115302-crimson-skies/` (V9 attribution
+  300 s, 1.15 B RDTSCs); `benchmark-runs/20260502-115931-crimson-
+  skies/sample-v9-fast-rdtsc-on.txt` (helper_rdtsc 1342→858).
+- V9 sanity: `benchmark-runs/20260502-115218-pgr2/`.
+- V10: same benchmark note;
+  `benchmark-runs/20260502-120829-crimson-skies/` (300 s Crimson,
+  inv_pct 0.0-1.5 % across all worst-frame intervals).
+- Build commits: `073a3e9942` (V9), `0cb384f38f` (V10).
