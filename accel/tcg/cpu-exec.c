@@ -34,6 +34,8 @@
 #include "tcg/tcg.h"
 #include "qemu/atomic.h"
 #include "qemu/rcu.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-spike-log.h"
 #include "exec/log.h"
 #include "qemu/main-loop.h"
 #include "exec/icount.h"
@@ -47,6 +49,7 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
+#include "qemu/xemu-tcg-perf.h"
 
 /* -icount align implementation. */
 
@@ -457,6 +460,7 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
         log_cpu_exec(log_pc(cpu, itb), cpu, itb);
     }
 
+    xemu_tcg_perf_inc_tb_exec();
     qemu_thread_jit_execute();
     ret = tcg_qemu_tb_exec(cpu_env(cpu), tb_ptr);
     cpu->neg.can_do_io = true;
@@ -963,6 +967,23 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
         TranslationBlock *last_tb = NULL;
         int tb_exit = 0;
 
+        /* V3 attribution: time one pass through the inner TB-execution
+         * loop. If the vCPU is spending entire-second-class wallclock
+         * inside one chain of chained TBs without exiting to interrupt
+         * handling, this scope is where it is happening — and that is
+         * the dominant suspect for the composite Crimson 1.27s worst
+         * frame. Counts the number of TB lookups inside this pass for
+         * the spike line so we can distinguish "one giant chain" from
+         * "many short chains back-to-back." Gated by the TCG enable
+         * bit so steady-state cost is one branch + one clock read. */
+        int64_t chain_start_ns = 0;
+        uint32_t chain_tb_count = 0;
+        vaddr chain_first_pc = 0;
+        bool chain_have_first_pc = false;
+        if (xemu_spike_log_tcg_enabled) {
+            chain_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        }
+
         while (!cpu_handle_interrupt(cpu, &last_tb)) {
             TranslationBlock *tb;
             TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
@@ -1020,11 +1041,37 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tb_add_jump(last_tb, tb_exit, tb);
             }
 
+            if (xemu_spike_log_tcg_enabled) {
+                if (!chain_have_first_pc) {
+                    chain_first_pc = s.pc;
+                    chain_have_first_pc = true;
+                }
+                chain_tb_count++;
+            }
+
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
             /* Try to align the host and virtual clocks
                if the guest is in advance */
             align_clocks(sc, cpu);
+        }
+
+        /* V3: emit the chain spike line if this inner-loop pass
+         * exceeded the threshold. The cost includes all chained TB
+         * executions plus any patched direct jumps between them; an
+         * outlier here points the bottleneck at the vCPU thread being
+         * stuck inside one chain. */
+        if (xemu_spike_log_tcg_enabled && chain_tb_count > 0) {
+            int64_t chain_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+            int64_t chain_us = (chain_end_ns - chain_start_ns) / 1000;
+            if (chain_us >= xemu_spike_threshold_us) {
+                char extra[96];
+                snprintf(extra, sizeof(extra),
+                         "tb_count=%u first_pc=0x%llx",
+                         chain_tb_count,
+                         (unsigned long long)chain_first_pc);
+                xemu_spike_emit("tcg_tb_chain", chain_us, extra);
+            }
         }
     }
     return ret;

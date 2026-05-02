@@ -30,6 +30,7 @@
 #include "exec/icount.h"
 #include "system/replay.h"
 #include "qemu/main-loop.h"
+#include "qemu/xemu-spike-log.h"
 #include "block/aio.h"
 #include "block/thread-pool.h"
 #include "qemu/error-report.h"
@@ -671,8 +672,26 @@ void main_loop_wait(int nonblocking)
                                       timerlistgroup_deadline_ns(
                                           &main_loop_tlg));
 
+    /* Apple Silicon performance fork: M2 spike attribution. Time the
+     * full main_loop_wait iteration (the iothread's "did one round of
+     * BH dispatch + poll + timer fire"). Only the *active* portion is
+     * meaningful — we time everything except the os_host_main_loop_wait
+     * blocking poll, since the poll is allowed to sleep up to
+     * timeout_ns waiting for an event. The BH/timer dispatch *after*
+     * the poll is the part that can starve the vCPU when slow. */
+    int64_t mli_start_us = 0;
+    int64_t mli_post_poll_us = 0;
+    if (xemu_spike_log_tcg_enabled) {
+        mli_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
+
     ret = os_host_main_loop_wait(timeout_ns);
     mlpoll.state = ret < 0 ? MAIN_LOOP_POLL_ERR : MAIN_LOOP_POLL_OK;
+
+    if (xemu_spike_log_tcg_enabled) {
+        mli_post_poll_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
+
     notifier_list_notify(&main_loop_poll_notifiers, &mlpoll);
 
     if (icount_enabled()) {
@@ -683,6 +702,25 @@ void main_loop_wait(int nonblocking)
         icount_start_warp_timer();
     }
     qemu_clock_run_all_timers();
+
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t end_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        /* total_us = full iteration including the blocking poll. */
+        int64_t total_us = end_us - mli_start_us;
+        /* dispatch_us = post-poll BH + timer dispatch only. The poll
+         * itself is allowed to block up to timeout_ns waiting for fd
+         * readiness; counting it would generate spam.  We emit on the
+         * dispatch portion exceeding threshold (real iothread work),
+         * with the total reported in the extra field for context. */
+        int64_t dispatch_us = end_us - mli_post_poll_us;
+        if (dispatch_us >= xemu_spike_threshold_us) {
+            char extra[80];
+            snprintf(extra, sizeof(extra),
+                     "total_us=%lld nonblocking=%d",
+                     (long long)total_us, nonblocking);
+            xemu_spike_emit("qemu_main_loop_iter", dispatch_us, extra);
+        }
+    }
 }
 
 /* Functions to operate on the main QEMU AioContext.  */

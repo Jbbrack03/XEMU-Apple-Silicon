@@ -18,6 +18,10 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include "qemu/xemu-tcg-perf.h"
+#include "qemu/xemu-spike-log.h"
+#include "qemu/xemu-display-perf.h"
+#include "qemu/xemu-apu-perf.h"
 
 NV2AStats g_nv2a_stats;
 
@@ -95,16 +99,15 @@ static void nv2a_profile_log_init(void)
     perf_log.initialized = true;
     perf_log.enabled = env_flag_enabled("XEMU_PERF_LOG");
     perf_log.frame_log_enabled = env_flag_enabled("XEMU_PERF_FRAME_LOG");
-    perf_log.spike_log_enabled = env_flag_enabled("XEMU_PERF_SPIKE_LOG");
-    perf_log.spike_threshold_us = 50000;
-    const char *threshold_env = getenv("XEMU_PERF_SPIKE_LOG_THRESHOLD_US");
-    if (threshold_env && threshold_env[0]) {
-        char *end = NULL;
-        long t = strtol(threshold_env, &end, 10);
-        if (end != threshold_env && *end == '\0' && t >= 1000) {
-            perf_log.spike_threshold_us = t;
-        }
-    }
+
+    /* V3: spike-log state lives in the shared util/xemu-spike-log.c so
+     * the TCG-thread sources can call into it without a renderer
+     * include dependency. The renderer mirrors the cached enable +
+     * threshold for backward-compat with existing call sites. */
+    xemu_spike_log_init();
+    perf_log.spike_log_enabled = xemu_spike_log_renderer_enabled;
+    perf_log.spike_threshold_us = xemu_spike_threshold_us;
+
     perf_log.interval_us = 1000000;
 
     const char *interval_ms_env = getenv("XEMU_PERF_LOG_INTERVAL_MS");
@@ -178,6 +181,22 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
                     perf_log.frame_buf_overflow);
         }
     }
+
+    /* Apple Silicon performance fork: append TCG hot-path counter
+     * snapshot. No-op when all counters are zero. */
+    xemu_tcg_perf_emit_and_reset(stderr);
+
+    /* Apple Silicon performance fork: append display-pacing counter
+     * snapshot (vblank fires, FLIP_STALL writes, present heartbeat,
+     * GL swaps). No-op when all counters are zero. Used by the 30 FPS
+     * cap attribution diagnostic. */
+    xemu_display_perf_emit_and_reset(stderr);
+
+    /* Apple Silicon performance fork: append APU lock-hold / vCPU-wait
+     * counter snapshot. No-op when all counters are zero. Used by the
+     * audio voice-lock release slice (XEMU_APU_LOCK_RELEASE) to
+     * attribute the change in MCPXAPUState::lock contention. */
+    xemu_apu_perf_emit_and_reset(stderr);
 
     fprintf(stderr, "\n");
 
@@ -335,19 +354,19 @@ static void nv2a_profile_log_atexit(void)
 
 void nv2a_profile_spike(const char *op, int64_t duration_us)
 {
+    /* Backward-compat wrapper: keep the renderer's existing call sites
+     * gated by XEMU_PERF_SPIKE_LOG (renderer enable bit), then delegate
+     * the threshold check + emit to the shared helper. The double init
+     * is cheap (idempotent flag check) and ensures the env vars are
+     * read even if the TCG side hasn't initialised yet. */
     nv2a_profile_log_init();
-    if (!perf_log.spike_log_enabled) {
+    if (!xemu_spike_log_renderer_enabled) {
         return;
     }
-    if (duration_us < perf_log.spike_threshold_us) {
+    if (duration_us < xemu_spike_threshold_us) {
         return;
     }
-    int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
-    fprintf(stderr,
-            "xemu-spike: op=%s duration_us=%lld now_us=%lld\n",
-            op ? op : "?",
-            (long long)duration_us,
-            (long long)now_us);
+    xemu_spike_emit(op, duration_us, NULL);
 }
 
 const char *nv2a_profile_get_counter_name(unsigned int cnt)

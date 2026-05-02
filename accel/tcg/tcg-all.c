@@ -44,6 +44,7 @@
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
 #include "accel/tcg/cpu-ops.h"
+#include "qemu/xemu-spike-log.h"
 #include "internal-common.h"
 
 
@@ -70,16 +71,101 @@ bool qemu_tcg_mttcg_enabled(void)
 }
 #endif /* !CONFIG_USER_ONLY */
 
+/*
+ * Apple Silicon performance fork: resolve the splitwx default.
+ *
+ * Upstream defaults splitwx to off in non-debug builds because the
+ * MAP_JIT + per-TB pthread_jit_write_protect_np() path is correct
+ * everywhere. On Apple Silicon that toggle is the most expensive
+ * single operation on the TCG vCPU thread (measured 16% of on-CPU
+ * time during the Crimson Skies 1.35-second worst-frame stutter on
+ * 2026-05-01). The mach_vm_remap-based splitwx path
+ * (`alloc_code_gen_buffer_splitwx_vmremap` in tcg/region.c) eliminates
+ * that toggle entirely by maintaining two VA aliases (PROT_RX and
+ * PROT_RW) of the same physical pages, so we default it on.
+ *
+ * Precedence: explicit `-accel tcg,split-wx=...` wins over the env
+ * var, env var wins over the auto default. The env var is opt-in
+ * tuning surface for benchmarks; the property remains the official
+ * QEMU-style override.
+ */
+static int tcg_resolve_splitwx_default(void)
+{
+    const char *env = getenv("XEMU_TCG_SPLITWX");
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0) {
+            return 0;
+        }
+        if (strcmp(env, "1") == 0) {
+            return 1;
+        }
+        /* Anything else: ignore, fall through to compile-time default. */
+    }
+
+#if defined(CONFIG_DARWIN) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
+    /* Auto-on for Apple Silicon system emulation: try splitwx, fall
+     * back to MAP_JIT if the dual mapping fails. */
+    return -1;
+#elif defined(CONFIG_DEBUG_TCG) && !defined(CONFIG_USER_ONLY)
+    return -1;
+#else
+    return 0;
+#endif
+}
+
+/*
+ * Apple Silicon performance fork (I2): resolve XEMU_TCG_JMP_CACHE_TARGETED.
+ *
+ * Default-on for Apple Silicon system emulation: replace the
+ * unconditional 4096-entry jmp-cache zero (CF_PCREL path in
+ * tb_jmp_cache_inval_tb) with one bucket per invalidated TB inside an
+ * SMC-driven burst. Correctness rests on the CF_INVALID + cflags-
+ * equality check in cpu-exec.c::tb_lookup; see the comment on
+ * tcg_jmp_cache_targeted_enabled in accel/tcg/tb-maint.c.
+ *
+ * Precedence: XEMU_TCG_JMP_CACHE_TARGETED=0 forces off (rollback for
+ * A/B testing or correctness regression triage); =1 forces on
+ * (covers builds where the auto-default is off); unset uses the
+ * compile-time default (Apple Silicon system → on, others → off).
+ *
+ * The env var is consulted once at startup. There is no QOM property
+ * for this slice (it is a fork-local steady-state perf gate, not a
+ * user-facing knob like split-wx).
+ */
+extern bool tcg_jmp_cache_targeted_enabled;
+
+static bool tcg_resolve_jmp_cache_targeted_default(void)
+{
+    const char *env = getenv("XEMU_TCG_JMP_CACHE_TARGETED");
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0) {
+            return false;
+        }
+        if (strcmp(env, "1") == 0) {
+            return true;
+        }
+        /* Anything else: ignore, fall through to compile-time default. */
+    }
+
+#if defined(CONFIG_DARWIN) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
+    return true;
+#else
+    return false;
+#endif
+}
+
 static void tcg_accel_instance_init(Object *obj)
 {
     TCGState *s = TCG_STATE(obj);
 
-    /* If debugging enabled, default "auto on", otherwise off. */
-#if defined(CONFIG_DEBUG_TCG) && !defined(CONFIG_USER_ONLY)
-    s->splitwx_enabled = -1;
-#else
-    s->splitwx_enabled = 0;
-#endif
+    s->splitwx_enabled = tcg_resolve_splitwx_default();
+    tcg_jmp_cache_targeted_enabled = tcg_resolve_jmp_cache_targeted_default();
+
+    /* V3: ensure the shared spike-log enables are read from the
+     * environment before any TCG hot-path site checks them. This is
+     * idempotent and runs once at TCG accel instance init (single-
+     * threaded, before any vCPU thread starts). */
+    xemu_spike_log_init();
 }
 
 bool one_insn_per_tb;

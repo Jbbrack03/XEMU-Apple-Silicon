@@ -47,6 +47,8 @@
 #include "tb-internal.h"
 #include "tlb-bounds.h"
 #include "internal-common.h"
+#include "qemu/xemu-tcg-perf.h"
+#include "qemu/xemu-spike-log.h"
 #ifdef CONFIG_PLUGIN
 #include "qemu/plugin-memory.h"
 #endif
@@ -1342,6 +1344,14 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 {
     ram_addr_t ram_addr = mem_vaddr + full->xlat_section;
 
+    xemu_tcg_perf_notdirty_trip(ram_addr & TARGET_PAGE_MASK);
+    /* V3 attribution: increment the per-second notdirty trip rate
+     * window. Spike emission happens inside the helper when the window
+     * closes; keep this caller-side branch as a single load+compare
+     * when spike-log-tcg is off. */
+    if (xemu_spike_log_tcg_enabled) {
+        xemu_tcg_perf_notdirty_storm_tick();
+    }
     trace_memory_notdirty_write_access(mem_vaddr, ram_addr, size);
 
     if (!physical_memory_get_dirty_flag(ram_addr, DIRTY_MEMORY_CODE)) {
@@ -2532,6 +2542,7 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     hwaddr mr_offset;
     MemoryRegion *mr;
     MemTxAttrs attrs;
+    uint64_t result;
 
     tcg_debug_assert(size > 0 && size <= 8);
 
@@ -2539,9 +2550,37 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
 
-    BQL_LOCK_GUARD();
-    return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
-                           ra, mr, mr_offset);
+    /* Apple Silicon performance fork: M2 spike attribution. Time the
+     * BQL acquire + MMIO write + dispatch return for a single guest
+     * MMIO store helper. The most likely cause of a multi-millisecond
+     * cost here is BQL contention with the iothread or another vCPU
+     * doing slow device-emulation work, but it could also be a slow
+     * MemoryRegion write callback (e.g. an NV2A register that triggers
+     * a deferred GL operation). The size + addr fields in the spike
+     * extra let us correlate to specific MMIO regions. */
+    int64_t mmio_start_us = 0;
+    if (xemu_spike_log_tcg_enabled) {
+        mmio_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
+    {
+        BQL_LOCK_GUARD();
+        result = int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
+                                 ra, mr, mr_offset);
+    }
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t mmio_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - mmio_start_us;
+        if (mmio_us >= xemu_spike_threshold_us) {
+            char extra[160];
+            const char *mr_name =
+                mr && mr->name ? mr->name : "?";
+            snprintf(extra, sizeof(extra),
+                     "size=%d addr=0x%llx mr=%s",
+                     size, (unsigned long long)addr, mr_name);
+            xemu_spike_emit("mmio_helper_block", mmio_us, extra);
+        }
+    }
+    return result;
 }
 
 static uint64_t do_st16_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,

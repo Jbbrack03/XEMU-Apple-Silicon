@@ -856,16 +856,37 @@ size_t qemu_get_host_physmem(void);
 /*
  * Toggle write/execute on the pages marked MAP_JIT
  * for the current thread.
+ *
+ * Apple Silicon performance fork: when the splitwx mach_vm_remap path
+ * is in use (see `alloc_code_gen_buffer_splitwx_vmremap` in
+ * tcg/region.c), the JIT pages are not MAP_JIT-protected at all —
+ * the RW and RX views are independent VA aliases of the same
+ * physical pages, each carrying static permissions. In that mode
+ * `pthread_jit_write_protect_np()` is a no-op syscall that still
+ * costs ~80-100 ns of host-call overhead per invocation, and on the
+ * vCPU thread it is invoked on every TB execution. Skipping the call
+ * when `tcg_splitwx_diff != 0` removes that cost without any
+ * semantic change.
+ *
+ * `tcg_splitwx_diff` is defined in tcg/tcg.c (declared in
+ * include/tcg/tcg.h) and set during `tcg_region_init` before any
+ * vCPU starts executing. Re-declared here so osdep.h consumers do
+ * not need to pull in tcg.h.
  */
 #ifdef __APPLE__
+extern uintptr_t tcg_splitwx_diff;
 static inline void qemu_thread_jit_execute(void)
 {
-    pthread_jit_write_protect_np(true);
+    if (tcg_splitwx_diff == 0) {
+        pthread_jit_write_protect_np(true);
+    }
 }
 
 static inline void qemu_thread_jit_write(void)
 {
-    pthread_jit_write_protect_np(false);
+    if (tcg_splitwx_diff == 0) {
+        pthread_jit_write_protect_np(false);
+    }
 }
 #else
 static inline void qemu_thread_jit_write(void) {}

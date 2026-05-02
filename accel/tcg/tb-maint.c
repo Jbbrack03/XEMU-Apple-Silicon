@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/interval-tree.h"
 #include "qemu/qtree.h"
+#include "qemu/timer.h"
 #include "exec/cputlb.h"
 #include "exec/log.h"
 #include "exec/page-protection.h"
@@ -33,7 +34,31 @@
 #include "tb-hash.h"
 #include "tb-context.h"
 #include "tb-internal.h"
+#include "qemu/xemu-tcg-perf.h"
+#include "qemu/xemu-spike-log.h"
 #include "internal-common.h"
+
+/*
+ * Apple Silicon performance fork (I2): per-page-targeted jmp-cache
+ * invalidation gate.
+ *
+ * Default-on for Apple Silicon system builds (resolved in
+ * accel/tcg/tcg-all.c::tcg_resolve_jmp_cache_targeted_default()).
+ * When true, an SMC-driven invalidation burst inside
+ * tb_invalidate_phys_page_range__locked clears one jmp-cache bucket
+ * per invalidated PCREL TB instead of zeroing all 4096 buckets per
+ * TB. Correctness rests on the existing CF_INVALID + cflags-equality
+ * check in cpu-exec.c::tb_lookup (line 267): do_tb_phys_invalidate
+ * sets CF_INVALID before removing the TB from tb_ctx.htable, so a
+ * stale tb* still sitting in some other bucket fails the cflags
+ * compare and falls through to tb_htable_lookup, which won't find
+ * the (already-removed) TB and translates fresh.
+ *
+ * Set XEMU_TCG_JMP_CACHE_TARGETED=0 to fall back to the upstream
+ * full-zero path (the rollback for A/B testing or correctness
+ * regression triage).
+ */
+bool tcg_jmp_cache_targeted_enabled;
 #ifdef CONFIG_USER_ONLY
 #include "user/page-protection.h"
 #define runstate_is_running()  true
@@ -918,21 +943,64 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
                 qatomic_set(&jc->array[h].tb, NULL);
             }
         }
+        /* One bucket inspected per CPU; report as zeroed-buckets so the
+         * counter reflects the actual jmp-cache work done, regardless of
+         * whether the slot was occupied by this TB. */
+        unsigned ncpus = 0;
+        CPU_FOREACH(cpu) {
+            ncpus++;
+        }
+        xemu_tcg_perf_add_jmp_cache_zeroed(ncpus);
     }
+}
+
+/*
+ * I2: targeted single-bucket clear, used for the CF_PCREL path when
+ * tcg_jmp_cache_targeted_enabled is true. Mirrors the non-PCREL branch
+ * of tb_jmp_cache_inval_tb above. Correctness: the caller has already
+ * set CF_INVALID and removed the TB from tb_ctx.htable, so any stale
+ * tb* sitting in unrelated buckets fails the cflags compare in
+ * cpu-exec.c::tb_lookup and falls through to a fresh translation.
+ */
+static void tb_jmp_cache_inval_tb_targeted(TranslationBlock *tb)
+{
+    CPUState *cpu;
+    uint32_t h = tb_jmp_cache_hash_func(tb->pc);
+    unsigned ncpus = 0;
+
+    CPU_FOREACH(cpu) {
+        CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+        if (qatomic_read(&jc->array[h].tb) == tb) {
+            qatomic_set(&jc->array[h].tb, NULL);
+        }
+        ncpus++;
+    }
+    xemu_tcg_perf_add_jmp_cache_zeroed(ncpus);
 }
 
 /*
  * In user-mode, call with mmap_lock held.
  * In !user-mode, if @rm_from_page_list is set, call with the TB's pages'
  * locks held.
+ *
+ * If @defer_jmp_cache is true (I2 batched-invalidation path), the
+ * caller is responsible for calling tb_jmp_cache_inval_tb_targeted(tb)
+ * after the invalidation burst completes. Returning successfully with
+ * @defer_jmp_cache=true requires that CF_INVALID is set and the TB has
+ * been removed from tb_ctx.htable before the function returns; both
+ * happen before the deferred-cache decision below.
  */
-static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
+static bool do_tb_phys_invalidate(TranslationBlock *tb,
+                                  bool rm_from_page_list,
+                                  bool defer_jmp_cache)
 {
     uint32_t h;
     tb_page_addr_t phys_pc;
     uint32_t orig_cflags = tb_cflags(tb);
     void *existing = NULL;
 
+    xemu_tcg_perf_inc_tb_invalidate();
     assert_memory_lock();
 
     /* make sure no further incoming jumps will be chained to this TB */
@@ -945,7 +1013,7 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     h = tb_hash_func(phys_pc, (orig_cflags & CF_PCREL ? 0 : tb->pc),
                      tb->flags, tb->cs_base, orig_cflags);
     if (!qht_remove(&tb_ctx.htable, tb, h)) {
-        return;
+        return false;
     }
 
     qht_insert(&tb_ctx.inv_htable, tb, h, &existing);
@@ -957,7 +1025,9 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     }
 
     /* remove the TB from the hash list */
-    tb_jmp_cache_inval_tb(tb);
+    if (!defer_jmp_cache) {
+        tb_jmp_cache_inval_tb(tb);
+    }
 
     /* suppress this TB from the two jump lists */
     tb_remove_from_jmp_list(tb, 0);
@@ -968,12 +1038,13 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
 
     qatomic_set(&tb_ctx.tb_phys_invalidate_count,
                 tb_ctx.tb_phys_invalidate_count + 1);
+    return true;
 }
 
 static void tb_phys_invalidate__locked(TranslationBlock *tb)
 {
     qemu_thread_jit_write();
-    do_tb_phys_invalidate(tb, true);
+    do_tb_phys_invalidate(tb, true, false);
     qemu_thread_jit_execute();
 }
 
@@ -985,10 +1056,10 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
 {
     if (page_addr == -1 && tb_page_addr0(tb) != -1) {
         tb_lock_pages(tb);
-        do_tb_phys_invalidate(tb, true);
+        do_tb_phys_invalidate(tb, true, false);
         tb_unlock_pages(tb);
     } else {
-        do_tb_phys_invalidate(tb, false);
+        do_tb_phys_invalidate(tb, false, false);
     }
 }
 
@@ -1120,6 +1191,20 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
  * (@cpu, @retaddr) may be (NULL, 0) outside of a cpu context,
  * in which case precise_smc need not be detected.
  */
+/*
+ * I2: deferred PCREL jmp-cache invalidation. The fast-path stack
+ * buffer holds the small case (< 32 PCREL TBs in a burst, which covers
+ * the median Crimson interval per the V1 evidence: 11 notdirty trips
+ * with bursts ~16-30 TBs); the GArray fallback covers the worst case
+ * (TCG_TB_INVALIDATE_BURST_MAX measured at 470-474 in Crimson). The
+ * TBs are NOT executable after CF_INVALID is set + qht_remove
+ * completes inside do_tb_phys_invalidate(); they remain valid pointers
+ * because invalidated TBs live in tb_ctx.inv_htable until the next
+ * full tb_flush, so dereferencing them post-loop to compute their
+ * jmp-cache hash bucket is safe.
+ */
+#define TCG_JMP_CACHE_DEFER_STACK_THRESHOLD 32
+
 static void
 tb_invalidate_phys_page_range__locked(CPUState *cpu,
                                       struct page_collection *pages,
@@ -1131,9 +1216,20 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     PageForEachNext n;
     bool current_tb_modified = false;
     TranslationBlock *current_tb = NULL;
+    uint32_t burst_count = 0;
+    int64_t wall_start_ns;
+    bool defer_jmp_cache = qatomic_read(&tcg_jmp_cache_targeted_enabled);
+
+    /* Stack buffer for the deferred PCREL jmp-cache invalidation list.
+     * Falls back to a GArray if the burst grows past the threshold. */
+    TranslationBlock *defer_stack[TCG_JMP_CACHE_DEFER_STACK_THRESHOLD];
+    unsigned defer_stack_count = 0;
+    g_autoptr(GArray) defer_overflow = NULL;
 
     /* Range may not cross a page. */
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
+
+    wall_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
 
     if (retaddr && cpu && cpu->cc->tcg_ops->precise_smc) {
         current_tb = tcg_tb_lookup(retaddr);
@@ -1172,13 +1268,83 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
                 current_tb_modified = true;
                 cpu_restore_state_from_tb(cpu, current_tb, retaddr);
             }
-            tb_phys_invalidate__locked(tb);
+
+            if (defer_jmp_cache && (tb_cflags(tb) & CF_PCREL)) {
+                /* I2 path: invalidate without touching the jmp-cache,
+                 * then queue for a single targeted bucket clear after
+                 * the loop. Only TBs whose qht_remove succeeded are
+                 * recorded so we don't double-clear or operate on a
+                 * concurrently-removed TB. */
+                qemu_thread_jit_write();
+                bool removed = do_tb_phys_invalidate(tb, true, true);
+                qemu_thread_jit_execute();
+                if (removed) {
+                    if (defer_stack_count
+                        < TCG_JMP_CACHE_DEFER_STACK_THRESHOLD) {
+                        defer_stack[defer_stack_count++] = tb;
+                    } else {
+                        if (defer_overflow == NULL) {
+                            defer_overflow = g_array_new(
+                                FALSE, FALSE, sizeof(TranslationBlock *));
+                        }
+                        g_array_append_val(defer_overflow, tb);
+                    }
+                }
+            } else {
+                tb_phys_invalidate__locked(tb);
+            }
+            burst_count++;
         }
     }
+
+    /* I2: drain the deferred PCREL jmp-cache invalidations. Each call
+     * clears one bucket per CPU instead of zeroing all 4096 buckets,
+     * shrinking the per-burst jmp-cache cost from O(burst * NCPU * 4096)
+     * to O(burst * NCPU). */
+    for (unsigned i = 0; i < defer_stack_count; i++) {
+        tb_jmp_cache_inval_tb_targeted(defer_stack[i]);
+    }
+    if (defer_overflow != NULL) {
+        for (unsigned i = 0; i < defer_overflow->len; i++) {
+            tb_jmp_cache_inval_tb_targeted(
+                g_array_index(defer_overflow, TranslationBlock *, i));
+        }
+    }
+
+    xemu_tcg_perf_record_invalidate_burst(burst_count);
 
     /* if no code remaining, no need to continue to use slow writes */
     if (!p->first_tb) {
         tlb_unprotect_code(start);
+    }
+
+    /* I2: record per-call wallclock cost (us). Done regardless of the
+     * targeted flag so V2 can compare both arms. Note: when
+     * current_tb_modified fires, the function ends via cpu_loop_exit_noexc()
+     * (longjmp), so we record before the unlock to ensure the metric is
+     * captured. */
+    {
+        int64_t wall_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        uint64_t wall_us = (uint64_t)((wall_end_ns - wall_start_ns) / 1000);
+        xemu_tcg_perf_record_invalidate_wall_us(wall_us);
+
+        /* V3 attribution: emit a spike line if this single invalidate
+         * call exceeded the threshold. V2 evidence shows the per-call
+         * max is ~700us so this rarely fires at the 50ms default; that
+         * is the point — if tcg_invalidate_burst spikes during the
+         * worst frame we have direct evidence the call cost itself is
+         * the source. Gated on the TCG enable bit so steady-state
+         * overhead is one branch. */
+        if (xemu_spike_log_tcg_enabled
+            && (int64_t)wall_us >= xemu_spike_threshold_us) {
+            char extra[64];
+            snprintf(extra, sizeof(extra),
+                     "burst=%u page=0x%llx",
+                     burst_count,
+                     (unsigned long long)(start & TARGET_PAGE_MASK));
+            xemu_spike_emit("tcg_invalidate_burst",
+                            (int64_t)wall_us, extra);
+        }
     }
 
     if (unlikely(current_tb_modified)) {

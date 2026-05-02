@@ -38,6 +38,7 @@
 #include "internal-common.h"
 #include "tcg/perf.h"
 #include "tcg/insn-start-words.h"
+#include "qemu/xemu-tcg-perf.h"
 
 #if defined(CONFIG_VTUNE_JITPROFILING)
 #include <jitprofiling.h>
@@ -681,4 +682,8 @@ void tcg_flush_jmp_cache(CPUState *cpu)
     for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
         qatomic_set(&jc->array[i].tb, NULL);
     }
+    /* I2 attribution: the full-zero path clears every bucket. Used by
+     * extract-perf-summary.sh to compute the achieved reduction ratio
+     * after the targeted slice lands. */
+    xemu_tcg_perf_add_jmp_cache_zeroed(TB_JMP_CACHE_SIZE);
 }

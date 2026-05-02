@@ -59,6 +59,14 @@ function add_counter(name, value) {
     counters[name] += value
 }
 
+# Track the running maximum across intervals for keys whose semantics
+# are "per-interval maximum" rather than "per-interval sum".
+function max_counter(name, value) {
+    if (!(name in counters_max) || value > counters_max[name]) {
+        counters_max[name] = value
+    }
+}
+
 # Track per-interval values for jitter metrics.
 function record_interval(fps, mspf_avg, mspf_max, is_post_load) {
     all_count++
@@ -231,12 +239,27 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "DRAW_BEGIN_US_TOTAL" ||
                    key == "FLIP_STALL_US_TOTAL" ||
                    key == "FLIP_STALL_GLFINISH_US_TOTAL" ||
+                   key == "MSAA_RESOLVE_US_TOTAL" ||
                    key == "BEGIN_ENDS" ||
                    key == "DRAW_ARRAYS" ||
                    key == "INLINE_ELEMENTS" ||
                    key == "INLINE_ARRAYS" ||
-                   key == "INLINE_BUFFERS") {
+                   key == "INLINE_BUFFERS" ||
+                   key == "TCG_TB_EXEC_COUNT" ||
+                   key == "TCG_TB_INVALIDATE_COUNT" ||
+                   key == "TCG_NOTDIRTY_TRIPS" ||
+                   key == "TCG_NOTDIRTY_PAGES_HIT" ||
+                   key == "TCG_JMP_CACHE_ZEROED_BUCKETS" ||
+                   key == "NV2A_VBLANK_FIRES" ||
+                   key == "NV2A_FLIP_STALL_WRITES" ||
+                   key == "NV2A_PRESENT_HEARTBEAT" ||
+                   key == "XEMU_GL_SWAPS" ||
+                   key == "APU_LOCK_HOLD_US_TOTAL") {
             add_counter(key, value)
+        } else if (key == "TCG_TB_INVALIDATE_BURST_MAX" ||
+                   key == "TCG_INVALIDATE_WALL_US_MAX" ||
+                   key == "APU_VCPU_LOCK_WAIT_US_MAX") {
+            max_counter(key, value)
         }
     }
 
@@ -333,15 +356,33 @@ END {
     keys[50] = "DRAW_BEGIN_US_TOTAL"
     keys[51] = "FLIP_STALL_US_TOTAL"
     keys[52] = "FLIP_STALL_GLFINISH_US_TOTAL"
-    keys[53] = "BEGIN_ENDS"
-    keys[54] = "DRAW_ARRAYS"
-    keys[55] = "INLINE_ELEMENTS"
-    keys[56] = "INLINE_ARRAYS"
-    keys[57] = "INLINE_BUFFERS"
+    keys[53] = "MSAA_RESOLVE_US_TOTAL"
+    keys[54] = "BEGIN_ENDS"
+    keys[55] = "DRAW_ARRAYS"
+    keys[56] = "INLINE_ELEMENTS"
+    keys[57] = "INLINE_ARRAYS"
+    keys[58] = "INLINE_BUFFERS"
+    keys[59] = "TCG_TB_EXEC_COUNT"
+    keys[60] = "TCG_TB_INVALIDATE_COUNT"
+    keys[61] = "TCG_NOTDIRTY_TRIPS"
+    keys[62] = "TCG_NOTDIRTY_PAGES_HIT"
+    keys[63] = "TCG_JMP_CACHE_ZEROED_BUCKETS"
+    keys[64] = "NV2A_VBLANK_FIRES"
+    keys[65] = "NV2A_FLIP_STALL_WRITES"
+    keys[66] = "NV2A_PRESENT_HEARTBEAT"
+    keys[67] = "XEMU_GL_SWAPS"
+    keys[68] = "APU_LOCK_HOLD_US_TOTAL"
 
-    for (i = 1; i <= 57; i++) {
+    for (i = 1; i <= 68; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
+    # Per-interval-max counters: report the running max across intervals.
+    printf("TCG_TB_INVALIDATE_BURST_MAX=%d\n",
+           ("TCG_TB_INVALIDATE_BURST_MAX" in counters_max) ? counters_max["TCG_TB_INVALIDATE_BURST_MAX"] : 0)
+    printf("TCG_INVALIDATE_WALL_US_MAX=%d\n",
+           ("TCG_INVALIDATE_WALL_US_MAX" in counters_max) ? counters_max["TCG_INVALIDATE_WALL_US_MAX"] : 0)
+    printf("APU_VCPU_LOCK_WAIT_US_MAX=%d\n",
+           ("APU_VCPU_LOCK_WAIT_US_MAX" in counters_max) ? counters_max["APU_VCPU_LOCK_WAIT_US_MAX"] : 0)
 
     emit_jitter("",         all_fps, all_mspf_max, all_mspf_avg, all_count)
     emit_jitter("post_load_", post_fps, post_mspf_max, post_mspf_avg, post_count)

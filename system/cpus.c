@@ -36,6 +36,8 @@
 #include "exec/cpu-common.h"
 #include "qemu/thread.h"
 #include "qemu/main-loop.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-spike-log.h"
 #include "qemu/plugin.h"
 #include "system/cpus.h"
 #include "qemu/guest-random.h"
@@ -575,7 +577,29 @@ void bql_lock_impl(const char *file, int line)
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
+    /* Apple Silicon performance fork: M2 spike attribution. Time the
+     * BQL acquisition. The interesting cost is wait time, not held
+     * time — if a vCPU thread blocks 10+ms here it's because some
+     * other thread (iothread, pfifo, GL worker) is holding BQL while
+     * doing slow work. Cheap when off (single-load enable check). */
+    int64_t bql_wait_start_us = 0;
+    if (xemu_spike_log_tcg_enabled) {
+        bql_wait_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
     bql_lock_fn(&bql, file, line);
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t bql_wait_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - bql_wait_start_us;
+        if (bql_wait_us >= xemu_spike_threshold_us) {
+            char extra[160];
+            const char *fname = file ? strrchr(file, '/') : NULL;
+            snprintf(extra, sizeof(extra),
+                     "from=%s:%d",
+                     fname ? fname + 1 : (file ? file : "?"),
+                     line);
+            xemu_spike_emit("bql_acquire_wait", bql_wait_us, extra);
+        }
+    }
 }
 
 void bql_unlock(void)

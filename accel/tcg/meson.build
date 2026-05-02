@@ -14,6 +14,7 @@ tcg_ss.add(files(
   'tcg-stats.c',
   'translate-all.c',
   'translator.c',
+  'xemu-tcg-perf.c',
 ))
 if get_option('plugins')
   tcg_ss.add(files('plugin-gen.c'))

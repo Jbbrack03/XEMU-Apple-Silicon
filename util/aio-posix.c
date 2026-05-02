@@ -23,6 +23,8 @@
 #include "qemu/rcu_queue.h"
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-spike-log.h"
 #include "trace.h"
 #include "aio-posix.h"
 
@@ -384,6 +386,15 @@ void aio_dispatch(AioContext *ctx)
 {
     AioHandlerList ready_list = QLIST_HEAD_INITIALIZER(ready_list);
 
+    /* Apple Silicon performance fork: M2 spike attribution. Time the
+     * full AioContext dispatch pass — BH dispatch + fd handlers +
+     * timer dispatch. Slow BHs / fd handlers / timers stall the
+     * iothread. */
+    int64_t aio_start_us = 0;
+    if (xemu_spike_log_tcg_enabled) {
+        aio_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
+
     qemu_lockcnt_inc(&ctx->list_lock);
 
     aio_bh_poll(ctx);
@@ -401,6 +412,14 @@ void aio_dispatch(AioContext *ctx)
     qemu_lockcnt_dec(&ctx->list_lock);
 
     timerlistgroup_run_timers(&ctx->tlg);
+
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t aio_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - aio_start_us;
+        if (aio_us >= xemu_spike_threshold_us) {
+            xemu_spike_emit("aio_run_iter", aio_us, NULL);
+        }
+    }
 }
 
 static bool run_poll_handlers_once(AioContext *ctx,

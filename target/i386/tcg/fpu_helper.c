@@ -28,6 +28,18 @@
 #include "fpu/softfloat-macros.h"
 #include "helper-tcg.h"
 #include "access.h"
+#include "qemu/xemu-spike-log.h"
+#include "qemu/xemu-tcg-perf.h"
+
+/* V3 attribution: cheap one-liner for the per-call x87-storm tick.
+ * Inline so the off-state cost is a single global load + branch (the
+ * compiler folds out the call). */
+static inline void xemu_x87_storm_inc(void)
+{
+    if (xemu_spike_log_tcg_enabled) {
+        xemu_tcg_perf_x87_storm_tick();
+    }
+}
 
 /* float macros */
 #define FT0    (env->ft0)
@@ -782,6 +794,7 @@ void helper_fmul_ST0_FT0(CPUX86State *env)
     int old_flags = save_exception_flags(env);
     ST0 = floatx80_mul(ST0, FT0, &env->fp_status);
     merge_exception_flags(env, old_flags);
+    xemu_x87_storm_inc();
 }
 
 void helper_fsub_ST0_FT0(CPUX86State *env)
@@ -815,6 +828,7 @@ void helper_fadd_STN_ST0(CPUX86State *env, int st_index)
     int old_flags = save_exception_flags(env);
     ST(st_index) = floatx80_add(ST(st_index), ST0, &env->fp_status);
     merge_exception_flags(env, old_flags);
+    xemu_x87_storm_inc();
 }
 
 void helper_fmul_STN_ST0(CPUX86State *env, int st_index)
@@ -829,6 +843,7 @@ void helper_fsub_STN_ST0(CPUX86State *env, int st_index)
     int old_flags = save_exception_flags(env);
     ST(st_index) = floatx80_sub(ST(st_index), ST0, &env->fp_status);
     merge_exception_flags(env, old_flags);
+    xemu_x87_storm_inc();
 }
 
 void helper_fsubr_STN_ST0(CPUX86State *env, int st_index)
@@ -844,6 +859,7 @@ void helper_fdiv_STN_ST0(CPUX86State *env, int st_index)
 
     p = &ST(st_index);
     *p = helper_fdiv(env, *p, ST0);
+    xemu_x87_storm_inc();
 }
 
 void helper_fdivr_STN_ST0(CPUX86State *env, int st_index)
