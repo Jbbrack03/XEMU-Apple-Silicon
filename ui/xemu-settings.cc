@@ -155,13 +155,61 @@ static const char *read_file(FILE *fd)
     return buf;
 }
 
+/*
+ * Apple Silicon performance fork: pick the platform-appropriate default
+ * for `display.quality.surface_scale` on a fresh install (no config
+ * file yet). The schema default is 1× (480p-class internal render
+ * target) to match upstream xemu, but the GL-vs-Metal stress on
+ * 2026-05-01 measured only ~7 % renderer-cost growth from 1× to 4× on
+ * PGR2 — so 2× (~1080p) has comfortable headroom on Apple Silicon and
+ * is the visually obvious win for new users. Existing users with a
+ * stored config keep whatever they had; only first-launch gets the
+ * platform-specific bump.
+ */
+static int xemu_settings_first_run_default_surface_scale(void)
+{
+#if defined(CONFIG_DARWIN) && defined(__aarch64__)
+    return 2;
+#else
+    return 1;
+#endif
+}
+
+/*
+ * Apple Silicon performance fork: env-var bridge for surface_scale.
+ * Mirrors `XEMU_BENCH_SURFACE_SCALE` (which the benchmark harness
+ * injects via `[display.quality] surface_scale = N` in the per-run
+ * config). `XEMU_DISPLAY_SCALE={1,2,3,4}` overrides the loaded /
+ * defaulted value for this session without touching the user's saved
+ * preference. Out-of-range values are silently ignored. The renderer
+ * separately clamps factor < 1 to 1 in `pgraph_*_reload_surface_scale_factor`.
+ */
+static void xemu_settings_apply_display_scale_env(void)
+{
+    const char *env = getenv("XEMU_DISPLAY_SCALE");
+    if (!env || !env[0]) {
+        return;
+    }
+    char *endp = NULL;
+    long v = strtol(env, &endp, 10);
+    if (endp == env || (endp && *endp != '\0')) {
+        return;
+    }
+    if (v < 1 || v > 10) {
+        return;
+    }
+    g_config.display.quality.surface_scale = (int)v;
+}
+
 bool xemu_settings_load(void)
 {
     const char *settings_path = xemu_settings_get_path();
     bool success = false;
+    bool first_run = false;
 
     if (qemu_access(settings_path, F_OK) == -1) {
         fprintf(stderr, "Config file not found, starting with default settings.\n");
+        first_run = true;
         success = true;
     } else {
         FILE *fd = qemu_fopen(settings_path, "rb");
@@ -202,6 +250,14 @@ bool xemu_settings_load(void)
     }
 
     config_tree.store_to_struct(&g_config);
+
+    if (first_run) {
+        g_config.display.quality.surface_scale =
+            xemu_settings_first_run_default_surface_scale();
+    }
+
+    /* Env-var bridge wins over both schema default and stored value. */
+    xemu_settings_apply_display_scale_env();
 
     return success;
 }

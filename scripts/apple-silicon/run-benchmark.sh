@@ -131,7 +131,11 @@ else
     cp -c "$HDD_SOURCE" "$SCRATCH_HDD" 2>/dev/null || cp "$HDD_SOURCE" "$SCRATCH_HDD"
 fi
 
-SURFACE_SCALE="${XEMU_BENCH_SURFACE_SCALE:-1}"
+# Default to 2 so the per-run config matches the Apple Silicon system
+# build's first-run default (1080p-class, ~7 % renderer-cost growth on
+# PGR2 vs scale 1; see docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md).
+# Override with XEMU_BENCH_SURFACE_SCALE=N for explicit A/B sweeps.
+SURFACE_SCALE="${XEMU_BENCH_SURFACE_SCALE:-2}"
 
 cat > "$CONFIG_FILE" <<EOF
 [general]
@@ -191,6 +195,9 @@ EOF
     echo "loadvm_at_seconds: ${LOADVM_TAG:+$LOADVM_AT}"
     echo "snapshot_no_thumbnail: $SNAPSHOT_NO_THUMBNAIL"
     echo "extra_qemu_args: ${EXTRA_QEMU_ARGS:-none}"
+    echo "surface_scale: $SURFACE_SCALE"
+    echo "env_XEMU_BENCH_SURFACE_SCALE: ${XEMU_BENCH_SURFACE_SCALE:-unset}"
+    echo "env_XEMU_DISPLAY_SCALE: ${XEMU_DISPLAY_SCALE:-unset}"
     echo "env_XEMU_NATIVE_TRI_DEPTH: ${XEMU_NATIVE_TRI_DEPTH:-unset}"
     echo "env_XEMU_NATIVE_QUAD: ${XEMU_NATIVE_QUAD:-unset}"
     echo "env_XEMU_PGRAPH_FAST_READ: ${XEMU_PGRAPH_FAST_READ:-unset}"
