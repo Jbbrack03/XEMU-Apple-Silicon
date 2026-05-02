@@ -20,6 +20,25 @@
  */
 
 #include "nv2a_int.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-spike-log.h"
+
+/* V3 attribution: time the pfifo (renderer) thread's wait on pg->lock.
+ * Off-state cost is one global load + branch and a normal qemu_mutex_lock. */
+static inline void pfifo_pg_lock_with_spike(QemuMutex *lock)
+{
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t wait_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        qemu_mutex_lock(lock);
+        int64_t wait_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        int64_t wait_us = (wait_end_ns - wait_start_ns) / 1000;
+        if (wait_us >= xemu_spike_threshold_us) {
+            xemu_spike_emit("renderer_pg_lock_wait", wait_us, NULL);
+        }
+    } else {
+        qemu_mutex_lock(lock);
+    }
+}
 
 typedef struct RAMHTEntry {
     uint32_t handle;
@@ -186,7 +205,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
 
         // TODO: this is fucked
         qemu_mutex_unlock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
+        pfifo_pg_lock_with_spike(&d->pgraph.lock);
 
         // Switch contexts if necessary
         if (can_fifo_access(d)) {
@@ -221,7 +240,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
 
         // TODO: this is fucked
         qemu_mutex_unlock(&d->pfifo.lock);
-        qemu_mutex_lock(&d->pgraph.lock);
+        pfifo_pg_lock_with_spike(&d->pgraph.lock);
 
         if (can_fifo_access(d)) {
             num_proc =

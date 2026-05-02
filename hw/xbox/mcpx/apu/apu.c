@@ -20,8 +20,62 @@
  */
 
 #include "apu_int.h"
+#include "qemu/xemu-apu-perf.h"
 
 MCPXAPUState *g_state; // Used via debug handlers
+
+/*
+ * Apple Silicon performance fork: opt-in lock-release slice for
+ * `MCPXAPUState::lock`.
+ *
+ * Default-on for Apple Silicon system builds (`CONFIG_DARWIN &&
+ * __aarch64__`). The slice releases `d->lock` while the APU worker
+ * thread is waiting for the per-frame voice-worker batch to finish
+ * inside `voice_work_dispatch`, then re-acquires it before publishing
+ * the frame. This shrinks the critical section so vCPU MMIO writes that
+ * acquire `d->lock` (notably `NV1BA0_PIO_VOICE_LOCK` writes that route
+ * through `voice_lock()` and the DSP X/Y/P writes via
+ * `gp_write`/`ep_write`) no longer block for an entire ~5.33 ms APU
+ * frame. D3 attribution (`docs/apple-silicon/benchmarks/
+ * 2026-05-02-tcg-30fps-cap-attribution.md`) measured this contention at
+ * 21.3 s of vCPU thread time across a 300 s Crimson route.
+ *
+ * Distinct from the prior `XEMU_VOICE_FAST_LOCK` slice (reverted
+ * 2026-05-01, see decision-log entry "2026-05-01: XEMU_VOICE_FAST_LOCK
+ * not landed"): that slice tried atomic OR/AND on the
+ * `voice_locked[]` bitmap and dropped the cond_signal — lock-elision
+ * at the bitmap level. This slice keeps `voice_lock()` exactly as it
+ * was on the vCPU side and instead shrinks the APU thread's `d->lock`
+ * hold so the vCPU's existing acquire is no longer contended.
+ *
+ * Precedence: `XEMU_APU_LOCK_RELEASE=0` forces the legacy
+ * lock-held-throughout-frame path (rollback for A/B testing or
+ * correctness regression triage); `=1` forces on; unset uses the
+ * compile-time default (Apple Silicon system → on, others → off).
+ *
+ * The env var is consulted once at device init.
+ */
+bool xemu_apu_lock_release_enabled;
+
+static bool xemu_apu_resolve_lock_release_default(void)
+{
+    const char *env = getenv("XEMU_APU_LOCK_RELEASE");
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0) {
+            return false;
+        }
+        if (strcmp(env, "1") == 0) {
+            return true;
+        }
+        /* Anything else: ignore, fall through to compile-time default. */
+    }
+
+#if defined(CONFIG_DARWIN) && defined(__aarch64__) && !defined(CONFIG_USER_ONLY)
+    return true;
+#else
+    return false;
+#endif
+}
 
 static void update_irq(MCPXAPUState *d)
 {
@@ -406,6 +460,19 @@ static void mcpx_apu_realize(PCIDevice *dev, Error **errp)
     qemu_mutex_lock(&d->lock);
     qemu_cond_init(&d->cond);
     qemu_cond_init(&d->idle_cond);
+
+    /* Apple Silicon performance fork: resolve XEMU_APU_LOCK_RELEASE
+     * once at device init. The env var is process-wide; resolving here
+     * keeps the value next to the rest of the APU device state. */
+    {
+        bool was_explicit = (getenv("XEMU_APU_LOCK_RELEASE") != NULL);
+        xemu_apu_lock_release_enabled =
+            xemu_apu_resolve_lock_release_default();
+        fprintf(stderr,
+                "xemu-perf: apu_lock_release=%d source=%s\n",
+                xemu_apu_lock_release_enabled ? 1 : 0,
+                was_explicit ? "XEMU_APU_LOCK_RELEASE" : "auto-default");
+    }
 
     mcpx_apu_vp_init(d);
     mcpx_apu_dsp_init(d);

@@ -21,6 +21,7 @@
 
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/main-loop.h"
+#include "qemu/xemu-display-perf.h"
 
 void nv2a_update_irq(NV2AState *d)
 {
@@ -203,6 +204,15 @@ static void nv2a_vga_gfx_update(void *opaque)
     d->pcrtc.raster = 0;
 
     nv2a_update_irq(d);
+
+    /* Apple Silicon performance fork: 30 FPS cap diagnostic. Bump the
+     * vblank-fired counter every time a vblank IRQ is delivered to the
+     * guest. The xemu vblank-timer thread (ui/xemu.c) drives this at
+     * vblank_interval_ns; the guest sees the matching NV_PCRTC vblank
+     * pending bit. Compared against NV2A_PRESENT_HEARTBEAT this proves
+     * whether the guest's frame-production rate equals or lags the
+     * vblank rate. */
+    xemu_display_perf_vblank_fired();
 }
 
 static void nv2a_init_memory(NV2AState *d, MemoryRegion *ram)

@@ -128,6 +128,11 @@ extern struct McpxApuDebug g_dbg, g_dbg_cache;
 extern int g_dbg_voice_monitor;
 extern uint64_t g_dbg_muted_voices[4];
 
+/* Apple Silicon performance fork: env-resolved opt-in for the APU
+ * lock-release slice. See `apu.c` and
+ * `docs/apple-silicon/automation.md` for details. */
+extern bool xemu_apu_lock_release_enabled;
+
 void mcpx_debug_begin_frame(void);
 void mcpx_debug_end_frame(void);
 

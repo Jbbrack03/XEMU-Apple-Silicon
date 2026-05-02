@@ -24,9 +24,31 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "ui/xemu-notifications.h"
 #include "ui/xemu-settings.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-spike-log.h"
+#include "qemu/xemu-display-perf.h"
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
+
+/* V3 attribution: time the wait on pg->lock when XEMU_PERF_SPIKE_LOG_TCG
+ * is on. Caller passes the op name ("tcg_pg_lock_wait" for the vCPU MMIO
+ * paths, "renderer_pg_lock_wait" for the pfifo-thread paths). When off
+ * the cost is one global load + branch and a normal qemu_mutex_lock. */
+static inline void pgraph_lock_with_spike(QemuMutex *lock, const char *op)
+{
+    if (xemu_spike_log_tcg_enabled) {
+        int64_t wait_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        qemu_mutex_lock(lock);
+        int64_t wait_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+        int64_t wait_us = (wait_end_ns - wait_start_ns) / 1000;
+        if (wait_us >= xemu_spike_threshold_us) {
+            xemu_spike_emit(op, wait_us, NULL);
+        }
+    } else {
+        qemu_mutex_lock(lock);
+    }
+}
 
 #define PG_GET_MASK(reg, mask) GET_MASK(pgraph_reg_r(pg, reg), mask)
 #define PG_SET_MASK(reg, mask, value)        \
@@ -123,7 +145,10 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
         return r;
     }
 
-    qemu_mutex_lock(&pg->lock);
+    /* V3: instrumented pg->lock acquisition — TCG vCPU thread MMIO
+     * read path. Spikes here mean the vCPU is waiting for the pfifo
+     * thread to release the GL critical section. */
+    pgraph_lock_with_spike(&pg->lock, "tcg_pg_lock_wait");
 
     switch (addr) {
     case NV_PGRAPH_INTR:
@@ -166,7 +191,8 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
     nv2a_reg_log_write(NV_PGRAPH, addr, size, val);
 
     qemu_mutex_lock(&d->pfifo.lock); // FIXME: Factor out fifo lock here
-    qemu_mutex_lock(&pg->lock);
+    /* V3: TCG vCPU MMIO write path. */
+    pgraph_lock_with_spike(&pg->lock, "tcg_pg_lock_wait");
 
     switch (addr) {
     case NV_PGRAPH_INTR:
@@ -192,6 +218,14 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
                         % PG_GET_MASK(NV_PGRAPH_SURFACE,
                                    NV_PGRAPH_SURFACE_MODULO_3D) );
             nv2a_profile_increment();
+            /* Apple Silicon performance fork: 30 FPS cap diagnostic.
+             * NV_PGRAPH_INCREMENT_READ_3D = the guest's READ_3D
+             * pointer advances = a frame's page flip completes. This
+             * is the actual present-heartbeat: real frames the engine
+             * is producing, distinct from FLIP_STALL (which is the
+             * present-request) and from VBLANK_FIRES (the host
+             * pacing signal). */
+            xemu_display_perf_present();
             pfifo_kick(d);
         }
         break;
@@ -986,6 +1020,12 @@ DEF_METHOD(NV097, FLIP_STALL)
     d->pgraph.renderer->ops.surface_update(d, false, true, true);
     d->pgraph.renderer->ops.flip_stall(d);
     nv2a_profile_flip_stall();
+    /* Apple Silicon performance fork: 30 FPS cap diagnostic. Bumped on
+     * every guest write to NV097_FLIP_STALL — i.e. every frame the
+     * guest decides to present. This is distinct from
+     * NV2A_PRESENT_HEARTBEAT (which counts the actual READ_3D pointer
+     * advance / page flip completion). */
+    xemu_display_perf_flip_stall();
     pg->waiting_for_flip = true;
 }
 

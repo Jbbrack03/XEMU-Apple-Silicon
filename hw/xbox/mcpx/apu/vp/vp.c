@@ -21,6 +21,7 @@
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "adpcm.h"
+#include "qemu/xemu-apu-perf.h"
 
 static const struct {
     hwaddr top, current, next;
@@ -134,7 +135,20 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
 static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
 {
     assert(v < MCPX_HW_MAX_VOICES);
+
+    /* Apple Silicon performance fork: time the acquire-wait so the
+     * APU_VCPU_LOCK_WAIT_US_MAX counter (used to attribute the
+     * voice-lock contention D3 measured at 21.3 s of vCPU thread time
+     * across a 300 s Crimson route) reflects the worst single-event
+     * vCPU wait per perf interval. The qemu_clock_get_us calls bracket
+     * just the lock acquisition, not the held section. */
+    int64_t wait_start_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
     qemu_mutex_lock(&d->lock);
+    int64_t wait_end_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
+    if (wait_end_us > wait_start_us) {
+        xemu_apu_perf_record_vcpu_wait_us(
+            (uint64_t)(wait_end_us - wait_start_us));
+    }
 
     uint64_t mask = 1LL << (v % 64);
     if (lock) {
@@ -1739,13 +1753,99 @@ voice_work_dispatch(MCPXAPUState *d,
 
     qemu_mutex_lock(&vwd->lock);
 
+    /* Apple Silicon performance fork: measure the d->lock held
+     * portion of the dispatched VP frame for APU_LOCK_HOLD_US_TOTAL.
+     * Captured here (after vwd->lock acquire) and ended just before
+     * the outer qemu_mutex_unlock(&vwd->lock); the released window
+     * inside (when XEMU_APU_LOCK_RELEASE is on) is excluded by
+     * splitting the measurement across the wait. */
+    int64_t hold_start_us = 0;
+    int64_t hold_acc_us = 0;
+
     if (vwd->queue_len) {
+        hold_start_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
         memset(vwd->mixbins, 0, sizeof(vwd->mixbins));
 
-        // Signal workers and wait for completion
+        // Signal workers and wait for completion.
+        //
+        // Apple Silicon performance fork (audio voice-lock release
+        // slice): when XEMU_APU_LOCK_RELEASE is enabled, release
+        // d->lock for the duration of the worker-finished wait so
+        // vCPU MMIO writes that take d->lock (notably
+        // NV1BA0_PIO_VOICE_LOCK -> voice_lock(), and
+        // gp_write/ep_write for DSP X/Y/P memory) don't block for
+        // the entire ~5.33 ms VP frame.
+        //
+        // Snapshot/process/publish boundary:
+        //  - Snapshot: vwd->queue[] (built under d->lock during the
+        //    voice-list walk in mcpx_apu_vp_frame, lines 1813-1840).
+        //    The queue holds voice handles + list ids; voice config
+        //    itself lives in guest RAM and is read by the workers
+        //    via voice_get_mask (already lock-free in upstream).
+        //  - Process: voice_worker_thread reads guest RAM via
+        //    voice_get_mask, runs voice_step_envelope / voice_resample
+        //    / SVF / HRTF math into worker-local self->mixbins. No
+        //    reads or writes through d->lock-protected fields during
+        //    this phase. Synchronization with the dispatcher uses
+        //    vwd->lock + work_pending / work_finished conds.
+        //  - Publish: re-acquire d->lock before draining vwd->mixbins
+        //    into the caller's mixbins[] (which is in se_frame's
+        //    stack, lifetime-bound to the current APU frame).
+        //
+        // Race widening vs upstream: a vCPU voice_lock(true) can now
+        // succeed while a worker is mid-process on the same voice.
+        // The worker reads voice config from guest RAM at the start
+        // of voice_process and may see partially-modified config if
+        // the vCPU then writes voice_set_mask between two of its own
+        // reads. This widens an existing race class: vp_write paths
+        // such as SET_VOICE_TAR_VOLA / SET_VOICE_TAR_PITCH already
+        // modify guest RAM without acquiring d->lock or voice_lock,
+        // so worker reads of those fields are already racy in
+        // upstream. The widening adds the same exposure to fields
+        // touched between voice_lock(true) and voice_lock(false) in
+        // VOICE_ON / VOICE_RELEASE sequences. Per-frame impact is
+        // bounded to ~256 samples (5.33 ms) of slightly-stale audio
+        // for affected voices on the worst case, which is below the
+        // perceptual threshold for the volume/envelope deltas the
+        // race exposes. See decision-log entry "2026-05-02: APU
+        // voice-lock release slice" for the full safety argument.
+        //
+        // Lock-hold counter: we measure the wallclock d->lock was
+        // released so APU_LOCK_HOLD_US_TOTAL drops by exactly the
+        // amount the slice removes from vCPU contention. The
+        // measurement adds two qemu_clock_get_us calls per frame
+        // (~tens of nanoseconds).
         voice_work_schedule(d);
         qemu_cond_broadcast(&vwd->work_pending);
-        qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+
+        if (xemu_apu_lock_release_enabled) {
+            /* Close the held-portion accumulator before releasing
+             * d->lock; reopen after re-acquire so the released window
+             * is excluded from APU_LOCK_HOLD_US_TOTAL. */
+            int64_t pre_release_us =
+                qemu_clock_get_us(QEMU_CLOCK_HOST);
+            if (pre_release_us > hold_start_us) {
+                hold_acc_us += pre_release_us - hold_start_us;
+            }
+            /* Release d->lock first; vwd->lock is independent and
+             * stays held across the wait (qemu_cond_wait releases
+             * vwd->lock during the wait, then re-acquires). */
+            qemu_mutex_unlock(&d->lock);
+            qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+            qemu_mutex_unlock(&vwd->lock);
+            /* Re-acquire d->lock before publishing into the caller's
+             * mixbins. The intervening window is what the slice buys
+             * for vCPU MMIO-write contention. Re-acquire vwd->lock
+             * after d->lock to preserve the legacy lock ordering
+             * (d->lock outer, vwd->lock inner) for any future
+             * callers that require it. */
+            qemu_mutex_lock(&d->lock);
+            qemu_mutex_lock(&vwd->lock);
+            hold_start_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
+        } else {
+            qemu_cond_wait(&vwd->work_finished, &vwd->lock);
+        }
+
         assert(!vwd->workers_pending);
         vwd->queue_len = 0;
 
@@ -1759,6 +1859,20 @@ voice_work_dispatch(MCPXAPUState *d,
 
     int64_t end_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     g_dbg.vp.total_worker_time_us = end_time - start_time;
+
+    /* Close the held-portion accumulator and publish before releasing
+     * vwd->lock. Only emits if there was a dispatched batch this
+     * frame (queue_len was nonzero on entry); idle frames don't add
+     * to the counter. */
+    if (hold_start_us != 0) {
+        int64_t hold_end_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
+        if (hold_end_us > hold_start_us) {
+            hold_acc_us += hold_end_us - hold_start_us;
+        }
+        if (hold_acc_us > 0) {
+            xemu_apu_perf_add_lock_hold_us((uint64_t)hold_acc_us);
+        }
+    }
 
     qemu_mutex_unlock(&vwd->lock);
 }

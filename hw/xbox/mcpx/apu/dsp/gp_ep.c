@@ -20,6 +20,7 @@
  */
 
 #include "hw/xbox/mcpx/apu/apu_int.h"
+#include "qemu/xemu-apu-perf.h"
 
 static const int16_t ep_silence[256][2] = { 0 };
 
@@ -302,7 +303,15 @@ static void gp_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     MCPXAPUState *d = opaque;
 
+    /* Apple Silicon performance fork: measure d->lock acquire wait
+     * for APU_VCPU_LOCK_WAIT_US_MAX. */
+    int64_t wait_start_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
     qemu_mutex_lock(&d->lock);
+    int64_t wait_end_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
+    if (wait_end_us > wait_start_us) {
+        xemu_apu_perf_record_vcpu_wait_us(
+            (uint64_t)(wait_end_us - wait_start_us));
+    }
 
     assert(size == 4);
     assert(addr % 4 == 0);
@@ -392,7 +401,15 @@ static void ep_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     MCPXAPUState *d = opaque;
 
+    /* Apple Silicon performance fork: measure d->lock acquire wait
+     * for APU_VCPU_LOCK_WAIT_US_MAX. */
+    int64_t wait_start_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
     qemu_mutex_lock(&d->lock);
+    int64_t wait_end_us = qemu_clock_get_us(QEMU_CLOCK_HOST);
+    if (wait_end_us > wait_start_us) {
+        xemu_apu_perf_record_vcpu_wait_us(
+            (uint64_t)(wait_end_us - wait_start_us));
+    }
 
     assert(size == 4);
     assert(addr % 4 == 0);

@@ -53,6 +53,7 @@
 
 #include "hw/xbox/smbus.h" // For eject, drive tray
 #include "hw/xbox/nv2a/nv2a.h"
+#include "qemu/xemu-display-perf.h"
 #include "ui/xemu-notifications.h"
 
 #include <stb_image.h>
@@ -861,6 +862,12 @@ static void gl_render_frame(struct xemu_console *scon)
 
     nv2a_release_framebuffer_surface();
     SDL_GL_SwapWindow(scon->real_window);
+    /* Apple Silicon performance fork: 30 FPS cap diagnostic. The host
+     * present count. Compared against NV2A_PRESENT_HEARTBEAT this
+     * confirms whether the host display thread runs at the host
+     * monitor's refresh rate (typically 60 Hz with vsync) regardless
+     * of the guest's frame production rate. */
+    xemu_display_perf_gl_swap();
     assert(glGetError() == GL_NO_ERROR);
 
     qatomic_set(&rendering, false);
