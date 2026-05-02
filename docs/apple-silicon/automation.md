@@ -791,6 +791,16 @@ the same `xemu-perf:` interval line as the NV2A counters above:
   metrics; if it stays an order of magnitude lower, the worst-frame
   is built from many small invalidations or a non-invalidation
   source.
+- `HELPER_RDTSC_CALLS` (V9, 2026-05-02): per-interval count of
+  guest RDTSC instructions executed (atomic; counted by
+  `cpu_get_tsc` in `hw/i386/x86-cpu.c`). Always-on, no env
+  gating; emitted only when non-zero. Used to validate the
+  RDTSC busy-wait hypothesis: if a worst-frame interval shows
+  `HELPER_RDTSC_CALLS` 10-100× higher than steady state, the
+  guest kernel is busy-waiting on RDTSC deadline-checks (V9
+  fast-path target). Steady-state Crimson rate is ~10-50k
+  RDTSCs/s; worst-frame rate during a busy-wait stall is
+  expected to be in the millions/s.
 - `TCG_TB_LOOKUP_US_TOTAL`, `TCG_TB_GEN_CODE_US_TOTAL`,
   `TCG_HANDLE_INTERRUPT_US_TOTAL` (V7, 2026-05-02): per-interval
   sum (microseconds) of wallclock spent inside `tb_lookup`,

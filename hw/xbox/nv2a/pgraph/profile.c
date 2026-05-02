@@ -198,6 +198,17 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
      * attribute the change in MCPXAPUState::lock contention. */
     xemu_apu_perf_emit_and_reset(stderr);
 
+    /* Apple Silicon performance fork: append per-interval RDTSC call
+     * counter (V9). Validates the worst-frame helper_rdtsc rate
+     * hypothesis from the V8 sample profile. Defined in
+     * hw/i386/x86-cpu.c (XBOX target only). No-op when zero. */
+#ifdef XBOX
+    {
+        extern void xemu_rdtsc_perf_emit_and_reset(FILE *out);
+        xemu_rdtsc_perf_emit_and_reset(stderr);
+    }
+#endif
+
     fprintf(stderr, "\n");
 
     perf_log.interval_start_us = now;

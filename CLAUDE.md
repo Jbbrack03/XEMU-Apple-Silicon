@@ -156,6 +156,31 @@ Stable opt-in:
   in `ui/xemu-settings.cc::xemu_settings_apply_display_scale_env`;
   first-run platform default in
   `xemu_settings_first_run_default_surface_scale`.
+- `XEMU_FAST_RDTSC={0,1}` (V9, 2026-05-02) — overrides the
+  Apple Silicon RDTSC fast-path auto-default. Apple Silicon
+  system builds default to ON. Replaces the legacy `cpu_get_tsc`
+  call chain (`qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)` →
+  `cpu_get_clock` seqlock → `cpu_get_clock_locked` → `get_clock`
+  → `clock_gettime(CLOCK_MONOTONIC)` → libsystem internals →
+  `mach_absolute_time` — 7-9 functions deep, ~80-100 ns per
+  call) with a direct `mach_absolute_time` + cached
+  `mach_timebase_info` + `muldiv64` path (~15-20 ns per call).
+  Estimated ~70 % overhead reduction per RDTSC, targeting Xbox
+  kernel busy-waits that deadline-check on RDTSC. Set `=0` to
+  fall back to the legacy QEMU clock path (rollback for A/B
+  testing). The vm_clock_offset (added by cpu_get_clock_locked
+  when the VM is paused) is omitted from the fast path; xemu
+  does not pause/resume the VM mid-execution and the guest only
+  observes TSC deltas, so this is safe. Implementation in
+  `hw/i386/x86-cpu.c::cpu_get_tsc`. Accompanying counter
+  `HELPER_RDTSC_CALLS` (per-interval sum) confirms the call
+  rate; surfaced in `extract-perf-summary.sh`. Decisive
+  attribution measurement of the Crimson worst-frame stutter:
+  if `HELPER_RDTSC_CALLS` is in the millions per worst-frame
+  interval, the V8 sample-profile-derived hypothesis (kernel
+  busy-wait on RDTSC) is confirmed. See
+  `docs/apple-silicon/benchmarks/2026-05-02-v7-cumulative-phase-attribution.md`
+  Mission 4 for the V8 evidence.
 - `XEMU_APU_LOCK_RELEASE={0,1}` — overrides the audio voice-lock
   release auto-default. Apple Silicon system builds default to ON.
   Releases `MCPXAPUState::lock` while the APU worker thread is
