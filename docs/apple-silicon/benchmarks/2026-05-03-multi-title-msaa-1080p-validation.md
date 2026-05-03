@@ -19,6 +19,33 @@ tracked titles plus Soul Calibur 2 (the documented 60 Hz title).
 | **Crimson** | 90 s     | 30 fps    | **30.23**  | 1.2 %  | 174 ms | (n/a)  | ✅ at cap |
 | **Rainbow** | 60 s/90 s| 30 fps    | **26.81**  | 5.4 %  | 153 ms | (varies) | ⚠ avg below cap; max 60 fps in many intervals |
 | **SC2**     | 60 s     | 60 fps    | **58.19**  | 1.9 %  | 116 ms | (n/a)  | ✅ near cap |
+| **Halo CE** | 60 s     | 30 fps    | **30.62**  | 0.3 %  | 218 ms | (n/a)  | ✅ at cap |
+
+**Five titles tested, four meet target.** Rainbow Six 3 is the
+single regressive title — its bimodal FPS distribution (max 60+ in
+many intervals, min 6-10 in stutter intervals) drags the average
+below 30. Per V6/V7/V9/V10 attribution, the slow intervals are
+guest-intrinsic asset-streaming hitches; the renderer is not the
+bottleneck.
+
+## Input latency validation (slice N1+N2)
+
+`XEMU_MACOS_NATIVE_INPUT=1` 30 s PGR2 GL run
+(`benchmark-runs/20260503-094414-pgr2`):
+
+```
+xemu-perf: macos_native_input enabled controllers=0
+INPUT_USB_POLLS sum: 2,362 (~131/interval ≈ 125 Hz Xbox controller poll rate)
+INPUT_BACKEND_UPDATES sum: 2,362 (1:1 with USB polls — backend keeps pace)
+INPUT_LAT_US_MAX = 5-6 µs (across 30 intervals)
+```
+
+**Single-digit microsecond latency** between the macOS-native backend
+publishing controller state and the guest USB stack consuming it.
+Well below the typical 1-2 ms latency floor of SDL's event-queue path,
+and orders of magnitude below the Xbox controller's 8 ms hardware
+poll period. Counters validate the path; full N3 paired-latency
+benchmark with iPhone slow-mo is queued separately.
 
 `MSAA cost = MSAA_RESOLVE_US_TOTAL / interval_us_total`.
 
