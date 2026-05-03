@@ -25,7 +25,7 @@ find_test_disc() {
 
 usage() {
     cat <<EOF
-usage: $0 crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 [--metal-capture <path>] crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.
@@ -35,8 +35,52 @@ run directory instead of replaying a scripted input file.
 Set XEMU_BENCH_LIVE_INPUT=1 for physical controller input without recording.
 Set XEMU_BENCH_HDD_IN_PLACE=1 only with a copied HDD image that should be
 modified directly by profile/setup runs.
+
+Options:
+  --metal-capture <path>   Programmatic Metal frame capture (M13 2026-05-02).
+                           Sets XEMU_METAL_CAPTURE=<path> for the run; the
+                           Metal renderer's MTLCaptureManager writes a
+                           .gputrace document at <path> bounded by
+                           XEMU_METAL_CAPTURE_FRAMES (default 60). Open the
+                           output in Xcode (Window > Organizer > GPU Frame
+                           Capture). Requires the Metal renderer to be the
+                           active backend; on the GL renderer the env var
+                           is harmless and ignored.
 EOF
 }
+
+# Optional flag(s) parsed before the positional args. Currently only one
+# flag (--metal-capture <path>); kept simple rather than pulling in a
+# full getopt/long-options dance.
+METAL_CAPTURE_PATH=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --metal-capture)
+            if [[ $# -lt 2 ]]; then
+                echo "--metal-capture requires a path argument" >&2
+                exit 2
+            fi
+            METAL_CAPTURE_PATH="$2"
+            shift 2
+            ;;
+        --metal-capture=*)
+            METAL_CAPTURE_PATH="${1#--metal-capture=}"
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        --*)
+            echo "unknown flag: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 if [[ $# -lt 1 || $# -gt 3 ]]; then
     usage >&2
@@ -206,6 +250,9 @@ EOF
     echo "env_XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE: ${XEMU_DIAG_NATIVE_TRI_DEPTH_TRACE:-unset}"
     echo "env_XEMU_DIAG_SKIP_TRI_GEOM: ${XEMU_DIAG_SKIP_TRI_GEOM:-unset}"
     echo "env_XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH: ${XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH:-unset}"
+    echo "metal_capture_path: ${METAL_CAPTURE_PATH:-none}"
+    echo "env_XEMU_METAL_CAPTURE: ${XEMU_METAL_CAPTURE:-unset}"
+    echo "env_XEMU_METAL_CAPTURE_FRAMES: ${XEMU_METAL_CAPTURE_FRAMES:-unset}"
     echo
     sw_vers || true
     uname -m || true
@@ -292,6 +339,16 @@ trap cleanup EXIT INT TERM
 
 echo "Starting $GAME_NAME for ${DURATION}s"
 echo "Run directory: $RUN_DIR"
+
+# M13 — programmatic Metal capture: when --metal-capture <path> was passed,
+# export XEMU_METAL_CAPTURE so the Metal renderer's MTLCaptureManager writes
+# a .gputrace there. Pre-exporting (vs inline `KEY=VAL "$XEMU"`) keeps the
+# three launch branches below readable and avoids having to interleave the
+# capture var into each of them.
+if [[ -n "$METAL_CAPTURE_PATH" ]]; then
+    export XEMU_METAL_CAPTURE="$METAL_CAPTURE_PATH"
+    echo "Metal capture: $METAL_CAPTURE_PATH"
+fi
 
 if [[ -n "$RECORD_INPUT" ]]; then
     echo "Recording controller input: $RECORD_INPUT"

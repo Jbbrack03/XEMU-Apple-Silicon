@@ -24,6 +24,10 @@
 #include "data/font_awesome_6_1_1_solid.min.otf.h"
 #include "data/abxy.ttf.h"
 
+// Apple Silicon performance fork: xemu-metal.h is pulled in via
+// common.hh -> font-manager.hh on darwin, exposing xemu_metal_*
+// dispatch helpers used in Rebuild() below.
+
 FontManager g_font_mgr;
 
 FontManager::FontManager()
@@ -106,6 +110,15 @@ void FontManager::Rebuild()
         m_fixed_width_font = io.Fonts->AddFontDefault(&config);
     }
 
+#if defined(__APPLE__)
+    if (xemu_metal_is_active()) {
+        // Apple Silicon performance fork: Metal-backed font atlas.
+        // The wrapper destroys any existing atlas, then re-creates it
+        // from the device, mirroring the OpenGL backend's behavior.
+        xemu_metal_create_fonts_texture();
+        return;
+    }
+#endif
     ImGui_ImplOpenGL3_CreateFontsTexture();
 }
 

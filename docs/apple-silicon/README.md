@@ -74,12 +74,14 @@ visible regressions point first at the renderer.
     2026-05-01.
   - Quality: 1080p (`surface_scale=2`, default on first launch on
     Apple Silicon), opt-in MSAA up to 4× via `XEMU_GL_MSAA`.
-  - Residual-stutter pillar: eliminate 1-second-class worst-frame
-    judder. Currently open: V6 — `cpu_exec_loop` per-phase
-    instrumentation to attribute the residual ~970 ms of unattributed
-    sub-1 ms `tb_gen_code` churn + kernel-PC `0x80030e4c` 1 ms-class
-    TB chains. See benchmarks/2026-05-02-apu-lock-release-validation.md
-    "Recommended next action #3".
+  - Metal product path: native Metal is now the primary renderer
+    direction for frame timing, latency work, capture/profiling,
+    MSAA/resolve control, enhancement hooks, pipeline caching, and
+    maintainability. OpenGL remains the runnable reference/fallback.
+  - Residual-stutter pillar: V9/V10 declared the Crimson 1.3 s class
+    judder best-effort complete within the current TCG architecture;
+    remaining improvement requires larger rearchitecture or
+    game-specific work, not more OpenGL renderer polish.
   - 60 FPS-capable titles (Soul Calibur 2, Burnout 3, OutRun 2, Ninja
     Gaiden Black, etc.) reach native 60 Hz at scale=2 + MSAA=4 per
     the V4 broader sweep.
@@ -164,88 +166,118 @@ visible regressions point first at the renderer.
 - `benchmarks/`: dated benchmark session notes and run templates.
 - `decision-log.md`: dated decisions and rationale.
 - `handoff.md`: current state and next-session checklist.
+- `metal-renderer-plan.md`: **(2026-05-02)** staged Metal renderer
+  implementation plan, slices M0–M15, validation gates, risk register,
+  open questions. Read after `handoff.md` when working on the Metal
+  port.
+- `metal-api-reference.md`: **(2026-05-02)** Apple Metal API surface
+  reference for Phase 4 implementation — device/queue, render pipelines,
+  MSL specifics, buffers/textures, MSAA, frame timing, sync, MetalFX,
+  capture, GPU family detection, common emulator pitfalls, and a
+  "Recommended Apple Silicon defaults" quick-reference table.
+- `emulator-metal-survey.md`: **(2026-05-02)** file-level findings
+  from Dolphin / PCSX2 / DuckStation / MoltenVK Metal backends and
+  xemu's own Vulkan renderer as the structural template; "12 Patterns
+  to Steal" / "5 Anti-Patterns to Avoid".
+- `macos-input-research.md`: **(2026-05-02)** GameController.framework
+  migration plan with proposed input slices N1–N6, independent of the
+  renderer track.
 
 ## Next Session Start
 
-Start in `handoff.md`, section `Next Session Checklist` (top of the
-2026-05-02 update block). The important state is:
+**Read `handoff.md` first.** Its top section ("Update — 2026-05-02
+Metal slice M14 — M-cycle complete; ready for user testing") is the
+authoritative current-state briefing and lists the next-action
+priority. The summary below is for orientation only — `handoff.md`
+wins when the two diverge.
 
-- **Seven default-on flags ship on Apple Silicon system builds**
-  (overridable via env vars):
-  - `XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`,
-    `XEMU_PGRAPH_FAST_READ` — geometry-shader bypasses + lock-free
-    PGRAPH register reads (closed 2026-05-01).
-  - `XEMU_TCG_SPLITWX` — splitwx on (V1, 2026-05-02).
-  - `XEMU_TCG_JMP_CACHE_TARGETED` — per-page targeted jmp-cache
-    invalidation (V2, 2026-05-02).
-  - `XEMU_APU_LOCK_RELEASE` — APU worker releases d->lock during
-    voice-worker batch wait (I5, 2026-05-02). **Has an audio
-    listen-test gate before fully-shipped status.**
-  - `display.quality.surface_scale = 2` — 1080p first-launch
-    default; existing user configs preserved.
-- **One opt-in renderer flag**: `XEMU_GL_MSAA={2,4,8}` (default 0;
-  clamped to `GL_MAX_SAMPLES`, 4 on Apple GL-on-Metal).
-- **One opt-in additional flag**: `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1`
-  (correct & shipped, does NOT fix the headline judder; default off).
-- **Strategic verdict (2026-05-01, decisive): stay on OpenGL.** The
-  GL-vs-Metal decision diagnostic
-  (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) showed Apple's
-  GL has measured headroom for AA / 1080p on tracked titles. Native
-  Metal is not the next priority.
-- **30 FPS cap on PGR2 / Rainbow / Crimson is title-intrinsic
-  (2026-05-02 SC2 sanity test).** Soul Calibur 2 sustains 60.57 FPS
-  on the same build/flag stack. The literal "60 FPS on
-  PGR2/Rainbow/Crimson" goal is technically impossible — those
-  titles' engines render at 30 Hz on real Xbox hardware. See
-  decision-log "2026-05-02: Confirm 30 FPS cap … is title-intrinsic
-  …".
-- **V6 `cpu_exec_loop` per-phase instrumentation landed 2026-05-02
-  as instrumentation only — NEGATIVE per-event 1 ms result.**
-  Three new spike sources (`tcg_tb_lookup`, `tcg_tb_gen_code`,
-  `tcg_handle_interrupt`) gated on `XEMU_PERF_SPIKE_LOG_TCG=1`.
-  Crimson 300 s at 1 ms threshold: 0 / 0 / 1 events; zero V6 events
-  in the 1.375 s worst-frame interval. The 1 ms-class
-  `tcg_tb_chain` events are reframed as **normal hot-path
-  execution** (mean tb_count = 1918 × ~500 ns/iter), disproving
-  D3's host-side-wait hypothesis. The dominant new finding is the
-  worst-frame TCG counter storm: `TCG_TB_INVALIDATE_COUNT = 8954`
-  (~6× steady state), `TCG_NOTDIRTY_PAGES_HIT = 1200` (~24× steady
-  state) — translation churn distributed across many sub-millisecond
-  events. See decision-log "2026-05-02: V6 rules out per-event
-  1 ms hypotheses; V7 cumulative-counter slice queued" and
-  `benchmarks/2026-05-02-v6-cpu-exec-loop-attribution.md`.
-- **Highest-priority next task: V7 — cumulative per-interval
-  `TCG_TB_*_US_TOTAL` counters.** Add
-  `TCG_TB_LOOKUP_US_TOTAL` / `TCG_TB_GEN_CODE_US_TOTAL` /
-  `TCG_HANDLE_INTERRUPT_US_TOTAL` (sum) gated on a new
-  `XEMU_TCG_PHASE_LOG=1` env var. Decision criterion: if
-  `TCG_TB_GEN_CODE_US_TOTAL ≥ 300 ms` in the worst-frame interval,
-  **PPTC (strategy.md Phase 5a — Ryujinx pattern)** is the right
-  follow-on fix. Estimated PPTC ceiling: drop the worst frame from
-  1.375 s to ~900 ms.
-- **V4 broader-title sweep validates default flag stack across the
-  broader Xbox library.** 6 of 6 titles pass; 0 new pathologies; 4
-  surface the same catalogued Crimson-class TCG TB-invalidation
-  worst-frame pathology — one V7-derived fix (likely PPTC) would
-  address them all. See
-  `benchmarks/2026-05-02-broader-title-sweep.md`.
-- Diagnostic infrastructure for community measurement on any Apple
-  Silicon Mac: per-subsystem timing counters
-  (`BIND_TEXTURES_US_TOTAL`, `TEX_UPLOAD_US_TOTAL`,
-  `SURF_TO_TEX_US_TOTAL`, `SURF_UPLOAD_US_TOTAL`,
-  `SURF_DOWNLOAD_US_TOTAL`, `FLUSH_DRAW_US_TOTAL`,
-  `DRAW_BEGIN_US_TOTAL`, `FLIP_STALL_US_TOTAL`,
-  `FLIP_STALL_GLFINISH_US_TOTAL`); TCG hot-path counters
-  (`TCG_TB_EXEC_COUNT`, `TCG_TB_INVALIDATE_COUNT`,
-  `TCG_NOTDIRTY_TRIPS`, `TCG_NOTDIRTY_PAGES_HIT`,
-  `TCG_TB_INVALIDATE_BURST_MAX`, `TCG_JMP_CACHE_ZEROED_BUCKETS`,
-  `TCG_INVALIDATE_WALL_US_MAX`); APU counters
-  (`APU_LOCK_HOLD_US_TOTAL`, `APU_VCPU_LOCK_WAIT_US_MAX`); display
-  pacing counters (`NV2A_VBLANK_FIRES`, `NV2A_PRESENT_HEARTBEAT`,
-  `NV2A_FLIP_STALL_WRITES`, `XEMU_GL_SWAPS`); MSAA cost
-  (`MSAA_RESOLVE_US_TOTAL`); per-event spike log
-  (`XEMU_PERF_SPIKE_LOG=1`, `XEMU_PERF_SPIKE_LOG_TCG=1`); and
-  renderer-load A/B knob (`XEMU_BENCH_SURFACE_SCALE=N`).
+**Current state (2026-05-02, post V9 + V10 + Metal slices M0–M14).**
+
+- **Eight default-on Apple Silicon flags ship**: `XEMU_NATIVE_TRI_DEPTH`,
+  `XEMU_NATIVE_QUAD`, `XEMU_PGRAPH_FAST_READ`, `XEMU_TCG_SPLITWX`,
+  `XEMU_TCG_JMP_CACHE_TARGETED`, `XEMU_APU_LOCK_RELEASE`
+  (PARTIAL — audio listen-test now UNBLOCKED), `XEMU_FAST_RDTSC` (V9,
+  −36 % helper_rdtsc cost), plus `display.quality.surface_scale = 2`
+  first-launch default.
+- **Opt-in GL renderer flags**: `XEMU_GL_MSAA={2,4,8}` (default 0;
+  clamped to `GL_MAX_SAMPLES`, 4 on Apple GL-on-Metal),
+  `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` (default off; correct &
+  shipped, does NOT fix headline judder),
+  `XEMU_GL_RATE_SLEW`/`XEMU_RATE_SLEW` (M10 prerequisite, default off).
+- **Metal renderer slices M0–M14 SHIPPED 2026-05-02.** The Metal
+  renderer is opt-in via `XEMU_RENDERER=METAL` (or
+  `display.renderer = METAL` in `xemu.toml`). 13 `XEMU_METAL_*` flags
+  + the `XEMU_RENDERER` env-var bridge (14 total Metal-track flags),
+  50 `METAL_*` performance counters, plus the 2 graphics-API-agnostic
+  `RATE_SLEW_*` counters surface on the `xemu-perf:` interval line.
+  Default renderer remains OpenGL; M15 (default-on flip) is PENDING,
+  gated on user-driven validation.
+- **Judder pillar declared "best effort complete" (2026-05-02 after
+  V9 + V10).** All xemu-side cost classes < 100 ms (~7 %) of the
+  Crimson 1.3 s worst-frame interval; remaining ~93 % is raw JIT'd
+  guest x86 code execution. The 1.3 s class stutter is
+  guest-intrinsic, amplified ~5× by xemu's TCG ISA-emulation
+  overhead. Further reduction requires major rearchitecture
+  (PPTC + AOT codegen, HLE Xbox kernel, or game-specific patches),
+  all out of current scope.
+- **30 FPS cap on PGR2 / Rainbow / Crimson is title-intrinsic**
+  (SC2 sanity test sustains 60.57 FPS on same build). The literal
+  "60 FPS on PGR2/Rainbow/Crimson" goal is technically impossible.
+
+**Next-action priority — pick one of two user-driven tracks; the
+implementation cycle is closed and the next state transition (M15)
+is gated on these.**
+
+1. **Track A (Metal user-driven validation, newly highest priority):**
+   Boot xemu with `XEMU_RENDERER=METAL` plus
+   `XEMU_METAL_TRANSLATED_PIPELINE=1` (M7.1 translated encode path);
+   run PGR2, Rainbow, Crimson, SC2, plus one further title;
+   confirm visual correctness (≤ 1 % per-pixel diff vs GL) and
+   capture a `.gputrace` via `XEMU_METAL_CAPTURE=/tmp/test.gputrace
+   XEMU_METAL_CAPTURE_FRAMES=60` for the M13 plan-text exit gate.
+   Run paired baselines vs GL with `XEMU_METAL_FX_SCALE` /
+   `XEMU_METAL_MSAA` toggles to compare jitter and per-stage GPU
+   timing counters. Outcome feeds the M15 default-on decision.
+2. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
+   UNBLOCKED, GL-side, orthogonal to Metal):** A human listener
+   plays Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice
+   on. If clean: declare I5 fully shipped. If glitches: revert or
+   design finer-grained lock split.
+
+**Implementation candidates (lower priority than user-driven
+validation):** M8.1 full hybrid ubershader (Path A), M10.1
+CAMetalDisplayLink integration, M11.1 memoryless MSAA storage, M6
+Part B remaining items (full S3TC/3D/cube/palette + lifecycle
+hook), NV2A draw-pass per-stage GPU timing.
+
+**Steady-state perf candidates (lower priority than A or B):**
+PPTC (strategy.md Phase 5a — Ryujinx pattern; ~4 % vCPU savings;
+saves only ~44 ms in the headline worst-frame so does NOT close the
+judder gap). V11 (`helper_lookup_tb_ptr` per-vCPU cache; ~4 %
+steady-state win).
+
+**Diagnostic infrastructure** (for community measurement on any
+Apple Silicon Mac): per-subsystem timing counters
+(`BIND_TEXTURES_US_TOTAL`, `TEX_UPLOAD_US_TOTAL`,
+`SURF_TO_TEX_US_TOTAL`, `SURF_UPLOAD_US_TOTAL`,
+`SURF_DOWNLOAD_US_TOTAL`, `FLUSH_DRAW_US_TOTAL`,
+`DRAW_BEGIN_US_TOTAL`, `FLIP_STALL_US_TOTAL`,
+`FLIP_STALL_GLFINISH_US_TOTAL`); TCG hot-path counters
+(`TCG_TB_EXEC_COUNT`, `TCG_TB_INVALIDATE_COUNT`,
+`TCG_NOTDIRTY_TRIPS`, `TCG_NOTDIRTY_PAGES_HIT`,
+`TCG_TB_INVALIDATE_BURST_MAX`, `TCG_JMP_CACHE_ZEROED_BUCKETS`,
+`TCG_INVALIDATE_WALL_US_MAX`, `TCG_INVALIDATE_WALL_US_TOTAL` (V10),
+`TCG_TB_LOOKUP_US_TOTAL` / `TCG_TB_GEN_CODE_US_TOTAL` /
+`TCG_HANDLE_INTERRUPT_US_TOTAL` (V7), `HELPER_RDTSC_CALLS` (V9));
+APU counters (`APU_LOCK_HOLD_US_TOTAL`,
+`APU_VCPU_LOCK_WAIT_US_MAX`); display pacing counters
+(`NV2A_VBLANK_FIRES`, `NV2A_PRESENT_HEARTBEAT`,
+`NV2A_FLIP_STALL_WRITES`, `XEMU_GL_SWAPS`); MSAA cost
+(`MSAA_RESOLVE_US_TOTAL`); per-event spike log
+(`XEMU_PERF_SPIKE_LOG=1`, `XEMU_PERF_SPIKE_LOG_TCG=1`); per-frame
+mspf log (`XEMU_PERF_FRAME_LOG=1`); cumulative TCG-phase log
+(`XEMU_TCG_PHASE_LOG=1`); renderer-load A/B knob
+(`XEMU_BENCH_SURFACE_SCALE=N`).
 
 ## First Principle
 

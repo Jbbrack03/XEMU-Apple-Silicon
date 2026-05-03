@@ -1,5 +1,14 @@
 # 2026-05-01 — GL vs Metal: definitive answer for the project goals
 
+**Superseded note (2026-05-02):** this note remains valid as a narrow
+performance diagnostic: the measured OpenGL path was not the immediate
+FPS bottleneck on the tested routes. It is superseded as a product
+direction by the 2026-05-02 decision-log pivot to native Metal, because
+the final shareable Apple Silicon build requires Metal-native frame
+timing, latency work, profiling/capture, MSAA/resolve control,
+enhancement hooks, pipeline caching, and long-term renderer
+maintainability.
+
 ## Question
 
 The project goals are sustained 60 FPS, no judder, 1080p output, anti-

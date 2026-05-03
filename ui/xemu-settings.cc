@@ -201,6 +201,39 @@ static void xemu_settings_apply_display_scale_env(void)
     g_config.display.quality.surface_scale = (int)v;
 }
 
+/*
+ * Apple Silicon performance fork: env-var bridge for display.renderer.
+ *
+ * `XEMU_RENDERER={OPENGL,VULKAN,METAL,NULL,null}` overrides the
+ * loaded value for this session without touching the user's saved
+ * preference. Used by the Metal validation harness
+ * (scripts/apple-silicon/metal-shader-validation/run-validation.sh)
+ * to force METAL on a CI run while leaving the user's interactive
+ * default unchanged.
+ *
+ * Unrecognized values are silently ignored. METAL is rejected on
+ * non-darwin/aarch64 hosts (the CONFIG_DISPLAY_RENDERER_METAL value
+ * is still defined in the schema for cross-platform builds, but the
+ * renderer.c-side registration only happens on Apple Silicon).
+ */
+static void xemu_settings_apply_renderer_env(void)
+{
+    const char *env = getenv("XEMU_RENDERER");
+    if (!env || !env[0]) {
+        return;
+    }
+    if (strcasecmp(env, "OPENGL") == 0 || strcasecmp(env, "GL") == 0) {
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_OPENGL;
+    } else if (strcasecmp(env, "VULKAN") == 0 || strcasecmp(env, "VK") == 0) {
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
+    } else if (strcasecmp(env, "METAL") == 0) {
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_METAL;
+    } else if (strcasecmp(env, "NULL") == 0) {
+        g_config.display.renderer = CONFIG_DISPLAY_RENDERER_NULL;
+    }
+    /* Unrecognized: leave as-is. */
+}
+
 bool xemu_settings_load(void)
 {
     const char *settings_path = xemu_settings_get_path();
@@ -258,6 +291,7 @@ bool xemu_settings_load(void)
 
     /* Env-var bridge wins over both schema default and stored value. */
     xemu_settings_apply_display_scale_env();
+    xemu_settings_apply_renderer_env();
 
     return success;
 }

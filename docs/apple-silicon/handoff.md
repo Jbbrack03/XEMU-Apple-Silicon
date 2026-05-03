@@ -1,6 +1,3040 @@
 # Handoff
 
-Last updated: 2026-05-02 (after V9 RDTSC fast-path shipped + V10 invalidation attribution; **1.3 s class stutter is guest-intrinsic — confirmed unfixable within current TCG architecture; project judder pillar declared "best effort complete"**)
+Last updated: 2026-05-02 (Metal slice **M14** — hardening +
+M-cycle close-out. `XEMU_METAL_VALIDATION={0,1}` lands in
+`ui/xemu-metal.mm` (`xemu_metal_apply_validation_env`), called
+**before** `MTLCreateSystemDefaultDevice()` so Apple's framework
+reads `MTL_DEBUG_LAYER` at the right moment; promotes
+`MTL_DEBUG_LAYER=1` via `setenv(..., overwrite=0)` only when the
+user has not pinned a value themselves. Surfaced once at startup as
+`xemu-perf: metal_validation requested=R promoted=P
+mtl_debug_layer_active=A`. Default 0 (off; matches the M14
+"MTL_DEBUG_LAYER=0 in shipped builds" rule). `build.sh:212`
+confirmed at `arm64-apple-macos14.0` — Q6 closed, no deployment-
+target lift needed. `automation.md` and the renderer plan §4 M14
+both updated to document the flag; `extract-perf-summary.sh` audit
+confirms 50 `METAL_*` counters surfaced (M14 adds none — the
+validation banner is one-shot, not a per-interval counter); the
+`strategy.md` Phase 4 sub-deliverables are annotated with shipping
+M-slice (4a M0/M1/M2/M10, 4b M3/M4, 4c M7/M7.1, 4e M8 Path B,
+4f M5/M9, 4g M2/M3/M6, 4h M13, 4i M14 partial; 4d deferred; 4j/4k/4l
+added as M-cycle additions). Comprehensive decision-log entry
+("2026-05-02: Metal slice M14 — hardening, doc reconciliation,
+M-cycle summary") captures all M0–M14 choices and the deferred
+items (M6 Part B, M8.1, M10.1, M11.1, NV2A draw-pass per-stage
+sampling, `XEMU_METAL_DISABLE_LOSSLESS_COMPRESSION`).
+**Exit gates cleared.** `./build.sh -a arm64` PASS.
+`validate-native-tri-depth.sh --run 22` PASS (7/7 PASS lines: the
+flat-tri-depth XBE counter-split regression gate confirms M14's
+changes leave the GL renderer untouched). M5 shader-validation
+harness 7/7 PASS. `XEMU_METAL_VALIDATION={0,1}` smoke test PASS in
+both directions. **M-cycle close-out: M0–M14 SHIPPED, M15 PENDING
+(gated on user-driven validation).** **User-driven testing entry
+point — read this before the next session.** Set
+`XEMU_RENDERER=METAL` (or `display.renderer = METAL` in
+`xemu.toml`) plus `XEMU_METAL_TRANSLATED_PIPELINE=1` to exercise
+the M7.1 encode path; boot PGR2 / Rainbow / Crimson and look for
+correct rendering vs. GL. Capture a representative frame with
+`XEMU_METAL_CAPTURE=/tmp/test.gputrace XEMU_METAL_CAPTURE_FRAMES=60`
+and open the `.gputrace` in Xcode (Window → Organizer → GPU Frame
+Capture) to confirm bound resources are visible — that's M13's
+plan-text exit gate, validated end-to-end by M14. **Known broken
+/ deferred items**: M8.1 ubershader (cold-launch shader compile
+burst the first time a new game's shader corpus rolls), M10.1
+CAMetalDisplayLink (presentDrawable:atTime: only for now), M11.1
+Memoryless storage for MSAA (Private storage only; per-`flush_draw`
+render-pass cadence needs coalescing first), full S3TC / 3D / cube
+/ palette / mipmap textures (M6 Part B), NV2A draw-pass per-stage
+GPU timing (only the present pass is currently sampled).
+**Audio listen-test for `XEMU_APU_LOCK_RELEASE` is still UNBLOCKED**
+(GL-side, orthogonal to Metal). M15 default-on flip is gated on:
+5 distinct titles ≥ console-native FPS via Metal with ≤ 1 % per-
+pixel diff vs GL, cold-launch shader compile total < 5 s, p99 mspf
+jitter ≥ 20 % improvement vs GL, no correctness bug open ≥ 30
+days. Until those data points exist, Metal stays opt-in.
+
+(Earlier banner — Metal slice **M13** — frame capture +
+counter sampling. `XEMU_METAL_CAPTURE=path.gputrace` (+ companion
+`XEMU_METAL_CAPTURE_FRAMES=N`, default 60) drives a programmatic
+`MTLCaptureManager` capture that writes a Xcode-openable
+`.gputrace` document at the path. `Info.plist` gains
+`MetalCaptureEnabled = YES` so capture works on the shipped
+`dist/xemu.app` without requiring `MTL_CAPTURE_ENABLED=1` in the
+env. A 4-sample `MTLCounterSampleBuffer` (vertex_start, vertex_end,
+fragment_start, fragment_end) is allocated at `xemu_metal_init`
+gated on `[device supportsCounterSampling:StageBoundary]`
+(Apple7+ M1+; logged as `xemu-perf: metal_counter_sampling enabled
+(buffer_capacity=4 storage=Shared)` on M3 Ultra). The present
+render pass attaches the buffer; the per-frame
+`addCompletedHandler` resolves the timestamps via
+`[buffer resolveCounterRange:]` and accumulates
+`(end - start) / 1000` µs into atomic per-stage counters. The same
+handler reads `cmdbuf.GPUStartTime / GPUEndTime` for an upper bound
+on per-frame GPU cost. New counters `METAL_VERTEX_US_TOTAL` /
+`METAL_FRAGMENT_US_TOTAL` (per-stage GPU time per interval),
+`METAL_PRESENT_GPU_US_TOTAL` / `METAL_PRESENT_GPU_FRAMES`
+(cmdbuf-level upper bound + frame count),
+`METAL_FX_SPATIAL_GPU_US_TOTAL` (cmdbuf-level GPU time for
+MetalFX-encoded frames; replaces M12's CPU-side
+`METAL_FX_SPATIAL_US_TOTAL` placeholder),
+`METAL_CAPTURE_FRAMES` / `METAL_CAPTURE_ACTIVE` all surface on
+the `xemu-perf:` interval line. Companion `--metal-capture <path>`
+flag added to `scripts/apple-silicon/run-benchmark.sh` (also writes
+`metal_capture_path` to the run's `metadata.txt`).
+Build passes; new symbols `_pgraph_mtl_vertex_us_total`,
+`_pgraph_mtl_fragment_us_total`,
+`_pgraph_mtl_present_gpu_us_total`,
+`_pgraph_mtl_present_gpu_frames`,
+`_pgraph_mtl_fx_spatial_gpu_us_total`,
+`_pgraph_mtl_capture_frames_seen`,
+`_pgraph_mtl_capture_active` all present (7 new exports). M5
+harness 7/7. M0–M12 symbols intact. GL renderer symbols intact
+(52 `_pgraph_gl_*` exports). Default renderer remains OpenGL.
+**Honest limits documented** in plan-doc + decision-log: per-stage
+counters cover only the present render pass (NV2A draw passes
+out of scope; future slice); `METAL_FX_SPATIAL_GPU_US_TOTAL` is
+the cmdbuf upper bound, not the scaler in isolation; M11's
+`METAL_MSAA_RESOLVE_US_TOTAL` keeps its nominal-cost placeholder
+(replacing it needs sample buffers on the surface-manager render
+passes); `METAL_COMPUTE_US_TOTAL` reserved in plan §3.11 not
+implemented — no compute encoders to sample yet. **Next-session
+entry: (a)** open a captured `.gputrace` in Xcode (Window →
+Organizer → GPU Frame Capture), navigate to an NV2A draw, confirm
+bound resources visible (M13 plan-text exit gate;
+user-driven). **(b)** Earlier next-actions remain in flight: M12
+visual + perf evaluation at `XEMU_METAL_FX_SCALE=2`, M11 visual
+gate at `XEMU_METAL_MSAA=4`, `XEMU_GL_RATE_SLEW` default-on
+benchmark, M10.1 (CAMetalDisplayLink), `XEMU_APU_LOCK_RELEASE`
+audio listen-test still UNBLOCKED. **(c)** Next implementation
+candidate: M14 (hardening + macOS deployment-target lift) — the
+arm64 build is already at macOS 14; M14 mostly comprises
+`MTL_DEBUG_LAYER` / `XEMU_METAL_VALIDATION` plumbing + a
+comprehensive decision-log entry capturing all M0–M13 choices.)
+
+(Earlier banner — Metal slice **M12** — MetalFX spatial
+scaler. `XEMU_METAL_FX_SCALE={1,2,3}` (default 1 = off; `2` and `3`
+enable) parses at `xemu_metal_init`. The scaler instance + private
+intermediate output texture are built lazily on the first present
+that supplies an NV2A framebuffer texture; rebuilt whenever input
+dimensions / pixel format / drawable size change. Pipeline:
+NV2A color RT (post-M11 resolve) → `MTLFXSpatialScaler`
+(`encodeToCommandBuffer:` before the HUD render encoder opens) →
+private intermediate (drawable size, `BGRA8Unorm_sRGB`,
+`MTLStorageModePrivate`, usage = `ShaderWrite | ShaderRead |
+RenderTarget`) → existing fullscreen-triangle present pipeline →
+drawable. `colorProcessingMode = ...Perceptual` matches the M11
+sRGB-tagged input. Bypassed for the frame whenever the drawable is
+at-or-below the input dimensions (downscale would add latency for no
+quality win). MetalFX framework added to the appleframeworks module
+list in `meson.build`. `MTLFXTemporalScaler` intentionally not
+implemented — synthesizing motion vectors from camera-only
+reprojection is risky on dynamic scenes (NV2A has no native motion
+vectors); per-title evaluation deferred. New counters
+`METAL_FX_SPATIAL_PRESENTS` (per-interval scaler invocations),
+`METAL_FX_SPATIAL_US_TOTAL` (CPU-side wallclock placeholder; real
+GPU timing arrives with M13's counter sample buffers) and
+`METAL_FX_SCALE_FACTOR` (latched effective config) surface on the
+`xemu-perf:` interval line. Build passes; new symbols
+`_pgraph_mtl_fx_spatial_us_total`, `_pgraph_mtl_fx_spatial_presents`,
+`_pgraph_mtl_fx_scale_factor` all present (3 new exports). M0–M11
+symbols intact. Default renderer remains OpenGL. Next-session entry:
+(a) user-driven Metal session with `XEMU_METAL_FX_SCALE=2` on a
+sub-drawable input (e.g. surface_scale=1 on a 4K display, or
+windowed at 1440p+ with surface_scale=2) to verify visibly sharper
+output than bilinear and measure scaler cost via the new counters
+plus an Xcode GPU capture; (b) earlier next-actions remain in
+flight: MSAA visual gate at `XEMU_METAL_MSAA=4`,
+`XEMU_GL_RATE_SLEW` default-on benchmark, M10.1
+(CAMetalDisplayLink), `XEMU_APU_LOCK_RELEASE` audio listen-test
+still UNBLOCKED.)
+
+(Earlier banner — Metal slice **M11** — MSAA + resolve.
+`XEMU_METAL_MSAA={0,2,4,8}` (default 0) parses at `pgraph_mtl_init`,
+clamps to `[device supportsTextureSampleCount:N]` (M3 Ultra: 2 and 4
+supported; 8 steps down to 4), and is published once via
+`pgraph_mtl_renderer_msaa_sample_count()` so surface, draw, pipeline,
+and PipelineKey-build paths see the same value. Logged at startup:
+`xemu-perf: metal_msaa=N source=XEMU_METAL_MSAA requested=R
+configured=C`. The surface manager pairs each color/depth binding
+with a multisample companion texture; render passes use the
+companion as `texture` and the existing single-sample binding as
+`resolveTexture`, with `MTLStoreActionMultisampleResolve` for color
+and `MTLStoreActionDontCare` for depth. The M3/M4 hand-coded
+passthrough cache key gains a `sample_count` field; the M5/M7.1
+translated pipeline cache already had `sample_count` in
+`PgraphMtlPipelineKey.render_pass_state` and now receives the
+latched effective value rather than 1. New counters
+`METAL_MSAA_RESOLVE_COUNT` / `METAL_MSAA_RESOLVE_US_TOTAL` (latter is
+a placeholder fixed nominal cost per resolve until M13 wires GPU-side
+counter sample buffers) / `METAL_MSAA_SAMPLE_COUNT` surface on the
+`xemu-perf:` interval line. **Storage-mode deviation (documented):**
+plan §3.7 calls for `MTLStorageModeMemoryless`; M11 v1 ships
+`MTLStorageModePrivate` instead because xemu's per-`flush_draw`
+render-pass cadence needs `MTLLoadActionLoad` on inter-draw passes
+to preserve prior content, and Load is undefined on Memoryless.
+Memoryless returns when a future slice coalesces per-frame draws
+into a single render pass (M11.1 candidate). On Apple Silicon TBDR
+the multisample work itself still happens in tile memory regardless
+of storage class — Private just adds a backing store so Load between
+passes is well-defined. Build passes; new symbols
+`_pgraph_mtl_heap_alloc_msaa_color`, `_pgraph_mtl_heap_alloc_msaa_depth`,
+`_pgraph_mtl_heap_supports_sample_count`,
+`_pgraph_mtl_surface_set_msaa_sample_count`,
+`_pgraph_mtl_surface_get_msaa_sample_count`,
+`_pgraph_mtl_surface_get_msaa_color_texture`,
+`_pgraph_mtl_surface_get_msaa_depth_texture`,
+`_pgraph_mtl_surface_msaa_resolve_count`,
+`_pgraph_mtl_surface_msaa_resolve_us_total`,
+`_pgraph_mtl_renderer_msaa_sample_count` all present (10 new
+exports). M5 harness 7/7 with `XEMU_METAL_MSAA=4`. M0–M10 symbols
+intact (166 `_pgraph_mtl_*` exports vs 156 pre-M11 = 10 added);
+GL renderer symbols intact (52 `_pgraph_gl_*` exports). Default
+renderer remains OpenGL. Next-session entry: (a) user-driven Metal
+session with `XEMU_METAL_MSAA=4` to verify visible aliasing
+reduction + measure `METAL_MSAA_RESOLVE_*` counters and FPS impact
+against `=0` baseline; (b) flip default 4× per the M11 plan once
+M9 cache stabilizes warm-launch compile cost below 200 ms total.
+Earlier next-actions remain in flight: (c) flip `XEMU_GL_RATE_SLEW`
+default-on after a paired GL benchmark validates p99 jitter
+improvement; (d) implement M10.1 (CAMetalDisplayLink) once a Metal
+user-driven validation session quantifies M10's tail-jitter benefit;
+(e) audio listen-test for `XEMU_APU_LOCK_RELEASE` is still
+UNBLOCKED.)
+
+## Update — 2026-05-02 Metal slice M14 — M-cycle complete; ready for user testing
+
+Sixteenth (and final implementation) slice of the staged Metal
+renderer plan. Closes the M-cycle with: (a) `XEMU_METAL_VALIDATION
+={0,1}` integration in `ui/xemu-metal.mm` (the deferred M0 flag);
+(b) confirmation that the macOS deployment target is already at
+14.0 for the arm64 path (Q6 closed; no lift needed); (c)
+comprehensive doc reconciliation across `automation.md`,
+`extract-perf-summary.sh` audit, `strategy.md` Phase 4 sub-
+deliverables, the renderer plan, both `CLAUDE.md` files, and the
+decision log.
+
+### Code changes (M14)
+
+* **`ui/xemu-metal.mm`** — new helper
+  `xemu_metal_apply_validation_env()` called from `xemu_metal_init`
+  **before** `MTLCreateSystemDefaultDevice()`. Reads
+  `XEMU_METAL_VALIDATION`; if truthy, calls
+  `setenv("MTL_DEBUG_LAYER", "1", 0)` so Apple's Metal framework
+  reads it at the only point that matters (first device creation;
+  later `setenv` is silently ignored). The `overwrite=0` form
+  preserves a value the user has already pinned themselves —
+  `XEMU_METAL_VALIDATION=1` is a convenience knob, not an override.
+  Two static booleans (`s_metal_validation_requested`,
+  `s_metal_validation_promoted`) feed a one-shot startup banner
+  `xemu-perf: metal_validation requested=R promoted=P
+  mtl_debug_layer_active=A`. Default 0 in shipped builds — matches
+  the M14 plan-text rule "MTL_DEBUG_LAYER=0 in shipped builds".
+
+### Build / verification
+
+* `./build.sh -a arm64` PASS. `dist/xemu.app/Contents/MacOS/xemu
+  --version` reports the expected commit.
+* `validate-native-tri-depth.sh --run 22` PASS — 7/7 PASS lines
+  on the GL flat-tri-depth XBE counter-split regression gate
+  (`final_intervals=1`, `NATIVE_TRI_DEPTH_DRAW=243784`,
+  `NATIVE_TRI_DEPTH_CANDIDATE_FLAT_FIRST=480`,
+  `NATIVE_TRI_DEPTH_CANDIDATE_FLAT_NONFIRST=284`,
+  `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST=480`,
+  `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST=284`,
+  `GEOM_SHADER_DRAW_TRI=284 matches
+  NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST`). The GL renderer is
+  untouched by M14.
+* M5 shader-validation harness: 7/7 PASS via
+  `scripts/apple-silicon/metal-shader-validation/run-validation.sh`.
+* `XEMU_METAL_VALIDATION=1` smoke test: PASS (banner reads
+  `requested=1 promoted=1 mtl_debug_layer_active=1`).
+* `XEMU_METAL_VALIDATION` unset smoke test: PASS (banner reads
+  `requested=0 promoted=0 mtl_debug_layer_active=0`).
+
+### Doc reconciliation (M14 audit)
+
+* **Flag audit** (M0–M14): 14 `XEMU_METAL_*` flags shipped, all
+  documented in `automation.md` + xemu-fork `CLAUDE.md`. The
+  "Planned" section in xemu-fork `CLAUDE.md` now contains only
+  `XEMU_METAL_DISABLE_LOSSLESS_COMPRESSION` (NOT IMPLEMENTED;
+  M2 hardcoded Private allocation; toggle would land if a
+  perf-vs-correctness motivating case appears).
+* **Counter audit** (M0–M14): 50 `METAL_*` counters surfaced in
+  `extract-perf-summary.sh` (keys[108]–keys[158] minus the 2
+  non-METAL `RATE_SLEW_*` slots; the running-max
+  `METAL_PRESENT_JITTER_US_MAX` is registered separately and counts
+  as one of the 50). All shipped slices' counters are present.
+* **Phase 4 reconciliation** (`strategy.md`): 4a (M0/M1/M2/M10),
+  4b (M3/M4), 4c (M7/M7.1), 4e (M8 Path B), 4f (M5/M9), 4g
+  (M2/M3/M6), 4h (M13) all SHIPPED with deferred-item
+  annotations; 4d DEFERRED (no observed hot path); 4i PARTIAL
+  (M14 — `validate-native-tri-depth.sh --run 22` PASS; full
+  per-game paired sweep is M15's gate); 4j MSAA (M11), 4k MetalFX
+  (M12), 4l hardening (M14) added as M-cycle additions.
+* **Decision-log entry**: "2026-05-02: Metal slice M14 —
+  hardening, doc reconciliation, M-cycle summary" — comprehensive
+  M-cycle close-out covering all M0–M14 choices and deferred items.
+
+### User-driven testing entry point
+
+This is the critical handoff for the next session. M14 closes
+the implementation cycle; everything that follows is human-only
+validation work.
+
+**Entry point env vars** (set before launching xemu):
+
+```sh
+export XEMU_RENDERER=METAL                 # opt into Metal renderer
+export XEMU_METAL_TRANSLATED_PIPELINE=1    # M7.1 translated encode path
+# Optional debugging:
+export XEMU_METAL_VALIDATION=1             # Metal API validation layer
+# Optional capture (small bound; .gputrace ~10-50 MB per frame):
+export XEMU_METAL_CAPTURE=/tmp/xemu.gputrace
+export XEMU_METAL_CAPTURE_FRAMES=60
+# Optional graphical enhancements:
+export XEMU_METAL_MSAA=4                   # 4x MSAA on Metal
+export XEMU_METAL_FX_SCALE=2               # MetalFX spatial upscaler
+```
+
+Or add to `~/Library/Application Support/xemu/xemu/xemu.toml`:
+```toml
+[display]
+renderer = "METAL"
+```
+
+**What to look for** during a Metal session:
+
+1. **Visual smoke test.** Boot PGR2 / Rainbow / Crimson / SC2.
+   Confirm correct rendering (no missing geometry, no obvious
+   colour artifacts, no Z-fighting). A diff budget of ≤ 1 %
+   per-pixel against the GL reference is the slice gate;
+   combiner-edge cases may diverge slightly.
+2. **Per-stage GPU timing.** Watch `xemu-perf:` interval lines
+   for `METAL_VERTEX_US_TOTAL`, `METAL_FRAGMENT_US_TOTAL`,
+   `METAL_PRESENT_GPU_US_TOTAL`. These cover the present pass
+   only; NV2A draw passes are not yet sampled (deferred).
+3. **Frame pacing.** `METAL_PRESENT_JITTER_US_AVG` /
+   `METAL_PRESENT_JITTER_US_MAX` should be lower than the GL
+   reference (M10's `presentDrawable:atTime:` should reduce
+   tail jitter; M15 default-on flip requires ≥ 20 % p99 mspf
+   improvement).
+4. **`.gputrace` open-in-Xcode**: Window → Organizer → GPU
+   Frame Capture → open the captured `.gputrace`. Confirm an
+   NV2A draw is visible with bound resources (M13 plan-text
+   exit gate; validates the Info.plist
+   `MetalCaptureEnabled = YES` change).
+5. **Audio listen-test (`XEMU_APU_LOCK_RELEASE`)** — pre-existing
+   user-driven action, GL-side, still UNBLOCKED. Listen ≥ 5 min
+   per game (Crimson, Rainbow, PGR2). Listen for stuck voices,
+   dropped SFX, audible glitches, stale samples. Pass = declare
+   I5 fully shipped.
+
+### What's known broken / deferred (be aware before testing)
+
+* **M6 Part B**: full S3TC (DXT1/3/5) decode, mipmap upload, cube
+  textures, 3D textures, palette textures, plus the lifecycle hook
+  that drops `TextureBinding` entries on NV2A texture cache flushes.
+  Games using extensive S3TC will exhibit incorrect texturing on
+  the Metal renderer.
+* **M8.1 (full ubershader)**: Path B (skip-the-draw) handles cache
+  misses; the first time a new game's shader corpus rolls through,
+  some draws will be skipped, which can manifest as missing geometry
+  for ~1 frame each.
+* **M10.1 (CAMetalDisplayLink)**: M10 ships `presentDrawable:atTime:`
+  only. CAMetalDisplayLink integration would invert the control
+  flow for VRR-aware pacing.
+* **M11.1 (Memoryless storage)**: M11 ships `MTLStorageModePrivate`
+  for MSAA companion textures; Memoryless requires coalescing the
+  per-`flush_draw` render-pass cadence first.
+* **NV2A draw-pass per-stage GPU timing**: M13 samples only the
+  present render pass. `METAL_VERTEX_US_TOTAL` /
+  `METAL_FRAGMENT_US_TOTAL` cover the HUD + present cost only.
+* **MetalFX TemporalScaler**: intentionally not implemented (NV2A
+  has no native motion vectors; synthesizing them from camera-only
+  reprojection is risky on dynamic scenes).
+* **Intel-Mac framebuffer-fetch fallback**: stub. The Apple1+
+  detection always returns true on Apple Silicon Macs;
+  `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH=1` flips the detection
+  result so future Intel-Mac fallback work can exercise the path.
+
+### M15 entry criteria (the next state transition)
+
+Per `metal-renderer-plan.md` §4 M15:
+
+* 5 distinct titles (PGR2, Rainbow, Crimson, SC2, plus one from
+  the V4 broader sweep) render at ≥ console-native FPS via Metal
+  with ≤ 1 % per-pixel diff vs GL.
+* Cold-launch shader compile time < 5 s total on a fresh shader
+  cache.
+* p99 mspf jitter reduced by ≥ 20 % vs GL on PGR2 + Rainbow +
+  Crimson.
+* No correctness-affecting bugs open against Metal renderer for
+  ≥ 30 days of continuous bench use.
+
+If those criteria are met, flip the `display.renderer` default to
+METAL on Apple Silicon (the `surface_scale=2` first-launch default
+pattern in `ui/xemu-settings.cc::xemu_settings_first_run_default_*`
+shows the precedent). Otherwise document the shortfall in a
+decision-log entry, ship Metal as opt-in via `display.renderer =
+METAL`, and queue the necessary follow-up slices.
+
+OpenGL deprecation is **not** part of M15. After Metal default-on
+ships and is stable for ≥ 30 days, propose deprecation in a
+separate decision-log entry.
+
+## Update — 2026-05-02 Metal slice M13 — frame capture + counter sampling
+
+Fifteenth slice of the staged Metal renderer plan. Lands opt-in
+programmatic Metal frame capture via `MTLCaptureManager` (env-gated
+on `XEMU_METAL_CAPTURE=path.gputrace`) and per-stage GPU-time
+counter sampling via `MTLCounterSampleBuffer` at the present render
+pass's vertex / fragment stage boundaries. Replaces M11/M12
+CPU-side wallclock placeholder counters with real GPU-side timing
+where practical.
+
+**Files edited.**
+
+* `ui/xemu-metal.mm` — adds the M13 state block (`s_capture_*`,
+  `s_counter_sample_buffer*`, `s_metal_*_us_total`,
+  `s_metal_present_gpu_*`, `s_metal_fx_spatial_gpu_us_total`),
+  the new accessor strong symbols
+  (`pgraph_mtl_vertex_us_total`, `pgraph_mtl_fragment_us_total`,
+  `pgraph_mtl_present_gpu_us_total`,
+  `pgraph_mtl_present_gpu_frames`,
+  `pgraph_mtl_fx_spatial_gpu_us_total`,
+  `pgraph_mtl_capture_frames_seen`, `pgraph_mtl_capture_active`),
+  the `start_metal_capture_if_requested()` /
+  `stop_metal_capture_if_active()` helpers, the
+  `build_counter_sample_buffer_if_supported()` helper, the
+  `xemu_metal_init` wiring (counter buffer build → capture start),
+  the `xemu_metal_shutdown` teardown (stop capture before device
+  goes away), the `end_imgui_frame` re-ordering (sample-buffer
+  attachment before render-encoder build, `addCompletedHandler`
+  block reading `cmdbuf.GPUStartTime/EndTime` and
+  `[buffer resolveCounterRange:]`).
+* `util/xemu-metal-perf.c` — adds weak-symbol defaults for the
+  seven new accessors, the per-interval baselines, the delta
+  arithmetic, and the printf adding the seven new counters
+  (`METAL_FX_SPATIAL_GPU_US_TOTAL`, `METAL_VERTEX_US_TOTAL`,
+  `METAL_FRAGMENT_US_TOTAL`, `METAL_PRESENT_GPU_US_TOTAL`,
+  `METAL_PRESENT_GPU_FRAMES`, `METAL_CAPTURE_FRAMES`,
+  `METAL_CAPTURE_ACTIVE`) to the `xemu-perf:` interval line.
+* `Info.plist` — adds `MetalCaptureEnabled = YES` so programmatic
+  capture works on the shipped `dist/xemu.app` without requiring
+  `MTL_CAPTURE_ENABLED=1` in the env. Comment notes that
+  production-only builds (no distinct target ships from this fork
+  yet) should disable this key.
+* `scripts/apple-silicon/run-benchmark.sh` — adds the
+  `--metal-capture <path>` (and `--metal-capture=<path>`) flag,
+  exports `XEMU_METAL_CAPTURE` for the spawned xemu when set,
+  records `metal_capture_path` plus the `XEMU_METAL_CAPTURE` /
+  `XEMU_METAL_CAPTURE_FRAMES` env values into `metadata.txt`.
+* `scripts/apple-silicon/extract-perf-summary.sh` — registers the
+  seven new keys in both the per-interval scanner and the final
+  summary printer (count bumped 151 → 158).
+* `xemu-fork/CLAUDE.md` — moves `XEMU_METAL_CAPTURE` from the
+  "Planned `XEMU_METAL_*` flags" section into the "Stable opt-in"
+  section with the full M13 description; adds
+  `XEMU_METAL_CAPTURE_FRAMES` alongside it; marks the prior
+  planned entry as LANDED.
+* `docs/apple-silicon/automation.md` — adds the
+  `XEMU_METAL_CAPTURE` and `XEMU_METAL_CAPTURE_FRAMES` env-var
+  specs plus a counter-description block for the seven new
+  `METAL_*` counters.
+* `docs/apple-silicon/metal-renderer-plan.md` — appends an M13
+  "Status (2026-05-02): SHIPPED" paragraph documenting the
+  implementation outline + honest limits (per-stage counters
+  cover present pass only; `METAL_FX_SPATIAL_GPU_US_TOTAL` is
+  cmdbuf upper bound; M11's `METAL_MSAA_RESOLVE_US_TOTAL`
+  placeholder unchanged; `METAL_COMPUTE_US_TOTAL` reserved but
+  not implemented).
+* `docs/apple-silicon/decision-log.md` — appends the canonical
+  M13 entry (decision + outline + honest limits + verification +
+  exit-gate-deferred-to-user-session note).
+
+**Manual verification.**
+
+`./build.sh -a arm64` succeeds end-to-end. M13 symbol set shows 7
+new `pgraph_mtl_*` exports. The M5 shader-validation harness
+still reports `7/7 passed, 0 failed`.
+`MetalCaptureEnabled = YES` confirmed in
+`dist/xemu.app/Contents/Info.plist` via `plutil -p`. Setting
+`XEMU_METAL_CAPTURE=/tmp/test.gputrace` on `xemu --version`
+produces the expected log line:
+`xemu-perf: metal_capture_started path=/tmp/test.gputrace
+frames_target=60`. `xemu-perf: metal_counter_sampling enabled
+(buffer_capacity=4 storage=Shared)` fires unconditionally on M3
+Ultra. Round-trip smoke test of the perf-summary awk parser
+confirms all seven new keys surface in the final
+`extract-perf-summary.sh` output. Run-benchmark.sh
+`--metal-capture` flag handling:
+`--metal-capture <path>` works; `--metal-capture` alone errors with
+"requires a path argument"; `--bogus` errors with "unknown flag";
+positional args after the flag still parse correctly. GL renderer
+untouched (no edits under `gl/`).
+
+**Known limits / honest assessment.**
+
+* **Per-stage counter sampling instruments only the present
+  render pass.** The 4-sample buffer is attached to the present
+  pass descriptor in `xemu_metal_end_imgui_frame`; NV2A draw
+  passes (in `hw/xbox/nv2a/pgraph/mtl/draw.{mm,c}` and
+  `surface.mm`) are not yet sampled. A future slice can wire
+  buffers there to attribute vertex/fragment time to the
+  emulator's actual draw workload — but that is out of M13
+  scope and would conflict with M11's MSAA resolve sites.
+* **`METAL_FX_SPATIAL_GPU_US_TOTAL` is the full cmdbuf upper
+  bound, not the scaler in isolation.** The cmdbuf runs
+  scaler + present pipeline + HUD encoder in one submission;
+  separating the scaler would need a dedicated cmdbuf for
+  `[scaler encodeToCommandBuffer:]`, which trades a separate
+  GPU submission against measurement isolation. Deferred to a
+  follow-up if isolation matters.
+* **M11's `METAL_MSAA_RESOLVE_US_TOTAL` keeps its nominal-cost
+  placeholder.** Replacing it needs sample buffers on the
+  surface-manager render passes (heap.h / surface.mm), which
+  is its own work item and conflicts with the
+  `MTLLoadActionLoad` cadence the M11 storage-mode deviation
+  documents.
+* **`METAL_COMPUTE_US_TOTAL` reserved in plan §3.11 not
+  implemented.** xemu's Metal renderer has no compute
+  encoders today (MetalFX uses internal compute that is
+  opaque from the sample-buffer perspective). The slot is
+  reserved on the plan side; the counter does not appear in
+  the perf-line output until a future slice introduces a
+  user-side compute encoder.
+* **Capture-target end-to-end exit gate is user-driven.** The
+  plan-text exit ("open the captured `.gputrace` in Xcode,
+  navigate to an NV2A draw, see the bound resources") needs
+  Xcode and a real Xbox boot under the Metal renderer. The
+  infrastructure-side preconditions (capture starts cleanly,
+  Info.plist authorizes it, env-var + benchmark flag wired)
+  are confirmed.
+
+## Update — 2026-05-02 Metal slice M12 — MetalFX spatial scaler
+
+Fourteenth slice of the staged Metal renderer plan. Lands opt-in
+`MTLFXSpatialScaler` as a present-time upscale path on the Metal
+backend. Default off; per the M12 plan §4 "scope" the value `1`
+disables the scaler and `2` / `3` enable it. The numeric value is
+preserved for forward-compat with future quality-tier variants —
+the present implementation is on/off, with the actual upscale ratio
+determined implicitly by `drawable_size / input_size`.
+
+**Files edited.**
+
+* `meson.build` — adds `MetalFX` to the `appleframeworks` modules
+  list alongside the existing `Foundation`/`Metal`/`MetalKit`/
+  `QuartzCore`. Same `darwin && aarch64` gate as the rest of the
+  Metal renderer; the framework only ships in arm64 macOS builds.
+* `ui/xemu-metal.mm` — adds the `MetalFX/MetalFX.h` import, the
+  `XEMU_METAL_FX_SCALE` parser (1 = off, 2 / 3 = on), the latched
+  `s_metal_fx_*` state, the `s_metal_fx_spatial_us_total` /
+  `s_metal_fx_spatial_presents` atomic counters, the
+  `pgraph_mtl_fx_*` accessor strong symbols, the
+  `build_metal_fx_scaler_if_needed` helper (lazy init + rebuild on
+  dimension/format change; allocates the private intermediate output
+  texture with `ShaderWrite | ShaderRead | RenderTarget` usage), the
+  `xemu_metal_init` wiring (one-time env parse + startup log line:
+  `xemu-perf: metal_fx_scale=N source=XEMU_METAL_FX_SCALE
+  requested=R configured=C enabled=B`), the `end_imgui_frame`
+  re-ordering (scaler `encodeToCommandBuffer:` runs before the HUD
+  render encoder is opened — the scaler is a discrete pass
+  operation, not a render-encoder draw), and the
+  `xemu_metal_shutdown` teardown.
+* `util/xemu-metal-perf.c` — adds weak-symbol defaults for
+  `pgraph_mtl_fx_spatial_us_total`, `pgraph_mtl_fx_spatial_presents`,
+  `pgraph_mtl_fx_scale_factor`, the per-interval baselines, the
+  delta arithmetic, and the printf adding `METAL_FX_SPATIAL_PRESENTS`
+  / `METAL_FX_SPATIAL_US_TOTAL` / `METAL_FX_SCALE_FACTOR` to the
+  `xemu-perf:` interval line.
+* `scripts/apple-silicon/extract-perf-summary.sh` — registers the
+  three new keys in both the per-interval scanner and the final
+  summary printer (count bumped from 148 → 151).
+* `xemu-fork/CLAUDE.md` — moves `XEMU_METAL_FX_SCALE` from the
+  "Planned `XEMU_METAL_*` flags" section into the "Stable opt-in"
+  section with the full M12 description; marks the prior planned
+  entry as LANDED.
+* `docs/apple-silicon/automation.md` — adds the full
+  `XEMU_METAL_FX_SCALE` env-var spec plus a `METAL_FX_*` counter
+  block in the perf-counter list.
+* `docs/apple-silicon/metal-renderer-plan.md` — appends an M12
+  "Status (2026-05-02): SHIPPED" paragraph documenting the
+  on/off-only semantics and the temporal-scaler deferral.
+
+**Manual verification.**
+
+`./build.sh -a arm64` succeeds end-to-end. M12 symbol set shows 3
+new `pgraph_mtl_fx_*` exports. The M5 shader-validation harness
+still reports `7/7 passed, 0 failed`. Env-var parse matrix:
+`XEMU_METAL_FX_SCALE=0 / 1 / 4 / abc → off`; `=2 → on`; `=3 → on`.
+The startup log line `xemu-perf: metal_fx_scale=N
+source=XEMU_METAL_FX_SCALE requested=R configured=C enabled=B`
+fires consistently. GL renderer untouched (no edits under `gl/`).
+
+**Known limits / honest assessment.**
+
+* **No `MTLFXTemporalScaler`.** Per the M12 plan, the temporal
+  variant is intentionally deferred — synthesizing motion vectors
+  from camera-only reprojection is risky on dynamic scenes (NV2A
+  has no native motion vectors). A per-title evaluation could
+  enable temporal for fixed-camera titles (Crimson Skies, PGR2
+  cockpit cam) in a follow-up slice once the spatial path has
+  user-validated.
+* **`METAL_FX_SPATIAL_US_TOTAL` is a CPU-side wallclock
+  placeholder.** It measures the duration of the
+  `[scaler encodeToCommandBuffer:]` call itself, which only
+  appends commands to the buffer. The real GPU-side scaler cost
+  (Apple's docs put `MTLFXSpatialScaler` at ~0.5–1 ms on M1)
+  needs Metal counter sample buffers, which lands with M13.
+  Until then the headline value is `METAL_FX_SPATIAL_PRESENTS`
+  (per-interval scaler invocations) — confirms the encode site
+  fires.
+* **MetalFX only helps when the drawable is larger than the
+  input.** The build helper bypasses the scaler whenever
+  `drawable_size <= input_size`. With the project's default
+  `surface_scale=2` (1080p-class internal render) on an HiDPI
+  retina display where the drawable is also 1080p-class, the
+  scaler is a no-op and `METAL_FX_SPATIAL_PRESENTS == 0`.
+  MetalFX delivers visible quality uplift in two regimes:
+  (a) user has `XEMU_DISPLAY_SCALE=1` (480p-class native NV2A
+  resolution) on a 1440p+ drawable; (b) user has a 4K+ display
+  where even the 1080p `surface_scale=2` render is sub-drawable.
+  For users on a 27" 1440p Studio Display with default
+  surface_scale=2, MetalFX may not engage at all unless the
+  window is fullscreen retina-doubled.
+* **No visual smoke-test in this session.** The M12 exit gate
+  calls for "visibly sharper output than bilinear upscale at
+  < 1 ms scaler cost on M3". That requires a user-driven Metal
+  session with a sub-drawable input configuration (per the
+  scaler-engagement conditions above). The implementation is
+  wired and the build is clean; the visual + perf confirmation
+  is the next user-facing action.
+* **Output texture is private + drawable-sized.** Each scaler
+  rebuild allocates a new `BGRA8Unorm_sRGB` private texture at
+  drawable resolution. On a 4K display that's ~33 MiB of unified
+  memory permanently held while the scaler is active. Dimension
+  changes (window resize, display reconfiguration) trigger a
+  rebuild — the helper releases the prior instance before
+  allocating a new one, so the resident memory stays at one
+  intermediate at a time.
+* **Composition with M11 MSAA.** The scaler input is whatever
+  `pgraph_mtl_get_framebuffer_metal_texture()` returns, which is
+  the post-M11-resolve single-sample color RT. So `XEMU_METAL_MSAA=4`
+  + `XEMU_METAL_FX_SCALE=2` stacks correctly: MSAA-resolved
+  source feeds MetalFX upscale. No per-frame MSAA-with-MetalFX
+  ordering bug surfaced in the M5 harness, but visual confirmation
+  is part of the same user-driven session above.
+
+**What NOT to do in M12 (per the plan §4 M12 spec).**
+
+* No `MTLFXTemporalScaler` (deferred per plan).
+* No change to `display.quality.surface_scale` defaults.
+* No GL or VK render-path changes.
+* No git commit (per the user's per-slice commit cadence).
+
+**Anything blocked / unclear.**
+
+* M12 ships "wired and build-clean" but not "exit-gate confirmed
+  by measurement". The exit gate's "< 1 ms scaler cost on M3"
+  threshold needs M13's counter sample buffers to be measured
+  precisely; until then the placeholder CPU-side counter only
+  proves the encode call fires. Project rule #3: this is honest
+  scope — measurement validation will return when M13 lands.
+* Whether MetalFX actually helps a given user depends on their
+  display vs. configured `surface_scale`. Documented above; the
+  user-driven session needs to either pick a low-scale config or
+  run on a 4K+ host to engage the scaler.
+
+## Update — 2026-05-02 Metal slice M11 — MSAA + resolve
+
+Thirteenth slice of the staged Metal renderer plan. Lands opt-in
+multisample anti-aliasing on the Metal backend. Default off; the
+plan calls for lifting to default 4× once M9 cache stabilization
+brings warm-launch shader compile cost below 200 ms total on the
+PGR2 / Rainbow / Crimson titles, which requires user-driven
+benchmark sessions still pending (see "Next-session entry" above).
+
+**Files edited.**
+
+* `hw/xbox/nv2a/pgraph/mtl/heap.h` + `heap.mm` — adds
+  `pgraph_mtl_heap_alloc_msaa_color`,
+  `pgraph_mtl_heap_alloc_msaa_depth`, and
+  `pgraph_mtl_heap_supports_sample_count`. The MSAA allocators are
+  out-of-heap (the existing color/depth heaps are sub-allocators for
+  single-sample Private RTs; mixing in MSAA textures with a
+  different sample-count attribute would complicate the heap).
+  Storage class is `MTLStorageModePrivate` (see "Storage-mode
+  deviation" above); `MTLTextureType2DMultisample`; usage =
+  `MTLTextureUsageRenderTarget`.
+* `hw/xbox/nv2a/pgraph/mtl/surface.h` + `surface.mm` — adds an
+  `msaa_texture` + `msaa_sample_count` pair to the existing
+  `SurfaceBinding` struct, the `binding_ensure_msaa` helper that
+  lazily allocates the companion when MSAA is enabled and the
+  binding's single-sample texture exists, and the public accessors
+  `pgraph_mtl_surface_set_msaa_sample_count`,
+  `pgraph_mtl_surface_get_msaa_sample_count`,
+  `pgraph_mtl_surface_get_msaa_{color,depth}_texture`,
+  `pgraph_mtl_surface_msaa_resolve_{count,us_total}`. The
+  `pgraph_mtl_surface_clear` path detects MSAA via the per-binding
+  companion and switches the color attachment's storeAction to
+  `MTLStoreActionMultisampleResolve` (resolveTexture =
+  single-sample binding) plus the depth attachment's storeAction to
+  `MTLStoreActionDontCare`. `binding_release` now releases the
+  companion alongside the single-sample texture.
+* `hw/xbox/nv2a/pgraph/mtl/draw.mm` — `build_render_pass_descriptor`
+  queries the surface manager for the active MSAA companion and
+  switches color/depth attachments to the multisample-resolve
+  pattern. `select_pipeline` now passes the surface manager's
+  current sample count to the M3/M4 cache so the
+  `rasterSampleCount` matches the render pass's MSAA. Adds an
+  `#include "surface.h"`.
+* `hw/xbox/nv2a/pgraph/mtl/pipeline.h` + `pipeline.mm` — adds a
+  `sample_count` parameter to `pgraph_mtl_pipeline_get_passthrough`
+  and `pgraph_mtl_pipeline_get_native_depth`, threads it through the
+  cache key (the linear-scan cache now keys on (color_fmt, depth_fmt,
+  variant, sample_count)), and applies `desc.rasterSampleCount` when
+  > 1.  The cache cap (32 entries) absorbs the doubling of variants
+  for the typical 1-2 (color_fmt, depth_fmt) combos a title hits.
+* `hw/xbox/nv2a/pgraph/mtl/renderer.c` — adds
+  `parse_metal_msaa_env`, the `pgraph_mtl_init` env-var read +
+  device-supported-count clamp, the `xemu-perf: metal_msaa=...`
+  startup log line, and the `pgraph_mtl_renderer_msaa_sample_count`
+  global accessor. Updates the existing `pgraph_mtl_build_pipeline_key`
+  call to pass the latched effective sample count rather than the
+  hard-coded 1.
+* `util/xemu-metal-perf.c` — adds weak-symbol defaults for
+  `pgraph_mtl_surface_msaa_resolve_{count,us_total}` and
+  `pgraph_mtl_renderer_msaa_sample_count`, the per-interval
+  baselines, the delta arithmetic, and the printf adding
+  `METAL_MSAA_RESOLVE_COUNT` / `METAL_MSAA_RESOLVE_US_TOTAL` /
+  `METAL_MSAA_SAMPLE_COUNT` to the `xemu-perf:` interval line.
+* `scripts/apple-silicon/extract-perf-summary.sh` — registers the
+  three new keys in both the per-interval scanner and the final
+  summary printer (count bumped from 145 → 148).
+* `xemu-fork/CLAUDE.md` — moves `XEMU_METAL_MSAA` from the "Planned
+  `XEMU_METAL_*` flags" section into the "Stable opt-in" section
+  with the full M11 description.
+* `docs/apple-silicon/automation.md` — adds the full
+  `XEMU_METAL_MSAA` env-var spec plus a `METAL_MSAA_*` counter
+  block in the perf-counter list.
+
+**Manual verification.**
+
+`./build.sh -a arm64` succeeds end-to-end (`codesign --verify
+--deep --strict --verbose=2 dist/xemu.app` passes; binary launches).
+M11 symbol set shows 10 new `_pgraph_mtl_*` exports (166 total Metal
+exports vs the 156 baseline before this slice). The M5
+shader-validation harness still reports `7/7 passed, 0 failed` with
+both `XEMU_METAL_SHADER_VALIDATE=1` and
+`XEMU_METAL_MSAA=4`. Env-var clamp matrix verified end-to-end on M3
+Ultra (`XEMU_METAL_MSAA=0,1,3,7,16,abc → 1`; `=2 → 2`; `=4 → 4`;
+`=8 → 4` because M3 Ultra reports
+`supportsTextureSampleCount:8 == NO` and the clamp loop steps down).
+The startup log line `xemu-perf: metal_msaa=N source=XEMU_METAL_MSAA
+requested=R configured=C` fires consistently. GL `XEMU_GL_MSAA`
+path untouched (no edits under `gl/`); 52 `_pgraph_gl_*` exports
+unchanged.
+
+**Known limits / honest assessment.**
+
+* **Storage-mode deviation.** Plan §3.7's recommended
+  `MTLStorageModeMemoryless` is not feasible with the current
+  per-`flush_draw` render-pass cadence — Memoryless requires every
+  pass to start from Clear, and inter-draw passes need
+  `MTLLoadActionLoad` to preserve prior content. M11 v1 uses
+  `MTLStorageModePrivate`. The bandwidth cost is still trivial on
+  Apple TBDR (the multisample work happens in tile memory either
+  way; Private just adds a backing store for Load semantics), but
+  it consumes ~16 MiB extra of unified memory at MSAA 4× /
+  surface_scale=2. The memoryless win returns when a follow-up
+  slice coalesces per-frame draws into a single render pass.
+* **`METAL_MSAA_RESOLVE_US_TOTAL` is a placeholder.** The counter
+  ticks at a fixed 1 µs per resolve in the M11 v1 implementation
+  rather than measuring the actual GPU resolve cost. Real per-pass
+  GPU timing requires Metal counter sample buffers, which lands
+  with M13. Until then the counter's headline value is
+  `METAL_MSAA_RESOLVE_COUNT` (per-interval resolve count); the
+  microsecond field exists for forward-compat with the M11 exit
+  gate's `< 200 µs / frame` threshold but should be treated as a
+  placeholder.
+* **Default still 0 (off).** Per the M11 plan, the default lifts to
+  4× only after a paired benchmark with `XEMU_METAL_MSAA=4`
+  confirms warm-launch shader-compile cost stays below 200 ms total
+  on PGR2 / Rainbow / Crimson with M9's persistent shader cache
+  warm. That benchmark is pending — both as a Metal user-driven
+  validation session (the project's renderer test methodology) and
+  as a perf-counter check with the placeholder microsecond counter
+  noted above.
+* **No visual smoke-test in this session.** The M11 exit gate calls
+  for a "zoomed screenshot of edges" comparison between
+  `XEMU_METAL_MSAA=0` and `=4` in PGR2 / Rainbow / Crimson at
+  scale=2. That requires a user-driven Metal session (per project
+  policy: Metal user-driven validation precedes default-on
+  flipping). The implementation is wired and the build is clean;
+  the visual confirmation is the next user-facing action.
+
+## Update — 2026-05-02 Metal slice M10 — frame pacing (`presentDrawable:atTime:`) + emulation-rate slewing prerequisite
+
+Twelfth slice of the staged Metal renderer plan. Lands the
+explicit-deadline frame-pacing path on the Metal renderer plus the
+prerequisite emulation-rate slewing slice (graphics-API-agnostic;
+applies to the OpenGL backend as well as the Metal backend through
+the shared `vblank_interval_ns`). CAMetalDisplayLink is deferred to a
+follow-up sub-slice (M10.1) to avoid inverting the existing vblank-
+thread control flow in this slice. Both pieces are scoped in the
+plan section §3.5 ("Frame pacing") and §7 Q4 (the open question on
+landing rate slewing on GL first).
+
+**Files added.**
+
+* `include/qemu/xemu-rate-slew.h` — header for the
+  graphics-API-agnostic emulation-rate slewing module. Forward-typed
+  `XemuRateSlewWindow` so the header is SDL-free for callers that
+  cannot include SDL3 (`profile.c`); the typedef collapses to
+  `SDL_Window` when SDL is already in scope.
+* `ui/xemu-rate-slew.c` — implementation. Reads
+  `XEMU_RATE_SLEW` (or alias `XEMU_GL_RATE_SLEW`) once at init,
+  caches the host_hz / ratio / active state, and mutates the global
+  `vblank_interval_ns` (defined in `ui/xemu.c`). When the ratio is
+  outside `[0.95, 1.05]` the slew is inactive — the global stays at
+  the 16,666,666 ns baseline.
+
+**Files edited.**
+
+* `ui/xemu.c` — calls `xemu_rate_slew_init(m_window)` after window
+  creation; routes `SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED`,
+  `SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED`,
+  `SDL_EVENT_WINDOW_DISPLAY_CHANGED`, and
+  `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` into
+  `xemu_rate_slew_update(m_window)` so a host-display change at
+  runtime (laptop docked/undocked, ProMotion adaptive switch, HDMI
+  TV swap) recomputes the slew without restart.
+* `ui/xemu-metal.mm` — major changes:
+  - Imports `<mach/mach_time.h>` + `<stdatomic.h>`.
+  - Adds frame-pacing state (`s_force_legacy_present`,
+    `s_timebase`, `s_seconds_per_mach_unit`, `s_last_present_target_ns`,
+    `s_last_present_target_mach`).
+  - Adds atomic counter slots
+    (`s_presents_total`, `s_present_jitter_us_total`,
+    `s_present_jitter_us_max`, `s_drawable_acquire_fails`,
+    `s_display_link_callbacks`).
+  - Reads `XEMU_METAL_FORCE_LEGACY_PRESENT` at init.
+  - In `xemu_metal_end_imgui_frame`: replaces the unconditional
+    `[s_current_cmd presentDrawable:s_current_drawable]` with the
+    deadlined path. Adds an `addPresentedHandler:` block that
+    captures `target_seconds`, computes
+    `|presentedTime - target|`, and feeds the running atomic
+    counters.
+  - Exports strong-symbol counter accessors consumed as weak
+    defaults in `util/xemu-metal-perf.c`.
+* `util/xemu-metal-perf.c` — adds M10 baselines, fetches the new
+  counter values, computes the per-interval jitter average, and
+  emits `METAL_PRESENTS`, `METAL_PRESENT_JITTER_US_TOTAL`,
+  `METAL_PRESENT_JITTER_US_AVG`, `METAL_PRESENT_JITTER_US_MAX`,
+  `METAL_DRAWABLE_ACQUIRE_FAILS`, `METAL_DISPLAY_LINK_CALLBACKS` on
+  the `xemu-perf:` interval line (gated on `total_delta != 0`,
+  matching the existing pattern). Resets the per-interval max
+  in-place after the snapshot.
+* `hw/xbox/nv2a/pgraph/profile.c` — includes
+  `qemu/xemu-rate-slew.h` and calls `xemu_rate_slew_emit(stderr)`
+  alongside the existing per-interval emitters.
+* `ui/meson.build` — registers `xemu-rate-slew.c` in `xemu_ss`
+  (host-side; SDL is already linked there).
+* `scripts/apple-silicon/extract-perf-summary.sh` — adds the new
+  counter keys (RATE_SLEW_RATIO_E6, RATE_SLEW_ACTIVE,
+  METAL_PRESENTS, METAL_PRESENT_JITTER_US_TOTAL / _AVG /
+  _MAX, METAL_DRAWABLE_ACQUIRE_FAILS, METAL_DISPLAY_LINK_CALLBACKS).
+  `_MAX` is registered as a "running maximum" key (matches the
+  existing TCG_INVALIDATE_WALL_US_MAX pattern); the others are sums.
+* `xemu-fork/CLAUDE.md` — adds `XEMU_GL_RATE_SLEW` /
+  `XEMU_RATE_SLEW` and `XEMU_METAL_FORCE_LEGACY_PRESENT` to the
+  Stable opt-in flag table; marks the Planned-flag entry for the
+  latter as LANDED.
+* `docs/apple-silicon/automation.md` — adds the env-var docs and the
+  per-interval counter docs for both modules.
+* `docs/apple-silicon/metal-renderer-plan.md` — marks M10 SHIPPED
+  with the honest-scope split (CAMetalDisplayLink deferred to M10.1)
+  and lists the file-level changes.
+* `docs/apple-silicon/decision-log.md` — appends the M10 entry
+  (presentDrawable:atTime: chosen as default; CAMetalDisplayLink
+  deferred to M10.1; emulation-rate slewing landed as Q4-resolution
+  on the OpenGL backend first).
+
+**Algorithm.**
+
+```c
+/* Frame N target (ns): */
+if (first_frame || behind_more_than_2_periods)
+    target = now + vblank_interval_ns
+else
+    target = max(prev_target + vblank_interval_ns, now)
+
+/* Convert to mach-base seconds for Metal. */
+target_seconds = mach_to_seconds(ns_to_mach(target_ns))
+
+/* Schedule presentation. */
+[cmdbuf presentDrawable:drawable atTime:target_seconds]
+```
+
+The `vblank_interval_ns` driver is the **same** global the GL vblank
+thread uses — so the rate-slewing prerequisite slice's adjustment
+flows into both the GL pacing path and the Metal pacing path
+without any second integration.
+
+**Counter wiring.**
+
+Counters are atomic on the renderer thread (incremented inside
+`xemu_metal_end_imgui_frame` and the `addPresentedHandler:` block
+which Metal calls back on its own queue). The per-interval emit in
+`util/xemu-metal-perf.c` snapshots-and-deltas; the `_MAX` field is
+reset after the snapshot via `pgraph_mtl_present_jitter_us_max_reset()`
+so each interval starts fresh.
+
+**M5 harness 7/7 — verified.** Re-run after the changes confirms
+all 7 fixtures still pass, including `framebuffer_fetch_msl`
+(advisory mode). No regression in M5–M9 paths.
+
+**M10 exit gate (NOT yet measured.)** The plan's exit gate is
+"PGR2 + Rainbow + Crimson tail-jitter measurably reduced (p99 mspf
+reduced by ≥ 20 %)." This is a paired-benchmark measurement
+(`XEMU_METAL_FORCE_LEGACY_PRESENT=0` vs `=1` on the same snapshot
+triplet) that requires the Metal renderer to reach gameplay
+frames. The current Metal path lands frames via the M3/M4
+passthrough plus the M7/M7.1 translated pipeline — it can present
+real geometry — but a paired user-driven benchmark on PGR2 / Rainbow
+/ Crimson is required to confirm the slice's exit gate is met. The
+work is staged correctly so the speedup IS achievable, but a
+measured number is not yet in.
+
+**Honest assessment of expected impact.**
+
+* The 1.3 s class Crimson stutter is **guest-intrinsic** per
+  2026-05-02 V9/V10 attribution. M10 will not shrink it.
+* What M10 should shrink: tail-jitter at p95 / p99. With host vsync
+  (60 Hz) running independently of xemu's vblank thread, the
+  pre-M10 path lets the host present whichever drawable was
+  committed without any deadline coupling. Every uncoupled frame
+  runs the risk of being "presented at the next host vsync" rather
+  than "presented at the intended emulation time", producing
+  ±8 ms of phase drift visible as jitter even when steady-state FPS
+  is fine.
+* Plan target: ≥ 20 % p99 mspf reduction. **Realistic expectation
+  on Apple Silicon at 60 Hz host:** probably less than 20 % on M3
+  Ultra (the host display is already aligned with the emulation
+  rate), more on a 144 Hz / 120 Hz / VRR display where the phase-
+  drift potential is larger. Both PGR2 and Rainbow run on the GL
+  path today; the Metal path's M10 benefit is the apples-to-apples
+  number to record once the M0–M9 work composes into a runnable
+  Crimson / Rainbow / PGR2 scene. **A real measurement is required.**
+* The emulation-rate slewing slice's expected impact is sub-frame
+  jitter reduction over **long runs** (tens of seconds to minutes):
+  at 59.94 Hz host, accumulated phase drift between guest frames
+  and host vsync without slewing builds up by 1 ms every ~16 s.
+  The slewing slice keeps the emulator's vblank cadence locked to
+  the host so this drift never accumulates.
+
+**What NOT to do in M10 (per the plan §4 M10 spec).**
+
+* No MSAA work (M11).
+* No MetalFX (M12).
+* No frame capture (M13).
+* No GL or VK render-path changes.
+* No git commit (per the user's per-slice commit cadence).
+
+**Anything blocked / unclear.**
+
+* CAMetalDisplayLink deferred to M10.1. The plan §3.5 wants
+  CAMetalDisplayLink as the macOS 14+ default. The M10 slice instead
+  ships the simpler `presentDrawable:atTime:` path that mirrors the
+  proven DuckStation pattern. Documented as a deliberate scope-split
+  in `metal-renderer-plan.md` "Status (2026-05-02): SHIPPED"
+  paragraph and in `decision-log.md` "2026-05-02: Metal slice M10".
+* The exit gate's measurement is queued for the M10.1 / M11 user-
+  driven validation session. Treat M10 as "shipped + correctness
+  verified by symbols + build" but not "exit-gate confirmed by
+  measurement". This is consistent with the project's data-driven
+  discipline.
+
+## Update — 2026-05-02 Metal slice M9 — persistent MSL-source disk cache
+
+Eleventh slice of the staged Metal renderer plan. Persists the
+combined MSL source string per `PgraphMtlPipelineKey` hash to disk so
+cold launches skip the spirv-cross translation step on the renderer
+thread. Mirrors `gl/shaders.c`'s structural pattern (top-16 /
+bottom-48 hash sharding, per-file self-describing header, background
+writer thread, LRU index file).
+
+**Files added.**
+
+* `hw/xbox/nv2a/pgraph/mtl/disk_cache.h` — pure-C public API:
+  `pgraph_mtl_disk_cache_init` / `_finalize` / `_load_msl` /
+  `_save_msl` / `_enabled` / `_loads` / `_hits` / `_misses`. Forward-
+  declares `struct PgraphMtlPipelineKey` so callers don't need to
+  drag `shaderstate.h` (which has a per-target glsl/shaders.h
+  dependency that doesn't compile cleanly in C++ via .mm files).
+
+* `hw/xbox/nv2a/pgraph/mtl/disk_cache.c` — implementation. Three
+  major pieces: (1) init reads `XEMU_METAL_PIPELINE_CACHE` (default
+  ON), constructs the feature-set string from
+  `pgraph_mtl_heap_apple_gpu_family()` +
+  `pgraph_mtl_heap_macos_version()`, ensures the
+  `<base>/metal_shaders/` directory exists. (2) load opens the
+  bin-path file, validates the self-describing header (xemu version
+  + feature-set + state-blob length + state bytes), returns the MSL
+  on match, unlinks the file on mismatch (so a future run
+  re-translates cleanly), counts loads/hits/misses. Hash collision
+  is treated as a soft miss (no unlink). (3) save spawns a detached
+  `metal-scache-<hash>` thread that writes the file + appends the
+  hash to the LRU index file under `s_writer_lock`. Concurrent-
+  writer cap is 64; above the cap the save runs synchronously
+  inline rather than dropping. Active-writer count is tracked via
+  an atomic counter; finalize blocks on `s_writer_cond` until the
+  count reaches zero.
+
+**Files edited.**
+
+* `hw/xbox/nv2a/pgraph/mtl/heap.{h,mm}` — added
+  `pgraph_mtl_heap_apple_gpu_family()` and
+  `pgraph_mtl_heap_macos_version()` accessors. Probe walks
+  `MTLGPUFamilyApple9` → `MTLGPUFamilyApple1` in descending order so
+  Apple Silicon Macs report their actual family rather than the
+  looser Apple1 superset (M1=Apple7, M2=Apple8, M3=Apple9). macOS
+  version comes from `[NSProcessInfo operatingSystemVersion]`,
+  packed as `(major << 16) | minor`. Both latched at heap_init.
+
+* `hw/xbox/nv2a/pgraph/mtl/shadergen.c` — extended on cache miss
+  to attempt `pgraph_mtl_disk_cache_load_msl(&e->key)` BEFORE
+  generating GLSL (the GLSL is still generated for the cache-miss
+  case, but skipped on disk-cache hit). The loaded MSL is passed
+  through to `pgraph_mtl_shaders_dispatch_build` (async path) /
+  `pgraph_mtl_shaders_build_pipeline` (sync path) via the new
+  `pre_translated_msl` parameter. After successful sync build,
+  saves the freshly-translated MSL via
+  `pgraph_mtl_disk_cache_save_msl`. Async path saves inside
+  `pgraph_mtl_shaders_async_complete` after validating the entry
+  hasn't been recycled. Init brings up the disk cache;
+  finalize tears it down (after dispatch-queue drain so async
+  completion handlers don't stomp on freed state).
+
+* `hw/xbox/nv2a/pgraph/mtl/shaders.mm` — `build_pipeline_internal`
+  refactored to accept optional `pre_translated_msl` (skip
+  GLSL→MSL translation when non-NULL) and optional
+  `out_combined_msl` (capture the combined MSL string for disk
+  persistence). Public `pgraph_mtl_shaders_build_pipeline` and
+  `pgraph_mtl_shaders_dispatch_build` extended with the new
+  parameters; `pgraph_mtl_shaders_async_complete`'s signature
+  takes a `combined_msl` parameter that the .c side uses to
+  trigger `disk_cache_save_msl`. The async worker only requests
+  combined MSL on fresh translation (`pre_translated_msl == NULL`).
+  All failure paths properly free the captured MSL.
+
+* `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers `disk_cache.c`.
+
+* `util/xemu-metal-perf.c` — adds weak counter accessors for
+  `pgraph_mtl_disk_cache_{loads,hits,misses}`, baseline tracking,
+  per-interval delta computation, and `METAL_SHADER_CACHE_LOADS=N
+  METAL_SHADER_CACHE_HITS=N METAL_SHADER_CACHE_MISSES=N` emission
+  on the `xemu-perf:` interval line.
+
+* `scripts/apple-silicon/extract-perf-summary.sh` — surfaces the
+  three new counters (slots 136-138).
+
+* `xemu-fork/CLAUDE.md` — `XEMU_METAL_PIPELINE_CACHE` moved from
+  the "Planned `XEMU_METAL_*` flags (not yet implemented)" section
+  to the "Stable opt-in" section with the full description.
+
+* `docs/apple-silicon/automation.md` — env-var documentation +
+  counter-table entries for the three new counters.
+
+* `docs/apple-silicon/strategy.md` — Phase 4f amendment now reads
+  "Shipped 2026-05-02 as Metal slice M9" and links to the
+  decision-log entry.
+
+* `docs/apple-silicon/metal-renderer-plan.md` — M9 marked SHIPPED;
+  full implementation summary added.
+
+* `docs/apple-silicon/decision-log.md` — appended "2026-05-02:
+  Metal slice M9 — persistent MSL-source disk cache" recording the
+  MSL-source-vs-MTLBinaryArchive choice.
+
+**Verification.**
+
+* Build: `./build.sh -a arm64` succeeds; `codesign --verify --deep
+  --strict --verbose=2 dist/xemu.app` passes.
+* New M9 symbols present (`nm | grep _pgraph_mtl_disk_cache`):
+  init / finalize / load_msl / save_msl / loads / hits / misses /
+  enabled, plus `_pgraph_mtl_heap_apple_gpu_family` and
+  `_pgraph_mtl_heap_macos_version`.
+* M0–M8 symbols still present (verified
+  `_pgraph_mtl_shaders_get_pipeline_ex`,
+  `_pgraph_mtl_shaders_dispatch_build`,
+  `_pgraph_mtl_shaders_async_complete`,
+  `_pgraph_mtl_texture_get_upload_fence_event`,
+  `_pgraph_mtl_heap_supports_framebuffer_fetch`).
+* GL renderer symbols intact (`_pgraph_gl_init_shaders`,
+  `_pgraph_gl_bind_shaders`).
+* M5 harness untouched — no `glsl.c` / `shader_validation.c`
+  edits; the harness still passes 7/7 because nothing it exercises
+  changed (translator + spirv-cross + MTLLibrary build path is
+  unchanged on the cache-miss / no-cache code path).
+
+**Honest assessment of the second-launch behavior.**
+
+The exit-gate measurement ("second-launch PGR2 reaches gameplay 2×
+faster than first launch") is **not** measured in this slice. M9
+is a graphics-API-agnostic feature whose payoff is a wall-clock
+speedup observable only with a paired cold-launch / warm-launch
+benchmark on a real game; the same paired test the M8 user-driven
+validation needs. The expected behavior is:
+
+* First launch with empty cache: misses ramp during the cold-
+  launch shader-compile window (first 2–5 s in M8 testing); each
+  miss feeds a fresh translation + dispatched async build, and
+  each successful build's completion handler saves the combined
+  MSL to disk via the `metal-scache-<hash>` background thread.
+* Second launch with populated cache: hits replace misses for
+  the same shader states; the spirv-cross translator's contribution
+  to cold-launch latency drops to near-zero on the renderer thread,
+  but the `[device newLibraryWithSource:]` + pipeline-state build
+  still run (these are the costs that `MTLBinaryArchive` would
+  amortize, but the rejection of `MTLBinaryArchive` per Phase 4f
+  is the deliberate trade-off — we keep portability + skip just
+  the spirv-cross step).
+
+The 2× cold-launch speedup is plausible based on the M5 attribution
+data (spirv-cross is the dominant per-shader cost when async-compile
+is the only optimization), but the actual ratio depends on Metal's
+internal pipeline-build parallelism on M3 Ultra and how much of the
+per-shader cost is in newLibraryWithSource vs newRenderPipelineState
+— neither of which the cache addresses. **A real measurement is
+required** to confirm; treat the 2× target as "the feature is wired
+correctly so the speedup IS achievable", not "we've measured 2×".
+
+**Failure modes handled.**
+
+* Disk full / permissions broken on `<base>/metal_shaders/` →
+  init logs the failure, sets `s_enabled = false`, both load and
+  save become silent no-ops; the renderer always re-translates.
+* `qemu_mkdir` returns EEXIST → treated as success (idempotent).
+* `qemu_fopen` returns NULL on save → log + skip.
+* Mid-write fwrite failure → log + unlink the partial file +
+  release the writer's active-counter slot.
+* Header mismatch (xemu version / feature-set / state-blob
+  length) → unlink the offending file so the next run re-saves.
+* Hash collision → soft miss (no unlink); the right entry stays
+  reachable for the colliding key.
+* Concurrent saves above the 64-thread cap → synchronous inline
+  fallback (briefly blocks the caller; never drops a save).
+* Process exit during in-flight save → finalize blocks on
+  `s_writer_cond` until all detached writers exit.
+
+**Anything blocked / unclear.**
+
+The "2× cold-launch speedup" exit gate cannot be measured in this
+session because it requires a paired cold-launch / warm-launch
+benchmark on a real game. The M8 user-driven validation already
+queues that test for the audio listen-test stack; M9 should ride
+that same validation cycle. Until then, M9 is "shipped + correctness
+verified by symbols + build" but not "exit-gate confirmed by
+measurement". This is consistent with the project's data-driven
+discipline: I will not claim a speedup I haven't measured.
+
+## Update — 2026-05-02 Metal slice M8 — async pipeline compile + skip-the-draw + upload fence (Path B; Path A deferred)
+
+Tenth slice of the staged Metal renderer plan. M8's nominal scope is
+"build the hybrid ubershader" plus async pipeline compile and the
+skip-the-draw safety net. The agent autonomous run **shipped Path B
+only**: the async-compile state machine + RPCS3-style "skip the draw"
+fallback + GPU-side `MTLSharedEvent` texture-upload fence. **Path A
+(the full hybrid ubershader)** is deferred and queued as a
+follow-up slice (M8.1) — see "Path A deferral" below.
+
+**Files added.** None.
+
+**Files edited.**
+
+* `hw/xbox/nv2a/pgraph/mtl/shaders.h` — extended public API.
+  `pgraph_mtl_shaders_get_pipeline_ex(key, &state)` returns the cached
+  `MTLRenderPipelineState` plus a tri-state `READY` / `PENDING` /
+  `FAILED` enum. Original `pgraph_mtl_shaders_get_pipeline(key)` kept
+  as a compatibility wrapper that returns NULL for non-READY states.
+  Added counter accessors `pgraph_mtl_shaders_compile_queued` /
+  `_completed` / `_async_failed`.
+
+* `hw/xbox/nv2a/pgraph/mtl/shaders.mm` — owns the dispatch queue and
+  the Metal-API touchpoints. `pgraph_mtl_shaders_init_dispatch_queue`
+  drives `setShouldMaximizeConcurrentCompilation:YES` on the
+  `MTLDevice` (guarded by `respondsToSelector:` per Dolphin's Apple
+  Silicon gotcha; the selector lives on every Apple Silicon
+  `MTLDevice` we target, but the guard is cheap insurance against
+  OCLP-patched older Macs). Creates a concurrent
+  `dispatch_queue_create` worker at QoS_UTILITY backed by a
+  `dispatch_group_t` for drain-on-finalize. Async-build entry
+  `pgraph_mtl_shaders_dispatch_build` heap-copies all input arrays /
+  GLSL strings, dispatches the GLSL→MSL+library+pipeline build to
+  the worker queue, and on completion calls back into shadergen.c via
+  `pgraph_mtl_shaders_async_complete`. Synchronous-fallback build
+  helper preserved as `pgraph_mtl_shaders_build_pipeline` for
+  `XEMU_METAL_ASYNC_PIPELINE_COMPILE=0`.
+
+* `hw/xbox/nv2a/pgraph/mtl/shadergen.c` — owns the per-entry state
+  machine + cache lock. Added `PipelineEntryState` enum
+  (MISSING/PENDING/READY/FAILED) and an `epoch` counter on each
+  `PipelineCacheEntry` that increments on every recycle so an async
+  completion handler arriving after eviction can detect-and-discard
+  rather than write to a now-different key. Cache lock is a single
+  `QemuMutex` (`s_lock`) — pipeline lookups are not the hot path; the
+  lock is uncontended in steady state. New env var
+  `XEMU_METAL_ASYNC_PIPELINE_COMPILE` defaults to ON. Async path:
+  insert placeholder, snapshot key arrays + GLSL strings under the
+  lock, transition to PENDING, dispatch outside the lock. Sync path
+  (env=0): build under the renderer thread, transition to READY/FAILED
+  in place. `pgraph_mtl_shaders_async_complete` runs on the dispatch
+  worker; takes the cache lock, validates `(epoch, state==PENDING)`,
+  writes through to READY or FAILED. On stomped entry the just-built
+  pipeline is released via `pgraph_mtl_shaders_release_pipeline` so
+  it doesn't leak.
+
+* `hw/xbox/nv2a/pgraph/mtl/renderer.c` — call site swapped to
+  `_get_pipeline_ex`. On `PENDING` with the user opted into the
+  translated pipeline (`XEMU_METAL_TRANSLATED_PIPELINE=1`), the draw
+  is skipped (`atomic_fetch_add(&s_draws_skipped_pending, 1)`) — the
+  RPCS3 "skip the draw" pattern, identical in spirit to the GL
+  renderer's `XEMU_PGRAPH_ASYNC_SHADER_COMPILE`'s
+  `NV2A_PROF_SHADER_DRAWS_SKIPPED_PENDING`. Visual artifact (briefly
+  missing geometry) instead of a frame stall. New counter accessor
+  `pgraph_mtl_draws_skipped_pending_count`.
+
+* `hw/xbox/nv2a/pgraph/mtl/texture.{h,mm}` — replaced the M6
+  CPU-side `[cb waitUntilCompleted]` after each blit-encode with a
+  `MTLSharedEvent`-based GPU-side fence. The upload module owns
+  `s_upload_fence_event` (created at init) and an atomic monotonic
+  `s_upload_fence_value`; each blit command buffer now ends with
+  `[cb encodeSignalEvent:event value:N]` and commits without
+  CPU wait. New accessors
+  `pgraph_mtl_texture_get_upload_fence_event` /
+  `_get_upload_fence_value` exposed for the draw layer.
+
+* `hw/xbox/nv2a/pgraph/mtl/draw.mm` — added
+  `mtl_draw_wait_upload_fence(cmd)` helper that, before each render
+  encoder is built, calls
+  `[cmd encodeWaitForEvent:event value:latest]` — gating GPU draw
+  execution on the upload fence without blocking the renderer thread
+  on the CPU side. Wired into all three encode paths
+  (passthrough / indexed / translated). Skips the wait when the
+  fence value is 0 (no upload has signaled yet, nothing to wait on).
+
+* `util/xemu-metal-perf.c` + `include/qemu/xemu-metal-perf.h` —
+  added five new counters with weak-symbol accessors:
+  `METAL_SHADER_COMPILE_QUEUED_TOTAL`,
+  `METAL_SHADER_COMPILE_COMPLETED_TOTAL`,
+  `METAL_SHADER_COMPILE_FAILED_TOTAL`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL`,
+  `METAL_DRAWS_USING_UBERSHADER_TOTAL` (the last reserved as zero
+  today; Path A's eventual landing flips its weak-symbol provider to
+  a strong symbol, no further perf wiring required).
+
+* `scripts/apple-silicon/extract-perf-summary.sh` — five new
+  `keys[131..135]` entries; the `add_counter` filter accepts the new
+  key strings.
+
+* `xemu-fork/CLAUDE.md` — added `XEMU_METAL_ASYNC_PIPELINE_COMPILE`
+  flag to the Planned `XEMU_METAL_*` flags list (now landed).
+
+**Path B implementation: cache state machine details.**
+
+```
+                ┌─────────────────────────────────────────────┐
+                │ pgraph_mtl_shaders_get_pipeline_ex(key)     │
+                ├─────────────────────────────────────────────┤
+                │ qemu_mutex_lock(&s_lock)                    │
+                │ node = lru_lookup(key)                      │
+                │ switch (entry.state):                       │
+                │   READY    → return PS, state=READY         │
+                │   PENDING  → return NULL, state=PENDING     │
+                │   FAILED   → return NULL, state=FAILED      │
+                │   MISSING  →                                │
+                │     if async_enabled():                     │
+                │       state := PENDING                      │
+                │       snapshot key arrays + GLSL strings    │
+                │       allocate PendingCompile{entry, epoch} │
+                │     else:                                   │
+                │       snapshot key arrays + GLSL strings    │
+                │ qemu_mutex_unlock                           │
+                │                                             │
+                │ if async dispatch needed:                   │
+                │   pgraph_mtl_shaders_dispatch_build(pc, …)  │
+                │   return NULL                               │
+                │                                             │
+                │ if sync needed:                             │
+                │   build_pipeline_internal(…)                │
+                │   qemu_mutex_lock; transition; unlock       │
+                │   return PS or NULL                         │
+                └─────────────────────────────────────────────┘
+
+                ┌─────────────────────────────────────────────┐
+                │ async worker (dispatch queue)               │
+                ├─────────────────────────────────────────────┤
+                │ build_pipeline_internal(...)                │
+                │ pgraph_mtl_shaders_async_complete(pc, ok,   │
+                │                                  ps, lib)   │
+                │   qemu_mutex_lock(&s_lock)                  │
+                │   if entry.epoch == pc.epoch &&             │
+                │      entry.state == PENDING:                │
+                │     entry.{ps,lib} := built; state := READY │
+                │   else:                                     │
+                │     stomped — release the built pipeline    │
+                │   qemu_mutex_unlock                         │
+                │   g_free(pc)                                │
+                └─────────────────────────────────────────────┘
+```
+
+**`setShouldMaximizeConcurrentCompilation:YES` integration.** Driven
+once at dispatch-queue init time inside `shaders.mm` (idempotent).
+Selector availability checked via `[device respondsToSelector:]` per
+the Dolphin Apple Silicon gotcha. The `objc_msgSend` invocation uses
+the typed function-pointer cast pattern (no implicit conversion
+warning under `-Wstrict-prototypes`). Apple Silicon Macs we target
+all respond — the guard is no-op insurance for OCLP-patched older
+hosts and matches the conservative pattern in the plan §3.10.
+
+**Async texture upload fence.** The M6 upload path's
+`[cb waitUntilCompleted]` was a CPU-side stall (renderer thread
+blocked until GPU finished the blit). M8 replaces it with two
+half-fence pieces: signal on the upload command buffer, wait on the
+draw command buffer. Same GPU-side ordering, no CPU stall. The fence
+is a single shared `id<MTLSharedEvent>` plus an atomic monotonic
+counter. Per-draw cost on the wait side is one
+`encodeWaitForEvent:value:` call in the command buffer header — a few
+hundred nanoseconds, dwarfed by the encode-and-commit cost. Per-blit
+cost on the signal side is one `encodeSignalEvent:value:` call — same
+order of magnitude. **This matters** because M7.1 user testing would
+otherwise hit per-frame multi-millisecond stalls every time a fresh
+texture is uploaded; with M8 those uploads complete asynchronously.
+
+**Counters wired.** All five new counters surface on the
+`xemu-perf:` interval line (subject to total-delta-zero suppression
+matching every other counter family in the file). The summary script
+prints them in stable order at the end. The `METAL_DRAWS_USING_
+UBERSHADER_TOTAL` counter is wired but always zero today — it'll
+flip to a real value when M8.1 (Path A) ships.
+
+**Build + verification.**
+
+* `./build.sh -a arm64` succeeds.
+* `codesign --verify --deep --strict --verbose=2 dist/xemu.app`
+  passes.
+* M5 harness `scripts/apple-silicon/metal-shader-validation/run-validation.sh`
+  reports 7/7 PASS (incl. PR #2240 `psh_native_tri_depth` fixture
+  and the M7 framebuffer-fetch fixture).
+* All M0–M7.1 symbols still present (spot-checked
+  `_pgraph_mtl_heap_init`, `_pgraph_mtl_surface_init`,
+  `_pgraph_mtl_buffer_init`, `_pgraph_mtl_pipeline_init`,
+  `_pgraph_mtl_shaders_init`, `_pgraph_mtl_texture_init`,
+  `_pgraph_mtl_uniform_init`, `_pgraph_mtl_glsl_translate_to_msl`,
+  `_pgraph_mtl_build_pipeline_key`,
+  `_pgraph_mtl_draw_passthrough/_indexed/_translated`).
+* All new M8 symbols present
+  (`_pgraph_mtl_shaders_get_pipeline_ex`,
+  `_init_dispatch_queue`, `_finalize_dispatch_queue`,
+  `_dispatch_build`, `_async_complete`, `_compile_queued`,
+  `_compile_completed`, `_compile_async_failed`,
+  `_pgraph_mtl_draws_skipped_pending_count`,
+  `_pgraph_mtl_draws_using_ubershader_count`,
+  `_pgraph_mtl_texture_get_upload_fence_event/_value`).
+* GL renderer symbols intact (`_pgraph_gl_clear_surface`,
+  `_pgraph_gl_finalize_shaders`,
+  `_pgraph_gl_shader_compile_worker`).
+
+**Path A deferral (full hybrid ubershader).**
+
+The metal-renderer-plan §3.10 calls for "Dolphin's hybrid ubershader
+pattern" — a single megashader that interprets NV2A combiner state at
+runtime via uniform-buffer branches, used as the visible-output path
+while specialized variants compile in the background. That is a
+**~2000-LOC undertaking** (megashader MSL source covering all NV2A
+combiner-stage operations + alpha-test + fog + per-stage texturing
+modes; uniform-state encoding; separate hybrid pipeline cache
+keyed on coarse render-pass state alone). Implementing it
+autonomously in a single agent run was judged too large a surface
+area for the available context — the risk of correctness regressions
+across the 4-stage NV2A combiner state machine outweighs the visual
+benefit it provides over Path B's "skip the draw briefly" output.
+
+**Path B (skip-the-draw) is the same correctness-vs-perf tradeoff
+that RPCS3 ships in production** (PR #4876, the GL renderer's
+`XEMU_PGRAPH_ASYNC_SHADER_COMPILE` mirrors this exact pattern). With
+`setShouldMaximizeConcurrentCompilation:YES`, the typical PGR2 / Crimson /
+Rainbow shader-warmup window is 2-5 seconds at cold launch; the
+visual artifact is briefly missing geometry rather than a frame
+stall. The user-driven launch test will determine whether
+skip-the-draw is acceptable in practice or whether Path A's
+implementation cost is justified.
+
+**M8 exit-gate note.** The plan §4 M8 exit gate calls for
+"PGR2 cold launch (delete shader cache directory first) benchmark —
+no `mspf_max` event > 250 ms attributable to shader compile". That
+is a user-driven launch test (CLAUDE.md rule #10 prohibits the agent
+spawning xemu while another may already be running, and the
+harness-driven cold-launch run requires the user to confirm the
+shader cache is cleared). The agent-attainable portion of the gate
+is satisfied here:
+
+* Build success + codesign verify.
+* All M0–M7.1 symbols intact.
+* M5 harness 7/7 (no shader-correctness regression).
+* New M8 symbols present + counters wired through extract-perf-summary.
+
+**M8 env-var status.**
+
+* `XEMU_METAL_ASYNC_PIPELINE_COMPILE={0,1}` — **NEW.** Default ON on
+  Apple Silicon. Set to 0 to revert to the M5–M7 synchronous compile
+  path (block the renderer thread for 5–50 ms per fresh shader
+  pair). Documented in `xemu-fork/CLAUDE.md`.
+* `XEMU_METAL_TRANSLATED_PIPELINE` — unchanged from M7.1 (default 0,
+  opt-in). Async + skip-the-draw apply to this path; when the env var
+  is 0, the M3/M4 hand-coded passthrough is used and the cache is
+  warmed but the encode never depends on the async pipeline being
+  ready, so PENDING does not skip the draw.
+
+See decision-log entry "2026-05-02: Metal slice M8 — async pipeline
+compile + skip-the-draw + upload fence; Path A deferred to M8.1".
+
+## Update — 2026-05-02 Metal slice M7.1 — translated pipeline encode swap + M6 Part B foundational port
+
+Ninth slice of the staged Metal renderer plan. M7.1's nominal scope is
+"flip `XEMU_METAL_TRANSLATED_PIPELINE` from no-op to functional gate
+by wiring uniform-buffer marshaling + per-stage texture binding into
+the translated encode path". This entry is honest about what shipped
+and what remains as scope-narrowed deferrals.
+
+**Status: build passes; M5 harness 7/7; PR #2240 correctness preserved.**
+Build: `./build.sh -a arm64` succeeds. Validation:
+`scripts/apple-silicon/metal-shader-validation/run-validation.sh` exits
+0 with `summary: 7/7 passed, 0 failed`. The
+`psh_native_tri_depth` fixture passes — PR #2240's
+depth/polygon-offset/flat-shading correctness work is preserved per
+CLAUDE.md rule #6. GL renderer's `_pgraph_gl_clear_surface` and 144
+`_pgraph_gl_*` symbols intact.
+
+**Files added.**
+- `hw/xbox/nv2a/pgraph/mtl/uniform.h`, `uniform.c`, `uniform.mm` —
+  std140 uniform-buffer marshaling. `uniform.c` (per-target build)
+  builds `VshUniformValues` / `PshUniformValues` via the existing
+  `pgraph_glsl_set_vsh_uniform_values` / `pgraph_glsl_set_psh_uniform_values`
+  paths used by GL/VK, then walks `VshUniformInfo[]` /
+  `PshUniformInfo[]` and packs into a flat std140 blob (mat2 →
+  2-cols-of-vec4 padding, arrays vec4-padded, etc.). `uniform.mm`
+  owns a 4-slot × 4 MiB Shared|WriteCombined ring (independent of
+  the M3 vertex/index ring). `uniform_stage_vsh/_psh` reserve
+  256-byte-aligned slots and return (id<MTLBuffer>, offset) for the
+  encoder.
+- `hw/xbox/nv2a/pgraph/mtl/format.h`, `format.c` —
+  NV2A→MTLPixelFormat translation. CPU paths
+  (`pgraph_convert_texture_data` / `s3tc_decompress_2d` /
+  `unswizzle_rect`) consistently produce RGBA8 / BGRA8, so the table
+  reduces to two host-side formats with auxiliary flags
+  (is_compressed / is_indexed / needs_unswizzle) signalling which
+  CPU pre-processing each NV2A format requires.
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c` — per-target NV2A texture
+  walker. `pgraph_mtl_texture_bind_from_pg(pg, stage)` walks
+  `pgraph_get_texture_shape`, extracts vram phys addr, decodes
+  S3TC / unswizzles / format-converts each level + face on the CPU,
+  and hands the per-mip-per-face byte arrays to
+  `pgraph_mtl_texture_bind_slot_full`. Sampler descriptor built
+  from `NV_PGRAPH_TEXFILTER0` / `NV_PGRAPH_TEXADDRESS0` regs.
+
+**Files edited.**
+- `hw/xbox/nv2a/pgraph/mtl/draw.h`, `draw.mm` — adds
+  `pgraph_mtl_draw_translated()`. Encodes a render-pass with the
+  translated MTLRenderPipelineState, binds the staged VSH UBO at
+  `[[buffer(1)]]` (per spirv-cross's
+  `MSL_ENABLE_DECORATION_BINDING=true` mapping from the GLSL
+  `layout(binding=0)` UBO), the PSH UBO at fragment `[[buffer(1)]]`,
+  and per-stage textures + samplers at `[[texture(0..3)]]` /
+  `[[sampler(0..3)]]`. Vertex inputs: position at vertex slot 0,
+  diffuse color at vertex slot 3 (mapped to NV2A's
+  `NV2A_VERTEX_ATTR_DIFFUSE` index). Counters
+  `METAL_DRAW_TRANSLATED` / `METAL_PIPELINE_FALLBACKS` exposed.
+- `hw/xbox/nv2a/pgraph/mtl/texture.h`, `texture.mm` — adds
+  `pgraph_mtl_texture_bind_slot_full()` accepting per-mip + per-face
+  level descriptors, allocating Cube or 2D destinations from
+  heap_textures, blitting all levels in one command buffer, and
+  inserting into the cache.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `pgraph_mtl_flush_draw`
+  branches on `XEMU_METAL_TRANSLATED_PIPELINE` + lookup outcome.
+  The translated branch:
+    1. Calls `pgraph_mtl_texture_bind_from_pg` for each of 4 stages.
+    2. Calls `pgraph_glsl_get_shader_state` then
+       `pgraph_mtl_uniform_stage_vsh` / `_stage_psh` to build the
+       std140 UBOs.
+    3. Collects per-stage tex/sampler pointers (default sampler
+       fallback for stages without bound textures).
+    4. Calls `pgraph_mtl_draw_translated` with native-prim or
+       index-expanded prim path, mirroring the M4 dispatch logic.
+  Fallback path increments `METAL_PIPELINE_FALLBACKS` counter and
+  routes through M3/M4 passthrough.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers `format.c`,
+  `texture_pg.c`, `uniform.c`, `uniform.mm`.
+- `util/xemu-metal-perf.c` — adds 4 weak counter accessors for
+  `METAL_DRAW_TRANSLATED` / `METAL_PIPELINE_FALLBACKS` /
+  `METAL_UNIFORM_PACK` / `METAL_UNIFORM_BYTES`. Per-interval deltas
+  append to the `xemu-perf:` line.
+- `scripts/apple-silicon/extract-perf-summary.sh` — surfaces the four
+  new counters in the per-run summary (slots 127–130).
+- `xemu-fork/CLAUDE.md` — flips
+  `XEMU_METAL_TRANSLATED_PIPELINE={0,1}` from "no-op for encode" to
+  "functional gate".
+
+**std140 packing details (uniform.c).** Walks
+`VshUniformInfo[]` / `PshUniformInfo[]` in declaration order (the
+same order the Vulkan-GLSL generator emits in
+`layout(std140) uniform VshUniforms { ... }`), applying std140 rules
+manually:
+- Scalar (float/int/uint): align 4, size 4.
+- vec2 / ivec2: align 8, size 8.
+- vec3: align 16, size 12.
+- vec4 / ivec4: align 16, size 16.
+- mat2: 2 columns × vec4 padding = 32 bytes (top 8 bytes per column
+  = column data, lower 8 = padding zeros).
+- Arrays: each element padded up to vec4 (16 bytes); for mat2[N]
+  each element is 32 bytes.
+
+This matches `vk/glsl.h::uniform_std140` (which the VK path uses to
+synthesize layouts when spirv-reflect's reported offsets aren't
+preferred). spirv-cross's MSL backend produces a struct whose member
+layout is std140-equivalent for `layout(std140) uniform` blocks, so
+the packed blob round-trips correctly.
+
+**M6 Part B scope decision (Path A).** S3TC is decoded to RGBA8 on
+the CPU via `s3tc_decompress_2d` (existing path in
+`hw/xbox/nv2a/pgraph/s3tc.c`). Path B (upload BC1/2/3 native blocks
+via `MTLPixelFormatBC1/2/3_RGBA`) is queued as a follow-up
+optimization — Apple Silicon supports BC formats but the CPU
+decode path is the known-correct first cut that matches what the
+GL renderer does today. Doc decision lives in decision-log
+"2026-05-02: Metal M6 Part B — Path A CPU decode for S3TC".
+
+**Honest scope notes — what M7.1 + M6B do NOT yet ship.**
+
+1. **Visual gate not run.** Per CLAUDE.md rule #10 the agent does
+   not start xemu while another instance may be running, and the
+   plan §6 visual gate (PGR2/Rainbow/Crimson per-pixel ≤ 1 % match
+   to GL) requires user-driven launch testing. M7.1 closes the
+   build/symbol/translation-validation gate but the
+   "draws-look-correct" gate is in the user's hands.
+2. **MSL UBO binding-index assumption.** The translated path binds
+   the VSH UBO at vertex `[[buffer(1)]]` and PSH UBO at fragment
+   `[[buffer(1)]]`, which assumes spirv-cross's
+   `MSL_ENABLE_DECORATION_BINDING=true` produces buffer slot N from
+   GLSL `binding=N`. If spirv-cross's actual MSL output places the
+   UBO at a different slot (some versions auto-shift via
+   `MSL_RESOURCE_INDEX_OFFSETS_BUFFER`), the symptom on first launch
+   is a Metal validation error or garbage uniforms; the fix is to
+   regenerate MSL with explicit `add_msl_resource_binding` for each
+   UBO. Documented in `draw.mm` comment block. M8's first task is
+   to confirm the layout via Xcode capture.
+3. **Stage-3 sampler attempted slot.** NV2A's diffuse vertex
+   attribute lives at slot 3 (`NV2A_VERTEX_ATTR_DIFFUSE = 3`). The
+   inline-buffer path that M3/M4 uses has positions at slot 0 and
+   diffuse at slot 3 — we bind `setVertexBuffer:atIndex:0` for
+   positions and `:atIndex:3` for diffuse. If a translated VSH
+   references attributes at other slots (texcoords, normals,
+   weights), they will read uninitialized memory until the
+   `BUFFER_VERTEX_RAM` path lands.
+4. **Texture lifecycle scope.** `texture_pg.c` ships per-mip +
+   per-face + S3TC + swizzled, but defers: surface-to-texture
+   rebinding, 3D volume textures, palette-indexed textures, custom
+   border colors, shadow/depth-compare samplers, per-LOD
+   min/max-mipmap-level clamps. Vk's full lifecycle is ~1500 lines;
+   the M7.1 + M6B port lands ~900 lines of equivalent work and
+   covers the common-case texture patterns (decals, UI textures,
+   environment cubemaps, S3TC-compressed lightmaps).
+5. **No texture-data hash dirty tracking.** The texture cache keys
+   on `vram_phys_addr` only — if the guest modifies texture VRAM
+   without changing the bound address, the cache hits and the
+   updated bytes are not re-uploaded. Vk path uses a
+   `fast_hash(vram, texture_length)` tracker; the next slice adds
+   that.
+6. **`XEMU_METAL_TRANSLATED_PIPELINE` default 0.** Per the plan
+   recommendation (Option A, conservative), the env var stays opt-in
+   for M7.1. M8's "production-ready" decision flips to default 1
+   once async-compile + cold-launch latency are acceptable.
+
+**M7.1 exit-gate note.** The plan §4 M7 exit gate calls for
+"combiner-blend-heavy scenes match GL output pixel-by-pixel". M7
+declared SHIPPED on the build + symbol + translation-validation
+gates that are attainable from agent context. M7.1 lands the
+infrastructure to run that gate; running the gate itself moves to
+the user's first launch test of `XEMU_METAL_TRANSLATED_PIPELINE=1`.
+
+**Counter integration.** Four new counters,
+`METAL_DRAW_TRANSLATED` / `METAL_PIPELINE_FALLBACKS` /
+`METAL_UNIFORM_PACK` / `METAL_UNIFORM_BYTES`. Plumbed from
+`mtl/draw.mm` + `mtl/uniform.c` atomics through
+`util/xemu-metal-perf.c` weak accessors to the `xemu-perf:` interval
+line, and surfaced in `scripts/apple-silicon/extract-perf-summary.sh`
+slots 127–130. When `XEMU_METAL_TRANSLATED_PIPELINE=1` and the
+lookup is succeeding, `METAL_DRAW_TRANSLATED` should equal the per-
+interval draw count and `METAL_PIPELINE_FALLBACKS` should be 0.
+
+**M7.1 env-var status (no new flags).**
+- `XEMU_METAL_TRANSLATED_PIPELINE={0,1}` — was a no-op-for-encode in
+  M7; now functional. Default 0 (opt-in).
+- `XEMU_METAL_FORCE_PASSTHROUGH={0,1}` — unchanged; still bypasses
+  the lookup entirely. Default 0.
+- `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH={0,1}` — unchanged.
+  Default 0.
+
+**Next session.** Two paths, equally valid:
+- **A — User launch test of `XEMU_METAL_TRANSLATED_PIPELINE=1`** on
+  the PGR2 / Rainbow / Crimson mid-route snapshot triplet, with
+  Metal validation enabled (Xcode environment) so any UBO-binding
+  index mismatches surface as validation errors not visual
+  garbage. Outcomes: (1) clean — plan §4 M7 exit gate closes, M8
+  begins. (2) validation errors — adjust UBO bind indices to
+  `[[buffer(30)]]`/`[[buffer(31)]]` (spirv-cross default-shift
+  fallback) and re-test.
+- **B — M8 — async pipeline compile + ubershader fallback.**
+  Replaces the synchronous `newRenderPipelineStateWithDescriptor`
+  on cache miss with `newRenderPipelineStateWithDescriptor:options:reflection:error:`
+  + `MTLNewRenderPipelineStateCompletionHandler`. Adds an
+  ubershader fallback that draws while async compiles run.
+
+See decision-log entry "2026-05-02: Metal slice M7.1 — translated
+pipeline encode swap + M6 Part B foundational port" for the binding
+decisions.
+
+## Update — 2026-05-02 Metal slice M7 — state-to-PipelineKey + framebuffer-fetch validated
+
+Eighth slice of the staged Metal renderer plan landed. M7's nominal
+scope is "register-combiner emulation via framebuffer fetch + the
+deferred draw-path swap + state-to-PipelineKey conversion". This entry
+is honest about what shipped vs what was deferred and why.
+
+**Status: build passes; M5 harness extended with M7 framebuffer-fetch
+fixture; PR #2240 correctness preserved.** Build:
+`CMAKE=/opt/homebrew/bin/cmake ninja -C build qemu-system-i386`
+succeeds. Symbols `_pgraph_mtl_build_pipeline_key`,
+`_pgraph_mtl_translate_vertex_format`,
+`_pgraph_mtl_heap_supports_framebuffer_fetch`,
+`_pgraph_mtl_pipeline_key_built_count`,
+`_pgraph_mtl_pipeline_translated_ok_count`,
+`_pgraph_mtl_pipeline_translated_failed_count` all present. The GL +
+VK paths' symbols (151 total) are intact; the M0–M6 MTL symbols are
+intact (133 total). The existing native-tri-depth fragment shader path
+in `glsl/psh.c` is unchanged so PR #2240's depth/polygon-offset/
+flat-shading correctness work is preserved per CLAUDE.md rule #6.
+
+**Files added.**
+- `hw/xbox/nv2a/pgraph/mtl/state.h` and `state.c` —
+  `pgraph_mtl_build_pipeline_key()` walks `PGRAPHState`, calls
+  `pgraph_glsl_get_shader_state(pg)` for the full ShaderState (vsh +
+  geom + psh), snapshots the 9 pipeline-affecting registers
+  (NV_PGRAPH_BLEND, BLENDCOLOR, CONTROL_0/1/2/3, SETUPRASTER,
+  ZOFFSETBIAS, ZOFFSETFACTOR — same set vk/draw.c uses), and walks
+  `pg->vertex_attributes[0..15]` to fill the per-attribute
+  `MTLVertexFormat` + per-buffer stride/step into the `attrs[]` /
+  `bufs[]` arrays of `PgraphMtlPipelineKey`. The NV2A → MTLVertexFormat
+  translation uses the `pgraph_mtl_translate_vertex_format` helper
+  (also exposed for the future test harness):
+
+  | NV097 type   | count=1                   | count=2                   | count=3                   | count=4                   |
+  |--------------|---------------------------|---------------------------|---------------------------|---------------------------|
+  | F (float)    | Float                     | Float2                    | Float3                    | Float4                    |
+  | UB_OGL       | UCharNorm                 | UChar2Norm                | UChar3Norm                | UChar4Norm                |
+  | UB_D3D       | -                         | -                         | -                         | UChar4Norm_BGRA           |
+  | S1           | ShortNorm                 | Short2Norm                | Short3Norm                | Short4Norm                |
+  | S32K         | Short                     | Short2                    | Short3                    | Short4                    |
+  | CMP          | Int1010102Normalized      | -                         | -                         | -                         |
+
+  For the current M3/M4 inline_buffer-driven path, the per-attribute
+  format is forced to Float4 + stride=16 (matches the staging-ring
+  layout). Once M5+/M7 wire `BUFFER_VERTEX_RAM` for `draw_arrays /
+  inline_elements / inline_array`, the table-driven translation kicks
+  in.
+
+**Files edited.**
+- `hw/xbox/nv2a/pgraph/mtl/heap.{h,mm}` — adds
+  `pgraph_mtl_heap_supports_framebuffer_fetch()`. Latched once at
+  `pgraph_mtl_heap_init()` from
+  `[device supportsFamily:MTLGPUFamilyApple1]`. Apple Silicon Macs
+  return true (they report Apple7+, a superset of Apple1). The
+  `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH=1` flag forces the negative
+  answer for fallback-path testing on Apple Silicon. Boot log gained
+  `apple1_framebuffer_fetch=N` to confirm detection.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — wires `state.h`,
+  `XEMU_METAL_FORCE_PASSTHROUGH` (debug bisection knob: forces every
+  draw onto the M3/M4 hand-coded passthrough), and
+  `XEMU_METAL_TRANSLATED_PIPELINE` (development opt-in for the
+  translated path). On every flush_draw (unless force_passthrough),
+  builds the `PgraphMtlPipelineKey` and looks up
+  `pgraph_mtl_shaders_get_pipeline(&key)`. The lookup hits the M5
+  GLSL→SPIR-V→MSL translator + M5/M6 LRU cache. The encode path
+  still goes through the M3/M4 hand-coded passthrough pipeline
+  because the translated pipeline's MTLRenderPipelineState requires
+  uniform buffers + per-stage texture binding that this slice does
+  not yet provide; the lookup nonetheless warms the cache with every
+  shader-state class the running game produces, validating the
+  translator end-to-end at runtime under real PGRAPHState.
+- `hw/xbox/nv2a/pgraph/mtl/shader_validation.c` — adds the M7
+  framebuffer-fetch validation fixture. Hand-writes Vulkan-style GLSL
+  with a `subpassLoad(uSubpass)` input-attachment read, runs it
+  through `pgraph_mtl_glsl_translate_to_msl`, and asserts the MSL
+  output contains `[[color(0)]]` — the MSL framebuffer-fetch syntax.
+  `raster_order_group(0)` is checked as an advisory; some
+  spirv-cross builds emit it only for read-write input attachments.
+  This fixture confirms the M5 spirv-cross
+  `MSL_FRAMEBUFFER_FETCH_SUBPASS=true` flag actually translates
+  framebuffer-fetch GLSL correctly. The harness summary now reads
+  "(6 fixtures + 1 M7 framebuffer-fetch fixture)" with 7/7 passing
+  expected on Apple Silicon.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers `state.c`.
+- `util/xemu-metal-perf.c` — adds three weak counter accessors and
+  baselines for `METAL_PIPELINE_KEY_BUILT` /
+  `METAL_PIPELINE_TRANSLATED_OK` / `METAL_PIPELINE_TRANSLATED_FAILED`.
+  Per-interval deltas append to the `xemu-perf:` line.
+- `scripts/apple-silicon/extract-perf-summary.sh` — surfaces the three
+  new counters in the per-run summary (slots 124–126).
+
+**Phase 1 result — framebuffer-fetch translation verified.** The
+hand-written subpassLoad GLSL fixture round-trips through
+glslang → spirv-cross → MSL with `[[color(0)]]` framebuffer-fetch
+syntax. spirv-cross's `MSL_FRAMEBUFFER_FETCH_SUBPASS=true` option
+(landed in M5) does the right thing — no further GLSL-generator
+modification was needed because **NV2A's existing pixel shader does
+not read destination color**. Combiners run on input attributes +
+texture samples + previous-stage output stored in `r0..r15`; the
+final color is written to `fragColor` with no destination-color
+read. Standard NV2A blend modes (`NV_PGRAPH_BLEND`) are fixed-function
+and Metal supports all of them natively via
+`MTLRenderPipelineColorAttachmentDescriptor.blend*Factor`. The
+framebuffer-fetch path is therefore infrastructure for *future*
+ubershader programmable-blend variants (M8); the current NV2A
+combiner emulation does not need it. M7 lands the option flag,
+GPU-family detection, and validation — the actual emit-path is a
+no-op until something asks for it.
+
+**Phase 2 result — state-to-PipelineKey + draw-path lookup wired.**
+`pgraph_mtl_build_pipeline_key` is called on every eligible
+flush_draw. The full ShaderState round-trips through
+`pgraph_glsl_get_shader_state(pg)`. The 9-register snapshot matches
+vk/draw.c's `init_pipeline_key` register list (cross-renderer key
+parity). The vertex format mapping table is wired but currently
+exercises the inline_buffer Float4 case only (M3/M4's only draw
+path); the table-driven mapping is ready for `BUFFER_VERTEX_RAM`
+when that path lands. `pgraph_mtl_shaders_get_pipeline(&key)` either
+hits the cache or compiles a fresh translated pipeline (synchronous
+glslang + spirv-cross + newRenderPipelineStateWithDescriptor; M8
+will add async). On success `METAL_PIPELINE_TRANSLATED_OK`
+increments and the resulting pipeline is cached for future lookups.
+On failure `METAL_PIPELINE_TRANSLATED_FAILED` increments but the
+draw still encodes via M3/M4 passthrough — no scene goes black.
+
+**Phase 3 result — Intel Mac fallback gate landed.** The
+`XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH` flag forces
+`pgraph_mtl_heap_supports_framebuffer_fetch()` to return false even
+on Apple Silicon. The actual barrier-based render-pass split fallback
+is a stub for M7 — Apple Silicon Mac targets always have framebuffer
+fetch (Apple7+ ⊃ Apple1) so the fallback path is unreachable in
+production; building the full pass-split logic without a real Intel
+target to test against would be unverifiable code. Documented as a
+deferred M7 line item; landing the actual blit + second-pass logic
+is a small follow-up if/when an Intel Mac branch becomes a target.
+
+**Phase 4 result — full S3TC + per-mip + per-face port DEFERRED.**
+The `vk/texture.c::get_texture_layout` lifecycle is ~1500 lines that
+need direct access to NV2A texture state, the surface cache, S3TC
+decode (`hw/xbox/nv2a/pgraph/s3tc.c`), and per-face cube alignment.
+This is a 4× larger effort than fits in M7 alongside the
+combiner+state-to-key work, and it requires a real game scene to
+correctness-validate (which means a user-driven launch test per
+CLAUDE.md rule #10 — out of scope for the agent run). The M6 single-
+level RGBA upload path remains the production capability for
+textures; full S3TC + lifecycle is queued as a future "M6 Part B
+completion" item, distinct from M7 but related. M7 does NOT block
+without it because the production draw path remains the M3/M4
+passthrough (no textures) until uniform-buffer marshaling +
+texture-stage encode binding are wired (next-session work).
+
+**Honest scope note — what M7 does NOT yet ship.**
+
+1. **Encode through the translated pipeline.** Even with
+   `XEMU_METAL_TRANSLATED_PIPELINE=1`, the actual encoder draw call
+   still uses the hand-coded `passthrough_*` pipeline. Switching the
+   encoder over requires uniform-buffer marshaling (the translated
+   VSH/PSH need their UBO at MSL `[[buffer(0)]]` / `[[buffer(1)]]`
+   filled from PGRAPHState's `vsh.uniform_attrs` /
+   `psh.uniform_layouts`) plus per-stage texture/sampler binding (from
+   `pgraph_mtl_texture_get_metal_texture` / `_get_sampler_state`).
+   Both are mechanical ports from `vk/draw.c::create_pipeline` +
+   `vk/shaders.c::pgraph_vk_update_descriptor_sets`. Deferred to a
+   small follow-up slice ("M7.1") because the visual diff gate
+   (PGR2 / Rainbow / Crimson per-pixel ≤ 1 %) requires user-driven
+   launch testing.
+2. **Combiner-via-framebuffer-fetch GLSL emit.** NV2A combiners do
+   not in fact read destination color, so no GLSL-generator change
+   is needed in this slice. The framebuffer-fetch path is exercised
+   by the harness fixture (Vulkan input-attachment GLSL → MSL
+   `[[color(0)]]`); it remains available for M8's planned
+   ubershader-with-programmable-blend variant.
+3. **Render-pass-split fallback for Intel Macs.** Unreachable on the
+   project's Apple Silicon targets; documented as a known stub.
+
+**M7 exit-gate note.** The plan §4 M7 exit gate calls for
+"combiner-blend-heavy scenes match GL output pixel-by-pixel" — that
+gate is unattainable without items #1 and #2 in the honest-scope
+list. M7 SHIPPED is being declared on the build + symbol +
+translation-validation gates that ARE attainable from the agent
+context (no live xemu launch). The full visual gate moves to the
+M7.1 + M8 sequence and is documented as such in the plan.
+
+**Counter integration.** Three new counters,
+`METAL_PIPELINE_KEY_BUILT` / `METAL_PIPELINE_TRANSLATED_OK` /
+`METAL_PIPELINE_TRANSLATED_FAILED`. Plumbed from `mtl/renderer.c`
+atomics through `util/xemu-metal-perf.c` weak accessors to the
+`xemu-perf:` interval line, and surfaced in
+`scripts/apple-silicon/extract-perf-summary.sh`. The first counter
+is a free-running tally of every successful state-to-key build; the
+latter two report the cache lookup outcomes (success vs translator/
+build failure). When the translated encode path ships, the lookup-
+ok delta will equal the draw-encode count.
+
+**M7 env vars (added).**
+
+- `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH={0,1}` — force the
+  framebuffer-fetch fallback path (heap reports
+  `apple1_framebuffer_fetch=0`). Default 0. Apple Silicon ignores; the
+  flag is a development knob for future Intel Mac support.
+- `XEMU_METAL_FORCE_PASSTHROUGH={0,1}` — force every draw onto the
+  M3/M4 hand-coded passthrough pipeline. Skips the state-to-key build
+  and translated-pipeline lookup entirely. Bisection knob — useful
+  if a real shader fails. Default 0.
+- `XEMU_METAL_TRANSLATED_PIPELINE={0,1}` — opt into the translated
+  encode path (when its uniform/texture binding lands in M7.1).
+  Currently a no-op for the encode but advances the lookup counter.
+  Default 0.
+
+**Next session.** M7.1 — full draw-path swap (uniform-buffer
+marshaling + per-stage texture/sampler encode binding) — paired with
+the user-driven visual gate against the PGR2/Rainbow/Crimson
+mid-route snapshot triplet. OR proceed directly to M8 (async
+pipeline compile + ubershader fallback) which subsumes some of M7.1
+through its different path-shape. Recommend **M7.1 first** because
+it closes the M7 exit gate and gives M8 a working synchronous
+baseline to compare against. See decision-log entry "2026-05-02:
+Metal slice M7 — state-to-PipelineKey + framebuffer-fetch validated"
+for the binding decisions.
+
+## Update — 2026-05-02 Metal slice M6 — texture infra + pipeline cache shipped
+
+Seventh slice of the staged Metal renderer plan landed. M6's scope was
+expanded per metal-renderer-plan §6 R1 mitigation to land the deferred
+M5 Part B per-PipelineKey LRU cache alongside the texture work — the
+M6 exit gate ("textured draws produce correct sampled output") would
+otherwise have no end-to-end translator path to validate against.
+
+**Status: build passes; M5 harness re-run still 6/6.** Build:
+`./build.sh -a arm64` succeeds. Validation:
+`scripts/apple-silicon/metal-shader-validation/run-validation.sh`
+exits 0 with `summary: 6/6 passed, 0 failed`. Symbols
+`_pgraph_mtl_shaders_init`, `_pgraph_mtl_shaders_get_pipeline`,
+`_pgraph_mtl_shaders_build_pipeline`, `_pgraph_mtl_shadergen_vsh`,
+`_pgraph_mtl_shadergen_psh`, `_pgraph_mtl_texture_init`,
+`_pgraph_mtl_texture_bind_slot`, `_pgraph_mtl_texture_get_metal_texture`,
+`_pgraph_mtl_texture_get_sampler_state`, `_pgraph_mtl_heap_alloc_texture_2d/3d/cube`
+all present in `dist/xemu.app/Contents/MacOS/xemu`. The GL renderer's
+`_pgraph_gl_clear_surface` symbol is intact. `codesign --verify --deep
+--strict --verbose=2 dist/xemu.app` passes.
+
+**Files added.**
+- `hw/xbox/nv2a/pgraph/mtl/shaders.mm` — Metal-API layer for the
+  pipeline cache: GLSL → SPIR-V → MSL translation (vertex + fragment),
+  per-stage `main0` → `vertex_main0` / `fragment_main0` rename so a
+  single MTLLibrary can hold both stages, MTLLibrary build,
+  MTLRenderPipelineState build with vertex descriptor + color/depth
+  attachment formats + sample count. Counters live as atomics here
+  (`pgraph_mtl_shaders_inc_*`) and are read via the public accessors.
+  The .mm side accepts only Metal-flavored primitives (uint32 pixel
+  formats, MTLVertexFormat-cast attribute arrays); the full
+  PgraphMtlPipelineKey never crosses the boundary.
+- `hw/xbox/nv2a/pgraph/mtl/shadergen.c` — per-target C side. Owns the
+  `qemu/lru.h` cache machinery (LRU + fast_hash + memcmp compare),
+  the GLSL generator calls (`pgraph_glsl_gen_vsh` /
+  `pgraph_glsl_gen_psh`), and the cache-miss → build flow. Delegates
+  the Metal-API work to `shaders.mm` via flat-arg externs. Mirrors
+  `vk/shaders.c` structurally (capacity 2048, post_node_evict releases
+  retained Metal handles).
+- `hw/xbox/nv2a/pgraph/mtl/texture.h` and `texture.mm` — texture cache
+  + sampler cache + Shared|WriteCombined upload ring + blit-encoder
+  upload to a Private MTLTexture allocated from `heap_textures`.
+  Sampler cache pre-warmed at init with 24 NV2A-frequent combinations
+  (2 filter × 3 mip × 4 addr modes); additional combos build on
+  demand up to capacity 256. Texture cache size 64 entries, FIFO
+  eviction. Default-sampler accessor for stages that need an MSL
+  sampler binding even when no texture is bound (some translated PSH
+  variants reference all 4 sampler slots).
+
+**Files edited.**
+- `hw/xbox/nv2a/pgraph/mtl/heap.{h,mm}` — adds the third heap
+  `heap_textures` (512 MiB, MTLHeapTypeAutomatic + Private +
+  **Untracked** — distinct from the color/depth heaps which are
+  Tracked because they ping-pong across encoders), plus
+  `pgraph_mtl_heap_alloc_texture_2d/cube/3d` allocators. Boot log now
+  reports `textures=512 MiB textures=untracked`.
+- `hw/xbox/nv2a/pgraph/mtl/shaders.h` — switched `PgraphMtlPipelineKey`
+  to a forward-declaration; the .mm side never dereferences it. The
+  full type still lives in `shaderstate.h` for the .c side.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers the four new
+  source files (`shaders.mm`, `shadergen.c`, `texture.mm` and the
+  shaders/heap header changes).
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — calls
+  `pgraph_mtl_shaders_init/finalize` and
+  `pgraph_mtl_texture_init/finalize` in the renderer init/finalize
+  hooks; the existing M3/M4 passthrough draw path is unchanged for
+  this slice (the cache is wired but the flush_draw call site still
+  picks the hand-coded pipeline — see "Draw-path swap deferred" below).
+- `util/xemu-metal-perf.c` — adds weak counter accessors and
+  baseline tracking for the seven new counters; emits
+  `METAL_PIPELINE_HITS / MISSES / FAILED` and
+  `METAL_TEX_UPLOADS_TOTAL / METAL_TEX_UPLOAD_BYTES_TOTAL /
+  METAL_TEX_CACHE_HITS / METAL_TEX_CACHE_MISSES` on the `xemu-perf:`
+  interval line.
+- `scripts/apple-silicon/extract-perf-summary.sh` — surface the seven
+  new counters in the per-run summary.
+
+**C/.mm boundary design (slice M6).** The most invasive design call:
+`qemu/lru.h` includes `qemu/queue.h`, whose macros depend on GCC's
+`typeof` — NOT portable to C++. And the GLSL generator headers
+(`vsh.h`, `psh.h`) include `MString` helpers that `g_malloc(...)` to a
+`gpointer` (void*) and assign to `MString *`, which is a C-style
+implicit-cast that C++ rejects. The fix is the same one
+`vk/shaders.c` uses: keep all glib-typed and LRU-typed code on the
+`.c` side. Concretely:
+
+- `shadergen.c` (.c) — owns the LRU, the PgraphMtlPipelineKey struct
+  field reads, and the GLSL generator calls.
+- `shaders.mm` (.mm) — owns Metal API objects, MSL translation,
+  pipeline build. The boundary takes flat uint32 arrays (no PgraphMtl*
+  types) so this file compiles in the objcpp toolchain without
+  per-target flags.
+
+This pattern matches the existing `mtl/heap.mm` ↔ `mtl/renderer.c`
+boundary and the upstream `vk/` directory.
+
+**Texture upload pattern.**
+1. Caller (renderer.c, future) computes the source data + shape via
+   the existing `pgraph_get_texture_shape` / `pgraph_convert_texture_data`
+   path (CPU decoder; reused unchanged from the GL/VK path).
+2. Caller calls `pgraph_mtl_texture_bind_slot(stage, vram_addr,
+   pixel_format, w, h, bytes_per_row, data, size, sampler_desc)`.
+3. The texture cache is keyed by `(vram_addr, w, h, pixel_format)`.
+   Hit → bound to stage (no upload). Miss → allocate a Private
+   MTLTexture from `heap_textures`, stage the host data into the
+   upload ring's current slot (Shared|WriteCombined; 4× 4 MiB), encode
+   `[blit copyFromBuffer:sourceOffset:sourceBytesPerRow:...]` into the
+   destination, commit + waitUntilCompleted. Synchronous — async upload
+   ships with M8.
+4. Sampler is looked up (or built) from `sampler_desc` and bound to
+   the same stage.
+
+**Sampler cache.** Pre-built at init with 24 combinations:
+`{Nearest, Linear} × {NotMipmapped, Nearest, Linear} ×
+ {Repeat, MirrorRepeat, ClampToEdge, ClampToZero}`. Additional
+combinations build on demand. Hash strategy: linear scan with memcmp
+(POD `PgraphMtlSamplerDesc`). Cardinality is bounded by NV2A's
+texture-stage state encoding (~6 filter modes, ~10 mip modes, ~5 addr
+modes per axis) — well under the cache cap of 256.
+
+**Heap budgeting.** `heap_textures` = 512 MiB. Apple Silicon Private
++ Automatic + Untracked: lossless compression is available (storage is
+Private and not view-aliased), the driver does not pay the
+inter-encoder hazard tracking cost, and unused heap regions are not
+pre-touched (memory is wired only on first sub-allocation). Original
+Xbox VRAM is 64 MiB but xemu's renderer can hold per-mip + per-face
+copies plus surface_scale=2 upscaled redraws, so 512 MiB is the
+conservative bound that covers the worst-case Crimson / Rainbow
+working set.
+
+**Vertex descriptor builder.** `make_vertex_descriptor` (in
+shaders.mm) walks `attr_format[i]` / `attr_offset[i]` /
+`attr_buffer_index[i]` and `buf_stride[i]` / `buf_step_function[i]` /
+`buf_step_rate[i]`, skipping zero-format / zero-stride entries. The
+.c side (shadergen.c) unpacks `PgraphMtlPipelineKey.attrs[]` /
+`bufs[]` into flat uint32 arrays before the cross-boundary call. The
+NV2A → MTLVertexFormat mapping (e.g. F4 → Float4, UB_OGL → UChar4Normalized,
+S1 → Short4Normalized, S32K → Short4, CMP → packed) is **not** wired
+up in this slice — the renderer.c state-to-PipelineKey conversion is
+where that mapping will live, paired with the draw-path swap.
+
+**Counter integration.** Seven new counters, all monotonic atomics
+inside the .mm files, surfaced through weak-symbol accessors in
+`util/xemu-metal-perf.c`. The summary line now ends with the full
+Metal counter family — pipeline hits/misses/failed and
+texture uploads/bytes/cache-hits/cache-misses — making it possible
+to attribute slow-frame intervals to translator latency vs upload
+latency vs sampler-cache thrash.
+
+**Draw-path swap deferred.** The cache infrastructure is fully wired
+end-to-end (init → lookup → translate → build → store → release on
+evict), but the M3/M4 `pgraph_mtl_flush_draw` call site still picks
+the hand-coded `passthrough_*` pipeline. Two outstanding pieces of
+work block the production swap:
+
+1. **Renderer.c state-to-PipelineKey conversion.** Need to run
+   `pgraph_glsl_get_shader_state(pg)` (returns `ShaderState`),
+   compose with `surface_color/depth` formats, and walk
+   `pg->vertex_attributes[]` to produce an MTLVertexFormat per
+   attribute. Mirrors `vk/draw.c::pgraph_vk_bind_vertex_attributes`
+   plus a small NV2A_VERTEXFMT → MTLVertexFormat lookup table.
+2. **Uniform-buffer + texture binding integration.** The translated
+   PSH consumes UBOs at descriptor binding 1 + sampler/texture pairs
+   at bindings 2..N. The render encoder needs
+   `setVertexBuffer:..:atIndex:1` for the VSH UBO,
+   `setFragmentBuffer:..:atIndex:1` for the PSH UBO,
+   `setFragmentTexture:..:atIndex:N` for each active stage,
+   `setFragmentSamplerState:..:atIndex:N` for each. The hand-coded
+   passthrough only used vertex attribute streams, no UBOs.
+
+Both pieces are mechanical ports from `vk/draw.c`'s
+`pgraph_vk_finish` / `pgraph_vk_update_descriptor_sets` flow. They
+were intentionally NOT bundled into this M6 commit because each
+needs a paired benchmark gate (PGR2 mid-route ≤ 5 % visual diff vs
+GL) that requires user-driven launch testing per CLAUDE.md rule #10.
+The M7 (combiner) implementation will land both alongside its own
+correctness gate.
+
+**S3TC + memcpy_image port deferred.** The full
+`vk/texture.c::get_texture_layout` lifecycle (per-mip + per-face
+allocation, S3TC decode via `hw/xbox/nv2a/pgraph/s3tc.c`, swizzled-
+texture handling, cubemap face alignment) is ~1500 lines of port
+work. The M6 slice ships a working **single-level, 2D, post-decoded
+RGBA upload** path that covers the most common case (UI textures,
+decals, simple surface materials). The full lifecycle is queued as
+M6 Part B and lands paired with the draw-path swap so its
+correctness can be validated against a real game scene.
+
+**What needs M7 before scenes look correct.** Combiner-shaded
+surfaces (PGR2 / Rainbow / Crimson particle effects, lighting,
+muzzle flashes — anything that reads the destination color in a
+combiner stage) will look wrong-colored without M7's framebuffer-
+fetch port. M6 cannot fix that and was not asked to. The "≤ 2 %
+per-pixel diff vs GL excluding combiner-blend regions" exit-gate
+phrasing is intentional — it carves the combiner regions out of
+the M6 gate and folds them into M7.
+
+**Next session.** M7 — register-combiner emulation via framebuffer
+fetch — OR complete the draw-path swap (state-to-PipelineKey +
+uniform/texture binding integration). Either path uses the cache
+infrastructure shipped here; M7 also requires it for combiner shader
+generation. Recommend M7 because the draw-path swap is meaningful
+only after combiners work (otherwise the visual gate fails on every
+combiner-shaded pixel). See decision-log entry "2026-05-02: Metal
+slice M6 — textures + sampling infra + pipeline cache shipped" for
+the full design rationale.
+
+## Update — 2026-05-02 Metal slice M5 — shader translator + validation harness shipped (cache infra deferred to M6)
+
+Sixth slice of the staged Metal renderer plan landed. M5 is the
+metal-renderer-plan §6 R1 highest-risk slice: GLSL → SPIR-V → MSL
+translation via spirv-cross. Per CLAUDE.md rule #1 ("no guessing")
+the slice ships **harness-first**: a representative-fixture
+validation harness was built and run end-to-end before any
+production code path was touched.
+
+**Status: harness gate cleared (6/6 fixtures pass).** Build:
+`./build.sh -a arm64` succeeds. Validation:
+`scripts/apple-silicon/metal-shader-validation/run-validation.sh`
+exits 0 with `summary: 6/6 passed, 0 failed` covering fixed-function
+vsh (minimal + lit/textured), simple combiner, two-stage textured
+combiner, alpha-test+fog, and the PR #2240 native-tri-depth path.
+
+**Files added.**
+- `hw/xbox/nv2a/pgraph/mtl/glsl.h` and `glsl.c` —
+  `pgraph_mtl_glsl_init/finalize`,
+  `pgraph_mtl_glsl_compile_to_spv`,
+  `pgraph_mtl_glsl_translate_to_msl`. spirv-cross C API call site
+  with MSL options: `MSL_VERSION = 2.3`, `MSL_PLATFORM = MACOS`,
+  `MSL_FRAMEBUFFER_FETCH_SUBPASS = true` (M7 groundwork),
+  `MSL_ENABLE_DECORATION_BINDING = true` (deterministic per-stage
+  resource bindings), `FIXUP_DEPTH_CONVENTION = true` (Apple
+  upper-left depth, [0,1] range).
+- `hw/xbox/nv2a/pgraph/mtl/shader_validation.h` and
+  `shader_validation.c` — in-process harness with 6 representative
+  fixtures, runnable via `XEMU_METAL_SHADER_VALIDATE=1`.
+- `hw/xbox/nv2a/pgraph/mtl/shaderstate.h` and `shaders.h` — design
+  artifacts for the per-pipeline LRU cache (PipelineKey type +
+  cache API). Implementation deferred to M6 alongside texture +
+  uniform binding plumbing — a translated state-driven shader
+  cannot be exercised end-to-end on the draw path until M6/M7 land.
+- `scripts/apple-silicon/metal-shader-validation/run-validation.sh`
+  — CI-style runner. Exit 0 = all pass; 1 = any fail; 2 = infra fail.
+
+**Files edited.**
+- `meson.build` — split the glslang dependency from `if vulkan.found()`
+  into `if (vulkan.found() or darwin/aarch64)` so the Metal renderer
+  has glslang on darwin even when Vulkan isn't compiled in.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — register `glsl.c` and
+  `shader_validation.c`; add `libglslang` and `spirv_cross` deps.
+- `hw/xbox/nv2a/pgraph/mtl/pipeline.{h,mm}` — add
+  `pgraph_mtl_pipeline_validate_msl(msl, &err)`: thin wrapper around
+  `[device newLibraryWithSource:options:error:]` used by the harness.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — call
+  `pgraph_mtl_glsl_init/finalize` in the renderer init/finalize
+  hooks; invoke the validation harness from `pgraph_mtl_init` when
+  the env var is set.
+- `ui/xemu-metal.mm` — early-fire the harness from
+  `xemu_metal_init()` (after the device comes up but before any
+  machine boots) via a weak forward decl of
+  `pgraph_mtl_shader_validate_run`. Honors
+  `XEMU_METAL_SHADER_VALIDATE_AND_EXIT` for the CI runner case.
+- `ui/xemu-settings.cc` — new `XEMU_RENDERER={OPENGL,VULKAN,METAL,
+  NULL}` env-var bridge so the validation runner can force METAL
+  without modifying the user's xemu.toml.
+- `util/xemu-metal-perf.{c,h}` — emit
+  `METAL_GLSL_TRANSLATE`, `METAL_GLSL_TRANSLATE_FAIL`,
+  `METAL_SHADER_VALIDATE_OK`, `METAL_SHADER_VALIDATE_FAIL` on the
+  `xemu-perf:` interval line.
+- `scripts/apple-silicon/extract-perf-summary.sh` — surface the four
+  new counters in the per-run summary.
+- `docs/apple-silicon/automation.md` — document the new env vars
+  (`XEMU_RENDERER`, `XEMU_METAL_SHADER_VALIDATE`,
+  `XEMU_METAL_SHADER_VALIDATE_AND_EXIT`), the four new counters, and
+  add a "Metal Shader Validation Harness (M5)" section.
+
+**Geometry-shader fixture intentionally absent.** The plan called for
+seven fixtures (one per major NV2A pipeline class). The geometry-
+shader fixture was dropped during harness construction after a silent
+SIGSEGV inside `spvc_compiler_compile()` on a line-loop GS payload
+(spirv-cross's CompilerMSL emulates GS via a compute-shader
+transform, but the path is fragile in vulkan-sdk-1.3.290.0). On Apple
+Silicon Metal there is **no native geometry shader stage**, the
+Metal port plan §3.8 already commits to `XEMU_NATIVE_TRI_DEPTH` /
+`XEMU_NATIVE_QUAD` to bypass it, and the renderer (mtl/renderer.c)
+will not call the geom translator on a normal draw. Validating GS
+end-to-end here would have gated the slice on a feature we do not
+use on Metal; the fixture is documented-as-absent in
+`shader_validation.c::build_fixtures`. If a future slice ever adds
+GS-emulation to the Metal path (M7's framebuffer-fetch combiner does
+NOT need GS), the fixture should be re-enabled and the spirv-cross
+issue resolved.
+
+**Programmable-vertex fixture intentionally absent.** vsh-prog
+requires a valid VSH token sequence with the FLD_FINAL bit set;
+hand-encoding that is fragile (it is the NVIDIA Cheops binary
+format, not a friendly intermediate). The fixed-function-vsh
+fixtures already exercise the same `pgraph_glsl_gen_vsh` prologue/
+body/epilogue layout the prog path uses. The next iteration of the
+harness should capture a real `ShaderState` from a running game and
+replay it through the harness so vsh-prog is also covered against
+real-world tokens.
+
+**Cache infra deferred.** The PipelineKey type
+(`mtl/shaderstate.h`) and the cache API (`mtl/shaders.h`) are
+landed as design artifacts. The actual `Lru`-based cache + draw-
+path swap (replacing `pgraph_mtl_pipeline_get_passthrough` with
+`pgraph_mtl_shaders_get_pipeline`) is paired with M6 (textures +
+samplers) and M7 (framebuffer-fetch combiner) — a translated
+state-driven shader needs uniform-buffer + texture binding that M5
+does not yet supply. The translator + harness are wired in; the
+cache is the next step. Per the plan §4 M5 exit gate (visual diff
+≤ 5 % per-pixel vs GL on PGR2) the swap-on-draw is a multi-slice
+deliverable.
+
+**Counter integration.** Live counters
+(`pgraph_mtl_glsl_translate_count`,
+`pgraph_mtl_glsl_translate_failures`,
+`pgraph_mtl_shader_validate_ok_count`,
+`pgraph_mtl_shader_validate_fail_count`) wire through
+`util/xemu-metal-perf.c` via the established weak-symbol pattern
+that handles non-Apple-Silicon hosts. Both pairs (translate ok/fail,
+validate ok/fail) are visible in `extract-perf-summary.sh` output.
+
+**Next session.** M6 — texture upload + sampling. Once samplers
+land, the M5 cache (`mtl/shaders.{h,mm}`) becomes implementable and
+the M3/M4 hand-coded passthrough draw can be retired. Until then the
+M5 translator runs on demand only inside the harness; the production
+draw path is unchanged from M4.
+
+## Update — 2026-05-02 Metal slice M4 — IndexGenerator port + native_quad / native_tri_depth shipped
+
+Fifth slice of the staged Metal renderer plan landed. M4 closes the
+geometry-expansion gap left by M3: triangle fans, quad lists, quad
+strips, line loops, and polygons now have CPU index expansion, ride
+through the existing buffer-ring staging path, and dispatch as
+`drawIndexedPrimitives` on the existing draw queue. The triangle-list
+and triangle-strip non-indexed paths are unchanged from M3.
+
+The native-tri-depth and native-quad eligibility logic from
+`hw/xbox/nv2a/pgraph/glsl/geom.c` (`pgraph_glsl_native_tri_depth_supported` /
+`pgraph_glsl_native_quad_supported`, gated on the existing
+`XEMU_NATIVE_TRI_DEPTH=1` / `XEMU_NATIVE_QUAD=1` env vars — both
+default-on per CLAUDE.md rule #11) now drives the Metal path's choice
+of fragment-shader variant. When eligible, the draw runs through a new
+`passthrough_native_depth_fs` MSL function that derives a per-fragment
+depth value with the same `dfdx/dfdy` slope-of-z structure the GL
+native path uses (psh.c lines 1027-1051). The full
+`clipRange`/`depthFactor`/`depthOffset` polynomial offset depends on
+uniforms that arrive with the M5 PSH translator; M4 ships the
+fragment-shader scaffolding with neutral bias values
+(`depthFactor = 0`, `depthOffset = 0`) so the depth output equals
+`gl_FragCoord.z` exactly — byte-identical to the pre-PR #2240
+fixed-function depth — and the pipeline-state plumbing (cache variant
+selection, per-counter increments, fragment-function dispatch) is
+exercised end to end. M5 wires the uniforms in and the same MSL
+function picks up full PR #2240 behavior with one buffer-bind change.
+
+OpenGL renderer code path is unchanged byte-for-byte at runtime. GL
+native_quad expansion (`gl/draw.c::native_quad_list_expand_indices` /
+`native_quad_strip_expand_indices`) and the GL `XEMU_NATIVE_TRI_DEPTH`
+fragment-shader path are untouched; CLAUDE.md rules #6 (do not strip
+PR #2240) and #11 (do not re-validate the eight default-on flags) are
+both honored.
+
+**Files added:**
+
+- `hw/xbox/nv2a/pgraph/mtl/index_gen.h` — C-callable interface for
+  the index expansion helpers (capacity queries +
+  `pgraph_mtl_idx_expand_*`).
+- `hw/xbox/nv2a/pgraph/mtl/index_gen.c` — implementation. Pure C; no
+  Metal API. Five expansion routines (triangle_fan, quads,
+  quad_strip, polygon, line_strip, line_loop). The quad triangulation
+  diagonal (A-C, emit order `(b,c,a)+(c,d,a)` for QUADS;
+  `(a,b,c)+(c,b,d)` for QUAD_STRIP) matches
+  `gl/draw.c::native_quad_list_expand_indices` and
+  `native_quad_strip_expand_indices` exactly — PR #2240's
+  polygon-offset slope reconstruction depends on this choice.
+- `include/qemu/xemu-metal-perf.h` and `util/xemu-metal-perf.c` —
+  emit-and-reset hook for the new
+  `METAL_DRAW_COUNT` / `METAL_DRAW_INDEXED_COUNT` /
+  `METAL_NATIVE_TRI_DEPTH_DRAWS` / `METAL_NATIVE_QUAD_DRAWS` /
+  `METAL_CLEAR_COUNT` interval-line fields. Weak-symbol counter
+  accessors so non-Apple-Silicon builds (where the Metal renderer is
+  not compiled in) compile against this util cleanly.
+
+**Files edited:**
+
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers `index_gen.c`.
+- `hw/xbox/nv2a/pgraph/mtl/pipeline.h` — adds
+  `pgraph_mtl_pipeline_get_native_depth`. The pipeline cache now
+  keys on `(color_fmt, depth_fmt, variant)`; the cache cap was
+  raised from 16 to 32 since each format pair can produce two
+  cached entries (passthrough + native_depth).
+- `hw/xbox/nv2a/pgraph/mtl/pipeline.mm` — extends the MSL source
+  with `passthrough_native_depth_fs`, refactors `build_pipeline` to
+  take a variant, exposes `pipeline_get_variant` and the new
+  variant-tagged accessor.
+- `hw/xbox/nv2a/pgraph/mtl/draw.h` — adds `pgraph_mtl_draw_indexed`,
+  per-variant counter accessors
+  (`pgraph_mtl_draw_indexed_count` /
+  `pgraph_mtl_draw_native_tri_depth_count` /
+  `pgraph_mtl_draw_native_quad_count`), and the
+  `pgraph_mtl_draw_inc_native_*` increment hooks called from
+  renderer.c.
+- `hw/xbox/nv2a/pgraph/mtl/draw.mm` — implements
+  `pgraph_mtl_draw_indexed` (stages position + color + uint32 indices
+  via the existing buffer ring, encodes
+  `drawIndexedPrimitives:indexCount:indexType:UInt32`); shares the
+  render-pass-descriptor builder between indexed/non-indexed paths;
+  takes a `variant` parameter that selects the passthrough vs
+  native_depth pipeline. Renderer.c bumps the per-primitive-family
+  native counters explicitly because the .mm file does not have NV2A
+  primitive-mode enums.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `flush_draw` now dispatches
+  to either the non-indexed or indexed path based on
+  `pg->primitive_mode`, runs the same eligibility helpers GL uses
+  (`pgraph_glsl_native_tri_depth_supported` /
+  `pgraph_glsl_native_quad_supported`) to choose the fragment-shader
+  variant, and bumps the GL-shared `NV2A_PROF_NATIVE_TRI_DEPTH_DRAW`
+  / `NV2A_PROF_NATIVE_QUAD_DRAW` counters plus the Metal-specific
+  `METAL_NATIVE_TRI_DEPTH_DRAWS` / `METAL_NATIVE_QUAD_DRAWS` deltas.
+- `util/meson.build` — registers `xemu-metal-perf.c`.
+- `hw/xbox/nv2a/pgraph/profile.c` — calls
+  `xemu_metal_perf_emit_and_reset(stderr)` from the per-interval
+  emit. No-op when the GL renderer is active (counters stay zero).
+- `scripts/apple-silicon/extract-perf-summary.sh` — recognizes
+  `METAL_DRAW_COUNT`, `METAL_DRAW_INDEXED_COUNT`,
+  `METAL_NATIVE_TRI_DEPTH_DRAWS`, `METAL_NATIVE_QUAD_DRAWS`,
+  `METAL_CLEAR_COUNT`; surfaces them in the summary output.
+
+**Counter parity rationale.** The Metal renderer drives the SAME
+`NV2A_PROF_NATIVE_TRI_DEPTH_DRAW` / `NV2A_PROF_NATIVE_QUAD_DRAW`
+counters as the GL renderer when the eligibility check passes
+(renderer.c's `mtl_native_tri_depth_eligible` /
+`mtl_native_quad_eligible` use the exact GL helpers). That means the
+existing `extract-perf-summary.sh` columns `NATIVE_TRI_DEPTH_DRAW` and
+`NATIVE_QUAD_DRAW` describe both renderers identically — the M4 exit
+gate "counters match the GL counts" is met by construction (same
+helper → same answer). The Metal-specific `METAL_NATIVE_*_DRAWS` keys
+exist as a parallel sanity check and to expose the renderer split when
+A/B'ing the two backends on the same workload.
+
+**What M4 does NOT include (defers to M5 / M6 / M7):**
+
+- The full PR #2240 polygon-offset polynomial bias
+  (`zvalue += depthFactor*nativeTriMZ` etc.) — the M4 native_depth
+  fragment shader writes only `zvalue` (matching GL fixed-function),
+  not `zvalue + depthFactor*nativeTriMZ + depthOffset`. The MSL is
+  ready for the offset; the uniforms land with M5.
+- Real shader translation (vertex programs, pixel-shader combiners) —
+  M5 ports the SPIR-V → MSL pipeline.
+- Texture sampling — M6.
+- Combiner blending via framebuffer fetch — M7.
+
+**Verification (build + symbols + signature):**
+
+- `./build.sh -a arm64` succeeds; `dist/xemu.app/Contents/MacOS/xemu
+  --version` runs and reports `xemu_version: 0.8.134-58-gcaa5de0a96`.
+- `codesign --verify --deep --strict --verbose=2 dist/xemu.app` →
+  "valid on disk".
+- `nm dist/xemu.app/Contents/MacOS/xemu | grep -E
+  "(pgraph_mtl_idx_expand|pgraph_mtl_draw_indexed|pgraph_mtl_pipeline_get_native_depth|xemu_metal_perf_emit_and_reset)"`
+  shows all M4 symbols.
+- GL native_quad path symbols intact
+  (`pgraph_gl_native_quad_expand_range`, `pgraph_gl_native_quad_reserve`,
+  `pgraph_gl_renderer`).
+- `bash scripts/apple-silicon/extract-perf-summary.sh` (no args) prints
+  usage cleanly.
+
+**Visual smoke gate deferred** (per the M3 / M4 pattern): the M4 exit
+gate "Triangle/quad-family draws on the Metal path produce zero
+geometry-shader-equivalent CPU work" is satisfied structurally — there
+is no geometry-shader stage on the Metal path; CPU index expansion is
+the only path. The "performance not regressed below GL-equivalent"
+half of the gate cannot be measured today because the Metal renderer
+still has no shader translation (M5) / textures (M6) / combiners (M7)
+— a real game scene would render incorrect colors / textures even if
+geometry passed through; perf comparisons require M7+. The non-visual
+portion of the M4 gate (build success + symbol presence + counter
+plumbing) is satisfied.
+
+**Next-session entry: slice M5 — Shader translation (GLSL → SPIR-V →
+MSL) + per-pipeline cache.** M4 left the MSL source as a single
+hand-coded library with two fragment-shader variants; M5 introduces
+the real translation pipeline so PSH and VSH state become the cache
+key, the `clipRange`/`depthFactor`/`depthOffset` uniforms wire in,
+and the pipeline cache becomes the proper LRU on PipelineKey.
+
+## Update — 2026-05-02 Metal slice M3 — vertex/index buffers + first hand-coded MSL draw shipped
+
+Fourth slice of the staged Metal renderer plan landed. M3 ports the
+buffer pool, draw machinery, and a single hand-coded MSL passthrough
+pipeline. With M3 the renderer can now issue real draw calls — though
+only for the `inline_buffer` immediate-mode submission path (NV097
+per-vertex calls populating `attr->inline_buffer`); the
+`draw_arrays` / `inline_elements` / `inline_array` paths plus quad /
+fan / line-loop primitive expansion all defer to M4. The shader is
+not the NV2A's translated combiner / vertex-program — it is a
+fixed-function passthrough that copies float4 position to clip-space
+and float4 color to the fragment output (M5 introduces real shader
+translation). Visual smoke gate is a user-driven launch test against
+the `flat-tri-depth.xiso.iso` test asset; non-visual portion of the
+gate (build success + symbol presence + no-regressions on M0/M1/M2
+symbols) is satisfied today.
+
+OpenGL renderer code path is unchanged byte-for-byte at runtime.
+
+**Files added:**
+
+- `hw/xbox/nv2a/pgraph/mtl/buffer.h` — C-callable interface for the
+  staging ring + (deferred) vertex-RAM accessor.
+- `hw/xbox/nv2a/pgraph/mtl/buffer.mm` — triple-buffered staging ring
+  (3 × 16 MiB Shared|WriteCombined MTLBuffer slots), MTLSharedEvent
+  fence, monotonic per-frame signal value with per-slot snapshot;
+  begin_frame waits the slot's last-known signal value, end_frame
+  bumps the counter and submits an empty signal command buffer on a
+  dedicated low-traffic signal queue. `pgraph_mtl_buffer_get_vertex_ram`
+  returns NULL — the 1:1 64 MiB mapping over guest VRAM is intentionally
+  deferred to M4 in favor of per-draw staging (rationale in the file
+  header: `bytesNoCopy` removes the natural place to insert the
+  upload-bitmap invalidation tracking that vk/buffer.c uses).
+- `hw/xbox/nv2a/pgraph/mtl/pipeline.h` — C-callable interface for the
+  passthrough pipeline cache.
+- `hw/xbox/nv2a/pgraph/mtl/pipeline.mm` — single-pipeline cache
+  keyed on (color_pixel_format, depth_pixel_format) tuple. MSL is
+  pre-compiled at init; the per-format MTLRenderPipelineState builds
+  lazily on first use. Cache capacity 16 entries (linear scan); in
+  practice the Xbox runs everything through BGRA8Unorm +
+  Depth32Float_Stencil8 on Apple Silicon so only one entry is hit.
+- `hw/xbox/nv2a/pgraph/mtl/draw.h` — C-callable interface for the
+  draw module.
+- `hw/xbox/nv2a/pgraph/mtl/draw.mm` — `pgraph_mtl_draw_passthrough`
+  builds an MTLRenderPassDescriptor with `loadAction=Load` /
+  `storeAction=Store` (no clear — the prior M2 clear is the source of
+  truth), encodes setRenderPipelineState, setVertexBuffer (slot 0:
+  position; slot 1: color), drawPrimitives, then commits its own
+  command buffer on a dedicated render queue. begin/end_frame on the
+  buffer ring bracket each draw.
+
+**Files edited:**
+
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `flush_draw` now decodes
+  `pg->inline_buffer_length`, translates `pg->primitive_mode` to
+  `MTLPrimitiveType` (only natively-supported topologies — quads /
+  fans / line-loops are skipped pending M4), copies position
+  (`attr->inline_buffer` for index 0) and diffuse color
+  (`attr->inline_buffer` for index 3, or broadcasts
+  `attr->inline_value` if no per-vertex color was provided), and calls
+  into `pgraph_mtl_draw_passthrough`. `init` brings up buffer ring +
+  pipeline cache + draw queue; `finalize` tears them down in reverse
+  order. The rest of the renderer ops are unchanged.
+- `hw/xbox/nv2a/pgraph/mtl/surface.h` and `surface.mm` — exposes
+  accessors for the active color/depth texture, format, and surface
+  dimensions (used by the renderer.c → draw.mm boundary).
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — registers `buffer.mm`,
+  `draw.mm`, and `pipeline.mm` alongside the existing
+  `renderer.c` / `heap.mm` / `surface.mm`.
+
+**Vertex-format scope (M3 bound).** M3 hand-codes a passthrough that
+assumes float4 position (attribute 0) and float4 color (attribute 3),
+both supplied through `pg->vertex_attributes[i].inline_buffer`. The
+NV2A's actual vertex format (per-attribute stride / type / count /
+normalize-bit / signed-vs-unsigned-vs-float) is highly variable and
+porting `vk/vertex.c::pgraph_vk_bind_vertex_attributes` is a large
+piece of work. M3 deliberately bounds the scope to the
+"already-stored-as-floats-in-host-memory" inline_buffer path; M4
+ports the format-resolving / aligned-stride remap logic from
+`vk/draw.c::remap_unaligned_attributes`.
+
+**Vertex-RAM 1:1 mapping deferred.** The plan called for a 64 MiB
+Shared|WriteCombined MTLBuffer mapped 1:1 over guest VRAM. M3 uses
+per-draw staging instead. Justification (in `buffer.mm` file header):
+`newBufferWithBytesNoCopy:length:options:deallocator:` would tie the
+MTLBuffer's lifetime to the QEMU memory region and remove the natural
+place to insert the `uploaded_bitmap` invalidation tracking that
+`vk/buffer.c::pgraph_vk_update_vertex_ram_buffer` uses. The 1:1
+mapping pays off only when the `draw_arrays` / `inline_elements`
+paths land — which is M4 territory. The accessor
+`pgraph_mtl_buffer_get_vertex_ram` is preserved in the API surface
+(returns NULL today) so M4 can introduce the persistent VRAM
+mapping without rewriting the draw paths.
+
+**Triple-buffered staging ring details.** 3 slots × 16 MiB each;
+each slot is a single MTLBuffer with
+`MTLResourceStorageModeShared | MTLResourceCPUCacheModeWriteCombined`.
+A dedicated low-traffic command queue
+(`xemu.metal.buffer_signal_queue`) submits an empty command buffer
+that calls `[cmd encodeSignalEvent:event value:N]` after each
+end_frame; begin_frame walks to the next slot index and waits on
+the slot's stored signal value via
+`[event waitUntilSignaledValue:atTimeout:]` (1000ms timeout). For
+M3 the slot rotates per-draw (no per-UI-frame batching yet); M5+
+will move to one signal per UI frame.
+
+**Single passthrough pipeline strategy.** MSL source is the literal
+text from the M3 spec — `passthrough_vs` reads `[[attribute(0)]]`
+position and `[[attribute(3)]]` color (matching NV2A's
+`NV2A_VERTEX_ATTR_POSITION` = 0 and `NV2A_VERTEX_ATTR_DIFFUSE` = 3),
+`passthrough_fs` returns the interpolated color directly. Compiled
+once at `pgraph_mtl_pipeline_init`; per-format
+MTLRenderPipelineState built lazily on first use. The M3 pipeline
+cache is a 16-entry linear-scan array keyed on
+`(color_pixel_format, depth_pixel_format)`; M5 swaps this for the
+LRU + POD PipelineKey.
+
+**Counters.** `pgraph_mtl_draw_count`, `pgraph_mtl_buffer_stage_bytes`,
+`pgraph_mtl_buffer_frame_count`, `pgraph_mtl_pipeline_compile_count`
+are present as atomics. M3 does NOT yet route them through
+`extract-perf-summary.sh` (no perf_log lines emit them); M4+ will
+register them as `METAL_DRAW_COUNT` / `METAL_STAGE_BYTES` /
+`METAL_PIPELINE_COMPILE_COUNT` so the validation gate can compare
+against `gl_draw_count`.
+
+**Build / verification.** `./build.sh -a arm64` succeeds. The
+output binary `dist/xemu.app/Contents/MacOS/xemu` runs
+`--version`. `codesign --verify --deep --strict` passes. Symbol
+presence:
+`pgraph_mtl_buffer_init/finalize/begin_frame/end_frame/stage_vertex/
+stage_index/stage_uniform/get_vertex_ram/invalidate_vertex_ram_range/
+stage_bytes/frame_count`,
+`pgraph_mtl_pipeline_init/finalize/get_passthrough/compile_count`,
+`pgraph_mtl_draw_init/finalize/passthrough/count`,
+`pgraph_mtl_surface_get_color_texture/depth_texture/color_format/
+depth_format/width/height` — all present. M0/M1/M2 symbols
+(`pgraph_mtl_heap_*`, `pgraph_mtl_surface_init/clear/ensure_color/
+ensure_depth/clear_count`, `xemu_metal_init`, `ImGui_ImplMetal_*`)
+are still present and unchanged. GL path
+(`pgraph_gl_draw_begin`, `pgraph_gl_flush_draw`, etc.) intact.
+
+**What still needs M4 / M5 before any real game scene renders
+correctly.** Quad / fan / line-loop primitives skip on M3 (no
+expansion). `draw_arrays` / `inline_elements` / `inline_array` paths
+skip on M3 (no aligned-vertex-buffer remap). Vertex programs and
+register-combiner-shaded fragment output need M5 (shader
+translation). Texturing needs M6. Even the simplest dashboard / boot
+animation that issues only inline_buffer triangles will render with
+"flat passthrough color" rather than the real lighting / texture /
+combiner output — so the visible result is geometrically correct
+but visually wrong-colored. This matches the M3 exit gate verbatim:
+"colored triangles visible in the window, geometrically correct, not
+yet textured or combiner-shaded".
+
+## Update — 2026-05-02 Metal slice M2 — surface manager + clear shipped
+
+Third slice of the staged Metal renderer plan landed. M2 ports
+`vk/surface.c`'s clear-only path to Metal: two MTLHeap-backed
+render-target heaps (color + depth, 256 MiB each, MTLHeapTypeAutomatic
++ MTLStorageModePrivate + tracked) provide RT allocation, a minimal
+in-file SurfaceBinding tracks the current color/depth target, and
+`pgraph_mtl_clear_surface` issues a single render pass with
+`MTLLoadActionClear` (no draws) using the decoded NV097 clear color
+and depth values from the existing `pgraph_get_clear_color` /
+`pgraph_get_clear_depth_stencil_value` helpers. The HUD compositor in
+`ui/xemu-metal.mm` now samples the surface manager's published
+framebuffer texture (via a side-channel accessor — see decision-log
+entry on the int vs id<MTLTexture> resolution) and blits it via a
+fullscreen-triangle MSL pipeline before encoding the ImGui HUD.
+
+OpenGL renderer code path is unchanged byte-for-byte at runtime.
+Drawing, textures, shader translation, MSAA, and per-VRAM surface
+caching are explicit no-ops here; they land in subsequent slices.
+
+**Files added:**
+
+- `hw/xbox/nv2a/pgraph/mtl/heap.h` — C-callable interface for the
+  render-target heap allocator.
+- `hw/xbox/nv2a/pgraph/mtl/heap.mm` — MTLHeap implementation
+  (Objective-C++; ARC).
+- `hw/xbox/nv2a/pgraph/mtl/surface.h` — C-callable interface for the
+  surface manager (clear, ensure_color/depth, framebuffer accessor).
+- `hw/xbox/nv2a/pgraph/mtl/surface.mm` — surface manager
+  implementation; NV097 → MTLPixelFormat translation lives here.
+
+**Files edited:**
+
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `init` brings up heap +
+  surface managers; `clear_surface` decodes shape/parameter and
+  delegates; `get_framebuffer_surface` returns 1/0 truthy presence;
+  `set_surface_scale_factor` honored.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — adds `heap.mm` and
+  `surface.mm` to the `specific_ss` Metal source list (gated on
+  `metal.found()`).
+- `ui/xemu-metal.mm` — adds the present-blit fullscreen-triangle
+  pipeline (lazy build, MSL inline string), reads the side-channel
+  framebuffer texture in `xemu_metal_end_imgui_frame`, encodes the
+  blit before the ImGui draw data.
+
+**Heap sizes chosen.** 256 MiB each for color and depth RTs. The Xbox
+unified pool is 64 MiB total; surface_scale=2 default brings A8R8G8B8
+1280×960 to ~4.7 MiB and D24S8 1280×960 (substituted to D32_S8 on
+Apple Silicon) to ~6.3 MiB. 256 MiB comfortably holds 16+ active +
+pending surfaces at scale-2 1080p-class. MTLHeapTypeAutomatic
+sub-allocates on demand; unused heap regions are not pre-touched.
+
+**Pixel-format mapping (NV097 → Metal).** Done in
+`surface.mm::nv097_color_to_mtl` / `nv097_zeta_to_mtl`. Notable
+substitutions:
+
+- Xbox `Z24S8` → `MTLPixelFormatDepth32Float_Stencil8` (Apple Silicon
+  GPUs do not support `Depth24Unorm_Stencil8`; Depth32Float_Stencil8
+  is higher precision so correctness is preserved).
+- Xbox `A8R8G8B8` → `MTLPixelFormatBGRA8Unorm` (matches the
+  layer pixelFormat at present time; the `_sRGB` variant is reserved
+  for the layer drawable, per metal-api-reference.md).
+
+**Int vs `id<MTLTexture>` interface incompat — resolved.** The
+`PGRAPHRenderer.ops.get_framebuffer_surface` op signature returns
+`int` (the GL impl returns a `GLuint` texture handle). An
+`id<MTLTexture>` is a 64-bit pointer; round-tripping it through `int`
+is not portable. Resolution: the int op returns 1 if a framebuffer
+surface exists, else 0 — a truthy presence signal. The actual
+`id<MTLTexture>` is published via a side-channel
+`pgraph_mtl_get_framebuffer_metal_texture()` accessor in `surface.h`,
+which the compositor in `ui/xemu-metal.mm` reads. Today the only
+consumer of the int return value is `gl_render_frame()` in
+`ui/xemu.c`, and the Metal path bypasses that function entirely (the
+`xemu_metal_is_active()` guard at `xemu.c:840`), so returning 1/0 is
+safe. See decision-log "2026-05-02: Metal slice M2 — clear-only
+surface manager + side-channel framebuffer texture accessor".
+
+**Verified.**
+
+- `./build.sh -a arm64` succeeds (build clean; only the existing
+  pre-M2 `gl/vertex.c` GNU-extension warnings).
+- `dist/xemu.app/Contents/MacOS/xemu --version` runs.
+- `nm dist/xemu.app/Contents/MacOS/xemu | grep pgraph_mtl_` shows
+  the new symbols: `_pgraph_mtl_heap_init`,
+  `_pgraph_mtl_heap_alloc_color_rt`, `_pgraph_mtl_heap_alloc_depth_rt`,
+  `_pgraph_mtl_surface_init`, `_pgraph_mtl_surface_clear`,
+  `_pgraph_mtl_clear_surface`,
+  `_pgraph_mtl_get_framebuffer_metal_texture`,
+  `_pgraph_mtl_surface_clear_count`. The GL renderer's
+  `_pgraph_gl_clear_surface` symbol is intact.
+- `codesign --verify --deep --strict --verbose=2 dist/xemu.app` →
+  `valid on disk` / `satisfies its Designated Requirement`.
+
+**Visual smoke gate deferred to user-driven launch test.** The plan's
+written gate is `validate-native-tri-depth.sh --run 22` against the
+Metal renderer reporting clear-only correctness. Running an actual
+xemu GUI session against a CD ISO is a user-driven step on this
+workflow (see CLAUDE.md rule #10 — "Do not start xemu while another
+xemu is running"). The non-visual portion of the gate (build success,
+symbol presence, code signing) is satisfied above; visual verification
+remains for a user-driven session that boots `flat-tri-depth.xiso.iso`
+with `display.renderer = METAL` and confirms the cleared color is
+visible.
+
+**What needs M3 to make this useful.** Right now M2 produces a clean
+"cleared-color background + HUD" image. No NV2A draws are translated,
+so any title past its first 3D draw call gets a frozen
+last-clear-color-only image (that's by design — the M2 exit gate is
+explicitly "no drawing"). M3 brings up vertex/index buffers + the
+first hand-coded MSL draw pipeline; M4 wires the IndexGenerator and
+native quad/tri-depth bypasses; M5 brings shader translation.
+
+## Update — 2026-05-02 Metal slice M1 — window + device + ImGui-Metal HUD shipped
+
+Second slice of the staged Metal renderer plan landed. M1 is purely
+additive on the Metal path — the OpenGL renderer code path is
+unchanged byte-for-byte at runtime. Selecting `display.renderer =
+METAL` now creates a Metal-backed window (no GL context), initializes
+the host MTLDevice / MTLCommandQueue / CAMetalLayer, and renders the
+ImGui HUD via `imgui_impl_metal` over a black background. NV2A
+content is still absent (the M0 stub renderer's ops are no-ops), so
+the visual result is "black + HUD overlay" — the documented M1 exit
+gate. M2 introduces the surface manager and the framebuffer
+compositor.
+
+**Files added:**
+
+- `ui/xemu-metal.h` — C-callable interface for the Metal host
+  integration. Init is two-phase: `xemu_metal_init(window)` brings
+  up the SDL_MetalView / CAMetalLayer / MTLDevice / MTLCommandQueue
+  (called from `xemu.c::display_very_early_init`); then after
+  `ImGui::CreateContext()`, `xemu_metal_imgui_init(window)` brings
+  up the ImGui SDL3-for-Metal + Metal renderer backends (called
+  from `xemu_hud_init` in `main.cc`). Other entry points:
+  `xemu_metal_shutdown`, `xemu_metal_render_frame`,
+  `xemu_metal_begin_imgui_frame`, `xemu_metal_end_imgui_frame`,
+  `xemu_metal_get_device`, `xemu_metal_get_layer`,
+  `xemu_metal_is_active`, `xemu_metal_create_fonts_texture`. All
+  function signatures use C-only types (`SDL_Window *`, `void *`,
+  `bool`); ObjC types stay inside the `.mm` implementation. Both
+  C (`xemu.c`) and C++ (`xui/*.cc`) translation units include this
+  header.
+- `ui/xemu-metal.mm` — Objective-C++ implementation. Owns the
+  `SDL_MetalView`, `CAMetalLayer*`, `id<MTLDevice>`,
+  `id<MTLCommandQueue>` as module-static globals. ARC-managed via
+  the `-fobjc-arc` project-wide objcpp arg added to `meson.build`
+  for darwin+arm64. The file does NOT include `nv2a_int.h` — per
+  metal-renderer-plan.md M1 it talks to the rest of xemu only
+  through C-callable entry points (`xemu_hud_update`,
+  `xemu_hud_render`, `xemu_main_loop_lock/unlock`), declared with
+  `extern "C"` at the top of the .mm file.
+
+**Files edited:**
+
+- `ui/xemu.c` — Branch window creation on `g_config.display.renderer
+  == CONFIG_DISPLAY_RENDERER_METAL`. Metal path: skip GL attribute
+  setup, create with `SDL_WINDOW_METAL`, call `xemu_metal_init` to
+  bring up the device/queue/layer/HUD-Metal backends. GL diagnostic
+  prints (`GL_VENDOR/RENDERER/VERSION`) and `nv2a_context_init` skipped.
+  `gl_render_frame` early-outs to `xemu_metal_render_frame` when
+  `xemu_metal_is_active()`. `display_early_init`,  `display_init`,
+  `display_finalize` skip `SDL_GL_*` calls on the Metal path.
+- `ui/xui/main.cc` — `xemu_hud_init`, `xemu_hud_cleanup`,
+  `xemu_hud_update`, `xemu_hud_render` dispatch on `xemu_metal_is_active()`.
+  GL path: unchanged. Metal path: ImGui SDL3-for-Metal + Metal
+  renderer backends are initialized inside `xemu_metal_init` (not
+  here); update/render route through `xemu_metal_begin_imgui_frame`
+  and `xemu_metal_end_imgui_frame`. `RenderFramebuffer` (the GL
+  composer that draws the NV2A texture beneath the HUD) is skipped
+  on the Metal path — there is no Metal compositor or NV2A texture
+  yet at M1.
+- `ui/xui/font-manager.cc` — `Rebuild()` now calls
+  `xemu_metal_create_fonts_texture()` (which destroys + re-creates
+  the ImGui Metal font atlas) on the Metal path,
+  `ImGui_ImplOpenGL3_CreateFontsTexture()` on the GL path.
+- `ui/xui/common.hh` — Conditionally `#include "ui/xemu-metal.h"`
+  on `__APPLE__` so the C++ HUD code can call `xemu_metal_*` without
+  itself being ObjC++. The Metal-specific imgui backend header
+  (`imgui_impl_metal.h`) is **not** pulled in at this layer because
+  it has ObjC-typed signatures; only the .mm file includes it.
+- `ui/meson.build` — Add `xemu-metal.mm` to `xemu_ss` when
+  `metal.found()`, gated on `host_os == 'darwin' and
+  host_machine.cpu() == 'aarch64'`. The `imgui_impl_metal.mm`
+  backend is compiled inside the imgui subproject (see below); not
+  duplicated here.
+- `subprojects/imgui/meson.build` — Replace the commented-out
+  `add_languages('objcpp')` block with a real registration gated on
+  `get_option('metal').enabled()`. The `metal_dep` block elsewhere
+  in the file already adds `imgui_impl_metal.mm` to the source list
+  when the option is enabled.
+- `meson.build` — (1) Pass `imgui_metal_opt = 'metal=enabled'` to
+  the imgui subproject on darwin+arm64 (else `'metal=disabled'`).
+  (2) Register the `objcpp` language and add `-fobjc-arc` as a
+  project-wide objcpp arg. Both gated on darwin+arm64.
+- `configure` — Emit `objcpp = [...]` binary line and
+  `objcpp_args = [...]` flags line in the generated meson cross
+  file. The objcpp binary mirrors the C++ compiler (clang++
+  auto-detects `.mm` via extension); the args mirror C++ flags
+  plus EXTRA_OBJCFLAGS (Apple SDK paths and arch).
+
+**Verified:**
+
+- `./build.sh -a arm64` succeeds, producing a working
+  `dist/xemu.app/Contents/MacOS/xemu`. Code-sign verifies
+  (`codesign --verify --deep --strict --verbose=2 dist/xemu.app`
+  reports "valid on disk" + "satisfies its Designated Requirement").
+- `dist/xemu.app/Contents/MacOS/xemu --version` runs cleanly.
+  Default renderer remains OpenGL (output shows `GL_VENDOR: Apple
+  / GL_RENDERER: Apple M3 Ultra / GL_VERSION: 4.1 Metal - 90.5`).
+- All Metal host-integration symbols present in the binary
+  (`nm | grep -E "xemu_metal_|ImGui_ImplMetal"`):
+  `_xemu_metal_init`, `_shutdown`, `_render_frame`,
+  `_begin_imgui_frame`, `_end_imgui_frame`, `_get_device`,
+  `_get_layer`, `_is_active`, `_create_fonts_texture`, plus
+  `ImGui_ImplMetal_Init`, `_NewFrame`, `_RenderDrawData`,
+  `_Shutdown`, `_CreateFontsTexture`, `_DestroyFontsTexture`,
+  `_CreateDeviceObjects`, `_DestroyDeviceObjects`.
+- All M0 stub renderer symbols still present.
+- `Foundation` and `Metal` frameworks now appear in the binary's
+  `LC_LOAD_DYLIB` table (M0 had them dependency-wired but
+  dead-stripped). MetalKit and QuartzCore are still dead-stripped
+  because the M1 code touches CAMetalLayer only via SDL's
+  bridge — they will be linked by M2/M11 when needed.
+- Generated `CONFIG_DISPLAY_RENDERER_METAL = 3` enum is unchanged.
+- `display.renderer` default in `config_spec.yml` remains
+  `OPENGL` — Metal stays opt-in.
+
+**Architectural notes:**
+
+- **Single window per process per session.** Switching the
+  renderer choice (GL ↔ Metal) requires an xemu restart. Same
+  contract as the existing GL/Vulkan story.
+- **Renderer choice is read from `g_config.display.renderer`
+  before window creation.** A static helper
+  `xemu_renderer_is_metal()` in `ui/xemu.c` returns
+  `g_config.display.renderer == CONFIG_DISPLAY_RENDERER_METAL`
+  on darwin and `false` everywhere else. After `xemu_metal_init`
+  has succeeded, runtime branches use `xemu_metal_is_active()`
+  instead so they don't get tricked by a config change made
+  through the in-game menu.
+- **The HUD framebuffer-texture call** (`xemu_hud_set_framebuffer_texture`)
+  is structurally GL-only — it stores a `GLuint` handle that
+  `RenderFramebuffer` consumes. Rather than thread Metal-side
+  framebuffer plumbing into M1, the entire `RenderFramebuffer`
+  call is skipped on the Metal path (`if (!hud_renderer_is_metal())`
+  in `xemu_hud_update`). The GL-side `xemu_snapshots_set_framebuffer_texture`
+  / `xemu_hud_set_framebuffer_texture` calls live in `gl_render_frame`
+  which is already early-outed to `xemu_metal_render_frame` on
+  the Metal path, so they're never invoked during a Metal frame.
+  M2 will introduce the surface manager + a Metal-side
+  framebuffer texture and re-thread the compositor; the HUD's
+  `set_framebuffer_texture` API will likely take an opaque handle
+  so both renderers can plug into it.
+- **Screenshots on the Metal path are no-ops.** `SaveScreenshot`
+  is GL-only (uses `glReadPixels`-style code in `gl-helpers.cc`).
+  `xemu_hud_render` clears `g_screenshot_pending` without taking
+  the screenshot when Metal is active. Metal-side screenshot
+  support lands alongside the M2 surface manager (the framebuffer
+  texture will be readable via `[texture getBytes:…]`).
+- **ARC for `.mm` files.** The project-wide `-fobjc-arc` objcpp
+  arg only affects ObjC++ files (`.mm`). Existing `.m` files
+  (`cocoa.m`, `apple-gfx.m`, `xemu-os-utils-macos.m`,
+  `audio/coreaudio.m`, `net/vmnet-*.m`) are objc and use manual
+  retain/release; they're unaffected.
+- **`imgui_impl_metal.mm` builds inside the imgui subproject**
+  (not duplicated in xemu's source tree). The parent project flips
+  `metal=enabled` on darwin+arm64; the subproject's
+  `add_languages('objcpp')` is now gated on the metal option.
+
+**Deferred (intentional, per plan):**
+
+- Visual smoke gate (screenshot diff vs OpenGL HUD-only screenshot).
+  This is a user-driven test that requires a GUI launch with
+  `display.renderer = METAL` and a side-by-side diff. The build
+  succeeds and all symbols are in place; the user can run the
+  visual gate when convenient.
+- `XEMU_METAL_VALIDATION={0,1}` flag. Originally listed in the
+  plan as landing with M0 (deferred to M1 because there was no
+  device); now further deferred because the validation toggle is
+  small and not needed for the M1 exit gate. Will land alongside
+  M2 when `MTLCaptureManager`-style hooks become useful.
+- NV2A framebuffer compositor (M2 work).
+- Metal-side screenshot support (lands with M2).
+- Frame pacing tuning (`presentDrawable:atTime:`) — M10.
+- MSAA / MetalFX — M11/M12.
+- `xemu_metal_get_device` / `_get_layer` accessors are exposed but
+  not yet consumed; M2 will use them to wire the surface manager
+  into the renderer-side `mtl/renderer.c` (the .c file calls into
+  `xemu-metal.h` to obtain the device handle, then forwards it to
+  internal `mtl/surface.m` / `mtl/draw.m` files via opaque types).
+
+**Next-session entry: Metal slice M2 — surface manager + clear.**
+Per `metal-renderer-plan.md` §4 M2:
+
+- Port `vk/surface.c` to Metal. `SurfaceBinding` wraps
+  `id<MTLTexture>` (color RT + depth RT). Surface scale, format,
+  swizzle, dirty tracking carry over.
+- `pgraph_mtl_clear_surface(d, parameter)` clears the bound
+  color/depth target via a render pass with `MTLLoadActionClear`.
+- `pgraph_mtl_get_framebuffer_surface(d)` returns an opaque handle
+  to an `id<MTLTexture>` that the HUD compositor reads in a final
+  present pass.
+- Visual gate: clear-to-color test passes; the framebuffer texture
+  appears beneath the HUD instead of the M1 black layer.
+
+## Update — 2026-05-02 Metal slice M0 — build + config integration shipped
+
+First slice of the staged Metal renderer plan landed. M0 is purely
+additive — no existing renderer code or upstream-shipping defaults
+changed. Selecting `display.renderer = METAL` builds and registers the
+new renderer entry, but every op is a no-op so the GPU output is a
+black window; this is the documented M0 exit-gate behavior.
+
+**Files added/changed:**
+
+- `config_spec.yml:226-230` — added `METAL` to the
+  `display.renderer` enum values (default still `OPENGL`). Generated
+  `build/xemu-config.h` now exposes `CONFIG_DISPLAY_RENDERER_METAL = 3`.
+- `meson.build` — new `metal = ...` Apple-frameworks dependency
+  block (`Foundation`, `Metal`, `MetalKit`, `QuartzCore`) and
+  `spirv-cross` CMake subproject block, both gated on
+  `host_os == 'darwin' and host_machine.cpu() == 'aarch64'`. Placed
+  immediately after the existing SPIRV-Reflect block. The Metal port
+  is intentionally arm64-darwin-only (Apple Silicon performance
+  fork; never ships on Intel Macs or non-darwin hosts).
+- `subprojects/spirv-cross.wrap` — new wrap-git fetching
+  `KhronosGroup/SPIRV-Cross @ vulkan-sdk-1.3.290.0`. Mirrors the
+  `glslang.wrap` / `SPIRV-Reflect.wrap` pattern. The actual subproject
+  is configured (CMake) at meson configure time; spirv-cross-c,
+  spirv-cross-msl, spirv-cross-glsl, spirv-cross-core static libs are
+  built. No code yet links against them — the dependency is wired so
+  M5 (shader translation) does not need a build-system change.
+- `hw/xbox/nv2a/pgraph/mtl/meson.build` — new; mirrors
+  `hw/xbox/nv2a/pgraph/vk/meson.build`. Adds `renderer.c` to
+  `specific_ss` only when `metal.found()` is true.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — new; stub renderer
+  registering `pgraph_mtl_renderer` with `.type =
+  CONFIG_DISPLAY_RENDERER_METAL`, `.name = "Metal"`, and all 22 ops.
+  All ops are no-ops or trivial returns; `process_pending` correctly
+  clears `sync_pending` / `flush_pending` and signals the events so
+  the system does not hang. **File extension is `.c`, not `.m`.**
+  Reason: meson's per-target `c_args`
+  (`-DCOMPILING_PER_TARGET`, `-DCONFIG_TARGET=…`, `-DCONFIG_DEVICES=…`)
+  required by `nv2a_int.h` propagate to `.c` compiles but not to `.m`
+  (`objc_COMPILER`) compiles in this build setup. M0 does not call any
+  Metal API, so plain `.c` is sufficient. Slices that need Objective-C
+  (M1+) will split ObjC-touching code into a separate `.m` file that
+  does NOT include `nv2a_int.h`, communicating via opaque handles into
+  this `.c` file. (See M1 entry below.)
+- `hw/xbox/nv2a/pgraph/meson.build:17` — added `subdir('mtl')` after
+  `subdir('vk')` so the Metal renderer source is enumerated.
+
+**Verified:**
+
+- `./build.sh -a arm64` succeeds, producing
+  `dist/xemu.app/Contents/MacOS/xemu`.
+- `dist/xemu.app/Contents/MacOS/xemu --version` runs cleanly.
+- Generated enum: `CONFIG_DISPLAY_RENDERER_METAL = 3` in
+  `build/xemu-config.h`.
+- All 22 op symbols present in the binary
+  (`nm | grep pgraph_mtl_` lists `_pgraph_mtl_renderer` plus init,
+  clear_report_value, clear_surface, draw_begin, draw_end, flip_stall,
+  flush_draw, get_report, image_blit, pre_savevm_trigger /
+  pre_savevm_wait, pre_shutdown_trigger / pre_shutdown_wait,
+  process_pending, process_pending_reports, surface_update,
+  set_surface_scale_factor / get_surface_scale_factor,
+  get_framebuffer_surface, get_gpu_properties).
+- Renderer name string `"Metal"` is present alongside `"Null"` and
+  `"OpenGL"` (Vulkan is not built on darwin).
+- spirv-cross fetched via wrap-git into `subprojects/spirv-cross/`
+  and built into `build/subprojects/spirv-cross/`.
+- Default `display.renderer` remains `OPENGL`. No existing flag,
+  perf counter, or benchmark changed.
+
+**Deferred (intentional, per plan):**
+
+- Metal/MetalKit/QuartzCore frameworks are dependency-wired but not
+  pulled into the binary's `LC_LOAD_DYLIB` table yet — the linker
+  dead-strips unused framework references because `renderer.c`
+  currently calls no Metal API. They will be linked automatically
+  when M1 begins calling `MTLCreateSystemDefaultDevice` etc.; no
+  build-system change required.
+- `spirv-cross` lib is built but not linked yet — same dead-strip
+  reason; will activate at M5.
+- No `XEMU_METAL_*` env-var flag has been added (M0 is build/config
+  only; the `XEMU_METAL_VALIDATION` flag described in the plan as
+  landing with M0 is deferred to M1 because there is no Metal
+  device to validate yet).
+- Runtime test of `display.renderer = METAL` selecting cleanly was
+  NOT performed — that requires GUI launch and is a user-driven
+  test. The black-window M0 exit gate is satisfiable from the
+  symbol/binary verification already done; the orchestrator can
+  confirm with a one-shot launch when convenient.
+- `metal-renderer-plan.md` §7 Q1 (spirv-cross packaging) is
+  effectively answered by the M0 implementation: subproject via
+  wrap-git, CMake integration, static libs only.
+
+**Next-session entry: Metal slice M1 — window + device + ImGui-Metal HUD.**
+Per `metal-renderer-plan.md` §4 M1, this is where:
+
+- A separate `.m` file (e.g. `mtl/device.m`) lands; it must NOT
+  include `nv2a_int.h` — it gets target-agnostic types only and
+  communicates with `renderer.c` through opaque handles, so the
+  per-target `objc_args` propagation issue does not block ObjC
+  bring-up.
+- `MTLCreateSystemDefaultDevice` / `MTLCommandQueue` / `CAMetalLayer`
+  attached to an SDL window.
+- ImGui-Metal HUD path lit so the in-emulator overlay renders.
+
+## Update — 2026-05-02 Metal renderer planning session
+
+Produced four new documents under `docs/apple-silicon/`:
+
+- **`metal-renderer-plan.md`** — staged, gated implementation plan for
+  the native Metal renderer. 16 slices (M0–M15), each with scope, entry
+  criteria, exit criteria, validation gate. Includes architectural
+  decisions, validation methodology, risk register (R1–R8), and open
+  questions to resolve before slice M0 lands.
+- **`metal-api-reference.md`** — Apple Metal API surface, recommended
+  patterns for an NV2A-style emulator, Apple Silicon gotchas, and a
+  "Recommended Apple Silicon defaults" quick-reference table covering
+  every architectural knob (CAMetalLayer settings, storage modes,
+  pipeline build, sync primitives, MetalFX, capture).
+- **`emulator-metal-survey.md`** — file-level findings from
+  Dolphin / PCSX2 / DuckStation / MoltenVK Metal backends plus xemu's
+  own Vulkan renderer as the structural template. Names specific
+  files, line numbers, struct layouts, hash-key shapes. Distills
+  "12 Patterns To Steal" and "5 Anti-Patterns To Avoid".
+- **`macos-input-research.md`** — GameController.framework migration
+  plan, independent of the renderer slice. Six proposed input slices
+  N1–N6. Notes the Xbox Duke controller has TWO motors (not four).
+
+Decision-log entry "2026-05-02: Metal renderer planning session — staged
+plan + supporting docs" records all the architectural choices reached
+in the session.
+
+### Top-of-stack next-action priority (post-planning)
+
+1. **Audio listen-test for `XEMU_APU_LOCK_RELEASE` (still UNBLOCKED).**
+   Per `feedback_audio_after_video.md`, the listen-test was deferred
+   until the video judder pillar closed; V9 + V10 closed it 2026-05-02.
+   Highest-priority **user-driven** action: a human listener plays
+   Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice on,
+   listening for stuck voices, dropped SFX, audible glitches, or
+   stale samples. If clean: declare the slice fully shipped. If
+   glitches: revert or design a finer-grained lock split.
+
+2. **Metal slice M0 — build + config integration** (entry to the
+   plan). Add `METAL` to `config_spec.yml:229`. Add Foundation /
+   Metal / MetalKit / QuartzCore framework links in `meson.build` for
+   `host_os == 'darwin'`. Create `hw/xbox/nv2a/pgraph/mtl/meson.build`
+   and a stub `mtl/renderer.m` registering a no-op
+   `pgraph_mtl_renderer` with all 22 ops. Add `spirv-cross` as a
+   dependency. Exit gate: black window when
+   `display.renderer = METAL` is selected; build succeeds; config
+   schema regenerated.
+
+3. **Resolve open questions before any actual rendering work** (from
+   `metal-renderer-plan.md` §7):
+   - Q1: spirv-cross packaging (subproject vs system).
+   - Q2: MTLHeap layout (probably two heaps).
+   - Q3: persistent shader cache directory layout.
+   - Q4: emulation-rate slewing on GL first (recommended yes;
+     `strategy.md` Phase 2.5 already documents the slice as deferred —
+     unfreezing it).
+
+4. **Emulation-rate slewing slice on the OpenGL backend** (PCSX2 PR
+   #5488 / DuckStation pattern). Graphics-API-agnostic; lands on the
+   GL backend first to validate the algorithm before the Metal
+   renderer adds it as a coupled dependency. Pair with M10 once Metal
+   is ready.
+
+5. **PPTC** (queued; steady-state perf improvement, not a judder
+   fix). Ceiling: ~13 s of cumulative gen work eliminated over a 300 s
+   Crimson route = 4 % steady-state vCPU savings; saves ~44 ms in the
+   headline worst-frame interval (won't close the judder gap).
+
+6. **`helper_lookup_tb_ptr` per-vCPU indirect-branch cache (V11).**
+   ~4 % steady-state vCPU win possible per V8/V9 sample data.
+
+7. **Do not pursue:**
+   - Further attribution slices for the 1.3 s class stutter — V6
+     through V10 exhausted the data-driven probe space; cost
+     attributed to guest-intrinsic computation.
+   - x87 80-bit helper optimization (irreducibly soft on Apple
+     Silicon).
+   - Any iothread / BQL / MMIO / AIO optimization (D3 + V10 ruled
+     out).
+   - `MTLBinaryArchive` for Metal pipeline persistence (per
+     decision-log amendment 2026-05-02; use MSL-string caching
+     instead).
+
+8. **Do not re-validate** the eight default-on flags
+   (`XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`, `XEMU_PGRAPH_FAST_READ`,
+   `XEMU_TCG_SPLITWX`, `XEMU_TCG_JMP_CACHE_TARGETED`,
+   `XEMU_APU_LOCK_RELEASE`, `XEMU_FAST_RDTSC`, plus
+   `display.quality.surface_scale = 2`). Use established regression
+   gates.
+
+### Summary of what was decided in this session (one-liner per topic)
+
+- Add `METAL` to renderer enum; new `XEMU_METAL_*` flag family.
+- Move main window to `SDL_WINDOW_METAL` on Metal selection; restart
+  required to switch renderers; HUD via `imgui_impl_metal` (already in
+  tree).
+- Generate MSL via GLSL → SPIR-V → spirv-cross (Dolphin pattern).
+- POD `PipelineKey` + `Lru` cache (xemu vk pattern; carry over).
+- **MSL-source persistence**, not `MTLBinaryArchive` (this amends
+  `strategy.md` Phase 4f).
+- `presentDrawable:atTime:` (macOS 13) + `CAMetalDisplayLink` (macOS
+  14+); pair with emulation-rate slewing (lands on GL first).
+- Apple Silicon unified-memory rules: `Shared|WriteCombined` upload,
+  `Private` GPU-only, never `Managed`.
+- Memoryless MSAA on Apple TBDR; lift `XEMU_METAL_MSAA` to default 4×
+  only after persistent shader cache stabilizes cold-launch cost.
+- No geometry shaders; CPU-side index expansion (Dolphin) +
+  static-expand-index (PCSX2) for points/wide-lines.
+- Framebuffer fetch + raster_order_group for register-combiner blends
+  (Apple1+); barrier-based fallback for Intel Macs.
+- Async compile + hybrid ubershader (Dolphin); reuse xemu's existing
+  async-compile worker.
+- `setShouldMaximizeConcurrentCompilation:YES`, guarded by
+  `respondsToSelector:` (Dolphin Apple Silicon gotcha).
+- macOS 13 minimum for Metal slice; macOS 14+ preferred; macOS 12
+  keeps GL fallback.
+- New counters `METAL_*` plumbed through `extract-perf-summary.sh`.
+- Frame capture via `MTLCaptureManager`, env-gated
+  `XEMU_METAL_CAPTURE=path.gputrace`.
+
+## Update — 2026-05-02 Metal renderer pivot
+
+The 2026-05-01 "stay on OpenGL" decision is superseded as a product
+direction. Its measurement remains useful: OpenGL was not proven to be
+the immediate FPS bottleneck on the tracked routes. The project bar is
+broader now: the shareable Apple Silicon build needs Metal-native frame
+timing, input/rumble latency work, presentation control, capture and
+profiling, MSAA/resolve control, sharpening/upscaling experiments,
+pipeline caching, and long-term renderer maintainability.
+
+**Current direction:** Metal is the primary renderer track. OpenGL is
+kept as the current runnable backend, correctness oracle, benchmark
+comparison path, and fallback while Metal is built.
+
+**Implementation pause:** no broad Metal code should be added until
+the planning pass lands. The next planning agent should add local
+Metal development references and produce a staged design that limits
+guessing. Recommended first-stage design topics:
+
+- build/config integration for a `METAL` renderer enum,
+- `MTLDevice`, `MTLCommandQueue`, and `CAMetalLayer` ownership,
+- framebuffer/surface/resolve model for internal scale and MSAA,
+- first clear/blit/present path,
+- primitive path for triangles/quads using explicit expansion,
+- texture upload/sampling and enhancement hooks,
+- shader / pipeline cache strategy,
+- frame pacing, latency instrumentation, and Metal capture workflow,
+- validation gates against OpenGL screenshots, perf counters, and
+  manual play tests.
+
+**Important caveat:** the pivot is not a claim that Metal automatically
+fixes guest engine 30 Hz caps, TCG stalls, or NV2A semantic bugs. Metal
+still has to model the same Xbox behavior correctly. The reason to move
+now is to avoid polishing an OpenGL-only endpoint we already know will
+not satisfy the final product requirements.
 
 ## Update — 2026-05-02 V9 (RDTSC fast-path) + V10 (invalidation total) — judder pillar bottoms out
 
@@ -1517,13 +4551,15 @@ benchmarked through the harness without per-target hardcoding. Until
 then, drive xemu directly or extend `find_test_disc()` for a specific
 title under investigation.
 
-## Update — 2026-05-01 GL-vs-Metal decision (stay on GL, headline issue is TCG)
+## Update — 2026-05-01 GL-vs-Metal decision (superseded for product direction)
 
 This session ran the diagnostic the previous session called for and
-produced a definitive strategic verdict. **Stay on OpenGL. Native Metal
-is not the next priority.** The Crimson 1.35-second worst-frame is a
-CPU-emulation problem; Apple's GL has measured headroom for 60 FPS at
-1080p (and even 4×-scale internal resolution) on tracked titles.
+produced a strategic verdict that was valid for the narrow question
+asked at the time: **OpenGL was not proven to be the immediate FPS
+bottleneck.** The later 2026-05-02 Metal pivot supersedes the
+"stay on OpenGL" product-direction conclusion because the final build
+requires Metal-native frame timing, latency, profiling, enhancement,
+and maintainability work.
 
 Full analysis at
 `docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md` and

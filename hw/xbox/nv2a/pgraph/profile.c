@@ -22,6 +22,9 @@
 #include "qemu/xemu-spike-log.h"
 #include "qemu/xemu-display-perf.h"
 #include "qemu/xemu-apu-perf.h"
+#include "qemu/xemu-metal-perf.h"
+#include "qemu/xemu-pfifo-perf.h"
+#include "qemu/xemu-rate-slew.h"
 
 NV2AStats g_nv2a_stats;
 
@@ -39,12 +42,17 @@ static struct {
     bool initialized;
     bool enabled;
     bool frame_log_enabled;
+    bool stutter_trace_enabled;
     int64_t interval_us;
     int64_t interval_start_us;
+    uint64_t interval_id;
     uint64_t frames;
     int64_t mspf_us_sum;
     int64_t mspf_us_min;
     int64_t mspf_us_max;
+    int64_t stutter_threshold_us;
+    uint64_t stutter_frames;
+    int64_t stutter_max_us;
     /* Optional per-frame mspf_us buffer for XEMU_PERF_FRAME_LOG=1.
      * Bounded to avoid unbounded log lines under extreme frame counts. */
     int64_t frame_mspf_us[NV2A_PROF_FRAME_BUF_LEN];
@@ -99,6 +107,7 @@ static void nv2a_profile_log_init(void)
     perf_log.initialized = true;
     perf_log.enabled = env_flag_enabled("XEMU_PERF_LOG");
     perf_log.frame_log_enabled = env_flag_enabled("XEMU_PERF_FRAME_LOG");
+    perf_log.stutter_trace_enabled = env_flag_enabled("XEMU_STUTTER_TRACE");
 
     /* V3: spike-log state lives in the shared util/xemu-spike-log.c so
      * the TCG-thread sources can call into it without a renderer
@@ -109,6 +118,7 @@ static void nv2a_profile_log_init(void)
     perf_log.spike_threshold_us = xemu_spike_threshold_us;
 
     perf_log.interval_us = 1000000;
+    perf_log.stutter_threshold_us = 50000;
 
     const char *interval_ms_env = getenv("XEMU_PERF_LOG_INTERVAL_MS");
     if (interval_ms_env && interval_ms_env[0]) {
@@ -120,6 +130,19 @@ static void nv2a_profile_log_init(void)
             fprintf(stderr,
                     "xemu-perf: invalid XEMU_PERF_LOG_INTERVAL_MS '%s', using 1000\n",
                     interval_ms_env);
+        }
+    }
+
+    const char *stutter_threshold_env = getenv("XEMU_STUTTER_TRACE_THRESHOLD_US");
+    if (stutter_threshold_env && stutter_threshold_env[0]) {
+        char *end = NULL;
+        long t = strtol(stutter_threshold_env, &end, 10);
+        if (end != stutter_threshold_env && *end == '\0' && t >= 1000) {
+            perf_log.stutter_threshold_us = t;
+        } else {
+            fprintf(stderr,
+                    "xemu-perf: invalid XEMU_STUTTER_TRACE_THRESHOLD_US '%s', using 50000\n",
+                    stutter_threshold_env);
         }
     }
 
@@ -147,8 +170,12 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
     double max_mspf_ms = perf_log.mspf_us_max / 1000.0;
 
     fprintf(stderr,
-            "xemu-perf: interval_ms=%lld frames=%llu fps=%.2f "
+            "xemu-perf: interval_id=%llu interval_start_us=%lld "
+            "interval_end_us=%lld interval_ms=%lld frames=%llu fps=%.2f "
             "mspf_avg=%.3f mspf_min=%.3f mspf_max=%.3f increment_fps=%u",
+            (unsigned long long)perf_log.interval_id,
+            (long long)perf_log.interval_start_us,
+            (long long)now,
             (long long)(elapsed_us / 1000),
             (unsigned long long)perf_log.frames,
             fps,
@@ -182,6 +209,12 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
         }
     }
 
+    if (perf_log.stutter_frames > 0) {
+        fprintf(stderr, " stutter_frames=%llu stutter_max_us=%lld",
+                (unsigned long long)perf_log.stutter_frames,
+                (long long)perf_log.stutter_max_us);
+    }
+
     /* Apple Silicon performance fork: append TCG hot-path counter
      * snapshot. No-op when all counters are zero. */
     xemu_tcg_perf_emit_and_reset(stderr);
@@ -192,11 +225,35 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
      * cap attribution diagnostic. */
     xemu_display_perf_emit_and_reset(stderr);
 
+    /* Apple Silicon performance fork: append rate-slew counters
+     * (RATE_SLEW_RATIO_E6, RATE_SLEW_ACTIVE) so the per-interval
+     * line records the host_hz / 60 ratio and whether the slew is
+     * adjusting vblank_interval_ns. No-op until ui/xemu.c calls
+     * xemu_rate_slew_init at window-creation time. */
+    xemu_rate_slew_emit(stderr);
+
     /* Apple Silicon performance fork: append APU lock-hold / vCPU-wait
      * counter snapshot. No-op when all counters are zero. Used by the
      * audio voice-lock release slice (XEMU_APU_LOCK_RELEASE) to
      * attribute the change in MCPXAPUState::lock contention. */
     xemu_apu_perf_emit_and_reset(stderr);
+
+    /* Apple Silicon performance fork: append PFIFO / PGRAPH progress
+     * counters used to attribute guest D3D fence waits and command-stream
+     * stalls during long frame gaps. */
+    xemu_pfifo_perf_emit_and_reset(stderr);
+
+    /* Apple Silicon performance fork: append Metal renderer counters
+     * (M4: METAL_DRAW_COUNT / METAL_DRAW_INDEXED_COUNT /
+     * METAL_NATIVE_TRI_DEPTH_DRAWS / METAL_NATIVE_QUAD_DRAWS /
+     * METAL_CLEAR_COUNT). No-op when zero (i.e. when the GL renderer
+     * is active or no Metal draws/clears occurred this interval). */
+    xemu_metal_perf_emit_and_reset(stderr);
+
+    {
+        extern void xemu_ide_perf_emit_and_reset(FILE *out);
+        xemu_ide_perf_emit_and_reset(stderr);
+    }
 
     /* Apple Silicon performance fork: append per-interval RDTSC call
      * counter (V9). Validates the worst-frame helper_rdtsc rate
@@ -207,15 +264,27 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
         extern void xemu_rdtsc_perf_emit_and_reset(FILE *out);
         xemu_rdtsc_perf_emit_and_reset(stderr);
     }
+
+    /* Apple Silicon performance fork: append Xbox PIT catch-up /
+     * coalescing counters. Used by the stutter flight recorder after
+     * symbolication showed the worst gaps are dominated by the Xbox
+     * clock-interrupt handler (IDT vector 0x30). */
+    {
+        extern void xemu_pit_perf_emit_and_reset(FILE *out);
+        xemu_pit_perf_emit_and_reset(stderr);
+    }
 #endif
 
     fprintf(stderr, "\n");
 
     perf_log.interval_start_us = now;
+    perf_log.interval_id++;
     perf_log.frames = 0;
     perf_log.mspf_us_sum = 0;
     perf_log.mspf_us_min = 0;
     perf_log.mspf_us_max = 0;
+    perf_log.stutter_frames = 0;
+    perf_log.stutter_max_us = 0;
     perf_log.frame_buf_count = 0;
     perf_log.frame_buf_overflow = 0;
     memset(perf_log.counters, 0, sizeof(perf_log.counters));
@@ -234,9 +303,26 @@ static void nv2a_profile_log_add_frame(int64_t now, int64_t mspf_us,
     }
 
     perf_log.frames++;
+    uint64_t frame_index = perf_log.frames - 1;
     perf_log.mspf_us_sum += mspf_us;
     if (mspf_us < perf_log.mspf_us_min) perf_log.mspf_us_min = mspf_us;
     if (mspf_us > perf_log.mspf_us_max) perf_log.mspf_us_max = mspf_us;
+
+    if (perf_log.stutter_trace_enabled &&
+        mspf_us >= perf_log.stutter_threshold_us) {
+        perf_log.stutter_frames++;
+        if (mspf_us > perf_log.stutter_max_us) {
+            perf_log.stutter_max_us = mspf_us;
+        }
+        fprintf(stderr,
+                "xemu-stutter: interval_id=%llu frame_index=%llu "
+                "duration_us=%lld now_us=%lld threshold_us=%lld\n",
+                (unsigned long long)perf_log.interval_id,
+                (unsigned long long)frame_index,
+                (long long)mspf_us,
+                (long long)now,
+                (long long)perf_log.stutter_threshold_us);
+    }
 
     if (perf_log.frame_log_enabled) {
         if (perf_log.frame_buf_count < NV2A_PROF_FRAME_BUF_LEN) {
@@ -294,8 +380,13 @@ void nv2a_profile_log_startup(const char *renderer_name)
     fprintf(stderr, " host_arch=arm");
 #endif
 
-    fprintf(stderr, " log_interval_ms=%lld\n",
+    fprintf(stderr, " log_interval_ms=%lld",
             (long long)(perf_log.interval_us / 1000));
+    if (perf_log.stutter_trace_enabled) {
+        fprintf(stderr, " stutter_trace=1 stutter_threshold_us=%lld",
+                (long long)perf_log.stutter_threshold_us);
+    }
+    fprintf(stderr, "\n");
 }
 
 void nv2a_profile_increment(void)

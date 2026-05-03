@@ -128,12 +128,30 @@ static void InitializeStyle()
     g_base_style = s;
 }
 
+// Apple Silicon performance fork: returns true when the active renderer
+// for this session is Metal. xemu_metal_init() is called from xemu.c
+// before xemu_hud_init() on the Metal path; xemu_metal_is_active()
+// reflects that.
+static inline bool hud_renderer_is_metal()
+{
+#if defined(__APPLE__)
+    return xemu_metal_is_active();
+#else
+    return false;
+#endif
+}
+
 void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
 {
     xemu_monitor_init();
     g_vsync = g_config.display.window.vsync;
 
-    InitCustomRendering();
+    // Custom rendering helpers are GL-only (RenderFramebuffer, etc.).
+    // The Metal HUD path renders only the ImGui draw data for slice M1;
+    // the framebuffer compositor lands with M2 in xemu-metal.mm.
+    if (!hud_renderer_is_metal()) {
+        InitCustomRendering();
+    }
 
     // Setup Dear ImGui context
     IMGUI_CHECKVERSION();
@@ -143,9 +161,27 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io.IniFilename = NULL;
 
-    // Setup Platform/Renderer bindings
-    ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
-    ImGui_ImplOpenGL3_Init("#version 150");
+    // Setup Platform/Renderer bindings. The Metal device + queue +
+    // CAMetalLayer were already created in xemu_metal_init() (phase 1,
+    // called from xemu.c before xemu_hud_init); the ImGui-side
+    // bindings (ImGui_ImplSDL3_InitForMetal + ImGui_ImplMetal_Init)
+    // happen here in phase 2 because they require the ImGui context
+    // to exist.
+#if defined(__APPLE__)
+    if (hud_renderer_is_metal()) {
+        if (!xemu_metal_imgui_init(window)) {
+            // The ImGui context is created but its backends are not.
+            // This is fatal for the Metal path — fall through to abort.
+            fprintf(stderr, "xemu_hud_init: xemu_metal_imgui_init "
+                            "failed; cannot continue on Metal path\n");
+            abort();
+        }
+    } else
+#endif
+    {
+        ImGui_ImplSDL3_InitForOpenGL(window, sdl_gl_context);
+        ImGui_ImplOpenGL3_Init("#version 150");
+    }
     ImPlot::CreateContext();
 
 #if defined(_WIN32)
@@ -161,7 +197,17 @@ void xemu_hud_init(SDL_Window* window, void* sdl_gl_context)
 
 void xemu_hud_cleanup(void)
 {
-    ImGui_ImplOpenGL3_Shutdown();
+#if defined(__APPLE__)
+    if (hud_renderer_is_metal()) {
+        // Tears down the Metal renderer backend (ImGui_ImplMetal_Shutdown,
+        // command queue, device, layer, SDL_MetalView). The shared SDL3
+        // platform backend is shut down below — same path as GL.
+        xemu_metal_shutdown();
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_Shutdown();
+    }
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
 }
@@ -203,15 +249,28 @@ void xemu_hud_update(void)
         g_last_scale = g_viewport_mgr.m_scale;
     }
 
-    if (!first_boot_window.is_open) {
+    // GL-only: draw the NV2A framebuffer texture beneath the ImGui HUD.
+    // The Metal path will gain its own compositor with M2; for slice M1
+    // the background stays cleared-to-black (the layer's clear color).
+    if (!hud_renderer_is_metal() && !first_boot_window.is_open) {
         int ww, wh;
         SDL_GetWindowSizeInPixels(xemu_get_window(), &ww, &wh);
         RenderFramebuffer(g_tex, ww, wh, g_flip_req);
     }
 
-    ImGui_ImplOpenGL3_NewFrame();
-    io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
-    ImGui_ImplSDL3_NewFrame();
+#if defined(__APPLE__)
+    if (hud_renderer_is_metal()) {
+        // Acquires the next CAMetalDrawable, builds the render pass
+        // descriptor, opens a command buffer, and calls
+        // ImGui_ImplMetal_NewFrame + ImGui_ImplSDL3_NewFrame.
+        xemu_metal_begin_imgui_frame();
+    } else
+#endif
+    {
+        ImGui_ImplOpenGL3_NewFrame();
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        ImGui_ImplSDL3_NewFrame();
+    }
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     g_input_mgr.Update();
@@ -325,6 +384,26 @@ void xemu_hud_update(void)
 void xemu_hud_render()
 {
     ImGui::Render();
+
+#if defined(__APPLE__)
+    if (hud_renderer_is_metal()) {
+        // Encodes the ImGui draw data into the active command buffer's
+        // render encoder, presents the drawable, and commits. Vsync is
+        // controlled by CAMetalLayer.displaySyncEnabled (set in
+        // xemu_metal_init); SwapInterval has no Metal equivalent here.
+        xemu_metal_end_imgui_frame();
+
+        // Screenshots on the Metal path are deferred to a later slice
+        // (SaveScreenshot is GL-only). Drop the pending flag so the
+        // request doesn't accumulate; re-add Metal screenshot support
+        // alongside the M2 surface manager.
+        if (g_screenshot_pending) {
+            g_screenshot_pending = false;
+        }
+        return;
+    }
+#endif
+
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
     if (g_vsync != g_config.display.window.vsync) {

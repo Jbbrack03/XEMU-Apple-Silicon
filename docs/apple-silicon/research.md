@@ -281,6 +281,15 @@ excellent performance on Apple Silicon, with specific source references
 and named code paths. Captured 2026-05-01 as the evidence base for the
 research-informed roadmap in `strategy.md` Phase 2.5 and Phase 4.
 
+> **See also (2026-05-02):** `emulator-metal-survey.md` is the
+> source-level companion to this section. Where this section gives
+> high-level summaries, the survey doc names specific files, line
+> numbers, struct layouts, and hash-key shapes for Dolphin / PCSX2 /
+> DuckStation / MoltenVK / xemu's own Vulkan renderer. Read the
+> survey before starting Metal implementation slices that touch
+> pipeline cache (M5, M9), buffer management (M3, M6), or presentation
+> (M10).
+
 ### Dolphin (GameCube/Wii) — native Metal backend
 
 Native Metal backend (TellowKrinkle, PR #10754, 2022); MoltenVK kept as a

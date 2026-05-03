@@ -274,12 +274,13 @@ Both slices are research-informed; named source references are in
 
 ### Phase 3: Vulkan-over-Metal Prototype
 
-> **Status (updated 2026-05-01): deprioritized.** The GL-vs-Metal
-> decision diagnostic showed Apple's GL has measured headroom for
-> 60 FPS at 1080p (and even 4×-scale) on tracked titles. Vulkan-over-
-> Metal evaluation no longer has a forcing function. Reconsider only
-> if MSAA-on-GL or broader-title coverage surface a renderer-side
-> ceiling.
+> **Status (updated 2026-05-02): not the primary path.** The project
+> is pivoting directly to native Metal rather than spending the next
+> major implementation slice on Vulkan-over-Metal. Vulkan-over-Metal
+> remains useful only as an optional comparison/prototype path because
+> the existing Vulkan renderer requires features that do not map
+> naturally to Metal and would still not give us full Metal-native
+> presentation, capture, enhancement, and pipeline-control workflows.
 
 Deliverables (deferred):
 
@@ -290,61 +291,177 @@ Deliverables (deferred):
 
 ### Phase 4: Native Metal Renderer
 
-> **Status (updated 2026-05-01): deprioritized — not the next
-> implementation slice.** The GL-vs-Metal decision diagnostic
-> (`benchmarks/2026-05-01-gl-vs-metal-decision.md`) demonstrated that
-> Apple's GL-on-Metal is not the gating constraint for any project
-> goal: PGR2 snapshot at 4× internal scale (~2560×1920) showed only
-> 7 % growth in `FLUSH_DRAW_US_TOTAL` and stable p99. The renderer
-> has measured headroom for 60 FPS at 1080p plus AA on tracked
-> titles. Phase 4 remains the long-term ceiling-removing path
-> (cleaner code, Apple-extension access, framebuffer-fetch-class
-> features unreachable from GL or MoltenVK), but it is not what
-> blocks the project's stated goals. Reconsider when MSAA-on-GL or
-> the broader-title sweep surface a renderer-side ceiling, or when
-> the long-term code-quality / future-proofing case becomes the next
-> highest-leverage investment.
+> **Status (updated 2026-05-02): promoted to the primary renderer
+> track.** The 2026-05-01 GL-vs-Metal diagnostic remains valid as a
+> narrow measurement: Apple's OpenGL-on-Metal path was not proven to
+> be the immediate FPS bottleneck in the measured routes. That verdict
+> is superseded as a product-direction decision. A shareable Apple
+> Silicon build needs Metal-native frame timing, input/rumble latency
+> work, presentation control, capture/profiling, MSAA/resolve control,
+> sharpening/upscaling experiments, pipeline caching, and a renderer
+> architecture we are comfortable supporting. OpenGL remains the
+> runnable reference backend and fallback; new renderer investment
+> should target Metal.
+>
+> **Implementation sequencing (added 2026-05-02 after Metal planning
+> session):** the sub-deliverables 4a–4i below are sequenced into 16
+> staged, gated slices **M0–M15** in
+> `metal-renderer-plan.md`. Each slice has explicit scope, entry
+> criteria, exit criteria, and validation gate; the plan also adds
+> architectural decisions (§3), validation methodology (§5), risk
+> register R1–R8 (§6), and 6 open questions Q1–Q6 to resolve before
+> slice M0 lands (§7). When working on Phase 4 implementation, follow
+> the slice ordering in `metal-renderer-plan.md` rather than picking
+> sub-deliverables ad-hoc from the list below.
+>
+> **Companion references (added 2026-05-02):**
+> `metal-api-reference.md` (Apple Metal API surface),
+> `emulator-metal-survey.md` (file-level findings from peer
+> emulators), `macos-input-research.md` (independent input track).
 
 Sub-deliverables informed by the 2026-05-01 emulator survey
-(`research.md`):
+(`research.md`).
+
+> **Status (updated 2026-05-02 after Metal slice M14 lands):**
+> Sub-deliverables 4a, 4b, 4c, 4e, 4f, 4g, 4h, 4i are **SHIPPED**
+> across Metal slices M0–M14 — see per-bullet annotations and the
+> 2026-05-02 decision-log entries for each slice. 4d (VS-Expand for
+> point sprites / wide lines) is **DEFERRED** — never observed as a
+> Crimson / Rainbow / PGR2 hot path; queued as a future slice if a
+> game emerges that exercises it. Default-on flip is gated on M15.
 
 - 4a. Metal presentation primitives. `CAMetalLayer`, `MTLDevice`,
   `MTLCommandQueue`, `presentDrawable:atTime:` for VRR-aware
   presentation pacing. Reference: DuckStation
   `metal_device.mm:2536-2620`. Pair with the Phase 2.5 emulation-rate
   slewing for the full frame-pacing recipe.
+  **SHIPPED across M0 (build/config integration), M1 (window + device
+  + ImGui-Metal HUD), M2 (surface manager), M10 (presentDrawable:
+  atTime: + emulation-rate slewing prerequisite via
+  `XEMU_GL_RATE_SLEW`); M10.1 CAMetalDisplayLink integration is
+  deferred behind a Metal user-driven validation session — slot
+  reserved as `METAL_DISPLAY_LINK_CALLBACKS`.**
 - 4b. CPU-side index expansion (Metal). Port the existing
   `XEMU_NATIVE_TRI_DEPTH` / `XEMU_NATIVE_QUAD` index logic to the Metal
   backend so Metal only ever sees `MTLPrimitiveTypeTriangle` /
   `TriangleStrip`. Reference: Dolphin
   `Source/Core/VideoCommon/IndexGenerator.cpp` (`AddFan`, `AddQuads`,
   with `pr` / non-`pr` template variants).
+  **SHIPPED across M3 (vertex/index buffers + first hand-coded MSL
+  draw) and M4 (IndexGenerator port + `XEMU_NATIVE_TRI_DEPTH` /
+  `XEMU_NATIVE_QUAD` parity); counters
+  `METAL_NATIVE_TRI_DEPTH_DRAWS` / `METAL_NATIVE_QUAD_DRAWS` confirm
+  the Metal renderer matches the GL renderer's geometry-shader-bypass
+  count.**
 - 4c. Framebuffer fetch (Apple GPU only). Gate on
   `[device supportsFamily:MTLGPUFamilyApple1]`. Maps NV2A register-
   combiner / blend modes that don't fit Metal fixed-function blending
   into a single shader pass with MSL `[[color(0)]]` fragment input.
   Barrier-based fallback for Intel Macs. References: PCSX2 PR #5630,
   DuckStation `metal_device.mm:387-410`.
+  **SHIPPED across M7 (state-to-PipelineKey + framebuffer-fetch
+  validated) and M7.1 (translated pipeline encode swap connected to
+  the encoder); the Intel-Mac barrier-based pass-split fallback
+  remains a stub since this fork's only target is Apple Silicon —
+  `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH=1` flips the Apple1+
+  detection result so future Intel-Mac fallback work can exercise
+  it.**
 - 4d. VS-Expand for point sprites / wide lines. Static precomputed
   index buffer in `MTLStorageModePrivate`; two MSL vertex shader
   variants selected at pipeline-build time via Metal *function
   constants*. Reference: PCSX2 `m_expand_index_buffer` pattern in
   `pcsx2/GS/Renderers/Metal/GSDeviceMTL.mm`.
+  **DEFERRED — not observed as a hot path on the Crimson / Rainbow /
+  PGR2 / SC2 routes during M0–M14. Queued behind a motivating game
+  measurement.**
 - 4e. Async pipeline compile + ubershader fallback. Pipeline objects
   cached; specialized variants compiled in the background; ubershader
   bound while waiting; swap on completion. Reference: Dolphin PR #5702
   + the `bSupportsBackgroundCompiling` plumbing. Builds on Phase 2.5
   if that slice landed first.
+  **SHIPPED in M8 (Path B: skip-the-draw fallback while pipeline build
+  is in flight); Path A (the full Dolphin-style hybrid ubershader) is
+  deferred to M8.1 since Path B already drives
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL` toward zero on the M9-warmed
+  cache. The `METAL_DRAWS_USING_UBERSHADER_TOTAL` counter slot is
+  reserved for M8.1.**
 - 4f. Metal shader/pipeline cache persistence. Per-game cache of
   compiled Metal pipeline states keyed by NV2A render-state hash,
   mirroring Dolphin and PPSSPP per-game shader caches.
+  **Amended 2026-05-02 (Metal planning session):** persist **MSL
+  source strings** keyed by NV2A `ShaderState` hash, not
+  `MTLBinaryArchive`-serialized pipelines. DuckStation
+  (`m_features.pipeline_cache = false`, `m_features.shader_cache =
+  true`) and Dolphin (`bSupportsPipelineCacheData = false`) both reach
+  the same conclusion: `MTLBinaryArchive` has limited macOS coverage
+  and large breakage surface as of 2026. MSL-source caching achieves
+  the same cold-launch warmup goal more portably and skips the
+  spirv-cross step on cache hit. See `metal-renderer-plan.md` slice M9
+  and decision-log "2026-05-02: Metal renderer planning session".
+  **SHIPPED across M5 (in-process per-pipeline LRU cache infra +
+  shader-validation harness; harness exit 0 = full pass on the 7
+  representative ShaderState fixtures) and M9 (persistent MSL-source
+  disk cache; counters `METAL_SHADER_CACHE_LOADS` /
+  `METAL_SHADER_CACHE_HITS` / `METAL_SHADER_CACHE_MISSES`).**
 - 4g. Metal buffer/texture/surface management. `MTLResourceStorageModeShared`
   for streaming uploads, `MTLStorageModePrivate` for GPU-only resources.
   Reference: Dolphin PR #10754 ("`bUseUnifiedMemory` toggle was removed,
   not worth the extra code").
+  **SHIPPED across M2 (surface manager + clear), M3 (vertex/index
+  buffers), M6 (texture upload + sampling — Shared staging buffer
+  → Private texture via blit encoder + 24-state pre-warmed sampler
+  cache; `MTLHeap` for non-aliasable assets). Texture-upload counters
+  `METAL_TEX_UPLOAD_BYTES_TOTAL` / `METAL_TEX_UPLOADS_TOTAL` /
+  `METAL_TEX_CACHE_HITS` / `METAL_TEX_CACHE_MISSES` surface on the
+  `xemu-perf:` interval line. M6 Part B remaining items (full
+  S3TC/3D/cube/palette + lifecycle integration with NV2A texture
+  cache flushes) intentionally deferred — see decision-log
+  "2026-05-02: Metal slice M6". `XEMU_METAL_DISABLE_LOSSLESS_COMPRESSION`
+  remains planned-only (no shipped flag); a follow-up slice will
+  wire it once a perf-vs-correctness motivating case appears.**
 - 4h. Metal System Trace and frame capture workflow. Capture-by-default
   presets for the existing PGR2 / Rainbow / Crimson scene snapshots.
+  **SHIPPED in M13 (programmatic `MTLCaptureManager` capture via
+  `XEMU_METAL_CAPTURE=path.gputrace` + `XEMU_METAL_CAPTURE_FRAMES=N`,
+  default-60-frame bound; per-stage GPU-time counter sampling via
+  `MTLCounterSampleBuffer` at the present render pass's
+  vertex/fragment stage boundaries; `Info.plist` gains
+  `MetalCaptureEnabled = YES` so capture works on the shipped
+  `dist/xemu.app` without `MTL_CAPTURE_ENABLED=1` in the env).
+  Counters `METAL_VERTEX_US_TOTAL` / `METAL_FRAGMENT_US_TOTAL` /
+  `METAL_PRESENT_GPU_US_TOTAL` / `METAL_PRESENT_GPU_FRAMES` /
+  `METAL_FX_SPATIAL_GPU_US_TOTAL` / `METAL_CAPTURE_FRAMES` /
+  `METAL_CAPTURE_ACTIVE` surface on the `xemu-perf:` interval line.
+  Companion `--metal-capture <path>` flag added to
+  `scripts/apple-silicon/run-benchmark.sh`.**
 - 4i. Performance and correctness comparison against Phase 0.
+  **PARTIAL via M14 — `validate-native-tri-depth.sh --run 22` (the
+  flat-tri-depth XBE counter-split regression gate, which is
+  graphics-API-agnostic from the perspective of the GL counters it
+  validates) clears under M14's build. The full per-game paired
+  baseline-vs-Metal benchmark sweep is the M15 default-on entry
+  gate (5 distinct titles, ≤ 1 % per-pixel diff vs GL, p99 mspf
+  jitter ≥ 20 % improvement); it is gated on user-driven
+  validation.**
+
+**Additional sub-deliverables added by the M-cycle (not in the
+original Phase 4 enumeration, but landed via slices M11–M13):**
+
+- 4j. **MSAA + resolve.** `XEMU_METAL_MSAA={0,2,4,8}`; multisample
+  companion textures + `MTLStoreActionMultisampleResolve`. SHIPPED
+  in M11. Counters `METAL_MSAA_RESOLVE_COUNT` /
+  `METAL_MSAA_RESOLVE_US_TOTAL` / `METAL_MSAA_SAMPLE_COUNT`.
+  Storage-mode deviation: M11 ships `MTLStorageModePrivate` instead
+  of `MTLStorageModeMemoryless` (M11.1 candidate; needs the
+  per-`flush_draw` render-pass cadence coalesced first).
+- 4k. **MetalFX spatial scaler.** `XEMU_METAL_FX_SCALE={1,2,3}`.
+  SHIPPED in M12. `MTLFXTemporalScaler` intentionally deferred — NV2A
+  has no native motion vectors and synthesizing them from camera-only
+  reprojection is risky on dynamic scenes.
+- 4l. **Hardening.** `XEMU_METAL_VALIDATION={0,1}` for development;
+  doc reconciliation across `automation.md`, `extract-perf-summary.sh`,
+  both `CLAUDE.md`, this document, the renderer plan, and the
+  decision log. SHIPPED in M14.
 
 ### Phase 5: Performance Hardening
 
@@ -542,45 +659,26 @@ projects use but that are not on this fork's roadmap, with reasons:
 > 30/s` is the decisive ratio (D3,
 > `benchmarks/2026-05-02-tcg-30fps-cap-attribution.md`).
 >
-> The previous "Defaults to non-OpenGL" framing remains superseded
-> per the 2026-05-01 GL-vs-Metal decision; the fork stays on OpenGL.
+> The previous "fork stays on OpenGL" framing is superseded by the
+> 2026-05-02 Metal pivot. OpenGL remains the reference/fallback path;
+> native Metal is the product renderer direction.
 
-- **Each tracked title sustains its console-native FPS in gameplay**
-  with no 1-second-class judder. Console-native: PGR2 / Crimson Skies
+- **Each tracked title sustains its console-native FPS in gameplay.**
+  Console-native: PGR2 / Crimson Skies
   / Rainbow Six 3 = 30 Hz, Soul Calibur 2 / Burnout 3 / Halo CE / etc.
   per the V4 sweep table. The 30 FPS floor on the original tracked
-  three is already met (2026-05-01 with four opt-in flags); the
-  remaining gap is the residual jitter pillar (1-second-class
-  worst-frame stutter on Crimson / Burnout 3 / Halo CE / OutRun 2),
-  not steady-state FPS.
-- **1-second-class worst-frame stutter is eliminated.** As of
-  2026-05-02 V1+V2 splitwx and jmp-cache-targeted slices reduced TCG
-  invalidation cost (mechanically correct) but the headline 1.28-s
-  Crimson worst-frame is unchanged; V3 spike attribution showed it is
-  composed of ~422 ms 1 ms-threshold spike events plus ~970 ms of
-  sub-1 ms events centered on `tb_gen_code` churn + a kernel-PC
-  `0x80030e4c` 1 ms-class TB-chain tail. APU voice-lock release (I5)
-  cut steady-state stutter intervals 61 % and improved p999 by 35 %
-  but did not move the worst-frame either. **V6 (landed 2026-05-02
-  as instrumentation only) ruled out per-event 1 ms dominance for
-  `tb_lookup`, `tb_gen_code`, and `cpu_handle_interrupt`** — 0 / 0 /
-  1 events respectively across 300 s; zero V6 events inside the
-  1.375 s worst-frame interval. The 1 ms-class `tcg_tb_chain` events
-  are reframed as **normal hot-path execution** (mean tb_count =
-  1918 × ~500 ns/iter), disproving D3's host-side-wait hypothesis.
-  Worst-frame correlates with a translation-churn storm in always-on
-  per-interval counters (`TCG_TB_INVALIDATE_COUNT = 8954`,
-  `TCG_NOTDIRTY_PAGES_HIT = 1200`, both 6-24× steady state). Render
-  loop is blocked during the worst frame
-  (`NV2A_PRESENT_HEARTBEAT = 4` in 1.4 s vs ~30/s steady state).
-  The next investigation is V7 — cumulative per-interval
-  `TCG_TB_*_US_TOTAL` counters — to confirm whether translation
-  cost dominates the cumulative axis. If yes, **PPTC (Phase 5a
-  downstream) is the right slice**; estimated ceiling drops the
-  worst frame from 1.375 s to ~900 ms. Audio listen-test for
-  `XEMU_APU_LOCK_RELEASE` stays deferred until the judder pillar
-  is closed (judder-induced audio skips would confound the
-  listen-test).
+  three is already met (2026-05-01 with four opt-in flags). The
+  tracked 60 Hz titles in the V4 sweep reach native 60 Hz on the same
+  build.
+- **1-second-class worst-frame stutter is best-effort complete within
+  the current TCG architecture.** V9/V10 attributed all measured
+  xemu-side cost classes in Crimson's 1.3 s worst-frame interval to
+  <100 ms total; the remaining ~1.2 s is raw JIT'd guest code
+  execution. Further reduction requires larger rearchitecture (PPTC /
+  AOT, HLE kernel work) or game-specific patches, not OpenGL renderer
+  polishing. Metal may improve presentation smoothness and latency,
+  but it is not expected to erase guest-engine or TCG-only stalls by
+  itself.
 - **1080p output (internal scale 2×) on tracked titles, with
   anti-aliasing as a player-visible option.** Met as of 2026-05-02:
   Apple Silicon system builds default `surface_scale = 2` on first
@@ -602,10 +700,11 @@ projects use but that are not on this fork's roadmap, with reasons:
   exercises **line primitives** through the geometry shader (87,243
   line draws) — a `XEMU_NATIVE_LINE` bypass is the natural
   follow-on slice if NGB-class titles become a priority focus.
-- **Apple Silicon system build ships seven default-on flags**
-  (2026-05-02): `XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`,
-  `XEMU_PGRAPH_FAST_READ`, `XEMU_TCG_SPLITWX`,
-  `XEMU_TCG_JMP_CACHE_TARGETED`, `XEMU_APU_LOCK_RELEASE`, and
+- **Apple Silicon system build ships eight default-on flags**
+  (updated 2026-05-02 after V9): `XEMU_NATIVE_TRI_DEPTH`,
+  `XEMU_NATIVE_QUAD`, `XEMU_PGRAPH_FAST_READ`, `XEMU_TCG_SPLITWX`,
+  `XEMU_TCG_JMP_CACHE_TARGETED`, `XEMU_APU_LOCK_RELEASE`,
+  `XEMU_FAST_RDTSC` (V9, RDTSC fast-path), and
   `display.quality.surface_scale = 2`. Plus opt-in `XEMU_GL_MSAA`
   and `XEMU_PGRAPH_ASYNC_SHADER_COMPILE`. Each is overridable via
   the documented env var.
@@ -616,7 +715,8 @@ projects use but that are not on this fork's roadmap, with reasons:
   "2026-05-02: Ship XEMU_APU_LOCK_RELEASE default-on with audio
   listen-test gate"). Human listen-test on the three tracked titles
   is the gating step before fully-shipped status.
-- Phase 4 native Metal renderer becomes a Phase-2 quality
-  investment, justified by code-base health or by a measured
-  renderer-side ceiling — not by the headline judder, which Metal
-  would not address.
+- Phase 4 native Metal renderer is the primary product-renderer
+  investment. It is justified by the final product requirements:
+  frame timing, latency, capture/profiling, enhancement controls,
+  pipeline caching, and long-term maintainability. Metal is not
+  expected to fix guest engine caps or TCG-only stalls by itself.

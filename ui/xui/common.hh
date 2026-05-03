@@ -31,6 +31,18 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <stb_image.h>
 
+// Apple Silicon performance fork: Metal renderer host integration.
+// xemu-metal.h is C-callable (its own extern "C" guards) so it's safe
+// to include from C++ translation units that don't have an
+// Objective-C++ compiler. The Metal-specific imgui backend header
+// (imgui_impl_metal.h) is NOT included here — it has ObjC-typed
+// signatures that would force every consumer of common.hh to be .mm.
+// Calls into the Metal-backed HUD path go through the xemu_metal_*
+// C functions declared in xemu-metal.h.
+#if defined(__APPLE__)
+#include "ui/xemu-metal.h"
+#endif
+
 extern "C" {
 // Include necessary QEMU headers
 #include "qemu/osdep.h"

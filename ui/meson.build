@@ -24,6 +24,7 @@ xemu_ss.add(files(
   'xemu-input.c',
   'xemu-monitor.c',
   'xemu-net.c',
+  'xemu-rate-slew.c',
   'xemu-settings.cc',
   'xemu-controllers.cc',
 
@@ -52,6 +53,20 @@ elif host_os == 'windows'
 elif host_os == 'darwin'
   xemu_ss.add(files('xemu-os-utils-macos.m'))
 endif
+
+# Apple Silicon performance fork: Metal renderer host integration. The
+# .mm file owns the MTLDevice / MTLCommandQueue / CAMetalLayer and
+# routes the ImGui-Metal HUD path. Built only on darwin+arm64 where the
+# `metal` dependency is available (see meson.build:2399). The
+# imgui_impl_metal.mm ImGui backend is compiled inside the imgui
+# subproject (metal=enabled passed in subprojects/imgui/meson.build
+# from the parent meson.build subproject() call) and exposed via the
+# `imgui` dep below. xemu-metal.mm requires -fobjc-arc; that's set as
+# a project-wide objcpp arg in meson.build for darwin+arm64.
+if host_os == 'darwin' and host_machine.cpu() == 'aarch64'
+  xemu_ss.add(when: metal, if_true: files('xemu-metal.mm'))
+endif
+
 xemu_ss.add(imgui, implot, stb_image, sdl, opengl, fa, fpng, json, fatx, tomlplusplus, genconfig)
 system_ss.add_all(xemu_ss)
 

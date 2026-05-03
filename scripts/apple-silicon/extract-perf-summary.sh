@@ -163,7 +163,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
     printf("%slongest_stutter_run_60fps=%d\n", prefix, longest_run_above(mspf_max_arr, n, 16.7))
 }
 
-/xemu-perf: interval_ms=/ {
+/xemu-perf: .*interval_ms=/ {
     intervals++
     interval_fps = 0
     interval_mspf = 0
@@ -254,15 +254,105 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "TCG_TB_LOOKUP_US_TOTAL" ||
                    key == "TCG_TB_GEN_CODE_US_TOTAL" ||
                    key == "TCG_HANDLE_INTERRUPT_US_TOTAL" ||
+                   key == "MMIO_READ_COUNT" ||
+                   key == "MMIO_READ_US_TOTAL" ||
+                   key == "MMIO_READ_PGRAPH_COUNT" ||
+                   key == "MMIO_READ_PGRAPH_US_TOTAL" ||
                    key == "HELPER_RDTSC_CALLS" ||
+                   key == "PIT_IRQ_TIMER_FIRES" ||
+                   key == "PIT_COALESCE_EVENTS" ||
+                   key == "PIT_COALESCE_LATE_US_TOTAL" ||
+                   key == "PIT_COALESCE_SKIPPED_TRANSITIONS" ||
+                   key == "TCG_XBOX_IDLE_LOOP_HITS" ||
+                   key == "TCG_XBOX_IDLE_LOOP_YIELDS" ||
+                   key == "TCG_XBOX_IDLE_LOOP_HALTS" ||
+                   key == "PFIFO_PUSHER_RUNS" ||
+                   key == "PFIFO_PUSHER_STALLS" ||
+                   key == "PFIFO_PUSHER_STALL_FLIP" ||
+                   key == "PFIFO_PUSHER_STALL_NOP" ||
+                   key == "PFIFO_PUSHER_STALL_FIFO" ||
+                   key == "PFIFO_PULLER_CALLS" ||
+                   key == "PFIFO_PULLER_STALLS" ||
+                   key == "PFIFO_PULLER_STALL_FLIP" ||
+                   key == "PFIFO_PULLER_STALL_NOP" ||
+                   key == "PFIFO_PULLER_STALL_CONTEXT" ||
+                   key == "PFIFO_PULLER_STALL_FIFO" ||
+                   key == "PFIFO_PUSHER_WORDS" ||
+                   key == "PFIFO_PULLER_METHOD_WORDS" ||
+                   key == "PFIFO_USER_DMA_PUT_WRITES" ||
+                   key == "PFIFO_USER_DMA_GET_WRITES" ||
+                   key == "PFIFO_USER_DMA_PUT_READS" ||
+                   key == "PFIFO_USER_DMA_GET_READS" ||
+                   key == "PGRAPH_PATT_COLOR0_WRITES" ||
+                   key == "PGRAPH_PATT_COLOR0_READS" ||
+                   key == "PGRAPH_FLIP_STALL_SETS" ||
+                   key == "PGRAPH_FLIP_STALL_CHECKS" ||
+                   key == "PGRAPH_FLIP_STALL_STILL_WAITING" ||
+                   key == "PGRAPH_FLIP_STALL_COMPLETES" ||
                    key == "NV2A_VBLANK_FIRES" ||
                    key == "NV2A_FLIP_STALL_WRITES" ||
                    key == "NV2A_PRESENT_HEARTBEAT" ||
                    key == "XEMU_GL_SWAPS" ||
-                   key == "APU_LOCK_HOLD_US_TOTAL") {
+                   key == "APU_LOCK_HOLD_US_TOTAL" ||
+                   key == "METAL_DRAW_COUNT" ||
+                   key == "METAL_DRAW_INDEXED_COUNT" ||
+                   key == "METAL_NATIVE_TRI_DEPTH_DRAWS" ||
+                   key == "METAL_NATIVE_QUAD_DRAWS" ||
+                   key == "METAL_CLEAR_COUNT" ||
+                   key == "METAL_GLSL_TRANSLATE" ||
+                   key == "METAL_GLSL_TRANSLATE_FAIL" ||
+                   key == "METAL_SHADER_VALIDATE_OK" ||
+                   key == "METAL_SHADER_VALIDATE_FAIL" ||
+                   key == "METAL_PIPELINE_HITS" ||
+                   key == "METAL_PIPELINE_MISSES" ||
+                   key == "METAL_PIPELINE_FAILED" ||
+                   key == "METAL_TEX_UPLOADS_TOTAL" ||
+                   key == "METAL_TEX_UPLOAD_BYTES_TOTAL" ||
+                   key == "METAL_TEX_CACHE_HITS" ||
+                   key == "METAL_TEX_CACHE_MISSES" ||
+                   key == "METAL_PIPELINE_KEY_BUILT" ||
+                   key == "METAL_PIPELINE_TRANSLATED_OK" ||
+                   key == "METAL_PIPELINE_TRANSLATED_FAILED" ||
+                   key == "METAL_DRAW_TRANSLATED" ||
+                   key == "METAL_PIPELINE_FALLBACKS" ||
+                   key == "METAL_UNIFORM_PACK" ||
+                   key == "METAL_UNIFORM_BYTES" ||
+                   key == "METAL_SHADER_COMPILE_QUEUED_TOTAL" ||
+                   key == "METAL_SHADER_COMPILE_COMPLETED_TOTAL" ||
+                   key == "METAL_SHADER_COMPILE_FAILED_TOTAL" ||
+                   key == "METAL_DRAWS_SKIPPED_PENDING_TOTAL" ||
+                   key == "METAL_DRAWS_USING_UBERSHADER_TOTAL" ||
+                   key == "METAL_SHADER_CACHE_LOADS" ||
+                   key == "METAL_SHADER_CACHE_HITS" ||
+                   key == "METAL_SHADER_CACHE_MISSES" ||
+                   key == "RATE_SLEW_RATIO_E6" ||
+                   key == "RATE_SLEW_ACTIVE" ||
+                   key == "METAL_PRESENT_JITTER_US_AVG" ||
+                   key == "METAL_PRESENT_JITTER_US_TOTAL" ||
+                   key == "METAL_PRESENTS" ||
+                   key == "METAL_DISPLAY_LINK_CALLBACKS" ||
+                   key == "METAL_DRAWABLE_ACQUIRE_FAILS" ||
+                   key == "METAL_MSAA_RESOLVE_COUNT" ||
+                   key == "METAL_MSAA_RESOLVE_US_TOTAL" ||
+                   key == "METAL_MSAA_SAMPLE_COUNT" ||
+                   key == "METAL_FX_SPATIAL_PRESENTS" ||
+                   key == "METAL_FX_SPATIAL_US_TOTAL" ||
+                   key == "METAL_FX_SCALE_FACTOR" ||
+                   key == "METAL_FX_SPATIAL_GPU_US_TOTAL" ||
+                   key == "METAL_VERTEX_US_TOTAL" ||
+                   key == "METAL_FRAGMENT_US_TOTAL" ||
+                   key == "METAL_PRESENT_GPU_US_TOTAL" ||
+                   key == "METAL_PRESENT_GPU_FRAMES" ||
+                   key == "METAL_CAPTURE_FRAMES" ||
+                   key == "METAL_CAPTURE_ACTIVE") {
             add_counter(key, value)
-        } else if (key == "TCG_TB_INVALIDATE_BURST_MAX" ||
+        } else if (key == "METAL_PRESENT_JITTER_US_MAX" ||
+                   key == "TCG_TB_INVALIDATE_BURST_MAX" ||
                    key == "TCG_INVALIDATE_WALL_US_MAX" ||
+                   key == "MMIO_READ_US_MAX" ||
+                   key == "MMIO_READ_PGRAPH_US_MAX" ||
+                   key == "PIT_COALESCE_LATE_US_MAX" ||
+                   key == "PFIFO_DMA_BACKLOG_BYTES_MAX" ||
                    key == "APU_VCPU_LOCK_WAIT_US_MAX") {
             max_counter(key, value)
         }
@@ -382,15 +472,110 @@ END {
     keys[71] = "TCG_HANDLE_INTERRUPT_US_TOTAL"
     keys[72] = "HELPER_RDTSC_CALLS"
     keys[73] = "TCG_INVALIDATE_WALL_US_TOTAL"
+    keys[74] = "PIT_IRQ_TIMER_FIRES"
+    keys[75] = "PIT_COALESCE_EVENTS"
+    keys[76] = "PIT_COALESCE_LATE_US_TOTAL"
+    keys[77] = "PIT_COALESCE_SKIPPED_TRANSITIONS"
+    keys[78] = "TCG_XBOX_IDLE_LOOP_HITS"
+    keys[79] = "TCG_XBOX_IDLE_LOOP_YIELDS"
+    keys[80] = "TCG_XBOX_IDLE_LOOP_HALTS"
+    keys[81] = "MMIO_READ_COUNT"
+    keys[82] = "MMIO_READ_US_TOTAL"
+    keys[83] = "MMIO_READ_PGRAPH_COUNT"
+    keys[84] = "MMIO_READ_PGRAPH_US_TOTAL"
+    keys[85] = "PFIFO_PUSHER_RUNS"
+    keys[86] = "PFIFO_PUSHER_STALLS"
+    keys[87] = "PFIFO_PUSHER_STALL_FLIP"
+    keys[88] = "PFIFO_PUSHER_STALL_NOP"
+    keys[89] = "PFIFO_PUSHER_STALL_FIFO"
+    keys[90] = "PFIFO_PULLER_CALLS"
+    keys[91] = "PFIFO_PULLER_STALLS"
+    keys[92] = "PFIFO_PULLER_STALL_FLIP"
+    keys[93] = "PFIFO_PULLER_STALL_NOP"
+    keys[94] = "PFIFO_PULLER_STALL_CONTEXT"
+    keys[95] = "PFIFO_PULLER_STALL_FIFO"
+    keys[96] = "PFIFO_PUSHER_WORDS"
+    keys[97] = "PFIFO_PULLER_METHOD_WORDS"
+    keys[98] = "PFIFO_USER_DMA_PUT_WRITES"
+    keys[99] = "PFIFO_USER_DMA_GET_WRITES"
+    keys[100] = "PFIFO_USER_DMA_PUT_READS"
+    keys[101] = "PFIFO_USER_DMA_GET_READS"
+    keys[102] = "PGRAPH_PATT_COLOR0_WRITES"
+    keys[103] = "PGRAPH_PATT_COLOR0_READS"
+    keys[104] = "PGRAPH_FLIP_STALL_SETS"
+    keys[105] = "PGRAPH_FLIP_STALL_CHECKS"
+    keys[106] = "PGRAPH_FLIP_STALL_STILL_WAITING"
+    keys[107] = "PGRAPH_FLIP_STALL_COMPLETES"
+    keys[108] = "METAL_DRAW_COUNT"
+    keys[109] = "METAL_DRAW_INDEXED_COUNT"
+    keys[110] = "METAL_NATIVE_TRI_DEPTH_DRAWS"
+    keys[111] = "METAL_NATIVE_QUAD_DRAWS"
+    keys[112] = "METAL_CLEAR_COUNT"
+    keys[113] = "METAL_GLSL_TRANSLATE"
+    keys[114] = "METAL_GLSL_TRANSLATE_FAIL"
+    keys[115] = "METAL_SHADER_VALIDATE_OK"
+    keys[116] = "METAL_SHADER_VALIDATE_FAIL"
+    keys[117] = "METAL_PIPELINE_HITS"
+    keys[118] = "METAL_PIPELINE_MISSES"
+    keys[119] = "METAL_PIPELINE_FAILED"
+    keys[120] = "METAL_TEX_UPLOADS_TOTAL"
+    keys[121] = "METAL_TEX_UPLOAD_BYTES_TOTAL"
+    keys[122] = "METAL_TEX_CACHE_HITS"
+    keys[123] = "METAL_TEX_CACHE_MISSES"
+    keys[124] = "METAL_PIPELINE_KEY_BUILT"
+    keys[125] = "METAL_PIPELINE_TRANSLATED_OK"
+    keys[126] = "METAL_PIPELINE_TRANSLATED_FAILED"
+    keys[127] = "METAL_DRAW_TRANSLATED"
+    keys[128] = "METAL_PIPELINE_FALLBACKS"
+    keys[129] = "METAL_UNIFORM_PACK"
+    keys[130] = "METAL_UNIFORM_BYTES"
+    keys[131] = "METAL_SHADER_COMPILE_QUEUED_TOTAL"
+    keys[132] = "METAL_SHADER_COMPILE_COMPLETED_TOTAL"
+    keys[133] = "METAL_SHADER_COMPILE_FAILED_TOTAL"
+    keys[134] = "METAL_DRAWS_SKIPPED_PENDING_TOTAL"
+    keys[135] = "METAL_DRAWS_USING_UBERSHADER_TOTAL"
+    keys[136] = "METAL_SHADER_CACHE_LOADS"
+    keys[137] = "METAL_SHADER_CACHE_HITS"
+    keys[138] = "METAL_SHADER_CACHE_MISSES"
+    keys[139] = "RATE_SLEW_RATIO_E6"
+    keys[140] = "RATE_SLEW_ACTIVE"
+    keys[141] = "METAL_PRESENTS"
+    keys[142] = "METAL_DISPLAY_LINK_CALLBACKS"
+    keys[143] = "METAL_DRAWABLE_ACQUIRE_FAILS"
+    keys[144] = "METAL_PRESENT_JITTER_US_TOTAL"
+    keys[145] = "METAL_PRESENT_JITTER_US_AVG"
+    keys[146] = "METAL_MSAA_RESOLVE_COUNT"
+    keys[147] = "METAL_MSAA_RESOLVE_US_TOTAL"
+    keys[148] = "METAL_MSAA_SAMPLE_COUNT"
+    keys[149] = "METAL_FX_SPATIAL_PRESENTS"
+    keys[150] = "METAL_FX_SPATIAL_US_TOTAL"
+    keys[151] = "METAL_FX_SCALE_FACTOR"
+    keys[152] = "METAL_FX_SPATIAL_GPU_US_TOTAL"
+    keys[153] = "METAL_VERTEX_US_TOTAL"
+    keys[154] = "METAL_FRAGMENT_US_TOTAL"
+    keys[155] = "METAL_PRESENT_GPU_US_TOTAL"
+    keys[156] = "METAL_PRESENT_GPU_FRAMES"
+    keys[157] = "METAL_CAPTURE_FRAMES"
+    keys[158] = "METAL_CAPTURE_ACTIVE"
 
-    for (i = 1; i <= 73; i++) {
+    for (i = 1; i <= 158; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
     # Per-interval-max counters: report the running max across intervals.
+    printf("METAL_PRESENT_JITTER_US_MAX=%d\n",
+           ("METAL_PRESENT_JITTER_US_MAX" in counters_max) ? counters_max["METAL_PRESENT_JITTER_US_MAX"] : 0)
     printf("TCG_TB_INVALIDATE_BURST_MAX=%d\n",
            ("TCG_TB_INVALIDATE_BURST_MAX" in counters_max) ? counters_max["TCG_TB_INVALIDATE_BURST_MAX"] : 0)
     printf("TCG_INVALIDATE_WALL_US_MAX=%d\n",
            ("TCG_INVALIDATE_WALL_US_MAX" in counters_max) ? counters_max["TCG_INVALIDATE_WALL_US_MAX"] : 0)
+    printf("MMIO_READ_US_MAX=%d\n",
+           ("MMIO_READ_US_MAX" in counters_max) ? counters_max["MMIO_READ_US_MAX"] : 0)
+    printf("MMIO_READ_PGRAPH_US_MAX=%d\n",
+           ("MMIO_READ_PGRAPH_US_MAX" in counters_max) ? counters_max["MMIO_READ_PGRAPH_US_MAX"] : 0)
+    printf("PIT_COALESCE_LATE_US_MAX=%d\n",
+           ("PIT_COALESCE_LATE_US_MAX" in counters_max) ? counters_max["PIT_COALESCE_LATE_US_MAX"] : 0)
+    printf("PFIFO_DMA_BACKLOG_BYTES_MAX=%d\n",
+           ("PFIFO_DMA_BACKLOG_BYTES_MAX" in counters_max) ? counters_max["PFIFO_DMA_BACKLOG_BYTES_MAX"] : 0)
     printf("APU_VCPU_LOCK_WAIT_US_MAX=%d\n",
            ("APU_VCPU_LOCK_WAIT_US_MAX" in counters_max) ? counters_max["APU_VCPU_LOCK_WAIT_US_MAX"] : 0)
 

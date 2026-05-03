@@ -61,6 +61,22 @@
 #include <math.h>
 #include <SDL3/SDL.h>
 
+#if defined(__APPLE__)
+/* Apple Silicon performance fork: Metal renderer host integration.
+ * The header is C-callable. xemu_metal_is_active() returns false until
+ * xemu_metal_init() has been called; the Metal-path branches below
+ * are gated on this so non-darwin builds and OpenGL/Vulkan-on-darwin
+ * builds compile out cleanly. */
+#include "ui/xemu-metal.h"
+#endif
+
+/* Apple Silicon performance fork: graphics-API-agnostic emulation-rate
+ * slewing (PCSX2 PR #5488 pattern). Adjusts vblank_interval_ns to
+ * match the host display's actual refresh rate when it is within ±5 %
+ * of the Xbox 60 Hz baseline. Opt-in via XEMU_GL_RATE_SLEW=1 (alias
+ * XEMU_RATE_SLEW=1). */
+#include "qemu/xemu-rate-slew.h"
+
 #ifndef DEBUG_XEMU_C
 #define DEBUG_XEMU_C 0
 #endif
@@ -126,6 +142,20 @@ void tcg_register_init_ctx(void); // tcg.c
 static uint64_t lock_held_acc;
 static uint64_t lock_start;
 #endif
+
+/* Apple Silicon performance fork: returns true when xemu.toml selects
+ * the Metal renderer for this session. The value is read once before
+ * window creation; switching renderer requires an xemu restart, same
+ * contract as the GL/Vulkan story today. Defined here so both
+ * display_very_early_init and gl_render_frame can branch on it. */
+static inline bool xemu_renderer_is_metal(void)
+{
+#if defined(__APPLE__)
+    return g_config.display.renderer == CONFIG_DISPLAY_RENDERER_METAL;
+#else
+    return false;
+#endif
+}
 
 void xemu_main_loop_lock(void)
 {
@@ -808,6 +838,19 @@ static void gl_render_frame(struct xemu_console *scon)
         return;
     }
 
+#if defined(__APPLE__)
+    /* Apple Silicon performance fork: Metal HUD path. The Metal
+     * renderer's NV2A side is still a no-op stub at slice M1, so this
+     * call presents a black-cleared CAMetalLayer drawable with the
+     * ImGui HUD overlaid. M2 introduces the surface manager and the
+     * NV2A framebuffer compositor. */
+    if (xemu_metal_is_active()) {
+        xemu_metal_render_frame();
+        qatomic_set(&rendering, false);
+        return;
+    }
+#endif
+
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
     bool flip_required = false;
@@ -938,6 +981,21 @@ static void poll_events(struct xemu_console *scon)
             break;
         case SDL_EVENT_WINDOW_FIRST ... SDL_EVENT_WINDOW_LAST:
             handle_windowevent(ev);
+            /* Apple Silicon performance fork: the window may have moved
+             * to a different display (different refresh rate). Re-query
+             * the rate-slew module so vblank_interval_ns tracks the
+             * current host. */
+            if (ev->type == SDL_EVENT_WINDOW_DISPLAY_CHANGED ||
+                ev->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
+                xemu_rate_slew_update(m_window);
+            }
+            break;
+        case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+        case SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED:
+            /* Apple Silicon performance fork: host display switched
+             * refresh rate (e.g. ProMotion adaptive change, ATV/HDR
+             * mode switch). Recompute the slew. */
+            xemu_rate_slew_update(m_window);
             break;
         default:
             break;
@@ -977,19 +1035,23 @@ static void display_very_early_init(DisplayOptions *o)
 #endif
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
 
-    // Initialize rendering context
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(
-        SDL_GL_CONTEXT_PROFILE_MASK,
-        SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    // Initialize rendering context. The GL attributes are no-ops when
+    // the window is created with SDL_WINDOW_METAL, but skip them
+    // entirely on the Metal path for clarity and to avoid SDL warnings.
+    if (!xemu_renderer_is_metal()) {
+        SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+        SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+        SDL_GL_SetAttribute(
+            SDL_GL_CONTEXT_PROFILE_MASK,
+            SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    }
 
     char *title = g_strdup_printf("xemu | v%s"
 #ifdef XEMU_DEBUG_BUILD
@@ -1031,7 +1093,14 @@ static void display_very_early_init(DisplayOptions *o)
         window_height = min_window_height;
     }
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    SDL_WindowFlags window_flags;
+    if (xemu_renderer_is_metal()) {
+        /* Apple Silicon performance fork: SDL_WINDOW_METAL gives us a
+         * window backed by a CAMetalLayer (no GL context). */
+        window_flags = (SDL_WindowFlags)(SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    } else {
+        window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    }
 
     // Create main window
     m_window = SDL_CreateWindow(
@@ -1051,25 +1120,59 @@ static void display_very_early_init(DisplayOptions *o)
         SDL_SetWindowPosition(m_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     }
 
-    m_context = SDL_GL_CreateContext(m_window);
+    /* Apple Silicon performance fork: initialize the rate-slewing
+     * module now that the window has a real display. Reads
+     * XEMU_GL_RATE_SLEW / XEMU_RATE_SLEW once and adjusts
+     * vblank_interval_ns when the host refresh is within ±5 % of
+     * 60 Hz. The window argument is forward-typed so this header is
+     * SDL-free for callers that can't include SDL3 (profile.c).
+     * vblank_timer_thread / vblank_timer_callback below pick up the
+     * adjusted value through the global. */
+    xemu_rate_slew_init(m_window);
 
-    if (m_context != NULL && epoxy_gl_version() < 40) {
-        SDL_GL_MakeCurrent(NULL, NULL);
-        SDL_GL_DestroyContext(m_context);
+#if defined(__APPLE__)
+    if (xemu_renderer_is_metal()) {
+        /* Initialize the host-side Metal stack: SDL_MetalView,
+         * CAMetalLayer, MTLDevice, MTLCommandQueue, ImGui Metal +
+         * ImGui SDL3-for-Metal backends. m_context stays NULL on the
+         * Metal path; gl_render_frame branches to the Metal path
+         * before dereferencing it. */
+        if (!xemu_metal_init(m_window)) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                "Unable to initialize Metal renderer",
+                "Failed to initialize the Metal device, command queue, "
+                "or CAMetalLayer for this Mac. xemu cannot continue and "
+                "will now exit. To fall back to OpenGL, set\r\n"
+                "[display]\r\nrenderer = \"OPENGL\"\r\nin xemu.toml.",
+                m_window);
+            SDL_DestroyWindow(m_window);
+            SDL_Quit();
+            exit(1);
+        }
         m_context = NULL;
-    }
+    } else
+#endif
+    {
+        m_context = SDL_GL_CreateContext(m_window);
 
-    if (m_context == NULL) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-            "Unable to create OpenGL context",
-            "Unable to create OpenGL context. This usually means the\r\n"
-            "graphics device on this system does not support OpenGL 4.0.\r\n"
-            "\r\n"
-            "xemu cannot continue and will now exit.",
-            m_window);
-        SDL_DestroyWindow(m_window);
-        SDL_Quit();
-        exit(1);
+        if (m_context != NULL && epoxy_gl_version() < 40) {
+            SDL_GL_MakeCurrent(NULL, NULL);
+            SDL_GL_DestroyContext(m_context);
+            m_context = NULL;
+        }
+
+        if (m_context == NULL) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                "Unable to create OpenGL context",
+                "Unable to create OpenGL context. This usually means the\r\n"
+                "graphics device on this system does not support OpenGL 4.0.\r\n"
+                "\r\n"
+                "xemu cannot continue and will now exit.",
+                m_window);
+            SDL_DestroyWindow(m_window);
+            SDL_Quit();
+            exit(1);
+        }
     }
 
     int width, height, channels = 0;
@@ -1086,14 +1189,25 @@ static void display_very_early_init(DisplayOptions *o)
 
     fprintf(stderr, "CPU: %s\n", xemu_get_cpu_info());
     fprintf(stderr, "OS_Version: %s\n", xemu_get_os_info());
-    fprintf(stderr, "GL_VENDOR: %s\n", glGetString(GL_VENDOR));
-    fprintf(stderr, "GL_RENDERER: %s\n", glGetString(GL_RENDERER));
-    fprintf(stderr, "GL_VERSION: %s\n", glGetString(GL_VERSION));
-    fprintf(stderr, "GL_SHADING_LANGUAGE_VERSION: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
+#if defined(__APPLE__)
+    if (xemu_renderer_is_metal()) {
+        /* GL strings are unavailable on the Metal path. The Metal
+         * device's [name] and capabilities are logged from
+         * xemu_metal_init(); the renderer choice is logged from
+         * pgraph_init() ("Renderer: Metal"). */
+    } else
+#endif
+    {
+        fprintf(stderr, "GL_VENDOR: %s\n", glGetString(GL_VENDOR));
+        fprintf(stderr, "GL_RENDERER: %s\n", glGetString(GL_RENDERER));
+        fprintf(stderr, "GL_VERSION: %s\n", glGetString(GL_VERSION));
+        fprintf(stderr, "GL_SHADING_LANGUAGE_VERSION: %s\n", glGetString(GL_SHADING_LANGUAGE_VERSION));
 
-    // Initialize offscreen rendering context now
-    nv2a_context_init();
-    SDL_GL_MakeCurrent(NULL, NULL);
+        // Initialize offscreen rendering context now (GL only — the Metal
+        // renderer creates its own resources from the device on demand).
+        nv2a_context_init();
+        SDL_GL_MakeCurrent(NULL, NULL);
+    }
 }
 
 static void display_early_init(DisplayOptions *o)
@@ -1101,9 +1215,22 @@ static void display_early_init(DisplayOptions *o)
     assert(o->type == DISPLAY_TYPE_XEMU);
     display_opengl = 1;
 
-    SDL_GL_MakeCurrent(m_window, m_context);
-    SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
-    xemu_hud_init(m_window, m_context);
+#if defined(__APPLE__)
+    if (xemu_renderer_is_metal()) {
+        /* On the Metal path, ImGui SDL3-for-Metal + ImGui Metal
+         * backends were already initialized inside xemu_metal_init().
+         * xemu_hud_init still runs to bring up the C++ HUD context,
+         * styles, etc.; it sees xemu_metal_is_active() and skips the
+         * GL backend init. m_context is NULL in this path; the C++
+         * HUD does not deref it on the Metal branch. */
+        xemu_hud_init(m_window, NULL);
+    } else
+#endif
+    {
+        SDL_GL_MakeCurrent(m_window, m_context);
+        SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
+        xemu_hud_init(m_window, m_context);
+    }
 }
 
 static const DisplayChangeListenerOps dcl_gl_ops = {
@@ -1120,7 +1247,12 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     int i;
 
     assert(o->type == DISPLAY_TYPE_XEMU);
-    SDL_GL_MakeCurrent(m_window, m_context);
+#if defined(__APPLE__)
+    if (!xemu_renderer_is_metal())
+#endif
+    {
+        SDL_GL_MakeCurrent(m_window, m_context);
+    }
 
     gui_fullscreen = o->has_full_screen && o->full_screen;
     gui_fullscreen |= g_config.display.window.fullscreen_on_startup;
@@ -1176,7 +1308,12 @@ static void display_init(DisplayState *ds, DisplayOptions *o)
     }
 
     /* Tell main thread to go ahead and create the app and enter the run loop */
-    SDL_GL_MakeCurrent(NULL, NULL);
+#if defined(__APPLE__)
+    if (!xemu_renderer_is_metal())
+#endif
+    {
+        SDL_GL_MakeCurrent(NULL, NULL);
+    }
     qemu_sem_post(&display_init_sem);
 }
 
@@ -1187,8 +1324,17 @@ static void display_finalize(void)
     }
 
     SDL_RemoveEventWatch(event_watch_callback, &scon_list[0]);
-    SDL_GL_MakeCurrent(NULL, NULL);
-    SDL_GL_DestroyContext(m_context);
+#if defined(__APPLE__)
+    if (xemu_renderer_is_metal()) {
+        /* xemu_metal_shutdown is called from xemu_hud_cleanup; the
+         * SDL_MetalView and Metal device are torn down there. The GL
+         * context lifecycle (SDL_GL_DestroyContext) does not apply. */
+    } else
+#endif
+    {
+        SDL_GL_MakeCurrent(NULL, NULL);
+        SDL_GL_DestroyContext(m_context);
+    }
     SDL_DestroyWindow(m_window);
     SDL_Quit();
 }

@@ -28,6 +28,7 @@
 
 glslang
 SPIRV-Reflect
+spirv-cross
 volk
 VulkanMemoryAllocator
 nv2a_vsh_cpu

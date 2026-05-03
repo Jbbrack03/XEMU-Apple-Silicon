@@ -32,5 +32,14 @@
   <true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Microphone used for peripheral emulation, e.g. Xbox Live Communicator.</string>
+  <!-- Apple Silicon performance fork (M13, 2026-05-02): MetalCaptureEnabled=YES
+       authorizes programmatic Metal frame capture via MTLCaptureManager when
+       XEMU_METAL_CAPTURE=path.gputrace is set. Required by Apple's gating for
+       development builds; production-only builds should set this to NO (no
+       distinct production target ships from this fork yet, so YES is the
+       always-applied default). See docs/apple-silicon/automation.md and
+       docs/apple-silicon/metal-renderer-plan.md M13. -->
+  <key>MetalCaptureEnabled</key>
+  <true/>
 </dict>
 </plist>

@@ -86,6 +86,20 @@ if host_os == 'darwin' and \
   all_languages += ['objc']
   objc = meson.get_compiler('objc')
 endif
+# Apple Silicon performance fork: Metal renderer needs Objective-C++ for
+# the imgui_impl_metal.mm backend and the xemu-metal.mm host integration.
+# Gated on darwin+arm64 only; required when present so the configure
+# step fails fast if clang's objcpp frontend is missing. ARC is
+# enabled for objcpp because both files use ARC idioms (@property strong,
+# __bridge casts). The existing .m files (cocoa.m, apple-gfx.m,
+# xemu-os-utils-macos.m, audio/coreaudio.m, net/vmnet-*.m) are objc
+# (not objcpp), use manual retain/release, and are unaffected.
+if host_os == 'darwin' and host_machine.cpu() == 'aarch64' and \
+   add_languages('objcpp', required: true, native: false)
+  all_languages += ['objcpp']
+  objcpp = meson.get_compiler('objcpp')
+  add_project_arguments('-fobjc-arc', language: 'objcpp')
+endif
 
 have_rust = add_languages('rust', native: false,
     required: get_option('rust').disable_auto_if(not have_system))
@@ -2361,7 +2375,11 @@ elif host_os == 'linux'
   vulkan = dependency('vulkan')
 endif
 
-if vulkan.found()
+# glslang is required by the Vulkan renderer (when vulkan is found) and
+# by the Apple Silicon Metal renderer (slice M5+, glsl/ → SPIR-V →
+# spirv-cross/MSL). Build it whenever either is enabled.
+need_glslang = vulkan.found() or (host_os == 'darwin' and host_machine.cpu() == 'aarch64')
+if need_glslang
   libglslang = dependency('glslang', version: '>=15.0.0', required: false)
   if not libglslang.found()
     # FIXME: Get spirv-tools to enable opt.
@@ -2376,6 +2394,9 @@ if vulkan.found()
         ], include_directories: glslang_subpro.include_directories('glslang')
       )
   endif
+endif
+
+if vulkan.found()
 
   volk_opts = cmake.subproject_options()
   volk_opts.add_cmake_defines({'VOLK_STATIC_DEFINES': 'VK_NO_PROTOTYPES'})
@@ -2396,6 +2417,42 @@ if vulkan.found()
                                      dependencies: vulkan)
 endif
 
+# Metal renderer (Apple Silicon performance fork). Gated on darwin+arm64
+# only — the Metal port is the long-term renderer direction for the fork
+# and never lands on Intel Macs or non-darwin hosts.
+metal = not_found
+spirv_cross = not_found
+if host_os == 'darwin' and host_machine.cpu() == 'aarch64'
+  metal = dependency('appleframeworks',
+                     modules: ['Foundation', 'Metal', 'MetalKit', 'QuartzCore',
+                               'MetalFX'])
+
+  spirv_cross_opts = cmake.subproject_options()
+  spirv_cross_opts.add_cmake_defines({
+    'SPIRV_CROSS_STATIC': 'ON',
+    'SPIRV_CROSS_SHARED': 'OFF',
+    'SPIRV_CROSS_CLI': 'OFF',
+    'SPIRV_CROSS_ENABLE_TESTS': 'OFF',
+    'SPIRV_CROSS_ENABLE_GLSL': 'ON',
+    'SPIRV_CROSS_ENABLE_HLSL': 'OFF',
+    'SPIRV_CROSS_ENABLE_MSL': 'ON',
+    'SPIRV_CROSS_ENABLE_CPP': 'OFF',
+    'SPIRV_CROSS_ENABLE_REFLECT': 'OFF',
+    'SPIRV_CROSS_ENABLE_C_API': 'ON',
+    'SPIRV_CROSS_ENABLE_UTIL': 'OFF',
+  })
+  spirv_cross_subproj = cmake.subproject('spirv-cross', options: spirv_cross_opts)
+  spirv_cross = declare_dependency(
+    link_with: [
+      spirv_cross_subproj.target('spirv-cross-c'),
+      spirv_cross_subproj.target('spirv-cross-msl'),
+      spirv_cross_subproj.target('spirv-cross-glsl'),
+      spirv_cross_subproj.target('spirv-cross-core'),
+    ],
+    include_directories: spirv_cross_subproj.include_directories('spirv-cross-c'),
+  )
+endif
+
 if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
@@ -2405,6 +2462,12 @@ endif
 
 libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
 
+# Apple Silicon performance fork: enable the imgui Metal backend on
+# darwin+arm64 only. The Metal renderer is the long-term direction for
+# this fork; the OpenGL backend stays enabled for the GL renderer
+# fallback path. On non-darwin and Intel Macs metal stays disabled.
+imgui_metal_opt = (host_os == 'darwin' and host_machine.cpu() == 'aarch64') ? 'metal=enabled' : 'metal=disabled'
+
 imgui_proj = subproject('imgui', required: true,
                          default_options: [
                            'default_library=static',
@@ -2412,7 +2475,7 @@ imgui_proj = subproject('imgui', required: true,
                            'dx10=disabled',
                            'dx11=disabled',
                            'dx12=disabled',
-                           'metal=disabled',
+                           imgui_metal_opt,
                            'opengl=enabled',
                            'sdl2_renderer=disabled',
                            'sdl3_renderer=disabled',
