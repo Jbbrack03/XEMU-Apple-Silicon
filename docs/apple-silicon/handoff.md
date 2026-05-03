@@ -1,7 +1,63 @@
 # Handoff
 
-Last updated: 2026-05-03 (post-followup-B+C diagnostic capture —
-**three candidate buffer-swap mechanisms ruled out empirically**, the
+Last updated: 2026-05-03 (post-followup-E surface-cache fixes —
+**three real bugs in the Metal surface cache shipped + one decisive
+diagnostic counter**: per-vram_addr `metal_draw_target` counter at
+`pgraph_mtl_flush_draw` now exposes WHICH cached surface receives
+each draw. PGR2 evidence is unambiguous: 1500+ draws/s land in the
+1280×480 supersampled back buffer at `0x3628000`; the 640×480 front
+buffer at `0x32a4000` (CRTC publish target) gets only 3-4 draws per
+2-s interval. The back buffer texture shows pure black despite the
+draws, AND the front buffer no longer shows magenta artifact — those
+were both side-effects of three latent surface-cache bugs that this
+slice fixes:
+
+1. **Color/depth cache collision** at `vram_addr=0x0` (and any
+   real surface where `dma.address+offset=0`). The legacy lookup
+   `cache_get_at(addr)` was unfiltered by aspect, so an alternating
+   color-bind / depth-bind cycle destroyed each prior binding via
+   the shape-mismatch destroy-and-recreate path. Counter showed 6
+   recreates per 2 s interval. **Fixed** by splitting into
+   `cache_get_at_color` and `cache_get_at_depth`; recreate count
+   drops to 0/interval.
+2. **LRU eviction of the stably-published front-fb.** The publish
+   dedupe path skipped bumping `last_use_seq` when the texture was
+   already current, so a stable front-fb's LRU score grew stale and
+   the cache picked it as the eviction victim — destroying the
+   texture the compositor was reading. **Fixed** by bumping
+   `last_use_seq` on every publish call AND adding an explicit
+   front-fb pin to `cache_evict_lru` that skips the entry whose
+   texture matches `s_front_framebuffer_texture`.
+3. **Cache cap=16 too small** for AAA Xbox titles. PGR2 has 11+
+   color RTs + depth + ensure-by-shape entries = >16 needed. Cap
+   raised to 32; `METAL_SURFACE_CACHE_SIZE` now grows past 16
+   (observed 17/19/21 with PGR2 boot-phase activity), and a new
+   `metal_draw_target_first` slot 10 entry (`0x2454000`) appeared
+   that the previous cap was hiding.
+
+**Visual gate STILL FAILS**: the magenta artifact is gone (the
+front-fb is now coherent and pinned), but PGR2's published front-fb
+at `0x32a4000` is empty of scene content because PGR2 renders to
+the back buffer and there is no Metal-side mechanism to propagate
+GPU-rendered content to the CRTC-pointed front-fb. GL handles this
+via the display-side `get_framebuffer_surface` callback that
+uploads VRAM contents at host-vsync time. Vulkan handles it via
+`pgraph_vk_surface_download_if_dirty` which downloads rendered
+texture pixels back to guest VRAM. Metal has neither.
+**Highest-priority next-session action**: open slice **M5.10 —
+VRAM-coherent surface download** (or mirror GL's
+`get_framebuffer_surface` display flow) to bridge the back→front
+gap. Major slice. M15 default-on stays **BLOCKED** on M5.10.
+
+**User-stated goals are MET TODAY via the GL renderer**:
+`XEMU_GL_MSAA=4` + `surface_scale=2` (default-on for first launch) +
+`XEMU_MACOS_NATIVE_INPUT=1`; see
+`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
+for the per-title FPS table.
+
+(Earlier banner — diagnostic-capture session — preserved verbatim
+below for the empirical audit trail. Three candidate buffer-swap
+mechanisms ruled out empirically, the
 actual scene RT remains unidentified. Added `XEMU_METAL_DIAG_CLEAR=1`
 clear-color logger and extended `XEMU_METAL_SCREENSHOT_SOURCE` with a
 `vram:0xADDR` mode that captures any specific cached SurfaceBinding

@@ -1700,7 +1700,142 @@ per-vram_addr draw-target instrumentation.
 
 **Followup-D (surface download for read-from-RT) — STILL DEFERRED.**
 
+**Followup-E (surface-cache color/depth split + front-fb pin + cap raise) — SHIPPED 2026-05-03.**
+Three real bugs identified via the new per-vram_addr `metal_draw_target`
+diagnostic counter (instrumented at `pgraph_mtl_flush_draw`):
 
+1. **Color/depth cache collision.** `cache_get_at(addr)` was unfiltered
+   by `is_color`, so a same-vram_addr color/depth alternation thrashed
+   each prior binding via the destroy-and-recreate path. PGR2 hits
+   this on the legacy `vram_addr=0` ensure-by-shape sentinel plus a
+   real surface where `dma.address+offset=0`. Split into
+   `cache_get_at_color` / `cache_get_at_depth`. New counter
+   `METAL_SURFACE_RECREATE_SHAPE_MISMATCH` was 6/interval before fix;
+   0/interval after.
+2. **LRU eviction of stably-published front-fb.**
+   `pgraph_mtl_surface_publish_front_fb` returned early on dedupe
+   without bumping `last_use_seq`, so the front-fb's LRU score grew
+   stale and the cache picked it as eviction victim — destroying the
+   texture the compositor was reading. Pin the published texture in
+   `cache_evict_lru` + bump `last_use_seq` on every publish call.
+3. **Cache cap=16 too small.** Raised to 32. Steady-state
+   `METAL_SURFACE_CACHE_SIZE` now grows past 16 (observed 21 on PGR2);
+   a previously-evicted draw target reappeared in the diagnostic.
+
+**Codex-validate HIGH finding fix:** the shape-mismatch recreate path
+(color side) now also clears `s_front_framebuffer_texture` if it
+equals the destroyed entry's texture — symmetric with the LRU pin so a
+guest-side surface reconfiguration can't reproduce the magenta class
+via the destroy route.
+
+**Magenta artifact closed; visual gate STILL FAILS** because PGR2
+renders to back buffer `0x3628000` (~1500 draws/s confirmed by the
+new `metal_draw_target` counter) but the CRTC publishes
+`0x32a4000` and Metal has no mechanism to bridge them. GL handles
+this via the display-side `get_framebuffer_surface` callback that
+reads VRAM at host-vsync time; Vulkan via
+`pgraph_vk_surface_download_if_dirty`. M5.10 below.
+
+See decision-log "2026-05-03: Metal slice M5.9-followup-E —
+surface-cache color/depth split + front-fb pin + cap raise" for the
+full investigation, the per-vram_addr draw distribution measurements
+on PGR2, and the codex-validate review notes.
+
+### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **PENDING**
+
+**Status (2026-05-03): PENDING**, queued as the immediate next
+blocker for M15 default-on. Major slice; out of scope for the
+M5.9-followup-E session that surfaced the requirement.
+
+**Cause.** AAA Xbox titles like PGR2 render the final scene to a
+back-buffer at one VRAM address (e.g. PGR2's 1280×480 supersampled
+back at `0x3628000`) while the NV2A CRTC scans a different VRAM
+address (PGR2's 640×480 front at `0x32a4000`). On real Xbox the
+hardware NV2A engines move pixels between these via mechanisms the
+guest software relies on (potentially: cycled `pcrtc.start` writes
+mid-frame, hardware engine DMAs, the BACK_END_WRITE_SEMAPHORE +
+report flow, an undocumented blit subchannel, or a software
+post-process draw-pass that reads the back buffer as a texture and
+writes to the front buffer). The Metal renderer's per-vram_addr
+cache today **does not propagate rendered GPU content from the
+back-buffer to the CRTC-published front-fb**, so the published
+texture stays empty of scene content.
+
+**Two implementation paths** (decide based on vk vs gl architecture
+fit):
+
+- **Path A — port vk's surface download.** Mirror
+  `pgraph_vk_surface_download_if_dirty` (vk/surface.c:939-944),
+  including its callsites in `surface_access_callback`,
+  `invalidate_overlapping_surfaces`, `expire_old_surfaces`, and
+  `pgraph_vk_surface_flush`. The download writes rendered MTLTexture
+  pixels back to guest VRAM. The CRTC-publish path then reads VRAM at
+  `pcrtc.start + line_offset` and uploads from VRAM into the
+  published texture. Requires implementing a GPU→VRAM blit via
+  `MTLBlitCommandEncoder copyFromTexture:toBuffer:` + a `synchronize`
+  to ensure CPU visibility on Apple Silicon UMA.
+- **Path B — register `get_framebuffer_surface` ops callback.**
+  Mirror gl's display flow: register the renderer-ops callback,
+  remove the side-channel publish via
+  `s_front_framebuffer_texture`, have the display code call
+  `pgraph_mtl_get_framebuffer_surface(d)` at host-vsync time, and
+  have that function look up `pcrtc.start + line_offset` in the
+  per-vram_addr cache and return the matching MTLTexture handle.
+  Requires also handling the case where the lookup misses (PGR2's
+  back-buffer might be the actual scene target, but the CRTC-pointed
+  front-fb misses — need a fallback that returns the
+  most-recently-rendered surface, or upload from VRAM lazily).
+
+Path A is the closer architectural match to vk and reuses the
+existing publish path. Path B is the cleaner architectural match to
+gl and removes a Metal-specific side-channel.
+
+**Entry**: M5.9-followup-E shipped (it is).
+
+**Exit**: PGR2 renders visually-correct gameplay through the Metal
+renderer; back-buffer-rendered scene content reaches the displayed
+front-fb texture. ≤ 1 % per-pixel diff vs GL on combiner-correct
+surfaces. Validated via `XEMU_METAL_SCREENSHOT_PATH=` capture during
+a benchmark run that reaches gameplay (use the `pgr2_gameplay_b4`
+mid-route snapshot for fast iteration).
+
+**Concrete tasks**:
+
+1. Survey vk's full download flow and decide Path A vs Path B.
+2. (Path A) Port `pgraph_vk_surface_download_if_dirty` and its
+   callsites; add `METAL_SURFACE_DOWNLOADS` counter; wire into
+   `pgraph_mtl_flip_stall` before the publish.
+3. (Path B) Register `get_framebuffer_surface` in the Metal ops
+   table; have it walk the cache for `pcrtc.start + line_offset`;
+   remove the side-channel publish; ensure the side-channel
+   `pgraph_mtl_get_framebuffer_metal_texture` falls back to the new
+   getter.
+4. Address the codex-validate MEDIUM finding from M5.9-followup-E:
+   `register_access_cb_for` / `_unregister_access_cb_for` use
+   unfiltered `cache_get_at` and can hit the wrong aspect now that
+   color and depth coexist at the same vram_addr. Either move
+   callback tracking to a separate vram-range registry, or have the
+   register/unregister helpers walk all matching entries.
+5. Address the codex-validate LOW finding: extend
+   `pgraph_mtl_surface_get_color_vram_addr` to return
+   `{has_binding, vram_addr}` so the `metal_draw_target` diagnostic
+   stops conflating "real vram_addr=0", "ensure-by-shape fallback",
+   and "no color binding" into a single `metal_draw_target_zero`
+   bucket.
+6. Investigate PGR2's actual back→front mechanism via the new
+   diagnostic — the `metal_draw_target` counter showed only 3-4
+   draws/interval to `0x32a4000` and ~1500 to `0x3628000`. If neither
+   the surface-download nor the get_framebuffer_surface paths fix
+   PGR2, we need to identify the missing engine class (NV3089
+   scaled-blit and NV0039 M2MF are both unimplemented in xemu but
+   PGR2 works on GL/Vulkan, so PGR2 doesn't use them; the actual
+   mechanism is unknown).
+7. Run paired Metal vs GL benchmarks across PGR2 / Crimson / Rainbow
+   / SC2 (the M15 visual-diff gate).
+
+**Risk**: Path A's GPU→VRAM blit + synchronize per-frame adds Metal
+renderer cost. On Apple Silicon UMA the cost should be modest (no
+real copy, just barrier+coherence) but needs measurement.
 
 **Scope.** Backfill the per-VRAM-address surface cache that M2
 deferred and that subsequent slices M3–M14 built on top of without

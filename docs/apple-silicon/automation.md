@@ -1,9 +1,18 @@
 # Benchmark Automation
 
 Last updated: 2026-05-03 (Metal slices through **M5.9 + followup-A +
-followup-B+C** ship; new diagnostic flags `XEMU_METAL_DIAG_CLEAR=1`
-and `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR` documented; new
-counters `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
+followup-B+C + followup-E** ship. **followup-E** adds the
+per-vram_addr `metal_draw_target` diagnostic counter, splits the
+surface cache by aspect (color vs depth) so same-vram_addr bindings
+no longer thrash, raises `kMaxCacheEntries` from 16 to 32, and pins
+the published front-fb against LRU eviction + shape-mismatch destroy.
+New counter `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`. New diagnostic
+log lines `metal_draw_target`, `metal_draw_target_first`,
+`metal_draw_target_zero`, `metal_draw_target_overflow`,
+`metal_surface_recreate`. Earlier 2026-05-03 work documented:
+diagnostic flags `XEMU_METAL_DIAG_CLEAR=1` and
+`XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`; counters
+`METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
 `METAL_IMAGE_BLITS`, `METAL_SURFACE_VRAM_DIRTY_HITS`, `_UPLOADS`,
 `_UPLOAD_BYTES`, `METAL_SCREENSHOTS_TAKEN`, plus input-latency
 counters `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
@@ -631,6 +640,53 @@ and stack:
   upload). Useful for checking the bandwidth cost of frequent
   upload activity. Always-on. Apple Silicon performance fork;
   slice M5.9-followup-B+C.
+- `METAL_SURFACE_RECREATE_SHAPE_MISMATCH` (**M5.9-followup-E,
+  2026-05-03**): per-interval count of cache entries destroyed +
+  recreated because a same-vram_addr bind asked for a different
+  shape (width × height × format) than the existing entry. Each
+  recreate clobbers all previously-rendered content for that
+  vram_addr — non-zero rate explains "draws hit but screenshots
+  show fresh texture content". After the followup-E color/depth
+  cache split this counter should be **0/interval steady state**
+  on PGR2; non-zero values indicate either a real shape change
+  (rare) or a regression. Companion bounded log line (first 16
+  events, color and depth tracked separately):
+  `xemu-perf: metal_surface_recreate vram_addr=0x.. old=WxH/fmtN
+  new=WxH/fmtN (color|depth)`. Apple Silicon performance fork;
+  slice M5.9-followup-E.
+
+**Diagnostic-only lines (NOT emitted as KEY=VALUE on the perf
+interval line; emitted as their own xemu-perf: lines AFTER the
+interval line is closed):**
+
+- `xemu-perf: metal_draw_target vram_addr=0x.. count=N` (M5.9-followup-E,
+  2026-05-03): per-interval per-vram_addr count of `pgraph_mtl_flush_draw`
+  invocations whose bound color binding had `vram_addr`. Up to 32
+  distinct addresses tracked; addresses beyond the cap accumulate
+  into `metal_draw_target_overflow`. Used to measure WHICH cached
+  surface receives draws — decisive for bridging the back-buffer →
+  front-fb gap that PGR2 (and similar AAA Xbox titles) creates.
+  Per-interval counts; the slot table is preserved across resets so
+  recurring vram_addrs keep their slot. Always-on; zero hot-path cost
+  when no flush_draw fires (i.e. on the GL renderer).
+- `xemu-perf: metal_draw_target_first vram_addr=0x.. slot=K`
+  (M5.9-followup-E): one-shot log per distinct vram_addr at first
+  sighting, fires at most 32 times per session. Useful for spotting
+  newly-appearing draw targets without waiting for the next interval
+  emit.
+- `xemu-perf: metal_draw_target_zero count=N` (M5.9-followup-E):
+  per-interval count of flush_draw invocations where
+  `pgraph_mtl_surface_get_color_vram_addr()` returned 0 — meaning
+  EITHER no color binding was active OR the active binding came from
+  the legacy ensure-by-shape fallback (no DMA-derived address) OR a
+  real surface at vram_addr=0 (PGR2 has one). The diagnostic
+  conflates these three; future refinement (a `metal_draw_target_no_color`
+  bucket) will separate them.
+- `xemu-perf: metal_draw_target_overflow count=N` (M5.9-followup-E):
+  per-interval count of flush_draw invocations whose vram_addr did
+  not fit in the 32-slot table (i.e. titles using >32 distinct
+  surfaces). Non-zero overflow indicates the cap should be raised
+  or the diagnostic widened.
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with

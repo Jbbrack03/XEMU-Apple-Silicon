@@ -183,6 +183,44 @@ The fork-specific source-code changes are concentrated in:
       "2026-05-03: Metal slice M5.9-followup-B+C — CPU-write dirty
       tracking + VRAM upload" for full investigation + open
       hypotheses.
+      **(M5.9-followup-E, 2026-05-03 — SHIPPED, magenta artifact
+      closed; visual gate STILL FAILS pending M5.10)** Three real
+      bugs in the surface manager fixed via the new per-vram_addr
+      `metal_draw_target` diagnostic counter at
+      `pgraph_mtl_flush_draw`: (1) **color/depth cache collision**
+      — `cache_get_at(addr)` was unfiltered by aspect, so a
+      same-vram_addr color-bind / depth-bind alternation thrashed
+      each prior binding via the destroy-and-recreate path
+      (PGR2 hits this on `vram_addr=0x0` + a real surface where
+      `dma.address+offset=0`). Split into `cache_get_at_color` and
+      `cache_get_at_depth`; `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`
+      drops 6/interval → 0. (2) **LRU eviction of stably-published
+      front-fb** — publish dedupe didn't bump `last_use_seq`, so
+      the front-fb's LRU score went stale and the cache picked it
+      as eviction victim, producing the heap-default magenta. Pin
+      the published texture in `cache_evict_lru` + bump
+      `last_use_seq` on every publish call. (3) **Cache cap
+      `kMaxCacheEntries` raised 16 → 32** because PGR2 has 11+
+      color RTs + depth + ensure-by-shape entries; cap was always
+      saturated and LRU was thrashing real surfaces.
+      **Codex-validate follow-up fix (HIGH severity):** the
+      shape-mismatch recreate path (color side) now also clears
+      `s_front_framebuffer_texture` if it equals the entry's
+      texture, before `binding_destroy(e)` — symmetric with the
+      LRU pin, so a guest-side surface reconfiguration doesn't
+      reproduce the magenta class via the destroy route. New API:
+      `pgraph_mtl_surface_get_color_vram_addr` /
+      `_get_depth_vram_addr` getters used by the diagnostic.
+      Magenta artifact closed; visual gate still fails because
+      PGR2 renders to back buffer `0x3628000` and CRTC publishes
+      `0x32a4000` — Metal has no mechanism to bridge these (GL
+      uses display-side `get_framebuffer_surface` callback that
+      reads VRAM at host-vsync time; Vulkan uses
+      `pgraph_vk_surface_download_if_dirty`). New slice **M5.10
+      — VRAM-coherent surface download** (or alternatively:
+      register a Metal `get_framebuffer_surface` ops callback) is
+      the next blocker for M15 default-on. See decision-log
+      "2026-05-03: Metal slice M5.9-followup-E".
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and

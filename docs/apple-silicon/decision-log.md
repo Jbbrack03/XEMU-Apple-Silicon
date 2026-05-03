@@ -1,5 +1,210 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.9-followup-E — surface-cache color/depth split + front-fb pin + cap raise
+
+**Context.** After M5.9-followup-B+C and the diagnostic-capture entry
+below, the visual gate remained unmet despite empirical evidence
+showing 1500+ draws/s landing in the back buffer (`0x3628000`). The
+single decisive next measurement queued in the prior entry was a
+per-vram_addr "draw target" counter on `pgraph_mtl_flush_draw`. This
+slice adds that counter and three surface-cache bug fixes that the
+counter exposed.
+
+**New diagnostic instrumentation (lands first).**
+
+- `mtl/renderer.c::mtl_draw_target_bump(uint32_t vram_addr)` — bounded
+  per-vram_addr counter table (cap 32 distinct addresses + overflow +
+  zero-vram_addr buckets). Bumped from `pgraph_mtl_flush_draw` after
+  `mtl_bind_current_surfaces` succeeds. Reads the bound color
+  binding's vram_addr via the new
+  `pgraph_mtl_surface_get_color_vram_addr()` getter (also the
+  `_get_depth_vram_addr` symmetric companion), so the counter measures
+  the actual cache binding rather than re-deriving from DMA + offset.
+- `mtl/renderer.c::pgraph_mtl_draw_target_emit_interval(FILE *)` —
+  called from `nv2a_profile_log_emit_interval` AFTER the main
+  `xemu-perf:` line is closed. Emits zero-or-more
+  `xemu-perf: metal_draw_target vram_addr=0x.. count=N` lines per
+  interval, plus a one-shot `metal_draw_target_first` line per
+  distinct vram_addr at first sighting. Resets per-interval counts on
+  emit; the slot table itself is preserved across resets.
+- `mtl/surface.mm::pgraph_mtl_surface_recreate_shape_mismatch()` —
+  monotonic counter bumped each time `cache_find_or_create_color/_depth`
+  destroys an existing same-vram_addr cache entry to recreate it under
+  a different shape. Bounded log line
+  `xemu-perf: metal_surface_recreate vram_addr=0x.. old=WxH/fmtN
+  new=WxH/fmtN (color|depth)` for the first 16 events. Surfaced as
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH` on the perf interval line.
+
+**Empirical findings on PGR2 (60 s Metal benchmark).**
+
+The metal_draw_target counter showed steady-state per-2 s-interval
+distribution:
+
+| vram_addr | dimensions | role | draws/interval |
+|---|---|---|---|
+| `0x3628000` | 1280×480 (2560×960 host-scaled) | back-buffer | 908–1776 |
+| `0x2c06000` | 1024×512 aux | env/reflection | 434–1302 |
+| `0x2e06000` | 1024×512 aux | env/reflection | 434–868 |
+| `0x32a4000` | 640×480 (1280×960 host-scaled) | front-buffer | **3-4** |
+| `0x0` | 512×512 R5G6B5 (1024×1024) | aux RT | 1197–1995 |
+
+All other tracked vram_addrs (0x2854000, 0x2894000, 0x28d4000,
+0x2914000, 0x2954000, 0x2994000) are 256×256 aux RTs.
+
+- The back buffer at `0x3628000` is a 1280×480 supersampled render
+  target; the front buffer at `0x32a4000` is the 640×480 surface that
+  the CRTC publishes. PGR2's main scene goes to the back buffer.
+- `0x32a4000` (the front buffer / CRTC target) only receives 3-4
+  draws per 2-s interval — far too few for a per-frame composite at
+  30 FPS. PGR2 does not blit / scaled-blit / draw-call back→front via
+  any mechanism the Metal renderer hooks.
+- The back buffer texture content captured via
+  `XEMU_METAL_SCREENSHOT_SOURCE=vram:0x3628000` is pure black despite
+  1500+ draws/s landing there.
+
+**Three real bugs identified by the diagnostic counter.**
+
+1. **Color/depth cache collision on `vram_addr=0x0`.** The
+   `cache_get_at(addr)` lookup was not filtered by `is_color`. PGR2
+   binds both a color RT and a depth RT at `vram_addr=0` (the legacy
+   `pgraph_mtl_surface_ensure_*` paths use 0 as a sentinel; PGR2 also
+   has a real surface where `dma.address + offset = 0`). Each
+   alternating bind found an entry of the wrong aspect, fell through
+   to the destroy-and-recreate path, and clobbered the previous
+   binding. Diagnostic log showed 16 `metal_surface_recreate` events
+   alternating between `1280×960/fmt2 (color)` and `1024×1024/fmt3
+   (depth)` per run. **Fix**: split `cache_get_at` into
+   `cache_get_at_color` and `cache_get_at_depth`; the color/depth
+   `cache_find_or_create_*` paths now use the filtered lookup so a
+   same-vram_addr color binding and depth binding can coexist in the
+   cache without trashing each other. `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`
+   drops from 6/interval to 0/interval after the fix.
+
+2. **LRU eviction of the stably-published front-fb.** PGR2 binds the
+   back buffer for rendering most of the time; the front-fb at
+   `0x32a4000` is only bound briefly. The `pgraph_mtl_surface_publish_front_fb`
+   dedupe path returned early without bumping `last_use_seq` when the
+   published texture pointer was already current, so a stably-published
+   front-fb's LRU score grew stale and the cache happily picked it as
+   the eviction victim — destroying the texture the compositor was
+   reading and producing the heap-default magenta artifact. **Fix**:
+   bump `last_use_seq` on every publish call (before the dedupe
+   check), and add an explicit pin in `cache_evict_lru` that skips
+   the entry whose texture matches `s_front_framebuffer_texture`.
+   The pin is the primary protection; the seq bump is
+   belt-and-suspenders.
+
+3. **Cache cap too small for AAA Xbox titles.** `kMaxCacheEntries =
+   16` was always saturated on PGR2 (10+ color RTs + depth surfaces +
+   ensure-by-shape entries). Steady-state LRU eviction was thrashing
+   real surfaces. **Fix**: raise cap to 32. Each entry is small (struct
+   + MTLTexture + maybe an MSAA companion); 32 entries are tens of MB
+   on Apple Silicon UMA, well within budget. After the raise,
+   `METAL_SURFACE_CACHE_SIZE` grows past 16 (observed 17/19/21 with
+   PGR2 boot-phase activity); a previously-evicted draw target
+   (`0x2454000`) appeared as a new `metal_draw_target_first` slot 10
+   entry, confirming the previous cap was hiding real surfaces.
+
+**Validation gates.**
+
+| Gate | Result |
+|------|--------|
+| Build (`./build.sh -a arm64`) | PASS |
+| `METAL_PIPELINE_TRANSLATED_FAILED == 0` | PASS |
+| `METAL_PIPELINE_FALLBACKS == 0` | PASS |
+| `METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT` | PASS (100 % translated) |
+| `METAL_SURFACE_RECREATE_SHAPE_MISMATCH > 0` before fix | PASS (6/interval) |
+| `METAL_SURFACE_RECREATE_SHAPE_MISMATCH == 0` after fix | PASS |
+| `METAL_SURFACE_CACHE_SIZE > 16` after cap raise | PASS (observed 21) |
+| GL renderer regression | NOT REGRESSED (60 fps PGR2 GL run unchanged; all changes are mtl/-only or weak-symbol-gated) |
+| **Visual gate — captured PNGs show rendered scene** | **STILL FAIL.** PGR2's published front-fb at `0x32a4000` no longer shows magenta heap-default content (the LRU eviction bug is closed) but is still empty of the actual scene. PGR2 renders to back buffer `0x3628000`, not to the CRTC-pointed front buffer. No mechanism in the Metal renderer propagates rendered GPU content back to the front-fb. |
+
+**Consequences.**
+
+- Three real bug-fixes shipped that were blocking ANY further visual
+  progress on the Metal renderer. Cache-coherence is now correct.
+- The remaining magenta visibility issue is **architectural**: GL and
+  Vulkan render the displayed surface via `pgraph_*_get_framebuffer_surface`
+  ops callbacks that read VRAM at `pcrtc.start + line_offset` and
+  upload the texture for display; Metal uses a side-channel publish
+  via `pgraph_mtl_surface_publish_front_fb` that reads the cached
+  MTLTexture by vram_addr. When PGR2 renders to `0x3628000` and the
+  CRTC publishes `0x32a4000`, the Metal path has no mechanism to
+  bridge them. GL has it via the lazy upload of VRAM contents at
+  display time; Vulkan has it via `pgraph_vk_surface_download_if_dirty`
+  that downloads rendered MTLTexture pixels back to guest VRAM.
+- A new slice **M5.10 — VRAM-coherent surface download** (or
+  alternatively: register a `get_framebuffer_surface` ops callback for
+  the Metal renderer that mirrors GL's display-side flow) is queued
+  as the next blocker for M15 default-on. Major slice; out of scope
+  for this session.
+- M15 default-on stays **BLOCKED** on M5.10.
+- User-stated goals remain MET via the GL renderer (`XEMU_GL_MSAA=4` +
+  `XEMU_MACOS_NATIVE_INPUT=1` + the existing `surface_scale = 2`
+  default).
+
+**Files touched.**
+
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — added the per-vram_addr
+  draw-target table + bump + emit; mtl_draw_target_bump call site in
+  `pgraph_mtl_flush_draw` after surface bind.
+- `hw/xbox/nv2a/pgraph/mtl/surface.{h,mm}` — color/depth-filtered
+  cache lookups, vram_addr getters for color/depth bindings,
+  shape-mismatch counter, front-fb pin in `cache_evict_lru`,
+  `last_use_seq` bump on publish, cap raised from 16 to 32.
+- `util/xemu-metal-perf.c` — `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`
+  baseline + delta + emission; weak symbol fallback for the new
+  `pgraph_mtl_draw_target_emit_interval` so the non-Apple-Silicon
+  link still resolves.
+- `hw/xbox/nv2a/pgraph/profile.c` — call `pgraph_mtl_draw_target_emit_interval`
+  immediately AFTER the main interval-line newline so the existing
+  key=value parser is unaffected.
+- `scripts/apple-silicon/extract-perf-summary.sh` — recognize the new
+  counter key.
+
+LOC delta: +315 / -13 across 6 files (+ codex-validate follow-up
+fix — see below).
+
+**Codex-validate review (2026-05-03):**
+
+- **HIGH (fixed in-slice).** Codex flagged that the shape-mismatch
+  recreate path in `cache_find_or_create_color` could destroy the
+  currently-published front-fb's MTLTexture without clearing
+  `s_front_framebuffer_texture`. The LRU pin protects against
+  eviction; the recreate path was an unprotected second route to the
+  same heap-default-on-freed-texture compositor artifact. Fix: clear
+  `s_front_framebuffer_texture` if it equals the entry's texture
+  before `binding_destroy(e)`. Color recreate path only — the publish
+  path operates exclusively on color bindings, so depth recreate
+  never matches the front-fb.
+
+- **MEDIUM (deferred).** Access-callback ownership in
+  `pgraph_mtl_surface_register_access_cb_for` /
+  `_unregister_access_cb_for` (mtl/surface.mm:1327, :1342) keys on
+  unfiltered `cache_get_at(vram_addr)`. Now that color and depth
+  entries can co-exist at the same vram_addr (post the cache split),
+  these accessors can hit the wrong entry. Plan: either refactor to a
+  separate vram-range registry, or have the register/unregister
+  helpers walk all matching entries. Tracked under M5.10 prerequisite
+  work since the dirty-tracking path is being revisited there
+  anyway. Not load-bearing for this slice's user-visible behavior
+  (PGR2 dirty-tracking already showed 0 hits per the followup-B+C
+  attribution).
+
+- **LOW (deferred).** The `metal_draw_target_zero` bucket conflates
+  three distinct sources: real `vram_addr=0` color RT, ensure-by-shape
+  fallback, "no color binding". Plan: extend the getter to return
+  `{has_binding, vram_addr}` so the diagnostic separates them. Useful
+  for future investigation; not blocking.
+
+- **Open questions (non-issues).** Codex noted it could not verify
+  build/test pass from its read-only sandbox (build PASS confirmed
+  by the slice author). Codex asked whether a same-nonzero-vram_addr
+  color/depth pair was observed; no such pair has been observed in
+  PGR2 captures — only the `vram_addr=0` case fires the cache
+  collision today. Future titles may; the cache split is correct
+  defensively regardless.
+
 ## 2026-05-03: Metal magenta diagnostic capture — front/back/aux RTs all ruled out as scene targets
 
 **Context.** After M5.9-followup-B+C shipped, the visual gate remained
