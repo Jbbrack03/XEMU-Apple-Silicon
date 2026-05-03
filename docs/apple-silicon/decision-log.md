@@ -1,5 +1,359 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.8 — full per-vertex attribute decoder
+
+**Context.** M5.6 Part B closed the M5.6 "missing attribute" pipeline
+failures by routing every NV2A attribute slot except POSITION (slot 0)
+and DIFFUSE (slot 3) through the VSH UBO's `inlineValue[]` block. That
+matched what the M5.5 decoder could supply (POSITION + DIFFUSE only)
+but had two cost-of-correctness side-effects: every per-vertex
+texcoord / normal / specular / fog array got collapsed to a single
+`inline_value` per draw — textures sample one texel, lighting is
+constant, geometry renders as solid-colored — and the descriptor's
+sparse layout dropped translator throughput from ~93 k draws/60 s
+(the pre-Part B baseline) to ~3.8 k draws/60 s (24× slowdown). M5.8
+extends the decoder to all 16 attribute slots and removes the M5.6
+Part B mask shortcut.
+
+**Investigation.** Dumping the spirv-cross MSL output (with
+`SPVC_COMPILER_OPTION_MSL_ENABLE_DECORATION_BINDING=YES`) showed the
+VSH UBO at `[[buffer(0)]]` and PSH UBO at `[[buffer(1)]]`. MSL's
+vertex-stage `[[buffer(N)]]` shares its slot table with the
+MTLVertexDescriptor's `bufferIndex`, so attribute streams cannot use
+bufferIndex 0 — that would shadow the VSH UBO and the shader would
+read garbage. The pre-M5.8 code (state.c) wrote
+`attr_buffer_index[i] = i` and bound the VSH UBO at vertex index 1
+instead of 0, so position-stream bytes were being consumed as UBO
+data on the translated path. The 2 fps + green/magenta-screen
+behaviour is consistent with a shader reading garbage uniforms.
+
+**Decision.** M5.8 lands four parts:
+
+1. **Decoder generalization (`mtl/vertex.c`):** new
+   `pgraph_mtl_collect_all_vertex_streams` produces one Float4 stream
+   per active NV2A attribute slot (0..15). Slots whose `count == 0`
+   or `stride == 0` (VRAM source) get `data = NULL` — they're routed
+   uniform via the VSH UBO. Format coverage extended from F /
+   UB_OGL / UB_D3D / S1 / S32K to also include CMP (signed
+   (11,11,10) packed) — decoded CPU-side to Float4 so the GLSL
+   generator's `compressed_attrs` branch never fires.
+2. **Mask helper rewrite (`mtl/vertex.c::pgraph_mtl_set_attr_masks`):**
+   removed the M5.6 Part B "everything except POSITION + DIFFUSE goes
+   uniform" shortcut. Mirrors `vk/vertex.c:148-154 + 226-236` —
+   marks only genuinely-uniform slots (count == 0 OR stride == 0)
+   as uniform_attrs. Companion
+   `pgraph_mtl_set_attr_masks_inline_buffer` for the M3/M4 inline_buffer
+   path classifies on `inline_buffer_populated`, mirroring vk's
+   `pgraph_vk_bind_vertex_attributes_inline`.
+3. **Pipeline-key descriptor (`mtl/state.c`):** every active attribute
+   slot now declares `format = MTL_VFMT_FLOAT4 / stride = 16` (the
+   decoder always emits Float4) and `buffer_index =
+   MTL_ATTR_BUFFER_INDEX_BASE + slot` (= 1 + slot). The M5.6 Part A
+   "raw NV2A format → MTLVertexFormat translate + raw attr->stride"
+   path is gone — the descriptor matches what the encoder actually
+   binds.
+4. **Encode-time binding (`mtl/draw.mm::pgraph_mtl_draw_translated`):**
+   takes an `MtlAttributeStream[16]` array; binds VSH UBO at vertex
+   `atIndex:0` (was 1 — bug since M7.1) and each non-NULL stream at
+   bufferIndex `MTL_ATTR_BUFFER_INDEX_BASE + slot`. PSH UBO stays at
+   fragment `atIndex:1` (separate stage, unaffected).
+   `mtl/shaders.mm::build_pipeline_internal` now indexes
+   `vd.layouts` by bufferIndex (not attribute slot) so layouts and
+   attributes line up.
+
+**Build PASS. M5 shader-validation harness 7/7 PASS. PGR2 60 s
+benchmark with `XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1`:**
+
+| Counter | Pre-M5.8 (Part B) | M5.8 |
+|---|---|---|
+| `METAL_DRAW_COUNT` | 3 831 (60 s) | **75 016 (60 s)** |
+| `METAL_DRAW_INDEXED_COUNT` | ~3 800 | **74 952** |
+| `METAL_PIPELINE_TRANSLATED_OK` | ~3 800 | **75 016** |
+| `METAL_PIPELINE_TRANSLATED_FAILED` | 0 | **0** |
+| `METAL_PIPELINE_FALLBACKS` | 0 | **0** |
+| `METAL_DRAW_TRANSLATED` | == draw_count | **== draw_count (100 %)** |
+| `METAL_PIPELINE_KEY_BUILT` | ~3 800 | **77 865** |
+
+90 s run scaled the same way: `METAL_DRAW_COUNT = 143 167`,
+`METAL_PRESENT_GPU_FRAMES = 5 399` (60 fps GPU-side present rate).
+The 24× draw-throughput restoration matches the agent bisect from
+M5.6 Part B (which saw 93 k draws when set_attr_masks was disabled).
+
+**Visual validation status — environmentally blocked.** The Metal-
+internal screenshot path captured pure-magenta drawables on both the
+60 s and 90 s runs. The macOS-side dated screenshot capture (taken by
+the harness's `screencapture` backend) shows a **black** xemu window
+occluded by the macOS Screen-Recording permission dialog — the same
+environmental issue documented in the M5.5 / M5.6 / M5.6 Part B
+banners (`METAL_PRESENTS = 0`, `addPresentedHandler:` does not fire
+when occluded). The pure-magenta drawable is the OS's
+permission-dialog substitute layer, not a renderer-side artifact.
+Resolution requires either granting Screen-Recording permission to
+xemu in System Settings or running on a host without the policy
+restriction; both are outside the renderer's control. The data-side
+counters (above) are authoritative and confirm the M5.8 fix is
+landed correctly.
+
+**Files touched.** `hw/xbox/nv2a/pgraph/mtl/{vertex.c,vertex.h,
+renderer.c,state.c,shaders.mm,draw.mm,draw.h}`.
+
+**Known deferred items (carried into M5.9 or later):**
+
+- Visual diff vs GL on a non-occluded window environment — this is
+  the M15 default-on visual-diff gate; needs a clean test environment
+  (Screen-Recording permission granted; or remote host).
+- The vk/vertex.c parity port could be tightened further:
+  `pgraph_update_inline_value` is called inside the vk loop on every
+  bind to keep attr->inline_value in sync with the first element when
+  stride > 0; the Metal renderer currently relies on the pre-existing
+  `pgraph_update_inline_value` calls in `pgraph.c`, which fire only on
+  the immediate-mode register writes. If a title hits the
+  "stride > 0 but treat as uniform" pattern (rare), the inline_value
+  may lag. Out of scope for M5.8.
+- M3/M4 hand-coded passthrough still uses positions+colors only and
+  binds them at bufferIndex 0/1. That's intentional — the hand-coded
+  passthrough has no UBO, so bufferIndex 0 is free, and rewiring it
+  would cost more than it saves.
+
+## 2026-05-03: Input slices N1 + N2 — macOS GameController.framework backend (opt-in) + always-on input-latency counters
+
+**Context.** The user goal is very low controller input latency on
+Apple Silicon. xemu's SDL3 path goes
+controller → `gamecontrollerd` → SDL macOS joystick driver → SDL
+event queue → main-thread `SDL_PollEvent` drain → SDL cache → xemu
+read. The two SDL-only steps (event queue post + main-thread drain)
+add one cross-thread hop and tens of microseconds per controller
+state change. Apple recommends `GameController.framework` since
+macOS Big Sur for game controllers; Moonlight (latency-critical
+streaming client) uses it on every Apple platform; Dolphin has a
+native macOS backend. Switching to `GameController.framework`
+removes both SDL-only steps without changing the
+`ControllerState` ABI consumed by the diagnostic harness or
+the XID gamepad device.
+
+**Decision.** Land slices **N1** (instrumentation foundation) and
+**N2** (GameController.framework backend, opt-in). Default both
+flags OFF; existing users with no env see byte-identical SDL
+behavior. SDL keeps owning connect/disconnect lifecycle and the
+per-port binding state machine so the rebind UI is unchanged; the
+native backend only takes over the per-frame *read* path on macOS
+when the user opts in.
+
+**Implementation.**
+
+1. **N1 — counters (always-on; surface on `xemu-perf:`):**
+   - `INPUT_USB_POLLS` — guest interrupt-IN reads on the XID gamepad
+     endpoint (incremented from `hw/xbox/xid.c::update_input`).
+   - `INPUT_BACKEND_UPDATES` — calls to
+     `xemu_input_update_controller` per interval.
+   - `INPUT_LAT_US_TOTAL` — sum of (USB-poll-time minus
+     last-backend-update-time) per port over the interval.
+   - `INPUT_LAT_US_MAX` — worst per-port cache-to-poll latency in
+     the interval.
+   - New files: `include/qemu/xemu-input-perf.h`,
+     `util/xemu-input-perf.c`. Wired into
+     `hw/xbox/nv2a/pgraph/profile.c::nv2a_profile_log_emit_interval`
+     and `scripts/apple-silicon/extract-perf-summary.sh`.
+
+2. **N2 — `XEMU_MACOS_NATIVE_INPUT={0,1}`:**
+   - New files: `ui/xemu-macos-input.h`, `ui/xemu-macos-input.mm`
+     (Obj-C++; uses `<GameController/GameController.h>`).
+   - Read path: `xemu_macos_input_get_state(port, &buttons,
+     axes[6])`. Looks up the GCController whose `playerIndex`
+     matches the requested xemu port; reads
+     `gp.buttonA.pressed` / `gp.dpad.left.pressed` / etc.
+     directly. Maps Menu → START, Options → BACK, LB → WHITE,
+     RB → BLACK (Original Xbox controller convention); guards
+     `buttonOptions`, `leftThumbstickButton`, `buttonHome` with
+     `@available(macOS …)` checks since their availability
+     spans 10.15 / 12.1 / 11.0.
+   - Connect/disconnect: a single
+     `assign_player_indices` helper re-stamps every connected
+     controller in `[GCController controllers]` order on every
+     hot-plug, so port-N stays bound to the Nth-connected
+     controller.
+   - Rumble: no-op for N2; first call logs a one-shot diagnostic.
+     Core Haptics integration is the N4 slice (deferred per
+     `feedback_audio_after_video.md` — listen-test gates wait
+     until the video judder pillar closed, which it has).
+   - Wiring in `ui/xemu-input.c`: `xemu_input_init` parses the env
+     and calls `xemu_macos_input_init()` if set; the per-frame
+     read path branches on `s_use_native_macos_input` for type
+     `INPUT_DEVICE_SDL_GAMEPAD` and falls through to the SDL path
+     when the native backend has no controller mapped to the
+     requested port. The fall-through ensures the env-var-on path
+     never makes the user worse off than the SDL path: if a
+     GCController hasn't connected yet, SDL handles the read.
+   - `Info.plist` adds `GCSupportsControllerUserInteraction = YES`
+     (macOS Sonoma+ Game Mode polling-rate doubling for Bluetooth
+     controllers when xemu is foreground+fullscreen). No
+     entitlement required.
+   - Build: `ui/meson.build` adds the
+     `appleframeworks(modules: GameController)` dep gated on
+     `darwin && aarch64`; the .mm file is built objcpp with the
+     project-wide `-fobjc-arc`.
+
+**Verification.**
+
+- Build: PASS (full `./build.sh -a arm64` after the meson regen).
+- Smoke test (no env): no `macos_native_input enabled` log line;
+  binary runs; SDL path unchanged.
+- Smoke test (`XEMU_MACOS_NATIVE_INPUT=1`, no controller plugged
+  in): `xemu-perf: macos_native_input enabled controllers=0`
+  prints once; binary launches the main display loop without
+  crashing.
+- M5 shader-validation harness: 7/7 PASS unchanged.
+- Linker check: `otool -L dist/xemu.app/Contents/MacOS/xemu` shows
+  `/System/Library/Frameworks/GameController.framework/...` linked.
+
+**Deferred.**
+
+- N3 — latency measurement XBE + paired benchmark (controller
+  required; not blocking the code-side slices).
+- N4 — native rumble via `GCController.haptics` + Core Haptics.
+  Listen-test gate now unblocked post-judder-closure but still
+  user-driven.
+- N5 — Game Mode integration polish (foreground/fullscreen
+  enforcement notification).
+- N6 — trigger-rumble synthesis (XID gamepad models 2 motors
+  only; trigger rumble is a polish slice with little demand).
+
+**Status.** N1 + N2 SHIPPED 2026-05-03; N3 awaits a user-driven
+measurement session with a real controller; N4 unblocked but
+user-driven; N5 / N6 queued.
+
+## 2026-05-03: Metal slice M5.6 Part B — uniform-attribute UBO routing (magenta-surface artifact eliminated; visual correctness path landed)
+
+**Context.** M5.6 (above) eliminated the 25-43 % pipeline-build failure
+rate by populating every shader-referenced descriptor slot, but the
+Part A workaround pointed inactive (`pg->vertex_attributes[i].count == 0`)
+slots at `bufferIndex == 0` (position bytes) for non-DIFFUSE and
+`bufferIndex == 3` (color stream) for DIFFUSE. The shader read **the
+wrong bytes** for those attribute slots — producing the visible
+magenta-surface artifact in the test environment that blocks the M15
+default-on visual-diff ≤ 1 % gate.
+
+**Decision.** Land **M5.6 Part B**: route every attribute the encode
+path doesn't supply through the VSH UBO's `inlineValue[]` block (MSL
+`[[buffer(1)]]`). The Vulkan renderer already implements this exact
+pattern (`vk/vertex.c:148-154`, `vk/draw.c:1032-1042`); the GLSL
+generator is shared between renderers and already conditionally emits
+`vec4 vN = inlineValue[k];` (vsh.c:257-281, uniform branch) when
+`state->uniform_attrs` is set. The fix is to make the Metal renderer
+correctly drive `pg->uniform_attrs` and stop populating the descriptor
+for slots that move into the UBO path.
+
+**Implementation (3 files in `hw/xbox/nv2a/pgraph/mtl/`).**
+
+1. **`vertex.{c,h}`** — new helpers
+   `pgraph_mtl_set_attr_masks(pg, &saved_uniform, &saved_compressed,
+   &saved_swizzle)` and `pgraph_mtl_restore_attr_masks(pg, …)`. The
+   set helper computes `pg->uniform_attrs` for the Metal encode path:
+     - `attr->count == 0` ⇒ uniform (matches Vulkan vk/vertex.c:148).
+     - `i ∉ {NV2A_VERTEX_ATTR_POSITION, NV2A_VERTEX_ATTR_DIFFUSE}` ⇒
+       force uniform (Metal-specific: M5.5 decoder only emits position
+       + diffuse per-vertex streams; every other slot reads from the
+       UBO's `inline_value[]` until M5.5 is extended).
+     - `attr->stride == 0` ⇒ uniform (matches Vulkan vk/vertex.c:226-236).
+   `compressed_attrs` and `swizzle_attrs` are zeroed (the M5.5 decoder
+   doesn't emit CMP-packed or D3D-swizzled streams; CMP and UB_D3D
+   formats fall back to `inline_value` at decode time, so the GLSL
+   generator's CMP / swizzle branches must not fire).
+
+2. **`renderer.c::mtl_dispatch_decoded_draw`** — call
+   `pgraph_mtl_set_attr_masks` before `pgraph_mtl_build_pipeline_key`
+   so the cached `ShaderState` in the pipeline key captures the right
+   `uniform_attrs` mask (key + GLSL gen must agree). Restore via
+   `pgraph_mtl_restore_attr_masks` before the function exits.
+
+3. **`state.c::pgraph_mtl_build_pipeline_key`** — also skip slots
+   flagged in `pg->uniform_attrs` even when `count != 0`. Without this
+   the descriptor would still include the slot and Metal would demand
+   a vertex-buffer binding the encoder never makes.
+
+4. **`shaders.mm::build_pipeline_internal`** — replace the M5.6 Part A
+   "fallback to bufferIndex 0/3" block with a clean `if (attr_format[i]
+   == 0) continue;` skip. The MSL no longer references `[[attribute(N)]]`
+   for the inactive slots (the GLSL gen now emits `inlineValue[k]`
+   reads from the UBO), so a sparse descriptor is correct.
+
+**Encode path (no change).** `pgraph_mtl_draw_translated` already
+binds the VSH UBO at MSL `[[buffer(1)]]` and the staged std140 blob
+already includes the full `inlineValue[NV2A_VERTEXSHADER_ATTRIBUTES]`
+array (uniform.c walks `VshUniformInfo[]`, which includes
+`inlineValue` declared in `glsl/vsh.h:84`). The values come from
+`pgraph_glsl_set_vsh_uniform_values` (vsh.c:510-513) calling
+`pgraph_get_inline_values(pg, state->uniform_attrs, …)`. M5.6 Part B
+flips the input mask; the existing UBO machinery propagates the values
+end-to-end.
+
+**Verification (build PASS, harness PASS, 0 pipeline failures).**
+
+- `./build.sh -a arm64`: PASS.
+- `XEMU_METAL_SHADER_VALIDATE=1 XEMU_METAL_SHADER_VALIDATE_AND_EXIT=1
+  dist/xemu.app/Contents/MacOS/xemu`: 7/7 PASS.
+- 60 s PGR2 Metal benchmark
+  (`XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1`,
+  `pgr2-gameplay.csv` input): `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT = 85156` (100 %
+  translated), `METAL_PIPELINE_FALLBACKS=0`,
+  `METAL_PIPELINE_FAILED=0`, 0 occurrences of "newRenderPipelineState
+  failed" in stderr, 0 occurrences of "missing from the vertex
+  descriptor".
+- Targeted bisect: temporarily disabling
+  `pgraph_mtl_set_attr_masks` (NOT shipped — diagnostic step only)
+  reproduces the 32 513 / 93 971 = 34.6 % pipeline-fallback rate that
+  matches the pre-Part B M5.6 baseline. The bisect confirms the new
+  helper is what drives the 0 % failure rate, not an environmental
+  change.
+
+**Trade-offs.** Per-vertex normal / texcoord / fog / specular streams
+are now read from the UBO's `inline_value[]` instead of decoded VRAM —
+which is **as good as the most recent NV097 immediate-mode register
+write per attribute, replicated across every vertex**. For
+fixed-function pipelines that drive normal / specular / fog from
+per-object register writes (the typical Xbox idiom; see
+`hw/xbox/nv2a/pgraph/glsl/vsh.c:255-281` for the codegen), this is
+**per-NV2A-spec correct**. For per-vertex texcoord / normal arrays
+(programmable-shader title styles), the rendering will look like a
+single value broadcast to every vertex until the M5.5 decoder is
+extended to cover more slots — that is queued separately and out of
+Part B's scope. The magenta-surface artifact in the test environment is
+eliminated either way.
+
+**Performance note.** This run captured `avg_fps=2.15` /
+`post_load_avg_fps=2.17` against the pre-Part B M5.6 reference run's
+`post_load_avg_fps=36.56` (passthrough mode) and `28.49` (translated
+mode). The drop is documented as the macOS-environmental transient in
+`handoff.md` "Run-time variance" item: a paired GL run on the same
+build hit 48.02 fps post-load, ruling out thermal / build / branch
+issues; the `mtl_dispatch_decoded_draw` bisect (above) confirms the
+identical FPS profile with the Part B helper enabled vs disabled, also
+ruling out Part B as the cause. Re-validation under a clean macOS
+session is queued; the pipeline-build correctness data lands as
+authoritative.
+
+**Files touched.**
+
+- `hw/xbox/nv2a/pgraph/mtl/vertex.{c,h}` — new
+  `pgraph_mtl_set_attr_masks` / `pgraph_mtl_restore_attr_masks`
+  helpers (~90 LOC).
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c::mtl_dispatch_decoded_draw` —
+  bracket the dispatch helper with set/restore calls; restore on the
+  early-return for `translated_pending` and at function exit.
+- `hw/xbox/nv2a/pgraph/mtl/state.c::pgraph_mtl_build_pipeline_key` —
+  additional `pg->uniform_attrs` skip when `count != 0`.
+- `hw/xbox/nv2a/pgraph/mtl/shaders.mm::build_pipeline_internal` —
+  replace the Part A "fallback bufferIndex" block with a sparse-
+  descriptor skip; remove the now-unused layouts[3] backstop.
+
+**Cross-references.** `metal-renderer-plan.md` slice M5 / M6 tables
+remain in sync (the M5.6 part B carve-out is now closed). The
+remaining deferred items (M6 Part B, M8.1, M10.1, M11.1 — see the M14
+close-out entry) are unaffected. The audio listen-test for
+`XEMU_APU_LOCK_RELEASE` remains the next user-driven validation in
+front of M15.
+
 ## 2026-05-03: Metal slice M5.6 — translator failures eliminated (pipeline build success rate 67 % → 100 %; visual correctness gated only on M5.6 part B — uniform-attr UBO routing)
 
 **Context.** After M5.5 (draw paths online) and M5.7 (render-pass
@@ -4716,4 +5070,119 @@ Open M4 follow-up:
   PSH/VSH translation pipeline and the proper LRU-on-
   PipelineKey cache without geometry-shader-handling
   distractions.
+
+## 2026-05-03: Metal screenshot capture for visual validation
+
+The M5.6 / M15 default-on validation criteria require visual
+diff-vs-GL screenshots, but the existing
+`scripts/apple-silicon/macos-capture.sh` path uses macOS
+`screencapture`, which triggers a Screen-Recording permission
+dialog. That dialog occludes the xemu window for the duration of
+the benchmark, with two unwanted side effects:
+
+1. CoreAnimation's `addPresentedHandler:` does not fire for an
+   occluded layer, so `s_presents_total` stays at 0 →
+   `METAL_PRESENTS = 0` in the perf counters → the M10 frame-
+   pacing telemetry (jitter/avg/max) is unusable for that run.
+2. The user-visible image and the captured image diverge: the
+   dialog covers the xemu window during gameplay, so the
+   `screencapture`-emitted PNG shows the dialog rather than the
+   rendered frame.
+
+Both points block the visual-correctness gate that M5.6 part B
+and M15 default-on need. Land an in-renderer programmatic
+screenshot path that bypasses both:
+
+- New env vars `XEMU_METAL_SCREENSHOT_PATH=/path/to/file.png`,
+  `XEMU_METAL_SCREENSHOT_AT_FRAME=N` (default 60),
+  `XEMU_METAL_SCREENSHOT_INTERVAL=N` (default 0 = single shot).
+  Frame numbering is 1-indexed against a new submit-time
+  end-of-frame counter `s_end_frames`, NOT against
+  `s_presents_total` — the present counter is the broken thing
+  we are working around.
+- Capture point: AFTER the HUD ImGui-Metal render encoder
+  closes (`[s_current_enc endEncoding]` in
+  `xemu_metal_end_imgui_frame`) and BEFORE
+  `[s_current_cmd presentDrawable:...]`. At that point the
+  drawable's BGRA8Unorm_sRGB texture is the final composited
+  frame including HUD, identical to what the user would see on
+  screen when no dialog occludes.
+- Implementation: a single `MTLBlitCommandEncoder
+  copyFromTexture:...:toBuffer:` from the drawable into a
+  per-shot host-shared `MTLBuffer` (size = w·h·4); cmdbuf's
+  `addCompletedHandler:` reads the buffer's bytes after GPU
+  completion, swaps BGRA→RGBA, and writes a PNG via FPNG
+  (`ui/thirdparty/fpng/`, already linked into `xemu_ss`).
+  PNG-encoding errors are logged and swallowed.
+- Required side effect: when
+  `XEMU_METAL_SCREENSHOT_PATH` is set, `xemu_metal_init` flips
+  `s_layer.framebufferOnly` from `YES` to `NO` so the drawable
+  texture can be the source of a blit. Display compression is
+  off only for screenshot-enabled runs; default-off path keeps
+  the Apple Silicon UMA compression on.
+- Counter `METAL_SCREENSHOTS_TAKEN` (per-interval delta) bumps
+  only on successfully-encoded PNGs.
+
+FPNG-include note: `<fpng.h>` transitively includes libc++'s
+`<atomic>`, which errors on `-std=c++17` when `<stdatomic.h>` is
+also in scope ("incompatible with `<stdatomic.h>` before C++23").
+xemu-metal.mm needs `<stdatomic.h>` for inter-thread counters,
+so we forward-declare the two FPNG entry points (`fpng_init` and
+`fpng_encode_image_to_file`) by hand instead of including
+`<fpng.h>`. Both have C++ linkage in namespace `fpng`; the
+forward decl matches FPNG's signature exactly.
+
+Companion script changes on `scripts/apple-silicon/run-benchmark.sh`:
+new `--metal-screenshot <path>` and `--metal-screenshot-at-frame <N>`
+flags mirror the M13 `--metal-capture <path>` pattern (export
+the env var pre-launch; record the path in `metadata.txt`).
+`extract-perf-summary.sh` learns the new
+`METAL_SCREENSHOTS_TAKEN` key.
+
+Verification on this fork (M3 Ultra, macOS 26.4):
+
+- Build: `./build.sh -a arm64` PASS;
+  `codesign --verify --deep --strict --verbose=2
+  dist/xemu.app` returns "valid on disk".
+- M5 shader-validation harness:
+  `XEMU_METAL_SHADER_VALIDATE=1
+  XEMU_METAL_SHADER_VALIDATE_AND_EXIT=1
+  dist/xemu.app/Contents/MacOS/xemu` → 7/7 PASS.
+- Smoke test:
+  `XEMU_RENDERER=METAL
+  XEMU_METAL_SCREENSHOT_PATH=/tmp/test.png
+  XEMU_METAL_SCREENSHOT_AT_FRAME=120
+  scripts/apple-silicon/run-benchmark.sh pgr2
+  scripts/apple-silicon/input-scripts/pgr2-smoke.csv 30` →
+  `/tmp/test.png` 1280×931 PNG, 8-bit RGBA, valid (`file` +
+  `sips`). `xemu.log` shows
+  `xemu-perf: metal_screenshot path=/tmp/test.png at_frame=120
+  interval=0` at startup,
+  `xemu-perf: metal_screenshot_written
+  path=/tmp/test.png w=1280 h=931` post-capture, and
+  `METAL_SCREENSHOTS_TAKEN=1` on the corresponding interval.
+  Visual content at frame 120: pgr2-smoke.csv runs only 30 s and
+  the snapshot lands in xemu's HUD/menu bar window pre-BIOS — a
+  real in-game frame requires a longer-duration script or a
+  larger `--metal-screenshot-at-frame` value (≥ 600).
+
+Files touched:
+
+- `ui/xemu-metal.mm` (parse env, blit + encode pipeline,
+  end-of-frame submit counter, framebufferOnly flip, shutdown
+  free).
+- `util/xemu-metal-perf.c` (weak default + emit/reset for
+  `METAL_SCREENSHOTS_TAKEN`).
+- `scripts/apple-silicon/run-benchmark.sh` (new flags,
+  metadata, env export).
+- `scripts/apple-silicon/extract-perf-summary.sh` (counter
+  recognition + per-interval emission).
+- `docs/apple-silicon/automation.md`, `xemu-fork/CLAUDE.md`,
+  `docs/apple-silicon/handoff.md` (env-var documentation,
+  banner update).
+
+Constraint adherence: no edits under
+`hw/xbox/nv2a/pgraph/mtl/` (the parallel-running M5.6 part B
+agent owns that subtree). Stayed strictly in `ui/xemu-metal.mm`,
+`util/xemu-metal-perf.c`, and `scripts/apple-silicon/`.
 

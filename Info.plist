@@ -41,5 +41,12 @@
        docs/apple-silicon/metal-renderer-plan.md M13. -->
   <key>MetalCaptureEnabled</key>
   <true/>
+  <!-- Apple Silicon performance fork (slice N2, 2026-05-03):
+       GCSupportsControllerUserInteraction=YES enables macOS Sonoma+ Game Mode
+       polling-rate doubling (Bluetooth controllers ~125Hz -> ~250Hz) when xemu
+       is foreground+fullscreen. No entitlement required; activation is
+       Apple-Silicon only. See docs/apple-silicon/macos-input-research.md §2. -->
+  <key>GCSupportsControllerUserInteraction</key>
+  <true/>
 </dict>
 </plist>

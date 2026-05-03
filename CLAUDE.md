@@ -76,20 +76,45 @@ The fork-specific source-code changes are concentrated in:
     - `draw.mm` — open-pass coalescing (`open_pass_ensure` /
       `open_pass_close_locked` / `pgraph_mtl_draw_flush_open_pass`)
       shared across M3/M4 passthrough + M7.1 translated paths.
-    - `vertex.{c,h}` — **(M5.5, new)** CPU-side per-element NV2A
+    - `vertex.{c,h}` — **(M5.5 → M5.8)** CPU-side per-element NV2A
       vertex-attribute decoder. Public:
-      `pgraph_mtl_collect_vertex_streams`,
+      `pgraph_mtl_collect_vertex_streams` (legacy POSITION+DIFFUSE),
+      `pgraph_mtl_collect_all_vertex_streams` (M5.8, all 16 slots
+      via `MtlAttributeStream` array),
+      `pgraph_mtl_free_attribute_streams`,
       `pgraph_mtl_inline_array_vertex_stride`,
-      `pgraph_mtl_inline_array_update_offsets`. Format coverage F /
-      UB_OGL / UB_D3D / S1 / S32K (CMP falls back to inline_value;
-      M5.6 routes the descriptor as `MTL_VFMT_INT`).
-    - `shaders.mm` — pipeline build. M5.6 populates every vertex-
-      descriptor attribute slot (inactive → bufferIndex=3 for
-      DIFFUSE, → bufferIndex=0 otherwise) so the MSL's
-      `[[attribute(N)]]` slots all resolve.
-    - `state.c` — pipeline-key builder; M5.6 maps NV097 CMP format
-      to `MTL_VFMT_INT` (raw int) instead of
-      `INT1010102_NORMALIZED` to match what spirv-cross emits.
+      `pgraph_mtl_inline_array_update_offsets`,
+      `pgraph_mtl_set_attr_masks` (mirror of vk/vertex.c:148-154 +
+      226-236 — only count==0 OR stride==0 slots are uniform),
+      `pgraph_mtl_set_attr_masks_inline_buffer` (mirror of
+      pgraph_vk_bind_vertex_attributes_inline). Format coverage:
+      F / UB_OGL / UB_D3D / S1 / S32K / **CMP** (CMP added in
+      M5.8 — signed (11,11,10) packed → CPU-decoded Float4 so the
+      shader-side compressed_attrs branch never fires).
+      `MTL_ATTR_BUFFER_INDEX_BASE = 1` shifts attribute streams to
+      bufferIndex 1..16 so they don't shadow the VSH UBO at
+      MSL `[[buffer(0)]]`.
+    - `shaders.mm` — pipeline build. M5.8 indexes `vd.layouts` by
+      `attr_buffer_index[i]` (not slot) to match the per-attribute
+      bufferIndex shift; populates every active vertex-descriptor
+      attribute slot (inactive slots are left unset because the
+      GLSL generator emits `vec4 vN = inlineValue[k];` for them,
+      reading via the VSH UBO).
+    - `state.c` — pipeline-key builder; M5.8 emits
+      `format = MTL_VFMT_FLOAT4 / stride = 16 /
+      buffer_index = MTL_ATTR_BUFFER_INDEX_BASE + slot` for every
+      active attribute (the decoder always normalizes to Float4).
+      The legacy NV097 format → MTLVertexFormat translator
+      (`pgraph_mtl_translate_vertex_format`) is retained but no
+      longer called by the descriptor builder; CMP support there is
+      now dead code on the Metal-renderer encode path (kept as a
+      reference for future direct-fetch experiments).
+    - `draw.mm` — encode. M5.8 `pgraph_mtl_draw_translated` takes an
+      `MtlAttributeStream[16]` array; binds VSH UBO at vertex
+      `atIndex:0` (was 1 since M7.1 — a bug that shadowed position
+      bytes) and each non-NULL stream at bufferIndex
+      `MTL_ATTR_BUFFER_INDEX_BASE + slot`. PSH UBO stays at
+      fragment `atIndex:1`.
 - `ui/xemu-input.c` — `XEMU_SCRIPTED_INPUT` (CSV replay) and
   `XEMU_RECORD_INPUT` (CSV record).
 - `ui/xemu-snapshots.c` — `XEMU_SNAPSHOT_NO_THUMBNAIL=1`.
@@ -247,6 +272,34 @@ Stable opt-in:
   the auto-default is off. Accompanying counters
   `APU_LOCK_HOLD_US_TOTAL` and `APU_VCPU_LOCK_WAIT_US_MAX` (below)
   attribute the slice's effect.
+- `XEMU_MACOS_NATIVE_INPUT={0,1}` (slices N1 + N2, 2026-05-03) —
+  opt-in native macOS controller backend via Apple's
+  `GameController.framework`. Default 0 (off; existing users see
+  exactly today's SDL3 behavior). When set, `xemu_input_init`
+  enumerates `[GCController controllers]` and registers connect /
+  disconnect notification handlers; the per-frame poll path
+  (`xemu_input_update_controller`) reads `GCExtendedGamepad`
+  properties directly instead of draining the SDL event queue and
+  reading SDL's cached gamepad state. Removes one thread-hop +
+  ~tens-of-µs of SDL event-queue dispatch per controller change.
+  Mapping is by `GCControllerPlayerIndex`: xemu port N → playerIndex
+  N. SDL still owns connect/disconnect lifecycle and per-port
+  binding (the rebind UI is built on SDL events; Linux + Windows
+  builds keep depending on SDL); the native backend only takes over
+  the read path on macOS. Rumble on the native path is intentionally
+  a no-op for slice N2 (Core Haptics integration is N4); first call
+  logs a one-shot diagnostic. Logged once at startup as
+  `xemu-perf: macos_native_input enabled controllers=N` plus a
+  per-controller line documenting class / vendor / haptics / player
+  index. Implementation: `ui/xemu-macos-input.{h,mm}`,
+  `ui/xemu-input.c` (read-path dispatch),
+  `Info.plist::GCSupportsControllerUserInteraction = YES` (macOS
+  Sonoma+ Game Mode polling-rate doubling). Companion latency
+  counters from slice N1 (always-on, surface on `xemu-perf:`):
+  `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`, `INPUT_LAT_US_TOTAL`,
+  `INPUT_LAT_US_MAX`. Apple Silicon performance fork; built only on
+  darwin+arm64. See `docs/apple-silicon/macos-input-research.md` for
+  the full migration plan and slices N3-N6 followups.
 - `XEMU_METAL_SHADER_VALIDATE={0,1,strict,2}` (M5, 2026-05-02) —
   development-only Metal shader-translation harness. When set,
   `xemu_metal_init` runs the in-process M5 harness (6 fixed-function
@@ -469,6 +522,39 @@ Stable opt-in:
   mtl_debug_layer_active=A`. Default 0 (validation off; matches
   M14's "MTL_DEBUG_LAYER=0 in shipped builds" rule). Apple Silicon
   performance fork; slice M14. Implementation in `ui/xemu-metal.mm`.
+- `XEMU_METAL_SCREENSHOT_PATH=/path/to/file.png` (2026-05-03) —
+  programmatic PNG screenshot of the final composited drawable,
+  encoded inside the Metal renderer (no `screencapture`, no
+  Screen-Recording permission dialog, no window occlusion). Capture
+  point is AFTER the HUD ImGui-Metal encoder closes and BEFORE
+  `presentDrawable:`, so the encoded image is byte-identical to what
+  the user would see on screen. Implementation: blit drawable
+  texture → host-shared `MTLBuffer`; `addCompletedHandler:` runs
+  after GPU completion, swaps BGRA→RGBA, writes the PNG via FPNG
+  (`ui/thirdparty/fpng/`). Side effect: the env enables flips
+  `s_layer.framebufferOnly` from `YES` to `NO` at `xemu_metal_init`
+  so the drawable can be the source of a blit (display compression
+  is off only for screenshot-enabled runs). PNG-encoding errors are
+  logged and swallowed — capture is best-effort. Counter
+  `METAL_SCREENSHOTS_TAKEN` (per-interval delta) surfaces on the
+  `xemu-perf:` interval line. Companion script flags
+  `--metal-screenshot <path>` / `--metal-screenshot-at-frame <N>` on
+  `scripts/apple-silicon/run-benchmark.sh`. Default unset.
+- `XEMU_METAL_SCREENSHOT_AT_FRAME=N` (2026-05-03) — frame number
+  (1-indexed against the renderer's submit-time end-of-frame
+  counter, NOT `pgraph_mtl_present_total`) at which
+  `XEMU_METAL_SCREENSHOT_PATH` fires. Default 60. Submit-time was
+  picked because the present counter is only bumped from
+  `addPresentedHandler:`, which does not fire while the macOS
+  Screen-Recording dialog occludes the xemu window — that's exactly
+  the configuration the screenshot path is meant to work in.
+- `XEMU_METAL_SCREENSHOT_INTERVAL=N` (2026-05-03) — when N≥1 the
+  capture repeats every N frames after the first shot, writing
+  `<base>.0001.png`, `<base>.0002.png`, ... (the `.NNNN` suffix is
+  inserted before a trailing `.png` if present, appended otherwise).
+  Default 0 = single shot. Implementation in `ui/xemu-metal.mm`,
+  `util/xemu-metal-perf.c`, `scripts/apple-silicon/run-benchmark.sh`,
+  `scripts/apple-silicon/extract-perf-summary.sh`.
 
 Diagnostic toggles (intentionally not correctness paths):
 
@@ -657,9 +743,14 @@ them to the codebase ahead of the corresponding slice:
   MetalFX spatial upscale factor
   (default 1 = no upscale). Lands with slice M12.
 
-Planned `XEMU_MACOS_NATIVE_INPUT*` flags (independent track) are
-documented in `docs/apple-silicon/macos-input-research.md` §6 and
-will land with input slices N2 / N4.
+`XEMU_MACOS_NATIVE_INPUT={0,1}` SHIPPED 2026-05-03 (slices N1 + N2;
+see the "Stable opt-in" section above and
+`docs/apple-silicon/macos-input-research.md` for the full migration
+plan and slices N3-N6 followups). The remaining
+`XEMU_MACOS_NATIVE_INPUT_RUMBLE` / `XEMU_MACOS_NATIVE_INPUT_QUEUE`
+sub-toggles described in `macos-input-research.md` §6 are still
+planned-only; they will land with the N4 (Core Haptics rumble)
+slice.
 
 ## Commit and PR conventions
 

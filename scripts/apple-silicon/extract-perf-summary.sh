@@ -344,7 +344,11 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_PRESENT_GPU_US_TOTAL" ||
                    key == "METAL_PRESENT_GPU_FRAMES" ||
                    key == "METAL_CAPTURE_FRAMES" ||
-                   key == "METAL_CAPTURE_ACTIVE") {
+                   key == "METAL_CAPTURE_ACTIVE" ||
+                   key == "METAL_SCREENSHOTS_TAKEN" ||
+                   key == "INPUT_USB_POLLS" ||
+                   key == "INPUT_BACKEND_UPDATES" ||
+                   key == "INPUT_LAT_US_TOTAL") {
             add_counter(key, value)
         } else if (key == "METAL_PRESENT_JITTER_US_MAX" ||
                    key == "TCG_TB_INVALIDATE_BURST_MAX" ||
@@ -353,7 +357,8 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "MMIO_READ_PGRAPH_US_MAX" ||
                    key == "PIT_COALESCE_LATE_US_MAX" ||
                    key == "PFIFO_DMA_BACKLOG_BYTES_MAX" ||
-                   key == "APU_VCPU_LOCK_WAIT_US_MAX") {
+                   key == "APU_VCPU_LOCK_WAIT_US_MAX" ||
+                   key == "INPUT_LAT_US_MAX") {
             max_counter(key, value)
         }
     }
@@ -557,8 +562,12 @@ END {
     keys[156] = "METAL_PRESENT_GPU_FRAMES"
     keys[157] = "METAL_CAPTURE_FRAMES"
     keys[158] = "METAL_CAPTURE_ACTIVE"
+    keys[159] = "METAL_SCREENSHOTS_TAKEN"
+    keys[160] = "INPUT_USB_POLLS"
+    keys[161] = "INPUT_BACKEND_UPDATES"
+    keys[162] = "INPUT_LAT_US_TOTAL"
 
-    for (i = 1; i <= 158; i++) {
+    for (i = 1; i <= 162; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
     # Per-interval-max counters: report the running max across intervals.
@@ -578,6 +587,8 @@ END {
            ("PFIFO_DMA_BACKLOG_BYTES_MAX" in counters_max) ? counters_max["PFIFO_DMA_BACKLOG_BYTES_MAX"] : 0)
     printf("APU_VCPU_LOCK_WAIT_US_MAX=%d\n",
            ("APU_VCPU_LOCK_WAIT_US_MAX" in counters_max) ? counters_max["APU_VCPU_LOCK_WAIT_US_MAX"] : 0)
+    printf("INPUT_LAT_US_MAX=%d\n",
+           ("INPUT_LAT_US_MAX" in counters_max) ? counters_max["INPUT_LAT_US_MAX"] : 0)
 
     emit_jitter("",         all_fps, all_mspf_max, all_mspf_avg, all_count)
     emit_jitter("post_load_", post_fps, post_mspf_max, post_mspf_avg, post_count)

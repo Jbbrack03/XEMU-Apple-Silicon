@@ -28,6 +28,7 @@
 #include "pipeline.h"
 #include "surface.h"
 #include "texture.h"
+#include "vertex.h"  /* MtlAttributeStream + MTL_ATTR_BUFFER_INDEX_BASE */
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -548,11 +549,11 @@ extern "C" void pgraph_mtl_draw_inc_native_quad_count(void)
     atomic_fetch_add(&s_draw_native_quad_count, 1);
 }
 
-/* -------- M7.1: translated-pipeline encode -------- */
+/* -------- M7.1 / M5.8: translated-pipeline encode -------- */
 
 void pgraph_mtl_draw_translated(void *pipeline_state,
-                                const float *positions,
-                                const float *colors,
+                                const MtlAttributeStream *attr_streams,
+                                unsigned int n_attr_streams,
                                 unsigned int vertex_count,
                                 const uint32_t *indices,
                                 unsigned int index_count,
@@ -572,13 +573,19 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
                                 void *const stage_samplers[4])
 {
     if (!s_initialized || pipeline_state == NULL ||
-        vertex_count == 0 || positions == NULL || colors == NULL) {
+        vertex_count == 0 || attr_streams == NULL || n_attr_streams == 0) {
         return;
     }
     if (surface_color == NULL && surface_depth == NULL) {
         return;
     }
     bool indexed = (indices != NULL && index_count > 0);
+
+    /* Slot 0 (POSITION) is required — without per-vertex positions
+     * there's nothing to draw. Bail if the caller didn't supply it. */
+    if (attr_streams[0].data == NULL) {
+        return;
+    }
 
     /* M5.5+: open-pass coalescing — see passthrough path. We do NOT
      * pass color_fmt here because the translated path is invoked
@@ -597,16 +604,30 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
         return;
     }
 
-    void *pos_buf = NULL, *col_buf = NULL, *idx_buf = NULL;
-    size_t pos_off = 0, col_off = 0, idx_off = 0;
-    size_t pos_size = (size_t)vertex_count * 4 * sizeof(float);
-    size_t col_size = (size_t)vertex_count * 4 * sizeof(float);
-
-    if (!pgraph_mtl_buffer_stage_vertex(positions, pos_size, &pos_buf, &pos_off) ||
-        !pgraph_mtl_buffer_stage_vertex(colors, col_size, &col_buf, &col_off)) {
-        return;
+    /* Stage every active attribute stream into the ring; record the
+     * resulting (buffer, offset) for binding below. */
+    void   *attr_bufs[MTL_VERTEX_NUM_ATTRIBUTES];
+    size_t  attr_offs[MTL_VERTEX_NUM_ATTRIBUTES];
+    for (unsigned i = 0; i < MTL_VERTEX_NUM_ATTRIBUTES; i++) {
+        attr_bufs[i] = NULL;
+        attr_offs[i] = 0;
+    }
+    unsigned int max_streams = (n_attr_streams < MTL_VERTEX_NUM_ATTRIBUTES)
+                                   ? n_attr_streams
+                                   : MTL_VERTEX_NUM_ATTRIBUTES;
+    for (unsigned i = 0; i < max_streams; i++) {
+        if (attr_streams[i].data == NULL || attr_streams[i].bytes == 0) {
+            continue;
+        }
+        if (!pgraph_mtl_buffer_stage_vertex(attr_streams[i].data,
+                                            attr_streams[i].bytes,
+                                            &attr_bufs[i], &attr_offs[i])) {
+            return;
+        }
     }
 
+    void *idx_buf = NULL;
+    size_t idx_off = 0;
     if (indexed) {
         size_t idx_size = (size_t)index_count * sizeof(uint32_t);
         if (!pgraph_mtl_buffer_stage_index(indices, idx_size,
@@ -629,18 +650,29 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
     };
     [enc setViewport:vp];
 
-    /* Bind position at slot 0 and diffuse color at slot 3 to match
-     * the NV2A_VERTEX_ATTR_DIFFUSE buffer_index established by the
-     * pipeline key (see state.c). */
-    id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
-    id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
-    [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
-    [enc setVertexBuffer:cbuf offset:col_off atIndex:3];
-
-    /* UBOs at the spirv-cross emitted [[buffer(N)]] indices. */
+    /* M5.8 buffer-index layout:
+     *   - Vertex stage `[[buffer(0)]]` = VSH UBO (spirv-cross emits
+     *     `constant VshUniforms& _NN [[buffer(0)]]` because the GLSL
+     *     generator declares the UBO with `layout(binding=0)`).
+     *   - Vertex attribute streams = bufferIndex
+     *     (MTL_ATTR_BUFFER_INDEX_BASE + slot) = [1..16]. State.c sets
+     *     vd.attributes[N].bufferIndex to the same value; the
+     *     vertex-stage buffer table treats the vertex descriptor's
+     *     bufferIndex slots and `[[buffer(N)]]` as the same namespace,
+     *     so the offset MUST start past the UBO.
+     *   - Fragment stage `[[buffer(1)]]` = PSH UBO.
+     */
     if (vsh_ubo != NULL && vsh_ubo_size > 0) {
         id<MTLBuffer> ub = (__bridge id<MTLBuffer>)vsh_ubo;
-        [enc setVertexBuffer:ub offset:vsh_ubo_offset atIndex:1];
+        [enc setVertexBuffer:ub offset:vsh_ubo_offset atIndex:0];
+    }
+    for (unsigned i = 0; i < max_streams; i++) {
+        if (attr_bufs[i] == NULL) {
+            continue;
+        }
+        unsigned int bi = MTL_ATTR_BUFFER_INDEX_BASE + i;
+        id<MTLBuffer> b = (__bridge id<MTLBuffer>)attr_bufs[i];
+        [enc setVertexBuffer:b offset:attr_offs[i] atIndex:bi];
     }
     if (psh_ubo != NULL && psh_ubo_size > 0) {
         id<MTLBuffer> ub = (__bridge id<MTLBuffer>)psh_ubo;

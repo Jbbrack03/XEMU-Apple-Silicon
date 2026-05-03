@@ -25,6 +25,7 @@
 #include "qemu/xemu-metal-perf.h"
 #include "qemu/xemu-pfifo-perf.h"
 #include "qemu/xemu-rate-slew.h"
+#include "qemu/xemu-input-perf.h"
 
 NV2AStats g_nv2a_stats;
 
@@ -249,6 +250,12 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
      * METAL_CLEAR_COUNT). No-op when zero (i.e. when the GL renderer
      * is active or no Metal draws/clears occurred this interval). */
     xemu_metal_perf_emit_and_reset(stderr);
+
+    /* Apple Silicon performance fork: append input-latency counters
+     * (slice N1: INPUT_USB_POLLS / INPUT_BACKEND_UPDATES /
+     * INPUT_LAT_US_TOTAL / INPUT_LAT_US_MAX). No-op when no input
+     * activity occurred this interval. */
+    xemu_input_perf_emit_and_reset(stderr);
 
     {
         extern void xemu_ide_perf_emit_and_reset(FILE *out);

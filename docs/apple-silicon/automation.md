@@ -496,6 +496,50 @@ and stack:
   runs or single-frame regression triage). Ignored when
   `XEMU_METAL_CAPTURE` is unset. Apple Silicon performance fork;
   slice M13.
+- `XEMU_METAL_SCREENSHOT_PATH=/path/to/file.png` (**2026-05-03**) —
+  programmatic PNG screenshot of the final composited drawable,
+  captured from inside the Metal renderer. Replaces the
+  `screencapture`-based `scripts/apple-silicon/macos-capture.sh` path
+  for benchmark validation: there is no Screen-Recording permission
+  dialog, no window occlusion, and no impact on
+  `addPresentedHandler:` accounting (so `METAL_PRESENTS` is not
+  artificially zeroed by a foreground dialog). Capture point is
+  AFTER the HUD ImGui-Metal encoder closes and BEFORE
+  `presentDrawable:`, so the encoded image is byte-identical to what
+  the user would see on screen. Implementation: a blit from the
+  drawable texture into a host-shared `MTLBuffer`, then a
+  `addCompletedHandler:` block that runs after the GPU finishes the
+  cmdbuf, swaps BGRA→RGBA, and encodes the PNG via FPNG
+  (`ui/thirdparty/fpng/`). Side effect: when the env is set,
+  `s_layer.framebufferOnly` is flipped from `YES` to `NO` at
+  `xemu_metal_init` so the drawable can be the source of a blit
+  (display compression is off only for screenshot-enabled runs).
+  PNG-encoding errors are logged and swallowed — capture is best-
+  effort and never crashes the renderer. Companion env vars below;
+  companion script flags `--metal-screenshot <path>` /
+  `--metal-screenshot-at-frame <N>` on
+  `scripts/apple-silicon/run-benchmark.sh`. Apple Silicon performance
+  fork.
+- `XEMU_METAL_SCREENSHOT_AT_FRAME=N` (**2026-05-03**) — frame number
+  (1-indexed against the Metal renderer's submit-time end-of-frame
+  counter) at which `XEMU_METAL_SCREENSHOT_PATH` fires. Default 60.
+  Note: this counter is the renderer's "frame submitted" tick
+  (incremented unconditionally inside `xemu_metal_end_imgui_frame`),
+  not `pgraph_mtl_present_total` — the latter is bumped from
+  `addPresentedHandler:` which does not fire while the macOS
+  Screen-Recording dialog occludes the xemu window. Using the submit
+  counter keeps the trigger deterministic on benchmark machines that
+  do not have Screen-Recording permission granted to the launching
+  shell.
+- `XEMU_METAL_SCREENSHOT_INTERVAL=N` (**2026-05-03**) — when set to
+  N≥1, the screenshot capture repeats every N frames after the first
+  shot, writing `<base>.0001.png`, `<base>.0002.png`, ... (the
+  `.NNNN` suffix is inserted before the trailing `.png` if present,
+  appended otherwise). Default 0 = single shot at
+  `XEMU_METAL_SCREENSHOT_AT_FRAME`. Counter
+  `METAL_SCREENSHOTS_TAKEN` (per-interval delta) surfaces on the
+  `xemu-perf:` interval line and counts only successfully-encoded
+  PNGs (encoding failures log + skip without bumping the counter).
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with
@@ -637,6 +681,55 @@ and stack:
   source=XEMU_APU_LOCK_RELEASE|auto-default`. The env var beats the
   build default. Accompanying counters `APU_LOCK_HOLD_US_TOTAL` and
   `APU_VCPU_LOCK_WAIT_US_MAX` (below) attribute the slice's effect.
+
+- `XEMU_MACOS_NATIVE_INPUT={0,1}` (**slice N2, 2026-05-03**) — opt-in
+  routing of controller polling through Apple's `GameController.framework`
+  on macOS instead of SDL3. Default 0 (off; existing users see exactly
+  today's SDL behavior). When set, `xemu_input_init` enumerates
+  `[GCController controllers]`, registers
+  `GCControllerDidConnectNotification` /
+  `GCControllerDidDisconnectNotification` handlers, and assigns each
+  connected controller a fresh `GCControllerPlayerIndex` (xemu port N
+  ↦ playerIndex N). The read path
+  (`xemu_input_update_sdl_controller_state` → native backend) replaces
+  the SDL Gamepad property reads with direct `GCExtendedGamepad`
+  property reads — no SDL event-queue drain, no main-thread hop. SDL
+  still owns the connect/disconnect lifecycle and per-port binding
+  (the rebind UI is built on SDL events; Linux + Windows builds keep
+  depending on SDL); the native backend only takes over the read path
+  on macOS. Logged once at startup as `xemu-perf: macos_native_input
+  enabled controllers=N`, followed by a per-controller diagnostic
+  line (`class=GCController/GCXboxGamepad/...` `vendor="..."`
+  `haptics=yes/no` `playerIndex=N`). Connect / disconnect events emit
+  matching `xemu-perf: macos_native_input connect ...` /
+  `disconnect ...` lines. Rumble on the native path is intentionally
+  a no-op for slice N2 — Core Haptics integration is the N4 slice; the
+  first call logs a one-shot diagnostic so the absence of rumble is
+  visible until N4 lands. Companion env / toggle `Info.plist`
+  property: `GCSupportsControllerUserInteraction = YES` (added in
+  this slice; opt-in to macOS Sonoma "Game Mode" polling-rate doubling
+  for Bluetooth controllers when xemu is foreground+fullscreen).
+  Apple Silicon performance fork; built only on darwin+arm64.
+
+  Companion latency counters (slice N1, always-on; surface on the
+  `xemu-perf:` interval line):
+
+  - `INPUT_USB_POLLS` — guest interrupt-IN reads on the XID gamepad
+    endpoint (`hw/xbox/xid-gamepad.c::usb_xid_gamepad_handle_data`).
+    8 ms cadence on real hardware; the xemu USB stack passes through
+    the same rate.
+  - `INPUT_BACKEND_UPDATES` — calls to
+    `xemu_input_update_controller` per interval (rate-limited to
+    once per 2500 µs by `XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US`).
+  - `INPUT_LAT_US_TOTAL` — sum of (guest-USB-poll-time minus
+    last-backend-update-time) per port over the interval. Average
+    cache-to-poll latency = `INPUT_LAT_US_TOTAL / INPUT_USB_POLLS`.
+  - `INPUT_LAT_US_MAX` — worst-frame cache-to-poll latency in the
+    interval. Should stay under 16,000 µs (one frame); typical
+    values during gameplay are < 8,000 µs.
+
+  Cost when no input activity occurred: zero (counters are emitted
+  only when at least one is non-zero).
 
 ### Apple Silicon defaults
 

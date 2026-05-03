@@ -27,6 +27,7 @@
 
 #include "state.h"
 #include "shaderstate.h"
+#include "vertex.h" /* MTL_ATTR_BUFFER_INDEX_BASE */
 
 #include "hw/xbox/nv2a/pgraph/glsl/shaders.h"
 
@@ -225,42 +226,46 @@ bool pgraph_mtl_build_pipeline_key(NV2AState *d,
         out_key->regs[i] = pgraph_reg_r(pg, regs_to_snapshot[i]);
     }
 
-    /* Per-attribute / per-buffer descriptors. We map NV2A attribute
-     * slot N → both attrs[N] and bufs[N] (1:1 indexing). Slots with
-     * count == 0 (uniform_attrs) are left zero so the pipeline build
-     * skips them. */
+    /* Per-attribute / per-buffer descriptors.
+     *
+     * M5.8: the M5.5 / M5.8 CPU-side decoder always normalizes each
+     * active attribute's per-vertex bytes to Float4. The descriptor
+     * therefore declares format = MTL_VFMT_FLOAT4 / stride = 16 for
+     * every attribute slot the encode path supplies — independent of
+     * the guest's attr->format (which is consumed during decode, not
+     * vertex fetch). The M3/M4 inline_buffer path likewise emits
+     * Float4 streams.
+     *
+     * Slots flagged in pg->uniform_attrs are skipped — the GLSL
+     * generator emits `vec4 vN = inlineValue[k];` for them (reading
+     * via the VSH UBO at MSL `[[buffer(0)]]`), and the encoder leaves
+     * the matching bufferIndex unbound.
+     *
+     * BufferIndex remap: the VSH UBO occupies MSL `[[buffer(0)]]`
+     * (spirv-cross + ENABLE_DECORATION_BINDING preserves the SPIR-V
+     * binding=0 → MSL [[buffer(0)]]). Vertex-stage `[[buffer(N)]]`
+     * shares its slot table with the MTLVertexDescriptor's bufferIndex
+     * — so attribute streams MUST avoid bufferIndex 0. We shift to
+     * MTL_ATTR_BUFFER_INDEX_BASE + slot (= 1 + slot), giving a
+     * conflict-free [1..16] range.
+     */
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
         VertexAttribute *attr = &pg->vertex_attributes[i];
         if (attr->count == 0) {
             continue;
         }
-
-        /* For inline_buffer-driven draws (the M3/M4 path), the attr
-         * format is whatever the per-attribute inline_buffer staging
-         * emits — always 4 floats — and the format/stride must reflect
-         * that, NOT attr->format/attr->size which describe the raw
-         * vertex_data_array_format if any. The
-         * inline_buffer_populated bit signals which of the two paths
-         * is in flight per attribute. */
-        uint32_t mtl_format = MTL_VFMT_INVALID;
-        uint32_t stride = 0;
-        if (attr->inline_buffer_populated) {
-            mtl_format = MTL_VFMT_FLOAT4;
-            stride     = 4 * (uint32_t)sizeof(float);
-        } else {
-            mtl_format = pgraph_mtl_translate_vertex_format(attr->format,
-                                                            attr->count);
-            stride = (uint32_t)attr->stride;
-        }
-        if (mtl_format == MTL_VFMT_INVALID || stride == 0) {
+        if (pg->uniform_attrs & (1u << i)) {
             continue;
         }
 
-        out_key->attrs[i].format       = mtl_format;
-        out_key->attrs[i].offset       = 0;  /* 1:1 buffer→attr layout */
-        out_key->attrs[i].buffer_index = (uint32_t)i;
+        uint32_t buffer_index =
+            MTL_ATTR_BUFFER_INDEX_BASE + (uint32_t)i;
 
-        out_key->bufs[i].stride        = stride;
+        out_key->attrs[i].format       = MTL_VFMT_FLOAT4;
+        out_key->attrs[i].offset       = 0;
+        out_key->attrs[i].buffer_index = buffer_index;
+
+        out_key->bufs[i].stride        = 4 * (uint32_t)sizeof(float);
         out_key->bufs[i].step_function = MTL_VFN_PER_VERTEX;
         out_key->bufs[i].step_rate     = 1;
     }

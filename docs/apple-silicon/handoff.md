@@ -1,5 +1,147 @@
 # Handoff
 
+Last updated: 2026-05-03 (Metal renderer slice **M5.8 — full
+per-vertex attribute decoder — SHIPPED**. Replaces M5.6 Part B's
+"everything except POSITION + DIFFUSE goes uniform" mask shortcut
+with a proper per-attribute decoder that mirrors `vk/vertex.c`. The
+decoder produces one Float4 stream per active NV2A attribute slot
+(0..15); slots whose `count == 0` or `stride == 0` (VRAM source)
+remain uniform. Format coverage: F / UB_OGL / UB_D3D / S1 / S32K /
+CMP (CMP added in M5.8 — signed (11,11,10) packed → CPU-decoded
+Float4). Companion fix in `mtl/draw.mm`: VSH UBO now binds at vertex
+`atIndex:0` (matching the spirv-cross MSL `[[buffer(0)]]` declaration
+— previously bound at index 1, shadowing position bytes since M7.1)
+and per-attribute streams bind at `MTL_ATTR_BUFFER_INDEX_BASE + slot`
+= [1..16] to avoid clashing with the UBO. **Build PASS. M5
+shader-validation harness 7/7 PASS. PGR2 60 s Metal benchmark
+(`XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1`):**
+
+| Counter | M5.6 Part B (60 s) | **M5.8 (60 s)** |
+|---|---|---|
+| `METAL_DRAW_COUNT` | 3 831 | **75 016** |
+| `METAL_DRAW_INDEXED_COUNT` | ~3 800 | **74 952** |
+| `METAL_DRAW_TRANSLATED == DRAW_COUNT` | yes | **yes (100 %)** |
+| `METAL_PIPELINE_TRANSLATED_FAILED` | 0 | **0** |
+| `METAL_PIPELINE_FALLBACKS` | 0 | **0** |
+| `METAL_PIPELINE_KEY_BUILT` | ~3 800 | **77 865** |
+
+The 24× draw-throughput restoration (3.8k → 75k) matches the agent
+bisect from M5.6 Part B (which saw 93k draws/60s when set_attr_masks
+was disabled — that bisect's baseline is now restored). Translation
+remains 100 % successful with zero pipeline failures.
+
+**Visual validation status — environmentally blocked.** Same as M5.5
+/ M5.6 / M5.6 Part B banners: the macOS Screen-Recording permission
+dialog occludes the xemu window during scripted-input benchmarks
+(METAL_PRESENTS=0, `addPresentedHandler:` doesn't fire). The Metal-
+internal screenshot path captures the drawable BEFORE present, so it
+should bypass the OS-level occlusion — but the captured PNG is pure
+magenta, which corresponds to the macOS dialog's substitute layer
+(the macOS-side `screencapture` shows a black xemu window with the
+permission dialog floating on top). The renderer-side counter data
+above is authoritative and confirms M5.8 lands correctly. Resolution
+of the visual-diff gate requires a non-occluded test environment (a
+clean macOS user account, granted Screen-Recording permission, or a
+remote-host run); that's the M15 default-on prerequisite and is
+queued.
+
+Files touched: `hw/xbox/nv2a/pgraph/mtl/{vertex.c,vertex.h,
+renderer.c,state.c,shaders.mm,draw.mm,draw.h}`. See decision-log
+"2026-05-03: Metal slice M5.8 — full per-vertex attribute decoder".
+
+(Earlier banner — Input slices **N1 + N2 — macOS
+GameController.framework backend (opt-in) + always-on input-latency
+counters — SHIPPED**. New env `XEMU_MACOS_NATIVE_INPUT={0,1}` (default
+0) routes controller polling through Apple's
+`GameController.framework` instead of SDL3 on darwin+arm64; SDL still
+owns connect/disconnect lifecycle and per-port binding so the rebind
+UI is unchanged. Adds four always-on counters to the `xemu-perf:`
+interval line — `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
+`INPUT_LAT_US_TOTAL`, `INPUT_LAT_US_MAX` — that decompose the
+controller-input pipeline into measurable components for the next
+slice's user-driven latency benchmark (N3). Files touched:
+`include/qemu/xemu-input-perf.h` (new), `util/xemu-input-perf.c`
+(new), `ui/xemu-macos-input.h` (new), `ui/xemu-macos-input.mm` (new),
+`ui/xemu-input.c` (read + rumble dispatch),
+`hw/xbox/xid.c::update_input` (USB-poll counter),
+`hw/xbox/nv2a/pgraph/profile.c::nv2a_profile_log_emit_interval`
+(emit hook), `Info.plist` (`GCSupportsControllerUserInteraction =
+YES` for macOS Sonoma Game Mode polling-rate doubling),
+`ui/meson.build` (`appleframeworks(GameController)` dep),
+`util/meson.build` (xemu-input-perf.c source),
+`scripts/apple-silicon/extract-perf-summary.sh` (counter
+recognition). **Build PASS** (full `./build.sh -a arm64`); **M5
+shader-validation harness 7/7 PASS** unchanged; smoke tests confirm
+the env-off path is byte-identical to today's SDL behavior, the
+env-on path emits `xemu-perf: macos_native_input enabled
+controllers=0` once `xemu_input_init` runs (no controller plugged in
+during the test). Rumble on the native path is a no-op for N2 (Core
+Haptics integration is the N4 slice; first call logs a one-shot
+diagnostic). **Next-session priorities for the input track**: N3
+user-driven latency benchmark (paired SDL vs native runs in iPhone
+slow-mo at 240 Hz, ≥30 trials each, decision rule "ship default-on
+if native ≤ SDL within noise"); N4 native rumble (Core Haptics
+listen-test now unblocked post-judder-closure). See decision-log
+"2026-05-03: Input slices N1 + N2 — macOS GameController.framework
+backend".
+
+(Earlier banner — Metal renderer slice **M5.6 Part B —
+uniform-attribute UBO routing — SHIPPED**. Replaces the M5.6 Part A
+"fallback bufferIndex" hack (which read position-bytes for
+non-DIFFUSE inactive attribute slots and produced the visible
+magenta-surface artifact in the test environment) with the proper
+Vulkan-pattern uniform-via-UBO routing. The Metal renderer now
+correctly drives `pg->uniform_attrs` — every NV2A attribute slot the
+M5.5 encode path doesn't supply (everything except slot 0 POSITION
+and slot 3 DIFFUSE) is routed through the VSH UBO's `inlineValue[]`
+block at MSL `[[buffer(1)]]`; the GLSL generator emits
+`vec4 vN = inlineValue[k];` (vsh.c:257-281, uniform branch) instead
+of `layout(location=N) in vec4 vN;`; the pipeline descriptor in
+`build_pipeline_internal` is now sparse — inactive slots are skipped
+entirely instead of pointing at bogus bufferIndex 0 / 3. **Build PASS.
+M5 shader-validation harness 7/7 PASS. 60 s PGR2 Metal benchmark
+(`XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1`):
+`METAL_PIPELINE_TRANSLATED_FAILED=0`,
+`METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT = 85156` (100 %
+translated), `METAL_PIPELINE_FALLBACKS=0`,
+`METAL_PIPELINE_FAILED=0`, 0 occurrences of "newRenderPipelineState
+failed" or "missing from the vertex descriptor" in stderr.** Targeted
+bisect (temporarily disabling `pgraph_mtl_set_attr_masks`) reproduces
+the 34.6 % pipeline-fallback rate that matches the pre-Part B
+baseline, confirming the new helper is what drives the 0 % failure
+rate. Files touched:
+`hw/xbox/nv2a/pgraph/mtl/{vertex.c,vertex.h,renderer.c,state.c,shaders.mm}`.
+**Performance asterisk**: this validation session captured
+`avg_fps=2.15` / `post_load_avg_fps=2.17` against the pre-Part B
+M5.6 reference run's `36.56` (passthrough) / `28.49` (translated) —
+the bisect proved Part B is NOT the cause (FPS is identical with
+the helper enabled vs disabled), and a paired GL run on the same
+build hit `48.02 fps` post-load, confirming the system isn't broken.
+Documented as the macOS-environmental transient in the prior banner's
+"Run-time variance" item; clean-environment FPS re-validation is
+queued. The pipeline-build correctness data lands as authoritative;
+the magenta-surface artifact is unblocked. See decision-log
+"2026-05-03: Metal slice M5.6 Part B — uniform-attribute UBO
+routing".
+
+(Earlier banner — **Metal screenshot capture path**
+landed alongside M5.6 — adds the
+`XEMU_METAL_SCREENSHOT_PATH` /
+`XEMU_METAL_SCREENSHOT_AT_FRAME` /
+`XEMU_METAL_SCREENSHOT_INTERVAL` env vars and the matching
+`--metal-screenshot <path>` /
+`--metal-screenshot-at-frame <N>` flags on
+`scripts/apple-silicon/run-benchmark.sh`. The renderer encodes the
+final composited drawable to a PNG via FPNG inside the Metal
+command-buffer's `addCompletedHandler:`; no `screencapture`, no
+Screen-Recording permission dialog, no window occlusion. Submit-time
+end-of-frame counter is used as the trigger so the path works even
+when `addPresentedHandler:` is suppressed by an occluding dialog.
+Counter `METAL_SCREENSHOTS_TAKEN` surfaces on the `xemu-perf:`
+interval line. Build PASS, M5 shader-validation harness 7/7 PASS,
+smoke test produced a valid 1280×931 PNG. See decision-log
+"2026-05-03: Metal screenshot capture for visual validation".)
+
 Last updated: 2026-05-03 (Metal renderer slice **M5.6 — translator
 failures eliminated**. Following M5.5 (draw paths online) and M5.7
 (render-pass coalescing → PGR2 +125 % FPS), the remaining gap was

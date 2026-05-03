@@ -32,6 +32,25 @@
 #include <imgui_impl_metal.h>
 #include <imgui_impl_sdl3.h>
 
+/* 2026-05-03 — FPNG (used for the headless drawable-snapshot path).
+ * We do NOT #include <fpng.h> directly here because fpng.h pulls in
+ * <vector>, which transitively includes libc++'s <atomic>; libc++'s
+ * <atomic> errors out when <stdatomic.h> (C11 atomics) is also in
+ * scope on -std=c++17 ("<atomic> is incompatible with <stdatomic.h>
+ * before C++23"). xemu-metal.mm already needs <stdatomic.h> for the
+ * inter-thread counter atomics. The two encode functions used here
+ * have C++ linkage in namespace fpng; forward-declare them by hand
+ * so the link resolves without dragging in <vector>. */
+namespace fpng {
+    void fpng_init();
+    bool fpng_encode_image_to_file(const char *pFilename,
+                                   const void *pImage,
+                                   uint32_t w,
+                                   uint32_t h,
+                                   uint32_t num_chans,
+                                   uint32_t flags);
+}
+
 /* Apple Silicon performance fork: read by the M10 frame-pacing path
  * to compute the next presentation deadline. Defined in ui/xemu.c. */
 extern uint64_t vblank_interval_ns;
@@ -215,6 +234,55 @@ static bool                  s_capture_active;
 static uint64_t              s_capture_frames_target;
 static _Atomic uint64_t      s_capture_frames_seen;
 
+/* 2026-05-03 — programmatic PNG screenshot of the final composited
+ * drawable. Gated on XEMU_METAL_SCREENSHOT_PATH=/path/to/file.png.
+ * The capture point is BEFORE presentDrawable: but AFTER the HUD
+ * render encoder has closed, so the captured image is the same set of
+ * pixels the user is about to see on screen. Compared with macOS
+ * `screencapture`, this path takes no Screen-Recording permission
+ * dialog, never occludes the xemu window, and runs entirely on Metal
+ * command buffers so it does not break METAL_PRESENTS accounting.
+ *
+ * Frame numbering is 1-indexed against the about-to-present frame
+ * (atomic_load(&s_presents_total) + 1) so XEMU_METAL_SCREENSHOT_AT_FRAME=1
+ * captures the very first present, =60 captures the 60th, etc. The
+ * default at-frame is 60 so a typical scripted-input boot has time to
+ * settle before the snapshot fires.
+ *
+ * XEMU_METAL_SCREENSHOT_INTERVAL=N (>=1) repeats the capture every N
+ * frames after the first one, writing `<base>.0001.png`,
+ * `<base>.0002.png`, ... Default 0 disables the periodic mode and the
+ * single capture writes to the path verbatim.
+ *
+ * Note: the drawable texture cannot be the source of a blit when the
+ * CAMetalLayer is configured with framebufferOnly=YES. We flip that
+ * to NO at xemu_metal_init iff XEMU_METAL_SCREENSHOT_PATH is set so
+ * the steady-state perf path keeps display compression on for users
+ * who never request a screenshot. */
+static char                 *s_screenshot_path;          /* malloc'd or NULL */
+static uint64_t              s_screenshot_at_frame;      /* 1-indexed; 0 = disabled */
+static uint64_t              s_screenshot_interval;      /* 0 = single shot */
+/* 2026-05-03 diagnostic — XEMU_METAL_SCREENSHOT_SOURCE selects the
+ * texture captured. "drawable" (default) reads the post-HUD final
+ * drawable; "nv2a" reads the NV2A framebuffer texture (pre-present),
+ * useful for isolating renderer-side vs present-pipeline-side
+ * artifacts (e.g. when the macOS Screen-Recording dialog substitutes
+ * the drawable). 0 = drawable, 1 = nv2a. */
+static int                   s_screenshot_source;        /* 0 = drawable, 1 = nv2a */
+static _Atomic uint64_t      s_screenshots_taken;        /* counter for METAL_SCREENSHOTS_TAKEN */
+static _Atomic uint64_t      s_screenshots_done;         /* in-flight + completed; for filename suffix */
+/* Separate "end-of-frame" tick: bumps every time
+ * xemu_metal_end_imgui_frame runs the cmdbuf commit, regardless of
+ * whether addPresentedHandler: ever fires. We can't use
+ * s_presents_total for the screenshot trigger because the macOS
+ * Screen-Recording dialog can occlude the xemu window during a
+ * benchmark, in which case addPresentedHandler: does not fire and
+ * s_presents_total stays at zero (METAL_PRESENTS=0 in the perf
+ * counters — see handoff.md). The end-frame counter is the rendering
+ * thread's view of "how many frames have been submitted" which is the
+ * trigger we actually want for a deterministic per-frame snapshot. */
+static _Atomic uint64_t      s_end_frames;
+
 static uint64_t mach_now_ns(void)
 {
     if (s_timebase.denom == 0) {
@@ -345,6 +413,11 @@ extern "C" uint64_t pgraph_mtl_capture_frames_seen(void)
 extern "C" uint32_t pgraph_mtl_capture_active(void)
 {
     return s_capture_active ? 1u : 0u;
+}
+
+extern "C" uint64_t pgraph_mtl_screenshots_taken(void)
+{
+    return atomic_load(&s_screenshots_taken);
 }
 
 static uint32_t parse_metal_fx_scale_env(uint32_t *out_requested)
@@ -593,6 +666,152 @@ static void stop_metal_capture_if_active(void)
             (unsigned long long)atomic_load(&s_capture_frames_seen));
 }
 
+/* 2026-05-03 — parse XEMU_METAL_SCREENSHOT_PATH /
+ * XEMU_METAL_SCREENSHOT_AT_FRAME / XEMU_METAL_SCREENSHOT_INTERVAL.
+ * Called once from xemu_metal_init before the first nextDrawable call
+ * because XEMU_METAL_SCREENSHOT_PATH governs s_layer.framebufferOnly
+ * (the drawable texture cannot be the source of a blit when
+ * framebufferOnly=YES, so we have to flip it before any drawable is
+ * acquired).
+ *
+ * Defaults:
+ *   XEMU_METAL_SCREENSHOT_AT_FRAME → 60   (1-indexed against
+ *                                          pgraph_mtl_present_total + 1)
+ *   XEMU_METAL_SCREENSHOT_INTERVAL → 0    (single shot)
+ */
+static void parse_screenshot_env(void)
+{
+    const char *path = getenv("XEMU_METAL_SCREENSHOT_PATH");
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    s_screenshot_path = strdup(path);
+    if (s_screenshot_path == NULL) {
+        return;
+    }
+
+    s_screenshot_at_frame = 60;
+    const char *at_env = getenv("XEMU_METAL_SCREENSHOT_AT_FRAME");
+    if (at_env != NULL && at_env[0] != '\0') {
+        char *endp = NULL;
+        unsigned long n = strtoul(at_env, &endp, 10);
+        if (endp != NULL && *endp == '\0' && n >= 1) {
+            s_screenshot_at_frame = (uint64_t)n;
+        }
+    }
+
+    s_screenshot_interval = 0;
+    const char *iv_env = getenv("XEMU_METAL_SCREENSHOT_INTERVAL");
+    if (iv_env != NULL && iv_env[0] != '\0') {
+        char *endp = NULL;
+        unsigned long n = strtoul(iv_env, &endp, 10);
+        if (endp != NULL && *endp == '\0') {
+            s_screenshot_interval = (uint64_t)n;
+        }
+    }
+
+    s_screenshot_source = 0;
+    const char *src_env = getenv("XEMU_METAL_SCREENSHOT_SOURCE");
+    if (src_env != NULL && src_env[0] != '\0') {
+        if (strcmp(src_env, "nv2a") == 0 || strcmp(src_env, "1") == 0) {
+            s_screenshot_source = 1;
+        }
+    }
+
+    fprintf(stderr,
+            "xemu-perf: metal_screenshot path=%s at_frame=%llu interval=%llu "
+            "source=%s\n",
+            s_screenshot_path,
+            (unsigned long long)s_screenshot_at_frame,
+            (unsigned long long)s_screenshot_interval,
+            s_screenshot_source == 1 ? "nv2a" : "drawable");
+}
+
+/* 2026-05-03 — derive the per-shot filename. For single-shot mode the
+ * configured path is used verbatim. For interval mode the suffix
+ * `.NNNN.png` is inserted before the trailing `.png` extension (or
+ * appended if the path doesn't end in `.png`). The `idx` parameter is
+ * 1-indexed; the first interval shot is .0001, the second .0002, etc.
+ *
+ * Returned buffer is malloc'd; caller frees. Returns NULL on alloc
+ * failure or if `s_screenshot_path` is NULL. */
+static char *build_screenshot_filename(uint64_t idx)
+{
+    if (s_screenshot_path == NULL) {
+        return NULL;
+    }
+    if (s_screenshot_interval == 0) {
+        return strdup(s_screenshot_path);
+    }
+    /* Insert ".NNNN" before ".png" if present, else append. */
+    size_t plen = strlen(s_screenshot_path);
+    const char *suffix_start = NULL;
+    if (plen >= 4 &&
+        strcasecmp(s_screenshot_path + plen - 4, ".png") == 0) {
+        suffix_start = s_screenshot_path + plen - 4;
+    }
+    size_t pre_len = suffix_start ? (size_t)(suffix_start - s_screenshot_path) : plen;
+    /* "<pre>.NNNN<.png-or-empty>\0" — 5 chars for ".NNNN" + 4 for ".png" */
+    size_t out_size = pre_len + 5 + 4 + 1;
+    char *out = (char *)malloc(out_size);
+    if (out == NULL) {
+        return NULL;
+    }
+    if (suffix_start) {
+        snprintf(out, out_size, "%.*s.%04llu.png",
+                 (int)pre_len, s_screenshot_path,
+                 (unsigned long long)idx);
+    } else {
+        snprintf(out, out_size, "%s.%04llu.png",
+                 s_screenshot_path, (unsigned long long)idx);
+    }
+    return out;
+}
+
+/* 2026-05-03 — convert a BGRA8 byte buffer to RGBA8 in place. FPNG
+ * expects RGBA (R first in memory); the drawable is BGRA8Unorm_sRGB
+ * (B first). The swap is per-pixel; SIMD here would be premature
+ * (this runs once-per-screenshot off the renderer thread). */
+static void swap_bgra_to_rgba_in_place(uint8_t *p, size_t pixels)
+{
+    for (size_t i = 0; i < pixels; ++i) {
+        uint8_t b = p[i * 4 + 0];
+        uint8_t r = p[i * 4 + 2];
+        p[i * 4 + 0] = r;
+        p[i * 4 + 2] = b;
+    }
+}
+
+/* 2026-05-03 — encode `bytes` (BGRA8 byte order, w*h pixels, stride =
+ * w*4) into a PNG file at `filename`. Used from the cmdbuf
+ * addCompletedHandler so the PNG write happens after the GPU has
+ * finished writing the drawable. Returns true on success. PNG
+ * encoding errors are logged and swallowed — never crash the
+ * renderer. */
+static bool encode_drawable_png(const char *filename,
+                                uint8_t *bgra_bytes,
+                                uint32_t w,
+                                uint32_t h)
+{
+    if (filename == NULL || bgra_bytes == NULL || w == 0 || h == 0) {
+        return false;
+    }
+    static bool s_fpng_inited = false;
+    if (!s_fpng_inited) {
+        fpng::fpng_init();
+        s_fpng_inited = true;
+    }
+    swap_bgra_to_rgba_in_place(bgra_bytes, (size_t)w * (size_t)h);
+    bool ok = fpng::fpng_encode_image_to_file(filename, bgra_bytes, w, h, 4, 0);
+    if (!ok) {
+        fprintf(stderr,
+                "xemu-metal: fpng_encode_image_to_file failed (path=%s "
+                "w=%u h=%u)\n",
+                filename, (unsigned)w, (unsigned)h);
+    }
+    return ok;
+}
+
 /* M13 — initialize the per-frame MTLCounterSampleBuffer used for
  * vertex/fragment GPU-stage timing on the present render pass. Gated
  * on supportsCounterSampling: at stage boundary; if unsupported the
@@ -760,12 +979,21 @@ bool xemu_metal_init(SDL_Window *window)
         return false;
     }
 
+    /* 2026-05-03 — parse XEMU_METAL_SCREENSHOT_PATH BEFORE setting
+     * s_layer.framebufferOnly. The drawable texture cannot be the
+     * source of a blit when framebufferOnly=YES; the screenshot path
+     * needs to copy from the drawable into a shared MTLBuffer, so the
+     * env var has to flip the layer to NO at init. Steady-state perf
+     * is preserved when XEMU_METAL_SCREENSHOT_PATH is unset (the
+     * default Apple Silicon path keeps display compression on). */
+    parse_screenshot_env();
+
     /* Recommended Apple Silicon defaults from
      * docs/apple-silicon/metal-api-reference.md "Recommended Apple
      * Silicon defaults" quick-reference table. */
     s_layer.device                = s_device;
     s_layer.pixelFormat           = MTLPixelFormatBGRA8Unorm_sRGB;
-    s_layer.framebufferOnly       = YES;
+    s_layer.framebufferOnly       = (s_screenshot_path == NULL) ? YES : NO;
     s_layer.maximumDrawableCount  = 3;
     s_layer.displaySyncEnabled    = YES;
 
@@ -987,6 +1215,14 @@ void xemu_metal_shutdown(void)
         s_metal_view = NULL;
     }
 
+    /* 2026-05-03 — release screenshot path. Any in-flight completion
+     * handlers retain their per-shot fname copies, so freeing the
+     * top-level path here is safe. */
+    if (s_screenshot_path != NULL) {
+        free(s_screenshot_path);
+        s_screenshot_path = NULL;
+    }
+
     s_active = false;
 }
 
@@ -1166,6 +1402,111 @@ void xemu_metal_end_imgui_frame(void)
                                    s_current_enc);
 
     [s_current_enc endEncoding];
+
+    /* 2026-05-03 — programmatic drawable screenshot. Fires on the
+     * frame whose 1-indexed number matches XEMU_METAL_SCREENSHOT_AT_FRAME
+     * (or every N frames after that when XEMU_METAL_SCREENSHOT_INTERVAL
+     * is set). The blit copies the drawable texture into a host-shared
+     * MTLBuffer; the cmdbuf's completion handler then reads the
+     * buffer's bytes, swaps BGRA→RGBA, and writes the PNG via FPNG.
+     * The capture point is AFTER the HUD encoder closed and BEFORE
+     * presentDrawable:, so the captured pixels match what the user
+     * sees on screen.
+     *
+     * Frame counting: bump s_end_frames once per call (the renderer's
+     * view of frames submitted). We deliberately DO NOT use
+     * s_presents_total here — that counter is bumped only inside
+     * addPresentedHandler:, which does not fire when the macOS
+     * Screen-Recording dialog occludes the xemu window during a
+     * benchmark (METAL_PRESENTS=0; see handoff.md). The submit-time
+     * counter ticks deterministically regardless of presentation
+     * status, which is the trigger semantic we want here. */
+    uint64_t cur_end_frame = atomic_fetch_add(&s_end_frames, 1) + 1;
+    if (s_screenshot_path != NULL) {
+        uint64_t cur_frame = cur_end_frame;
+        bool should_fire = false;
+        if (s_screenshot_interval == 0) {
+            should_fire = (cur_frame == s_screenshot_at_frame);
+        } else if (cur_frame >= s_screenshot_at_frame) {
+            uint64_t since = cur_frame - s_screenshot_at_frame;
+            should_fire = (since % s_screenshot_interval) == 0;
+        }
+        if (should_fire) {
+            /* 2026-05-03 diagnostic — XEMU_METAL_SCREENSHOT_SOURCE=nv2a
+             * captures the NV2A framebuffer texture pre-present (before
+             * compositing into the drawable). When the NV2A side has not
+             * yet produced a frame, present_input_tex is nil and we fall
+             * back to the drawable so we still get a screenshot. */
+            id<MTLTexture> drawable_tex = s_current_drawable.texture;
+            id<MTLTexture> source_tex = drawable_tex;
+            if (s_screenshot_source == 1 && present_input_tex != nil) {
+                source_tex = present_input_tex;
+            }
+            NSUInteger w = source_tex.width;
+            NSUInteger h = source_tex.height;
+            size_t bytes_per_row   = (size_t)w * 4;
+            size_t total_bytes     = bytes_per_row * (size_t)h;
+            id<MTLBuffer> readback =
+                [s_device newBufferWithLength:total_bytes
+                                       options:MTLResourceStorageModeShared];
+            if (readback != nil) {
+                readback.label = @"xemu.metal.screenshot_readback";
+                id<MTLBlitCommandEncoder> blit =
+                    [s_current_cmd blitCommandEncoder];
+                blit.label = @"xemu.metal.screenshot_blit";
+                [blit copyFromTexture:source_tex
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(w, h, 1)
+                             toBuffer:readback
+                    destinationOffset:0
+               destinationBytesPerRow:bytes_per_row
+             destinationBytesPerImage:total_bytes];
+                /* synchronizeResource: is a no-op for Shared on Apple
+                 * Silicon UMA; included for correctness on hypothetical
+                 * Discrete-GPU paths. */
+                [blit endEncoding];
+
+                uint64_t shot_idx = atomic_fetch_add(&s_screenshots_done, 1) + 1;
+                char *fname = build_screenshot_filename(shot_idx);
+                /* The capturing block holds `readback` alive (ARC
+                 * retains via __strong) until the handler runs. The
+                 * filename buffer is malloc'd; we free it inside the
+                 * block. fpng can fail; log + continue. */
+                uint32_t shot_w = (uint32_t)w;
+                uint32_t shot_h = (uint32_t)h;
+                [s_current_cmd addCompletedHandler:^(id<MTLCommandBuffer> /*cb*/) {
+                    if (fname == NULL) {
+                        return;
+                    }
+                    /* readback is host-Shared; contents() is the raw
+                     * BGRA8 byte array (stride = w*4). */
+                    uint8_t *bytes = (uint8_t *)[readback contents];
+                    if (bytes != NULL) {
+                        bool ok = encode_drawable_png(fname, bytes,
+                                                      shot_w, shot_h);
+                        if (ok) {
+                            atomic_fetch_add(&s_screenshots_taken, 1);
+                            fprintf(stderr,
+                                    "xemu-perf: metal_screenshot_written "
+                                    "path=%s w=%u h=%u\n",
+                                    fname,
+                                    (unsigned)shot_w,
+                                    (unsigned)shot_h);
+                        }
+                    }
+                    free(fname);
+                }];
+            } else {
+                fprintf(stderr,
+                        "xemu-metal: screenshot readback buffer alloc "
+                        "failed (size=%zu); skipping shot frame=%llu\n",
+                        total_bytes,
+                        (unsigned long long)cur_frame);
+            }
+        }
+    }
 
     /* M10 — frame pacing. Default path: presentDrawable:atTime: with
      * an explicit deadline computed from vblank_interval_ns and the

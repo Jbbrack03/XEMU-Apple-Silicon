@@ -46,6 +46,17 @@ if host_os == 'darwin'
   xemu_ss.add(xemu_cocoa)
 endif
 
+# Apple Silicon performance fork: opt-in GameController.framework input
+# backend (slice N2). Built only on darwin+arm64 because the rest of
+# the Apple Silicon track is gated to that target. The .mm file is
+# objcpp (-fobjc-arc is set as a project-wide objcpp arg in
+# meson.build for darwin+arm64).
+if host_os == 'darwin' and host_machine.cpu() == 'aarch64'
+  gamecontroller = dependency('appleframeworks',
+                              modules: ['GameController'])
+  xemu_ss.add(gamecontroller, files('xemu-macos-input.mm'))
+endif
+
 if host_os == 'linux'
   xemu_ss.add([gtk, files('xemu-os-utils-linux.c')])
 elif host_os == 'windows'

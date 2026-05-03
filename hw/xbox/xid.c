@@ -20,6 +20,8 @@
  */
 
 #include "xid.h"
+#include "qemu/xemu-input-perf.h"
+#include "qemu/timer.h"
 
 /*
  * http://xbox-linux.cvs.sourceforge.net/viewvc/xbox-linux/kernel-2.6/drivers/usb/input/xpad.c
@@ -62,6 +64,14 @@ void update_input(USBXIDGamepadState *s)
     ControllerState *state = xemu_input_get_bound(s->device_index);
     assert(state);
     xemu_input_update_controller(state);
+
+    /* Apple Silicon performance fork (slice N1): record the guest's
+     * USB poll consumption so the cache-to-poll latency window is
+     * measured per-port. Stamped against device_index (xemu port);
+     * the backend-update path stamps the same port index in
+     * xemu_input_update_controller. */
+    xemu_input_perf_record_usb_poll(s->device_index,
+                                    qemu_clock_get_us(QEMU_CLOCK_REALTIME));
 
     const int button_map_analog[6][2] = {
         { GAMEPAD_A,     CONTROLLER_BUTTON_A     },

@@ -25,7 +25,7 @@ find_test_disc() {
 
 usage() {
     cat <<EOF
-usage: $0 [--metal-capture <path>] crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.
@@ -46,13 +46,32 @@ Options:
                            Capture). Requires the Metal renderer to be the
                            active backend; on the GL renderer the env var
                            is harmless and ignored.
+  --metal-screenshot <path>
+                           Programmatic PNG screenshot of the final
+                           composited drawable (2026-05-03). Sets
+                           XEMU_METAL_SCREENSHOT_PATH=<path> for the run;
+                           the Metal renderer captures the drawable into a
+                           shared MTLBuffer in the post-HUD-encoder /
+                           pre-presentDrawable: window and writes it as a
+                           PNG via FPNG. Compared with macOS \`screencapture\`,
+                           this path takes no Screen-Recording permission
+                           dialog and never occludes the xemu window.
+                           Requires the Metal renderer to be active; on
+                           the GL renderer the env var is harmless and
+                           ignored.
+  --metal-screenshot-at-frame <N>
+                           Frame number (1-indexed against the upcoming
+                           present) at which --metal-screenshot fires.
+                           Default 60. Maps to
+                           XEMU_METAL_SCREENSHOT_AT_FRAME=<N>.
 EOF
 }
 
-# Optional flag(s) parsed before the positional args. Currently only one
-# flag (--metal-capture <path>); kept simple rather than pulling in a
-# full getopt/long-options dance.
+# Optional flag(s) parsed before the positional args. Kept simple
+# rather than pulling in a full getopt/long-options dance.
 METAL_CAPTURE_PATH=""
+METAL_SCREENSHOT_PATH=""
+METAL_SCREENSHOT_AT_FRAME=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --metal-capture)
@@ -65,6 +84,30 @@ while [[ $# -gt 0 ]]; do
             ;;
         --metal-capture=*)
             METAL_CAPTURE_PATH="${1#--metal-capture=}"
+            shift
+            ;;
+        --metal-screenshot)
+            if [[ $# -lt 2 ]]; then
+                echo "--metal-screenshot requires a path argument" >&2
+                exit 2
+            fi
+            METAL_SCREENSHOT_PATH="$2"
+            shift 2
+            ;;
+        --metal-screenshot=*)
+            METAL_SCREENSHOT_PATH="${1#--metal-screenshot=}"
+            shift
+            ;;
+        --metal-screenshot-at-frame)
+            if [[ $# -lt 2 ]]; then
+                echo "--metal-screenshot-at-frame requires a frame number" >&2
+                exit 2
+            fi
+            METAL_SCREENSHOT_AT_FRAME="$2"
+            shift 2
+            ;;
+        --metal-screenshot-at-frame=*)
+            METAL_SCREENSHOT_AT_FRAME="${1#--metal-screenshot-at-frame=}"
             shift
             ;;
         --)
@@ -253,6 +296,11 @@ EOF
     echo "metal_capture_path: ${METAL_CAPTURE_PATH:-none}"
     echo "env_XEMU_METAL_CAPTURE: ${XEMU_METAL_CAPTURE:-unset}"
     echo "env_XEMU_METAL_CAPTURE_FRAMES: ${XEMU_METAL_CAPTURE_FRAMES:-unset}"
+    echo "metal_screenshot_path: ${METAL_SCREENSHOT_PATH:-none}"
+    echo "metal_screenshot_at_frame: ${METAL_SCREENSHOT_AT_FRAME:-default(60)}"
+    echo "env_XEMU_METAL_SCREENSHOT_PATH: ${XEMU_METAL_SCREENSHOT_PATH:-unset}"
+    echo "env_XEMU_METAL_SCREENSHOT_AT_FRAME: ${XEMU_METAL_SCREENSHOT_AT_FRAME:-unset}"
+    echo "env_XEMU_METAL_SCREENSHOT_INTERVAL: ${XEMU_METAL_SCREENSHOT_INTERVAL:-unset}"
     echo
     sw_vers || true
     uname -m || true
@@ -361,6 +409,20 @@ echo "Run directory: $RUN_DIR"
 if [[ -n "$METAL_CAPTURE_PATH" ]]; then
     export XEMU_METAL_CAPTURE="$METAL_CAPTURE_PATH"
     echo "Metal capture: $METAL_CAPTURE_PATH"
+fi
+
+# 2026-05-03 — programmatic PNG screenshot of the final composited
+# drawable. Exports XEMU_METAL_SCREENSHOT_PATH so the Metal renderer
+# captures the post-HUD-pre-present drawable into a PNG.
+# --metal-screenshot-at-frame is optional (default 60); maps to
+# XEMU_METAL_SCREENSHOT_AT_FRAME. Same export-pre-launch pattern as
+# --metal-capture above.
+if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
+    export XEMU_METAL_SCREENSHOT_PATH="$METAL_SCREENSHOT_PATH"
+    if [[ -n "$METAL_SCREENSHOT_AT_FRAME" ]]; then
+        export XEMU_METAL_SCREENSHOT_AT_FRAME="$METAL_SCREENSHOT_AT_FRAME"
+    fi
+    echo "Metal screenshot: $METAL_SCREENSHOT_PATH (at frame=${METAL_SCREENSHOT_AT_FRAME:-60})"
 fi
 
 if [[ -n "$RECORD_INPUT" ]]; then

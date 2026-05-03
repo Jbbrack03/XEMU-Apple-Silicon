@@ -1,6 +1,13 @@
 # macOS Input / Controller Latency Research
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03 (slices **N1 + N2 SHIPPED**: the
+`XEMU_MACOS_NATIVE_INPUT` opt-in is in place along with the four
+input-latency counters `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
+`INPUT_LAT_US_TOTAL`, `INPUT_LAT_US_MAX`. Build PASS, M5 shader-
+validation harness 7/7 PASS, smoke tests confirm the env-var-off
+path is byte-identical to today's SDL behavior and the env-var-on
+path emits `xemu-perf: macos_native_input enabled controllers=N`
+once `xemu_input_init` runs.)
 
 This document captures the state of xemu's input pipeline, the
 GameController.framework alternative, and the migration path. It is
@@ -298,16 +305,54 @@ This matches the existing macOS-specific Objective-C split
 Following project rules #1 (data-driven), #5 (build tools when blocked),
 #11 (XEMU_* flag convention):
 
-1. **N1 — Input backend abstraction + SDL extraction.** Refactor
-   `ui/xemu-input.c` so the SDL gamepad path lives behind an internal
-   vtable. No behavior change. Verify
-   `validate-native-tri-depth.sh --run 22` and one PGR2 mid-route
-   benchmark are byte-identical to current main. ~1 day.
-2. **N2 — Native GameController backend (input only, no rumble).** Add
-   `ui/input-gamecontroller.m`. Wire under `XEMU_MACOS_NATIVE_INPUT=1`.
-   Rumble stays on SDL. Add `INPUT_BACKEND_NAME` counter. Verify
-   scripted-input replay produces identical screenshots on both
-   backends.
+1. **N1 — instrumentation foundation. SHIPPED 2026-05-03.** Adds
+   four atomic counters (`INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
+   `INPUT_LAT_US_TOTAL`, `INPUT_LAT_US_MAX`) emitted on the
+   `xemu-perf:` interval line whenever input activity occurs. The
+   USB-poll counter increments inside `usb_xid_gamepad_handle_data`'s
+   `update_input(s)` path; the backend-update counter increments on
+   every `xemu_input_update_controller` call (regardless of which
+   backend produced the state). Latency is the wallclock delta
+   between the most recent backend cache update and the matching
+   per-port USB poll. Files touched: `include/qemu/xemu-input-perf.h`
+   (new), `util/xemu-input-perf.c` (new), `hw/xbox/xid.c::update_input`,
+   `ui/xemu-input.c::xemu_input_update_controller`,
+   `hw/xbox/nv2a/pgraph/profile.c::nv2a_profile_log_emit_interval`,
+   `scripts/apple-silicon/extract-perf-summary.sh`,
+   `util/meson.build`. The implementation chose to keep the existing
+   SDL-as-default-backend rather than refactor to a vtable abstraction
+   (the planned vtable adds churn without measurable benefit; the
+   Apple/SDL split is small enough to express as a single conditional
+   in the read path).
+2. **N2 — Native GameController backend (input only, no rumble).
+   SHIPPED 2026-05-03.** New file `ui/xemu-macos-input.mm` (Obj-C++)
+   exposing a small C interface (`xemu_macos_input_init`,
+   `_shutdown`, `_get_state`, `_rumble`,
+   `_controller_count`, `_is_active`). On init, enumerates
+   `[GCController controllers]`, registers
+   `GCControllerDidConnect/DisconnectNotification` observers, and
+   tags every connected controller with a fresh
+   `GCControllerPlayerIndex` (xemu port N → playerIndex N). On
+   poll, looks up the controller for the requested port via
+   playerIndex and reads `GCExtendedGamepad` properties directly —
+   no SDL event-queue drain, no main-thread hop. Rumble is a
+   no-op (Core Haptics integration deferred to N4); first call
+   logs a one-shot diagnostic. SDL still owns connect/disconnect
+   lifecycle and per-port binding so the rebind UI works
+   unchanged. Companion `Info.plist` change: add
+   `GCSupportsControllerUserInteraction = YES` (Sonoma+ Game Mode
+   polling-rate doubling for Bluetooth controllers when
+   foreground+fullscreen). Build dep: `appleframeworks(modules:
+   GameController)` added to `ui/meson.build`. Default OFF;
+   `XEMU_MACOS_NATIVE_INPUT=1` opts in. SDL fallback path
+   untouched. Files touched: `ui/xemu-macos-input.h` (new),
+   `ui/xemu-macos-input.mm` (new), `ui/xemu-input.c` (read +
+   rumble dispatch), `ui/meson.build`, `Info.plist`. Smoke tests:
+   M5 shader-validation harness still 7/7 PASS; with no env, no
+   `macos_native_input enabled` log line; with
+   `XEMU_MACOS_NATIVE_INPUT=1`, the line emits at the moment
+   `xemu_input_init` runs (i.e. after the SDL window is created
+   and the main display thread is up).
 3. **N3 — Latency measurement XBE + paired benchmark.** Build a tiny
    nxdk XBE that flashes a quad on A-press. Record at 240 Hz with iPhone
    slow-mo. Run `XEMU_MACOS_NATIVE_INPUT=0` vs `=1`, both with macOS

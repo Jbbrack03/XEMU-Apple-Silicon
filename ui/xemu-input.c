@@ -31,10 +31,15 @@
 #include "xemu-input.h"
 #include "xemu-notifications.h"
 #include "xemu-settings.h"
+#include "qemu/xemu-input-perf.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "system/blockdev.h"
+
+#if defined(__APPLE__)
+#include "xemu-macos-input.h"
+#endif
 
 // #define DEBUG_INPUT
 
@@ -122,6 +127,14 @@ static const XemuInputAxisName xemu_input_axis_names[] = {
 
 static XemuScriptedInput scripted_input;
 static XemuRecordedInput recorded_input;
+
+#if defined(__APPLE__)
+/* Apple Silicon performance fork: opt-in
+ * GameController.framework backend (slice N2). When set the read
+ * path forwards to ui/xemu-macos-input.mm; when unset (the default)
+ * the existing SDL path runs unmodified. */
+static bool s_use_native_macos_input;
+#endif
 
 static int xemu_scripted_input_event_compare(const void *a, const void *b)
 {
@@ -707,6 +720,30 @@ void xemu_input_init(void)
         exit(1);
     }
 
+#if defined(__APPLE__)
+    /* Apple Silicon performance fork: opt-in GameController.framework
+     * backend (slice N2). The flag must default off so existing users
+     * with XEMU_MACOS_NATIVE_INPUT unset see exactly today's
+     * SDL-driven behavior. SDL still owns the connect/disconnect
+     * lifecycle and per-port binding (the rebind UI is built on
+     * SDL events); the native backend only takes over the read
+     * path. */
+    {
+        const char *macos_native = getenv("XEMU_MACOS_NATIVE_INPUT");
+        if (macos_native && macos_native[0] != '\0' &&
+            macos_native[0] != '0') {
+            if (xemu_macos_input_init()) {
+                s_use_native_macos_input = true;
+            } else {
+                fprintf(stderr,
+                        "xemu: XEMU_MACOS_NATIVE_INPUT=1 set but "
+                        "GameController.framework init failed; "
+                        "falling back to SDL path\n");
+            }
+        }
+    }
+#endif
+
     // Create the keyboard input (always first)
     ControllerState *new_con = malloc(sizeof(ControllerState));
     memset(new_con, 0, sizeof(ControllerState));
@@ -931,16 +968,54 @@ void xemu_input_update_controller(ControllerState *state)
         return;
     }
 
+    bool used_native_backend = false;
+
     if (state->type == INPUT_DEVICE_SDL_KEYBOARD) {
         xemu_input_update_sdl_kbd_controller_state(state);
+#if defined(__APPLE__)
+    } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD &&
+               s_use_native_macos_input && state->bound >= 0) {
+        uint16_t btn = 0;
+        int16_t axes[6] = { 0 };
+        if (xemu_macos_input_get_state(state->bound, &btn, axes)) {
+            state->buttons = btn;
+            state->axis[CONTROLLER_AXIS_LTRIG]    = axes[0];
+            state->axis[CONTROLLER_AXIS_RTRIG]    = axes[1];
+            state->axis[CONTROLLER_AXIS_LSTICK_X] = axes[2];
+            state->axis[CONTROLLER_AXIS_LSTICK_Y] = axes[3];
+            state->axis[CONTROLLER_AXIS_RSTICK_X] = axes[4];
+            state->axis[CONTROLLER_AXIS_RSTICK_Y] = axes[5];
+            used_native_backend = true;
+        } else {
+            /* Native backend has no controller mapped to this port
+             * yet (e.g. SDL bound a GUID before the GCController
+             * connect notification fired). Fall through to the SDL
+             * path so the user still sees input. */
+            xemu_input_update_sdl_controller_state(state);
+        }
+#endif
     } else if (state->type == INPUT_DEVICE_SDL_GAMEPAD) {
         xemu_input_update_sdl_controller_state(state);
     }
 
+    (void)used_native_backend;
+
     xemu_recorded_input_update(state);
     xemu_scripted_input_apply(state);
 
-    state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    int64_t completed = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    state->last_input_updated_ts = completed;
+
+    /* Apple Silicon performance fork (slice N1): stamp the per-port
+     * backend-update timestamp so the next guest USB poll on this
+     * port can compute cache-to-poll latency. The keyboard
+     * "controller" lives at port -1 until bound; only stamp real
+     * bound ports. */
+    if (state->bound >= 0) {
+        xemu_input_perf_record_backend_update_port(state->bound, completed);
+    } else {
+        xemu_input_perf_record_backend_update(completed);
+    }
 }
 
 void xemu_input_update_controllers(void)
@@ -1088,6 +1163,20 @@ void xemu_input_update_rumble(ControllerState *state)
         XEMU_INPUT_MIN_RUMBLE_UPDATE_INTERVAL_US) {
         return;
     }
+
+#if defined(__APPLE__)
+    if (s_use_native_macos_input && state->bound >= 0) {
+        /* Slice N2: rumble on the native path is a no-op (Core Haptics
+         * integration is the N4 slice). The first call logs a one-shot
+         * warning so the absence of rumble is visible. We deliberately
+         * skip the SDL_RumbleGamepad call here so the two paths don't
+         * race for the same controller. */
+        xemu_macos_input_rumble(state->bound, state->rumble_l,
+                                state->rumble_r);
+        state->last_rumble_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        return;
+    }
+#endif
 
     SDL_RumbleGamepad(state->sdl_gamepad, state->rumble_l, state->rumble_r, 250);
     state->last_rumble_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);

@@ -788,6 +788,56 @@ See decision-log entry "2026-05-02: Metal slice M5 — shader
 translator + validation harness ship; per-pipeline cache deferred
 to M6" for the full rationale.
 
+**M5.6 (translator failure elimination, 2026-05-03).** Following M5.5
+(draw paths online) the slice landed two follow-on fixes that took
+the pipeline build success rate from 67 % to 100 %: (1) populate
+every shader-referenced descriptor slot in `build_pipeline_internal`
+(was previously skipped for `count == 0` uniform attrs, which the MSL
+declares as `[[attribute(N)]]`); (2) emit CMP-packed format as raw
+`MTL_VFMT_INT` instead of `MTL_VFMT_INT1010102_NORMALIZED` to match
+spirv-cross's `int v1_cmp` declaration. See decision-log entry
+"2026-05-03: Metal slice M5.6 — translator failures eliminated".
+
+**M5.6 Part B (uniform-attribute UBO routing, 2026-05-03).** Replaces
+the M5.6 Part A "fallback bufferIndex 0 / 3" hack with the proper
+Vulkan-pattern uniform-via-UBO routing. The Metal renderer's
+`mtl_dispatch_decoded_draw` now correctly drives `pg->uniform_attrs`
+(via the new `pgraph_mtl_set_attr_masks` helper in
+`hw/xbox/nv2a/pgraph/mtl/vertex.c`) — every NV2A attribute slot the
+M5.5 encode path doesn't supply is routed through the VSH UBO's
+`inlineValue[]` block at MSL `[[buffer(1)]]`. The pipeline descriptor
+is now sparse — inactive slots are skipped entirely instead of
+pointing at bogus buffer bindings. The magenta-surface artifact in
+the test environment is eliminated; with Part B applied a 60 s PGR2
+Metal benchmark hits `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+`METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT` (100 % translated),
+`METAL_PIPELINE_FALLBACKS=0`. See decision-log entry "2026-05-03:
+Metal slice M5.6 Part B — uniform-attribute UBO routing".
+
+**M5.8 (full per-vertex attribute decoder, 2026-05-03 — supersedes
+M5.6 Part B's mask shortcut).** M5.6 Part B's `pgraph_mtl_set_attr_masks`
+collapsed every NV2A attribute slot except POSITION + DIFFUSE to a
+single `inline_value` per draw — a correctness regression that
+showed up as solid-coloured geometry (texcoord/normal/specular/fog
+arrays all degenerate to one texel / one direction / one fog value)
+and as a 24× draw-throughput drop versus the agent bisect's
+"set_attr_masks disabled" baseline (3.8 k draws/60 s vs 93 k). M5.8
+extends the M5.5 decoder to all 16 NV2A attribute slots, removes the
+POSITION/DIFFUSE-only shortcut from `pgraph_mtl_set_attr_masks`
+(now matches `vk/vertex.c:148-154 + 226-236`), and adds CMP
+((11,11,10) packed) format support so D3D normal-cmp slots decode
+CPU-side. Companion fix: VSH UBO now binds at vertex `atIndex:0` —
+matching the spirv-cross MSL `[[buffer(0)]]` declaration —
+previously bound at index 1 (a bug since M7.1 that shadowed position
+bytes); per-attribute streams shifted to bufferIndex
+`MTL_ATTR_BUFFER_INDEX_BASE + slot` = [1..16] to avoid clashing
+with the UBO. Build PASS, M5 harness 7/7 PASS, 60 s PGR2 Metal
+bench: `METAL_DRAW_COUNT=75 016`, `METAL_DRAW_INDEXED_COUNT=74 952`,
+`METAL_PIPELINE_TRANSLATED_FAILED=0`, `METAL_PIPELINE_FALLBACKS=0`,
+100 % translated. Files touched: `mtl/{vertex.c,vertex.h,renderer.c,
+state.c,shaders.mm,draw.mm,draw.h}`. See decision-log entry
+"2026-05-03: Metal slice M5.8 — full per-vertex attribute decoder".
+
 ### M6 — Texture upload + sampling (advances 4g) — **SHIPPED 2026-05-02 (cache infra + sampler infra; full S3TC/mipmap + draw-path swap deferred to M6 Part B / M7)**
 
 **Scope.** Port `vk/texture.c` to Metal. `TextureBinding` wraps

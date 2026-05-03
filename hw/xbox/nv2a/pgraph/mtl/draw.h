@@ -24,6 +24,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "vertex.h"  /* MtlAttributeStream */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -110,7 +112,7 @@ void pgraph_mtl_draw_indexed(const float *positions,
                              uint32_t depth_fmt);
 
 /*
- * M7.1: encode a draw through a translated MSL pipeline.
+ * M7.1 + M5.8: encode a draw through a translated MSL pipeline.
  *
  * The caller has built a `PgraphMtlPipelineKey`, looked up the
  * resulting MTLRenderPipelineState via
@@ -118,6 +120,12 @@ void pgraph_mtl_draw_indexed(const float *positions,
  * bindings via the uniform.h / texture.h APIs.
  *
  *   pipeline_state    : id<MTLRenderPipelineState> from the cache.
+ *   attr_streams[i]   : per-NV2A-slot Float4 stream (M5.8). NULL data
+ *                       == slot is uniform; the encoder leaves the
+ *                       slot's bufferIndex unbound and the shader
+ *                       reads via the VSH UBO's inlineValue[] block.
+ *   n_attr_streams    : count of valid entries in attr_streams (typically
+ *                       MTL_VERTEX_NUM_ATTRIBUTES = 16).
  *   vsh_ubo / vsh_ubo_offset / psh_ubo / psh_ubo_offset : id<MTLBuffer>
  *                                                        + byte offset
  *                                                        for the
@@ -127,13 +135,14 @@ void pgraph_mtl_draw_indexed(const float *positions,
  *       and sampler bindings (NV2A_MAX_TEXTURES = 4 stages). Either
  *       may be NULL — the encoder will skip unbound slots.
  *
- * Vertex source: position + color, same shape as the M3/M4 path. M7.1
- * keeps the inline_buffer-driven Float4 vertex layout; the
- * BUFFER_VERTEX_RAM port lands later when format-resolving lands.
+ * Buffer-index layout (vertex stage):
+ *   [[buffer(0)]] = VSH UBO (spirv-cross pins the binding=0 UBO here).
+ *   [[buffer(1+N)]] = attribute slot N stream (N in 0..15) =
+ *     bufferIndex (MTL_ATTR_BUFFER_INDEX_BASE + N).
  */
 void pgraph_mtl_draw_translated(void *pipeline_state,
-                                const float *positions,
-                                const float *colors,
+                                const MtlAttributeStream *attr_streams,
+                                unsigned int n_attr_streams,
                                 unsigned int vertex_count,
                                 const uint32_t *indices,
                                 unsigned int index_count,

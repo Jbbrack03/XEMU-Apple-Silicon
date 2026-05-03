@@ -454,50 +454,21 @@ static bool mtl_native_quad_eligible(PGRAPHState *pg)
                                              pg->smooth_shading);
 }
 
-/* Pull the position / diffuse arrays out of the inline_buffer state.
- * Returns true if `out_positions` and `out_colors` (both non-NULL)
- * point to valid float[N][4] arrays for the call. The caller frees
- * `*out_synth_colors` with g_free() if non-NULL. */
-static bool mtl_inline_buffer_attrs(PGRAPHState *pg,
-                                    unsigned int vertex_count,
-                                    const float **out_positions,
-                                    const float **out_colors,
-                                    float **out_synth_colors)
-{
-    *out_synth_colors = NULL;
-    VertexAttribute *pos_attr =
-        &pg->vertex_attributes[NV2A_VERTEX_ATTR_POSITION];
-    VertexAttribute *col_attr =
-        &pg->vertex_attributes[NV2A_VERTEX_ATTR_DIFFUSE];
+/* M5.8 removed mtl_inline_buffer_attrs — the inline_buffer path now
+ * shares mtl_dispatch_decoded_draw's streams-based interface, with
+ * borrowed `attr->inline_buffer` pointers. Synthesized DIFFUSE for the
+ * M3/M4 fallback is handled inside mtl_dispatch_decoded_draw. */
 
-    if (pos_attr->inline_buffer == NULL) {
-        return false;
-    }
-
-    *out_positions = pos_attr->inline_buffer;
-
-    if (col_attr->inline_buffer != NULL) {
-        *out_colors = col_attr->inline_buffer;
-    } else {
-        float *synth = g_malloc_n(vertex_count * 4, sizeof(float));
-        for (unsigned int i = 0; i < vertex_count; i++) {
-            synth[i * 4 + 0] = col_attr->inline_value[0];
-            synth[i * 4 + 1] = col_attr->inline_value[1];
-            synth[i * 4 + 2] = col_attr->inline_value[2];
-            synth[i * 4 + 3] = col_attr->inline_value[3];
-        }
-        *out_synth_colors = synth;
-        *out_colors = synth;
-    }
-
-    return true;
-}
-
-/* M5.5: dispatch the decoded vertex / index buffers through the
+/* M5.5 / M5.8: dispatch the decoded vertex / index buffers through the
  * eligibility / translated-pipeline / passthrough machinery. Shared
  * by every flush_draw branch (inline_buffer / inline_elements /
- * draw_arrays / inline_array). The caller owns positions / colors /
+ * draw_arrays / inline_array). The caller owns the streams array and
  * indices; this helper does not free them.
+ *
+ * Required: streams[NV2A_VERTEX_ATTR_POSITION].data must be non-NULL
+ * (no draw without per-vertex positions). Slots whose `data == NULL`
+ * are treated as uniform attributes — pg->uniform_attrs is set
+ * accordingly so the GLSL generator emits `inlineValue[k]` for them.
  *
  * `indices` is non-NULL when the caller has already built an index
  * stream (inline_elements, or expanded triangle_fan / quads). For
@@ -507,21 +478,39 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                       void *color_tex, void *depth_tex,
                                       uint32_t color_fmt, uint32_t depth_fmt,
                                       uint32_t vp_w, uint32_t vp_h,
-                                      const float *positions,
-                                      const float *colors,
+                                      const MtlAttributeStream *streams,
                                       unsigned int vcount,
                                       const uint32_t *indices,
                                       unsigned int icount,
                                       bool native_tri, bool native_quad)
 {
     PGRAPHState *pg = &d->pgraph;
-    if (vcount == 0) {
+    if (vcount == 0 || streams == NULL) {
+        return;
+    }
+    /* M3/M4 hand-coded passthrough path requires per-vertex POSITION
+     * (slot 0) and DIFFUSE (slot 3) — synthesized DIFFUSE if the
+     * decoder didn't supply it. The translated path likewise needs
+     * POSITION at minimum. */
+    if (streams[NV2A_VERTEX_ATTR_POSITION].data == NULL) {
         return;
     }
 
     uint32_t variant = (native_tri || native_quad)
                            ? MTL_DRAW_VARIANT_NATIVE_DEPTH
                            : MTL_DRAW_VARIANT_PASSTHROUGH;
+
+    /* M5.8: classify each NV2A attribute slot as streaming
+     * (per-vertex) or uniform (single-value via VSH UBO inlineValue[]).
+     * Set BEFORE building the pipeline key so
+     * pgraph_glsl_get_shader_state(pg) captures the right
+     * uniform_attrs into the cached ShaderState — the cache key memcmp
+     * + the GLSL generator must agree. The previous values are saved
+     * here and restored after the encode so cross-renderer state stays
+     * consistent. See mtl/vertex.c:pgraph_mtl_set_attr_masks. */
+    uint16_t saved_uniform = 0, saved_compressed = 0, saved_swizzle = 0;
+    pgraph_mtl_set_attr_masks(pg, &saved_uniform, &saved_compressed,
+                              &saved_swizzle);
 
     /* Translated-pipeline lookup (shared with the original
      * inline_buffer flow). */
@@ -548,6 +537,8 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     if (translated_pending && mtl_use_translated_pipeline() &&
         !mtl_force_passthrough()) {
         atomic_fetch_add(&s_draws_skipped_pending, 1);
+        pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
+                                      saved_swizzle);
         return;
     }
 
@@ -556,6 +547,27 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         !mtl_force_passthrough();
 
     bool drew = false;
+
+    /* M3/M4 fallback path needs raw position+color float arrays. The
+     * passthrough fragment shader hardcodes `[[attribute(3)]]` for
+     * color, so synthesize an inline-value-filled stream when the
+     * decoder didn't produce one (matches the inline_buffer flow's
+     * mtl_inline_buffer_attrs synthesis). */
+    const float *positions = streams[NV2A_VERTEX_ATTR_POSITION].data;
+    const float *colors    = streams[NV2A_VERTEX_ATTR_DIFFUSE].data;
+    float       *synth_colors = NULL;
+    if (!use_translated_path && colors == NULL) {
+        synth_colors = g_malloc_n(vcount * 4, sizeof(float));
+        VertexAttribute *col_attr =
+            &pg->vertex_attributes[NV2A_VERTEX_ATTR_DIFFUSE];
+        for (unsigned int i = 0; i < vcount; i++) {
+            synth_colors[i * 4 + 0] = col_attr->inline_value[0];
+            synth_colors[i * 4 + 1] = col_attr->inline_value[1];
+            synth_colors[i * 4 + 2] = col_attr->inline_value[2];
+            synth_colors[i * 4 + 3] = col_attr->inline_value[3];
+        }
+        colors = synth_colors;
+    }
 
     if (use_translated_path) {
         for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
@@ -585,15 +597,15 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
 
         uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
         if (indices != NULL && icount > 0) {
-            /* Caller already built an index stream (inline_elements,
-             * or expanded primitive). Use it as-is. */
             uint32_t prim = mtl_prim;
             if (prim == 0xFFFFFFFF) {
                 prim = mtl_translate_expanded_primitive(pg->primitive_mode);
             }
             if (prim != 0xFFFFFFFF) {
                 pgraph_mtl_draw_translated(translated_pipeline,
-                                           positions, colors, vcount,
+                                           streams,
+                                           MTL_VERTEX_NUM_ATTRIBUTES,
+                                           vcount,
                                            indices, icount,
                                            prim, vp_w, vp_h,
                                            color_tex, depth_tex,
@@ -605,7 +617,9 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
             }
         } else if (mtl_prim != 0xFFFFFFFF) {
             pgraph_mtl_draw_translated(translated_pipeline,
-                                       positions, colors, vcount,
+                                       streams,
+                                       MTL_VERTEX_NUM_ATTRIBUTES,
+                                       vcount,
                                        NULL, 0,
                                        mtl_prim,
                                        vp_w, vp_h, color_tex, depth_tex,
@@ -627,7 +641,9 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                            vcount);
                     if (eicount > 0) {
                         pgraph_mtl_draw_translated(translated_pipeline,
-                                                   positions, colors, vcount,
+                                                   streams,
+                                                   MTL_VERTEX_NUM_ATTRIBUTES,
+                                                   vcount,
                                                    exp_idx, eicount,
                                                    expanded_prim, vp_w, vp_h,
                                                    color_tex, depth_tex,
@@ -695,6 +711,10 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         }
     }
 
+    if (synth_colors) {
+        g_free(synth_colors);
+    }
+
     if (drew) {
         if (native_tri) {
             nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
@@ -712,6 +732,15 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         if (color_tex) pg->surface_color.draw_dirty = true;
         if (depth_tex) pg->surface_zeta.draw_dirty = true;
     }
+
+    /* M5.8: restore previous masks. The encode-time use of
+     * uniform_attrs is fully captured: state.c read it via
+     * pgraph_glsl_get_shader_state during pipeline-key build, the
+     * cache lookup baked it into the entry, and the staged VSH UBO
+     * already carries the inline_value bytes for every uniform-marked
+     * attribute. */
+    pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
+                                  saved_swizzle);
 }
 
 static void pgraph_mtl_flush_draw(NV2AState *d)
@@ -760,9 +789,9 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
     bool native_tri  = mtl_native_tri_depth_eligible(pg);
     bool native_quad = mtl_native_quad_eligible(pg);
 
-    /* M5.5: inline_elements branch. Build a positions/colors stream
-     * for [min..max] guest elements, offset indices by min so the
-     * first decoded element is index 0 in the local arrays. */
+    /* M5.5/M5.8: inline_elements branch. Build full per-attribute
+     * streams for [min..max] guest elements, offset indices by min so
+     * the first decoded element is index 0 in the local arrays. */
     if (pg->inline_elements_length > 0) {
         uint32_t min_e = (uint32_t)-1, max_e = 0;
         for (unsigned int i = 0; i < pg->inline_elements_length; i++) {
@@ -774,10 +803,10 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
             return;
         }
         uint32_t span = max_e - min_e + 1;
-        float *pos = g_malloc_n(span * 4, sizeof(float));
-        float *col = g_malloc_n(span * 4, sizeof(float));
-        pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
-                                          min_e, span, pos, col);
+
+        MtlAttributeStream streams[MTL_VERTEX_NUM_ATTRIBUTES];
+        pgraph_mtl_collect_all_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
+                                              min_e, span, streams);
 
         uint32_t *idx = g_malloc_n(pg->inline_elements_length,
                                     sizeof(uint32_t));
@@ -787,19 +816,18 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
         mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                   color_fmt, depth_fmt, vp_w, vp_h,
-                                  pos, col, span,
+                                  streams, span,
                                   idx, pg->inline_elements_length,
                                   native_tri, native_quad);
 
         g_free(idx);
-        g_free(col);
-        g_free(pos);
+        pgraph_mtl_free_attribute_streams(streams);
         return;
     }
 
-    /* M5.5: draw_arrays branch. Decode each draw_arrays_start[i] /
-     * count[i] subrange independently — matches the GL/VK pattern of
-     * one drawcall per subrange. */
+    /* M5.5/M5.8: draw_arrays branch. Decode each draw_arrays_start[i]
+     * / count[i] subrange independently — matches the GL/VK pattern
+     * of one drawcall per subrange. */
     if (pg->draw_arrays_length > 0) {
         for (int i = 0; i < pg->draw_arrays_length; i++) {
             uint32_t start = pg->draw_arrays_start[i];
@@ -807,26 +835,22 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
             if (count == 0) {
                 continue;
             }
-            float *pos = g_malloc_n(count * 4, sizeof(float));
-            float *col = g_malloc_n(count * 4, sizeof(float));
-            pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
-                                              start, count, pos, col);
+            MtlAttributeStream streams[MTL_VERTEX_NUM_ATTRIBUTES];
+            pgraph_mtl_collect_all_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
+                                                  start, count, streams);
 
             mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                       color_fmt, depth_fmt, vp_w, vp_h,
-                                      pos, col, count,
+                                      streams, count,
                                       NULL, 0,
                                       native_tri, native_quad);
 
-            g_free(col);
-            g_free(pos);
+            pgraph_mtl_free_attribute_streams(streams);
         }
         return;
     }
 
-    /* M5.5: inline_array branch. Compute the per-vertex stride from
-     * the active attribute set, publish each attribute's
-     * inline_array_offset, then decode pg->inline_array. */
+    /* M5.5/M5.8: inline_array branch. */
     if (pg->inline_array_length > 0) {
         unsigned int vertex_stride = pgraph_mtl_inline_array_vertex_stride(pg);
         if (vertex_stride == 0) {
@@ -838,43 +862,68 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
         if (vcount == 0) {
             return;
         }
-        float *pos = g_malloc_n(vcount * 4, sizeof(float));
-        float *col = g_malloc_n(vcount * 4, sizeof(float));
-        pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_INLINE_ARRAY,
-                                          vertex_stride, 0, vcount, pos, col);
+        MtlAttributeStream streams[MTL_VERTEX_NUM_ATTRIBUTES];
+        pgraph_mtl_collect_all_vertex_streams(d, MTL_VERTEX_SRC_INLINE_ARRAY,
+                                              vertex_stride, 0, vcount, streams);
 
         mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                   color_fmt, depth_fmt, vp_w, vp_h,
-                                  pos, col, vcount,
+                                  streams, vcount,
                                   NULL, 0,
                                   native_tri, native_quad);
 
-        g_free(col);
-        g_free(pos);
+        pgraph_mtl_free_attribute_streams(streams);
         return;
     }
 
 
-    /* inline_buffer fallback (original M3/M4 path) — share the
-     * dispatch helper with the new branches above. */
+    /* inline_buffer fallback (original M3/M4 path). M5.8 wraps every
+     * populated inline_buffer into the streams array — we don't copy
+     * the data; the caller-owned `attr->inline_buffer` outlives the
+     * dispatch and the GPU staging completes synchronously inside it.
+     */
     unsigned int vcount = pg->inline_buffer_length;
-
-    const float *positions = NULL;
-    const float *colors    = NULL;
-    float       *synth     = NULL;
-    if (!mtl_inline_buffer_attrs(pg, vcount, &positions, &colors, &synth)) {
+    if (vcount == 0) {
         return;
     }
+
+    MtlAttributeStream streams[MTL_VERTEX_NUM_ATTRIBUTES];
+    for (int i = 0; i < MTL_VERTEX_NUM_ATTRIBUTES; i++) {
+        streams[i].data = NULL;
+        streams[i].bytes = 0;
+    }
+    /* Borrow each populated inline_buffer pointer; do NOT free at the
+     * end of this scope. */
+    for (int i = 0; i < MTL_VERTEX_NUM_ATTRIBUTES; i++) {
+        VertexAttribute *a = &pg->vertex_attributes[i];
+        if (a->inline_buffer_populated && a->inline_buffer != NULL) {
+            streams[i].data = a->inline_buffer;
+            streams[i].bytes = (size_t)vcount * 4 * sizeof(float);
+        }
+    }
+    /* M3/M4 hand-coded passthrough requires POSITION at slot 0 — bail
+     * if the inline_buffer flow didn't populate it. */
+    if (streams[NV2A_VERTEX_ATTR_POSITION].data == NULL) {
+        return;
+    }
+
+    /* For the inline_buffer path we set masks based on
+     * inline_buffer_populated (vk parity:
+     * pgraph_vk_bind_vertex_attributes_inline). Use the inline-buffer-
+     * specific helper; mtl_dispatch_decoded_draw saves/restores around
+     * its own call too — that's fine, the inner restore will put
+     * uniform_attrs back to whatever we set here. */
+    uint16_t saved_u = 0, saved_c = 0, saved_s = 0;
+    pgraph_mtl_set_attr_masks_inline_buffer(pg, &saved_u, &saved_c, &saved_s);
 
     mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                               color_fmt, depth_fmt, vp_w, vp_h,
-                              positions, colors, vcount,
+                              streams, vcount,
                               NULL, 0,
                               native_tri, native_quad);
 
-    if (synth) {
-        g_free(synth);
-    }
+    pgraph_mtl_restore_attr_masks(pg, saved_u, saved_c, saved_s);
+    /* Borrowed pointers — no free. */
 }
 
 static void pgraph_mtl_get_report(NV2AState *d, uint32_t parameter)

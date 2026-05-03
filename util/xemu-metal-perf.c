@@ -77,6 +77,10 @@ static uint64_t s_baseline_fragment_us_total;
 static uint64_t s_baseline_present_gpu_us_total;
 static uint64_t s_baseline_present_gpu_frames;
 static uint64_t s_baseline_capture_frames_seen;
+/* 2026-05-03 — programmatic PNG screenshot of the final composited
+ * drawable. Bumped from inside the cmdbuf addCompletedHandler in
+ * ui/xemu-metal.mm once the PNG has been written successfully. */
+static uint64_t s_baseline_screenshots_taken;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -334,6 +338,14 @@ __attribute__((weak)) uint32_t pgraph_mtl_capture_active(void)
     return 0;
 }
 
+/* 2026-05-03 — programmatic PNG screenshot of the final composited
+ * drawable. Strong symbol defined in ui/xemu-metal.mm; the weak
+ * default below lets non-Apple-Silicon builds link cleanly. */
+__attribute__((weak)) uint64_t pgraph_mtl_screenshots_taken(void)
+{
+    return 0;
+}
+
 void xemu_metal_perf_emit_and_reset(FILE *out)
 {
     if (out == NULL) {
@@ -393,6 +405,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t present_gpu_fr   = pgraph_mtl_present_gpu_frames();
     uint64_t capture_seen     = pgraph_mtl_capture_frames_seen();
     uint32_t capture_active   = pgraph_mtl_capture_active();
+    /* 2026-05-03 — PNG screenshot counter. */
+    uint64_t screenshots_taken = pgraph_mtl_screenshots_taken();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -488,6 +502,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                     s_baseline_present_gpu_frames;
     uint64_t capture_seen_delta   = capture_seen     -
                                     s_baseline_capture_frames_seen;
+    /* 2026-05-03 — PNG screenshot counter delta. */
+    uint64_t screenshots_taken_delta = screenshots_taken -
+                                       s_baseline_screenshots_taken;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -534,6 +551,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_present_gpu_us_total     = present_gpu_us;
     s_baseline_present_gpu_frames       = present_gpu_fr;
     s_baseline_capture_frames_seen      = capture_seen;
+    s_baseline_screenshots_taken        = screenshots_taken;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -558,7 +576,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            fx_us_delta | fx_presents_delta |
                            fx_gpu_us_delta | vertex_us_delta |
                            fragment_us_delta | present_gpu_us_delta |
-                           present_gpu_fr_delta | capture_seen_delta;
+                           present_gpu_fr_delta | capture_seen_delta |
+                           screenshots_taken_delta;
     if (total_delta == 0) {
         return;
     }
@@ -607,7 +626,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_PRESENT_GPU_US_TOTAL=%llu"
             " METAL_PRESENT_GPU_FRAMES=%llu"
             " METAL_CAPTURE_FRAMES=%llu"
-            " METAL_CAPTURE_ACTIVE=%u",
+            " METAL_CAPTURE_ACTIVE=%u"
+            " METAL_SCREENSHOTS_TAKEN=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -657,5 +677,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)present_gpu_us_delta,
             (unsigned long long)present_gpu_fr_delta,
             (unsigned long long)capture_seen_delta,
-            (unsigned)capture_active);
+            (unsigned)capture_active,
+            (unsigned long long)screenshots_taken_delta);
 }
