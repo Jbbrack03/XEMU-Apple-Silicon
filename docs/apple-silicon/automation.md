@@ -1,9 +1,14 @@
 # Benchmark Automation
 
-Last updated: 2026-05-03 (Metal renderer slices **M5.5 / M5.6 / M5.7**:
-draw paths online, translator failures eliminated, render-pass coalescing
-+125 % FPS on PGR2; `validate-native-tri-depth.sh` flake fixed via
-extended QMP-quit / SIGTERM grace windows in run-benchmark.sh)
+Last updated: 2026-05-03 (Metal slices through **M5.9 + followup-A +
+followup-B+C** ship; new diagnostic flags `XEMU_METAL_DIAG_CLEAR=1`
+and `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR` documented; new
+counters `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
+`METAL_IMAGE_BLITS`, `METAL_SURFACE_VRAM_DIRTY_HITS`, `_UPLOADS`,
+`_UPLOAD_BYTES`, `METAL_SCREENSHOTS_TAKEN`, plus input-latency
+counters `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
+`INPUT_LAT_US_TOTAL`, `INPUT_LAT_US_MAX`. `run-benchmark.sh`
+extended with `sc2` and `halo` title keys.)
 
 This fork has a small scripted-input harness for repeatable Apple Silicon
 benchmark runs. It is opt-in and does not affect normal xemu launches.
@@ -540,6 +545,30 @@ and stack:
   `METAL_SCREENSHOTS_TAKEN` (per-interval delta) surfaces on the
   `xemu-perf:` interval line and counts only successfully-encoded
   PNGs (encoding failures log + skip without bumping the counter).
+- `XEMU_METAL_SCREENSHOT_SOURCE={drawable,nv2a,vram:0xADDR}`
+  (**2026-05-03**) — selects which texture the screenshot path
+  captures. `drawable` (default, also accepts `0`) reads the
+  post-HUD final drawable. `nv2a` (also accepts `1`) reads the
+  NV2A framebuffer texture pre-present, which bypasses the present
+  pipeline and is the diagnostic used to disprove OS-level layer
+  substitution as the source of magenta artifacts. `vram:0xADDR`
+  captures any specific cached `MtlSurfaceBinding` by vram_addr
+  (e.g., `vram:0x32a4000` for PGR2's front buffer, `vram:0x3628000`
+  for the back buffer, `vram:0x2c06000` for an aux RT) — the
+  hex value is parsed with `strtoul(..., 0)` so `0x` is required.
+  Used during the M5.9 magenta investigation to capture per-surface
+  contents and confirm none of front/back/aux carry the rendered
+  scene.
+- `XEMU_METAL_DIAG_CLEAR={0,1}` (**2026-05-03**) — diagnostic logger
+  for `pgraph_mtl_surface_clear`. When `=1`, emits up to 32
+  one-line `xemu-perf: metal_surface_clear vram_addr=0x..
+  rgba=(R,G,B,A) write_zeta=N` records, capped to keep the log
+  bounded. Used during the M5.9 magenta investigation to confirm
+  that no observed clear color is `(1.0, 0.0, 1.0, *)` — every
+  PGR2 surface clear is `(0,0,0,1)` (front/back framebuffers) or
+  `(1,0,0,1)` (PGR2's aux RTs at `0x2c06000` / `0x2e06000`).
+  Default 0 (off; zero hot-path cost). Implementation in
+  `mtl/surface.mm::pgraph_mtl_surface_clear`.
 - `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03**): per-interval
   count of front-fb texture pointer **changes** in the Metal
   renderer's surface cache. Always-on atomic. Bumped whenever the

@@ -1,5 +1,85 @@
 # Decision Log
 
+## 2026-05-03: Metal magenta diagnostic capture — front/back/aux RTs all ruled out as scene targets
+
+**Context.** After M5.9-followup-B+C shipped, the visual gate remained
+unmet: PGR2's published front-fb at `0x32a4000` showed white upper-left
+640×480 + magenta in the remaining 75% of the host-scaled 1280×960
+texture. Three buffer-swap mechanisms had already been ruled out
+(no CPU memcpy, no NV097_IMAGE_BLIT, no pcrtc.start alternation), but
+the actual location of the rendered scene was unknown.
+
+**Investigation.** Two diagnostic tools added in this session:
+
+1. **`XEMU_METAL_DIAG_CLEAR=1`** logs every `pgraph_mtl_surface_clear`
+   call with `vram_addr` + RGBA. Capped at 32 records. Used to test
+   the magenta-clear-value hypothesis. Empirical result on PGR2: every
+   logged clear is `(0,0,0,1)` (front and back framebuffers, BIOS-time
+   surfaces) or `(1,0,0,1)` (PGR2's aux RTs at `0x2c06000` /
+   `0x2e06000`). **Not a single clear is ever magenta.**
+
+2. **`XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`** extends the
+   programmatic screenshot path to capture any cached
+   `MtlSurfaceBinding` by vram_addr. Bypasses CRTC publish entirely.
+   Used to inspect each candidate surface independently.
+
+**Empirical findings.**
+
+| Surface | vram_addr | Dimensions | Capture content |
+|---|---|---|---|
+| Front buffer | `0x32a4000` | 1280×960 | upper-left 640×480 white, rest magenta |
+| Back buffer | `0x3628000` | 2560×960 | pure black |
+| Aux RT (PGR2 cleared red) | `0x2c06000` | 2048×1024 | pure red |
+
+The front buffer's white sub-rect is the bind-time VRAM upload's 1×
+source rect inside the 2× host-scaled MTLTexture (the upload writes
+640×480 pixels of guest VRAM into the upper-left of a 1280×960
+texture). The remaining 75% region is magenta — and since no clear
+color produces magenta, this magenta is heap-default uninitialized
+texture content, not a renderer-applied clear.
+
+**Conclusion.** None of the three captured surfaces contains the
+rendered scene. The 75,000 draws/min reaching `pgraph_mtl_draw_translated`
+(METAL_PIPELINE_TRANSLATED_FAILED=0, FALLBACKS=0,
+DRAW_TRANSLATED == DRAW_COUNT) are landing in some other surface that
+we have not yet captured. Possibilities (none yet tested):
+
+- A cache entry that LRU-evicts before our capture trigger fires
+  (cache cap is 16; PGR2 uses many aux RTs).
+- A surface bound by `mtl_bind_current_surfaces` that does NOT match
+  `pg->dma_color` + `pg->surface_color.offset` as we currently compute
+  it (vram_addr derivation bug).
+- A surface that the open-pass coalescing (M5.7) is keeping bound
+  past the bind-time hand-off, so draws land in a stale render
+  target.
+
+**Decision.** Defer further root-cause investigation to next session.
+The single decisive next measurement is a per-vram_addr "draw target"
+counter: instrument `pgraph_mtl_flush_draw` to bump
+`metal_draw_target=0x...` per draw call so we can see WHICH
+SurfaceBinding's texture is the actual render destination. That data
+isolates the remaining hypothesis space to one of:
+
+1. The actual draw target IS a vram_addr we already capture, but the
+   rendered content is overwritten between draw and capture (LRU
+   eviction or bind-time upload clobber).
+2. The actual draw target is a different vram_addr we haven't
+   captured yet (`0x2e06000` aux RT, depth surface, or something
+   else entirely).
+3. The actual draw target's vram_addr is `0` or unmapped (vram_addr
+   derivation bug).
+
+**Consequences.**
+
+- M15 default-on stays BLOCKED on next-session investigation.
+- `XEMU_METAL_DIAG_CLEAR` and the new `vram:0xADDR` screenshot mode
+  are documented additions to the diagnostic toolkit; both are
+  always-off / opt-in and have zero hot-path cost when unused.
+- User-stated goals remain MET via the GL renderer
+  (`XEMU_GL_MSAA=4` + `XEMU_MACOS_NATIVE_INPUT=1` +
+  `surface_scale=2`); see
+  `benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`.
+
 ## 2026-05-03: Metal slice M5.9-followup-B+C — CPU-write dirty tracking + VRAM upload (shipped, visual gate NOT met)
 
 **Context.** The 2026-05-03 M5.9 + followup-A entries closed the

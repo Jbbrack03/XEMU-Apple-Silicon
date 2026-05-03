@@ -1,6 +1,15 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 / M5.8 / M5.9 + followup-A
++ followup-B+C all SHIPPED; pipeline counters 100% green
+TRANSLATED_FAILED=0 / FALLBACKS=0 / DRAW_TRANSLATED == DRAW_COUNT;
+visual gate UNMET — front buffer at `0x32a4000` shows white-on-magenta,
+back buffer at `0x3628000` is pure black, aux RT at `0x2c06000` is
+pure red (cleared color). Three buffer-swap mechanisms ruled out
+empirically (CPU memcpy, NV097_IMAGE_BLIT, pcrtc.start alternation).
+Next session needs a per-vram_addr `metal_draw_target` counter to
+isolate which cached SurfaceBinding receives the rendered scene.
+M15 default-on stays BLOCKED.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon

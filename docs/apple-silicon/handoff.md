@@ -1,6 +1,38 @@
 # Handoff
 
-Last updated: 2026-05-03 (Metal slice **M5.9-followup-B+C — CPU-write
+Last updated: 2026-05-03 (post-followup-B+C diagnostic capture —
+**three candidate buffer-swap mechanisms ruled out empirically**, the
+actual scene RT remains unidentified. Added `XEMU_METAL_DIAG_CLEAR=1`
+clear-color logger and extended `XEMU_METAL_SCREENSHOT_SOURCE` with a
+`vram:0xADDR` mode that captures any specific cached SurfaceBinding
+by vram_addr. PGR2 90 s capture results: front buffer at `0x32a4000`
+shows white upper-left 640×480 (= bind-time VRAM upload of cleared
+guest pixels) + magenta in the remaining 75 % of the 1280×960 host
+texture (= heap-default uninitialized region beyond the 1× upload
+sub-rect); back buffer at `0x3628000` (2560×960) shows pure black;
+aux RT at `0x2c06000` (2048×1024) shows pure red (= the cleared
+color logged by `metal_surface_clear`). **None of these surfaces
+contain the rendered scene** despite 75,000 draws/min successfully
+reaching `pgraph_mtl_draw_translated` (counter floors hold:
+TRANSLATED_FAILED=0, FALLBACKS=0, DRAW_TRANSLATED == DRAW_COUNT).
+The clear-color log decisively eliminates the magenta-clear-value
+hypothesis: every observed clear is black `(0,0,0,1)` or red
+`(1,0,0,1)` — never magenta. **Magenta in the front-fb is therefore
+a heap-default / uninitialized-region artifact, not from any guest
+clear.** **Highest-priority next-session action**: instrument
+`pgraph_mtl_flush_draw` to bump a per-vram_addr `metal_draw_target`
+counter so we can see WHICH cached surface is the actual draw
+destination — that's the single decisive measurement remaining.
+Other candidates: raise the cache cap above 16 to test LRU eviction,
+search `pgraph.c` / `pgraph_methods.h` for any 2D blit / DMA channel
+that the Metal renderer ops table doesn't currently hook. M15
+default-on stays **BLOCKED** on this. **User-stated goals are MET
+TODAY via the GL renderer** — `XEMU_GL_MSAA=4` + `surface_scale=2`
++ `XEMU_MACOS_NATIVE_INPUT=1`; see
+`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
+for the per-title FPS table.
+
+(Earlier banner — Metal slice **M5.9-followup-B+C — CPU-write
 dirty tracking + VRAM upload — SHIPPED, visual gate NOT met**.
 Adds `_Atomic(uint32_t) dirty_vram` + opaque `void *access_cb`
 fields to `MtlSurfaceBinding`, plus explicit `guest_width`/`guest_height`

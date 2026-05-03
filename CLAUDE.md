@@ -635,8 +635,26 @@ Stable opt-in:
   Default 0 = single shot. Implementation in `ui/xemu-metal.mm`,
   `util/xemu-metal-perf.c`, `scripts/apple-silicon/run-benchmark.sh`,
   `scripts/apple-silicon/extract-perf-summary.sh`.
+- `XEMU_METAL_SCREENSHOT_SOURCE={drawable,nv2a,vram:0xADDR}`
+  (2026-05-03) — selects which texture the screenshot path captures.
+  `drawable` (default) reads the post-HUD final drawable. `nv2a`
+  reads the NV2A framebuffer texture pre-present, bypassing the
+  present pipeline. `vram:0xADDR` captures any specific cached
+  `MtlSurfaceBinding` by vram_addr (used during the M5.9 magenta
+  investigation to inspect front-buffer / back-buffer / aux RT
+  contents independently). The hex value is parsed with
+  `strtoul(..., 0)` so the `0x` prefix is required.
 
 Diagnostic toggles (intentionally not correctness paths):
+
+- `XEMU_METAL_DIAG_CLEAR={0,1}` (2026-05-03) — diagnostic logger for
+  `pgraph_mtl_surface_clear`. When `=1`, emits up to 32 one-line
+  `xemu-perf: metal_surface_clear vram_addr=0x.. rgba=(R,G,B,A)
+  write_zeta=N` records (capped to bound log size). Used to confirm
+  the magenta artifact is NOT from any guest clear color: every PGR2
+  clear observed was `(0,0,0,1)` or `(1,0,0,1)`, never magenta.
+  Default 0 (off; zero hot-path cost). Implementation in
+  `mtl/surface.mm::pgraph_mtl_surface_clear`.
 
 - `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` — keep tri geometry shaders, skip
   their depth/slope math.

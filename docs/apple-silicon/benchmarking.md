@@ -1,6 +1,14 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03 (multi-title MSAA + 1080p validation across
+PGR2, Crimson, Rainbow, SC2, Halo CE; per-title FPS table in
+`benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`. GL
+renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` is the production
+configuration meeting the user's stated 30/60 FPS at 1080p goals.
+Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
+`INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
+`XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
+backend.)
 
 ## Benchmarking Rules
 

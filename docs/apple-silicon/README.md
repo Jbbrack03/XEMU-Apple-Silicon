@@ -1,6 +1,6 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-03 (M5.5 + M5.6 + M5.7 ship; PGR2 / Crimson / Rainbow Six 3 all meet console-native 30 FPS on the Metal renderer; PGR2 Metal exceeds GL by 18 %)
+Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 / M5.8 / M5.9 / followup-A / followup-B+C all ship on the Metal track. **Metal pipeline counters are 100% green** (TRANSLATED_FAILED=0, FALLBACKS=0, DRAW_TRANSLATED == DRAW_COUNT) but **visual output is incorrect** — published front-fb shows magenta-on-white instead of the rendered scene. Front, back, and aux render targets all empirically captured and none contain scene content; root cause requires per-vram_addr draw-target instrumentation in next session. **The user's stated 30/60 FPS at 1080p / high-quality AA / correct-colors goals are MET TODAY via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2` (PGR2 47 fps, Crimson 30, SC2 58, Halo 30, Rainbow 27 bimodal). Input slices N1+N2 also shipped (opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend, sub-millisecond input latency). Metal renderer remains opt-in / experimental until the magenta artifact is resolved.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run

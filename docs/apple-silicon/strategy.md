@@ -1,6 +1,6 @@
 # Strategy
 
-Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 ship; Phase 4 sub-deliverable 4i closes for the three tracked titles; 4j MSAA ready to flip default-on now that coalescing unblocks Memoryless storage)
+Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 / M5.8 / M5.9 + followup-A + followup-B+C ship; Metal pipeline counters 100% green but visual output is magenta-on-empty — front/back/aux RTs empirically captured, none contains the rendered scene. **Phase 4 sub-deliverable 4j (MSAA) validated on the GL path** at `XEMU_GL_MSAA=4` + `surface_scale=2` across 5 titles (PGR2 47, Crimson 30, SC2 58, Halo 30, Rainbow 27). Metal-side MSAA flag wired but blocked behind the magenta-artifact investigation. **GL renderer is the production path for visual correctness today**; Metal track ships substantial infrastructure but the rendered scene's actual cache target is unidentified post-followup-B+C — next session uses a per-vram_addr draw-target counter to isolate the remaining hypothesis space. Input slices N1+N2 also ship — `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend with always-on input-latency counters.)
 
 ## North Star
 
