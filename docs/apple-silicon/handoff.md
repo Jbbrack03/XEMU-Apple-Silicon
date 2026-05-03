@@ -1,6 +1,43 @@
 # Handoff
 
-Last updated: 2026-05-03 (Multi-title MSAA + 1080p validation across
+Last updated: 2026-05-03 (Metal magenta artifact **root-caused** —
+the Metal renderer ships slices M3 → M14 on top of an **M2-era
+single-slot surface manager** (`hw/xbox/nv2a/pgraph/mtl/surface.mm`
+588 LOC vs `vk/surface.c` 1760 LOC). The ~1200 LOC delta is the
+per-VRAM-address surface cache, CPU-write invalidation callbacks,
+VRAM↔texture upload/download, overlap resolution, and CRTC-based
+front-fb publish that `metal-renderer-plan.md` §3 line 530-535
+explicitly listed as `M2 explicitly does NOT do (deferred to later
+slices)` and that **was never backfilled**. Re-examination of the
+four `/tmp/pgr2-nv2a-direct.000{1..4}.png` captures decisively
+rules out the four-hypothesis multi-title-MSAA framing: the
+captured NV2A-direct screenshots have **different dimensions**
+(2560×960 / 1280×960 / 1024×1024 / 1024×1024), proving the
+published front-fb is "whichever surface was most recently
+clear-bound" rather than "whichever surface the NV2A CRTC says is
+the displayed framebuffer". Both vk and gl read
+`d->pcrtc.start + vga_display_params.line_offset` to look up the
+front-fb in their per-VRAM surface caches; mtl has zero CRTC
+awareness anywhere — `grep -rnE 'vram_addr|d->pcrtc|line_offset'
+hw/xbox/nv2a/pgraph/mtl/` returns the texture cache only.
+**Decision: open a new slice M5.9 — per-VRAM surface cache +
+CRTC-aware publish — as the single highest-priority Metal-track
+follow-up. Do not attempt the fix surgically; per project rule #2
+(no shortcuts) it is a properly-scoped ~1200 LOC port of the
+relevant subset of `vk/surface.c`.** M15 default-on stays BLOCKED
+on M5.9. Counter-driven success metrics
+(`METAL_PIPELINE_TRANSLATED_FAILED == 0`, `METAL_DRAW_TRANSLATED ==
+METAL_DRAW_COUNT`) are **necessary but not sufficient** evidence
+for renderer correctness — M5.9 must add a
+`METAL_FRONT_FB_PUBLISHES` counter and a per-publish
+`xemu-perf: metal_front_fb_publish vram_addr=0x.. ...`
+diagnostic line so this regression class is detectable in counter
+logs without requiring screenshot inspection. See decision-log
+"2026-05-03: Metal magenta root-caused — missing per-VRAM surface
+cache + CRTC-aware publish" for the full diagnosis, file
+references, M5.9 sketch, and consequences.
+
+(Earlier banner — Multi-title MSAA + 1080p validation across
 PGR2 / Crimson / Rainbow / SC2 on the GL renderer with
 `XEMU_GL_MSAA=4` + `surface_scale=2`. **PGR2 47 fps, Crimson 30 fps,
 Rainbow 26 fps avg (max 60 in many intervals — bimodal due to
@@ -12,9 +49,11 @@ solid-magenta render targets** despite 100% pipeline-build success
 post-M5.8 — diagnostic capture
 (`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, added 2026-05-03) confirms
 the magenta is renderer-side, not OS-level layer substitution.
-Possible root causes (queued): wrong NV097_SET_COLOR_CLEAR_VALUE
-handling, texture sampling producing transparent output, PSH
-combiner translation, or surface-routing bug. **Input slices N1+N2
+The four candidate root causes listed in this banner (clear-color
+overwrite, transparent texture sampling, PSH combiner translation,
+surface-routing) are **superseded** by the 2026-05-03 root-cause
+investigation above as a single architectural cause: missing
+per-VRAM surface cache. **Input slices N1+N2
 shipped (opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework
 backend; INPUT_USB_POLLS / INPUT_BACKEND_UPDATES /
 INPUT_LAT_US_TOTAL/_MAX counters always-on).** **Programmatic
@@ -24,10 +63,12 @@ Metal screenshot path shipped** (`XEMU_METAL_SCREENSHOT_PATH`,
 extended with `sc2` + `halo` title keys.** See
 `docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
 for the per-title MSAA validation table and user-goal mapping.
-**Next-session priorities**: (1) Metal magenta investigation —
-inspect NV097_SET_COLOR_CLEAR_VALUE handling, the M3/M4
-passthrough fragment-shader output for a specific scene, and the
-PSH translation for PGR2's combiner state; (2) Rainbow Six 3 FPS
+**Next-session priorities**: (1) **Metal slice M5.9 — per-VRAM
+surface cache + CRTC-aware publish** (~1200 LOC port of relevant
+subset of `vk/surface.c`; sketch in the 2026-05-03 root-cause
+decision-log entry above; gates M15 default-on); the prior
+"investigate clear-value / PSH / texture sampling" framing is
+superseded by the root-cause investigation; (2) Rainbow Six 3 FPS
 variance investigation (avg 26 vs target 30, max 60 — bimodal
 distribution suggests guest-intrinsic stutters dominate the
 average); (3) Audio listen-test for `XEMU_APU_LOCK_RELEASE` (still

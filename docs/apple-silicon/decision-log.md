@@ -1,5 +1,195 @@
 # Decision Log
 
+## 2026-05-03: Metal magenta root-caused — missing per-VRAM surface cache + CRTC-aware publish
+
+**Context.** Metal renderer produces solid-magenta NV2A render targets
+on PGR2 / Crimson / Rainbow even though M5.6 / M5.7 / M5.8 closed the
+translator-failure, draw-throughput, and vertex-decoder gaps. Pipeline
+counters report success: `METAL_PIPELINE_TRANSLATED_FAILED == 0`,
+`METAL_DRAW_INDEXED_COUNT > 50,000/60s`, `METAL_PIPELINE_FALLBACKS == 0`.
+The 2026-05-03 multi-title MSAA validation entry queued four candidate
+hypotheses (clear-color overwrite, transparent texture sampling, PSH
+combiner constant-magenta translation, surface routing) without
+isolating one.
+
+**Investigation (this session).** Re-examined the four diagnostic
+NV2A-direct screenshots `/tmp/pgr2-nv2a-direct.000{1..4}.png` written
+by `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` from
+`benchmark-runs/20260503-092145-pgr2`:
+
+| Frame | Dimensions | Content |
+|-------|------------|---------|
+| 0001 | 2560×960 | solid black (drawable fallback — `present_input_tex` was nil that frame) |
+| 0002 | 1280×960 | solid magenta R=255 G=0 B=255 A=255 (PGR2 main RT shape) |
+| 0003 | 1024×1024 | left half pure green, right half pure white |
+| 0004 | 1024×1024 | identical to 0003 |
+
+The dimensions vary frame-to-frame, which is decisive. PGR2's main
+color RT is 1280×960 (matching `surface_scale=2` × 640×480); a
+1024×1024 surface is a power-of-two swizzled aux RT (shadow map,
+reflection cube face, post-process input). The captured front-fb
+texture is therefore **whichever NV2A surface was most recently
+clear-bound — not the actual displayed framebuffer**.
+
+Read of the Metal surface manager confirmed the architectural cause:
+
+- `hw/xbox/nv2a/pgraph/mtl/surface.mm:128-129` declares two **single
+  global slots** `s_color_binding` / `s_depth_binding` — there is no
+  per-VRAM-address surface cache.
+- `s_front_framebuffer_texture` (line 147) is republished
+  unconditionally to whichever single texture is currently in
+  `s_color_binding` whenever `pgraph_mtl_surface_ensure_color`
+  (line 298) or `pgraph_mtl_surface_clear` (line 465) fires.
+- `pgraph_mtl_surface_ensure_color` (line 271) keys binding equality
+  on `(width, height, nv097_format)` only. The moment the guest binds
+  a 1024×1024 RT and the dimensions diverge, the previous 1280×960
+  binding is **released and replaced** — the prior RT contents are lost.
+- `pgraph_mtl_surface_update` (renderer.c:963) is a stub
+  ("M2 does not implement upload/download path … M3+ will route into
+  the per-VRAM cache").
+- `pgraph_mtl_get_framebuffer_surface` (renderer.c:995) returns
+  `s_front_framebuffer_texture` directly — no `d->pcrtc.start` lookup.
+
+Cross-referenced the Vulkan and GL renderers as the correct-output
+oracle:
+
+- `hw/xbox/nv2a/pgraph/vk/renderer.c:172-205` and
+  `hw/xbox/nv2a/pgraph/gl/display.c:414-448` both look up the publish
+  target via `pgraph_{vk,gl}_surface_get_within(d, d->pcrtc.start +
+  vga_display_params.line_offset)`.
+- `hw/xbox/nv2a/pgraph/vk/surface.c:697-724` defines a `QTAILQ`-backed
+  surface list keyed by `vram_addr`+`size`. Each surface persists
+  across binding changes; the renderer creates a new entry for a
+  newly-bound RT instead of overwriting an existing one.
+- The vk surface lifecycle is **1760 LOC**; the mtl surface manager is
+  **588 LOC**. The ~1200 LOC delta is exactly the work `M2 explicitly
+  does NOT do (deferred to later slices)` per `metal-renderer-plan.md`
+  §3 line 530-535: per-VRAM-addr surface cache, CPU-write callbacks
+  for invalidation, surface upload from VRAM (so a freshly-rebound RT
+  picks up CPU-modified pixels), surface download (so guest readback
+  works), overlap resolution, scratch images for read-modify-write
+  surfaces, and the CRTC-based publish path.
+
+`grep -rnE 'vram_addr|d->pcrtc|line_offset' hw/xbox/nv2a/pgraph/mtl/`
+confirmed: zero CRTC awareness anywhere in the Metal renderer. The
+texture cache is per-VRAM-keyed; the surface manager is not.
+
+**Root cause.** The Metal renderer has shipped slices M3 / M4 / M5 /
+M5.5 / M5.6 / M5.7 / M5.8 / M6 / M7 / M7.1 / M8 / M9 / M10 / M11 /
+M12 / M13 / M14 on top of an **M2-era single-slot surface manager**
+that the M2 plan explicitly deferred. The surface lifecycle work
+deferred from M2 was never backfilled. This makes the
+"render correct content into the right RT, then present that
+specific RT" contract impossible to honor: the published front-fb is
+"whichever surface was last cleared or last shape-changed", not "the
+RT the NV2A CRTC says is the active framebuffer". The four candidate
+hypotheses from the 2026-05-03 multi-title entry are all consequences
+of this single architectural cause, not independent bugs:
+
+- Magenta in 0002 is a real PGR2 clear of an intermediate RT to
+  `(1, 0, 1, 1)` (likely a sky-pass / overdraw-detection / sentinel
+  buffer the game expects to fully overwrite). The game DID then draw
+  the actual scene into a different surface, but that other surface
+  was either reallocated out from under us or is no longer the
+  published front-fb.
+- The 1024×1024 green/white halves in 0003/0004 is whichever swizzled
+  power-of-two aux RT was last clear-bound — possibly a stencil-based
+  shadow buffer with green = "shadowed", white = "lit" half-and-half
+  initialization.
+- "PSH translation produces magenta" / "depth test rejects fragments"
+  / "texture sampling returns transparent" all become testable only
+  AFTER the surface routing is correct — until then, every draw is
+  effectively rendering into the wrong target.
+
+**Decision.** Add a new **Metal renderer slice M5.9 — per-VRAM
+surface cache + CRTC-aware publish** as the single highest-priority
+Metal-track follow-up. Do not attempt the fix surgically in this
+session. Per project rule #2 (no shortcuts), the fix is a
+~1200 LOC port of the relevant subset of `vk/surface.c` and is
+properly scoped as a dedicated slice with its own validation gate, not
+mixed into another slice's work.
+
+**M15 default-on flip stays BLOCKED** on M5.9. The
+`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
+"Possible root causes (queued)" list is now resolved as a single
+architectural root cause; the multi-hypothesis framing is superseded.
+Earlier handoff banners that reported M5.6 / M5.7 / M5.8 as
+"the magenta-surface artifact is unblocked" were optimistic — those
+slices closed a different gap (translator failures, draw throughput,
+attribute decoding) and did not touch surface routing. They remain
+correct on their own terms but did not in fact address what the user
+sees on screen.
+
+**Consequences.**
+
+- Metal renderer is **not visually-correct** at this commit on any
+  retail title and will not become so until M5.9 lands.
+- GL renderer remains the production path (unchanged).
+- Counter-driven success metrics (`METAL_DRAW_TRANSLATED ==
+  METAL_DRAW_COUNT`, `METAL_PIPELINE_TRANSLATED_FAILED == 0`) are
+  **necessary but not sufficient** evidence for renderer correctness.
+  The Metal renderer needs an additional always-on counter
+  `METAL_FRONT_FB_PUBLISHES` (per-interval) and the M5.9 slice must
+  add a per-call diagnostic (`xemu-perf: metal_front_fb_publish
+  vram_addr=0x.. width=W height=H reason={crtc,clear,ensure}`) so
+  this regression class is detectable in counter logs without
+  requiring screenshot inspection.
+- The "Visual validation status — environmentally blocked" claim in
+  the M5.5 / M5.6 / M5.6 Part B / M5.8 banners is **partially
+  superseded**: the macOS Screen-Recording occlusion is a real
+  separate problem (it suppresses `addPresentedHandler:` and zeroes
+  `METAL_PRESENTS`), but it is no longer the *primary* obstacle to
+  visual correctness. Even with a non-occluded environment the Metal
+  renderer would render magenta because the published surface is
+  wrong. The screenshot path correctly captures the NV2A-side
+  texture; what it captures is genuinely wrong.
+
+**Plan for M5.9.** Sketch (the slice's own design doc lands when the
+slice is opened):
+
+1. Add `SurfaceBinding` struct keyed on `vram_addr` + `size` +
+   `width` + `height` + `nv097_format` + `is_color`. `QTAILQ` list
+   `s_surfaces` analogous to `vk/surface.c::PGRAPHVkState.surfaces`.
+2. `pgraph_mtl_surface_get(d, addr)` and
+   `pgraph_mtl_surface_get_within(d, addr)` lookup helpers, exact
+   ports of the vk equivalents.
+3. Replace `s_color_binding` / `s_depth_binding` with "currently-bound
+   color / depth pointers into the cache". Bindings are only released
+   when the cache evicts them (LRU-style, capped count) or when an
+   invalidating CPU write to the underlying VRAM range fires.
+4. Compute `vram_addr` for the current bind from the NV2A registers
+   (`NV097_SET_SURFACE_OFFSET_COLOR` / `_ZETA`, plus `surface_scale`).
+   Pattern: `vk/surface.c::pgraph_vk_surface_update`.
+5. Wire `surface_update` (`renderer.c:963`) to actually call into the
+   cache. Required for VRAM↔texture upload/download.
+6. Replace `s_front_framebuffer_texture` with a function
+   `pgraph_mtl_surface_get_crtc_surface(NV2AState *d)` that mirrors
+   `vk/renderer.c:172-205`'s `d->pcrtc.start +
+   vga_display_params.line_offset` lookup. Adjust
+   `pgraph_mtl_get_framebuffer_metal_texture` to call it and return
+   the resulting MTLTexture handle (NULL when no CRTC-pointed surface
+   exists yet). Match the side-channel semantics the M2 doc-comment
+   already promises.
+7. Add `METAL_FRONT_FB_PUBLISHES` counter and the per-publish
+   `xemu-perf: metal_front_fb_publish ...` diagnostic line described
+   above so that future regressions of this class are caught by
+   counter inspection alone.
+8. Validation gate: paired Metal-vs-GL screenshot capture of a
+   PGR2 mid-route frame, per-pixel diff ≤ 1 % on combiner-correct
+   surfaces, plus the existing `METAL_DRAW_TRANSLATED ==
+   METAL_DRAW_COUNT` and `METAL_PIPELINE_TRANSLATED_FAILED == 0`
+   counter floors.
+
+**See also.** `hw/xbox/nv2a/pgraph/mtl/surface.mm` (M2-era
+single-slot surface manager — the bug),
+`hw/xbox/nv2a/pgraph/vk/surface.c:697-724` (correct-output reference
+to port from), `hw/xbox/nv2a/pgraph/vk/renderer.c:172-205` and
+`hw/xbox/nv2a/pgraph/gl/display.c:414-448` (CRTC-based publish path
+to mirror), `metal-renderer-plan.md` §3 lines 530-535 (the M2
+deferral that was never backfilled),
+`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
+(the four candidate hypotheses superseded by this entry).
+
 ## 2026-05-03: Multi-title MSAA + 1080p validation; GL is the production path
 
 **Context.** User-stated goals: console-native FPS at 1080p, high-quality

@@ -97,8 +97,29 @@ The Metal renderer at this commit produces visually-incorrect output
 The diagnostic capture path
 (`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, added 2026-05-03)
 captures the NV2A-side render target pre-present and confirms the
-magenta is renderer-side, not OS-level layer substitution. Possible
-root causes (queued for follow-up):
+magenta is renderer-side, not OS-level layer substitution.
+
+**Update — 2026-05-03 root-cause investigation** (see decision-log
+entry "2026-05-03: Metal magenta root-caused — missing per-VRAM
+surface cache + CRTC-aware publish"). The four candidate root causes
+listed in the original version of this section are **superseded** by
+a single architectural cause: the Metal renderer ships slices M3
+through M14 on top of an M2-era single-slot surface manager. The
+~1200 LOC of surface lifecycle work that `metal-renderer-plan.md` §3
+lines 530-535 explicitly listed as "M2 explicitly does NOT do
+(deferred to later slices)" was never backfilled, so
+`s_front_framebuffer_texture` is republished on every clear/ensure to
+whichever single `s_color_binding` is currently bound — there is no
+per-VRAM-address surface cache and no `d->pcrtc.start + line_offset`
+lookup as the gl and vk renderers do. The NV2A-direct screenshots
+`/tmp/pgr2-nv2a-direct.000{1..4}.png` have **different dimensions**
+(2560×960 / 1280×960 / 1024×1024 / 1024×1024), proving the published
+front-fb is "whichever surface was most recently clear-bound" rather
+than the actual displayed framebuffer. Resolution: open Metal slice
+**M5.9 — per-VRAM surface cache + CRTC-aware publish** (sketch in
+the decision-log entry). M15 default-on stays BLOCKED on M5.9.
+
+For historical reference, the four superseded hypotheses were:
 
 - Wrong NV097_SET_COLOR_CLEAR_VALUE handling (clears overwriting drawn geometry).
 - Texture sampling producing transparent/invalid colors (alpha=0 or
@@ -107,6 +128,10 @@ root causes (queued for follow-up):
   PGR2's specific combiner state.
 - Surface routing publishing the wrong NV2A RT (e.g., unfilled aux
   buffer) as the framebuffer.
+
+The fourth ("surface routing") was directionally closest to the
+actual root cause; the others described downstream symptoms whose
+isolation is impossible until M5.9 lands.
 
 ## Decisions
 

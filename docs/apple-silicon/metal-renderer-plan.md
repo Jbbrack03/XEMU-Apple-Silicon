@@ -1650,7 +1650,110 @@ slices M0–M14 and opens the user-driven validation window before
 M15. See decision-log "2026-05-02: Metal slice M14 — hardening,
 doc reconciliation, M-cycle summary".
 
-### M15 — Default-on selection + GL fallback policy — **PENDING (gated on user-driven validation)**
+### M5.9 — Per-VRAM surface cache + CRTC-aware publish — **PENDING (next slice; gates M15)**
+
+**Scope.** Backfill the per-VRAM-address surface cache that M2
+deferred and that subsequent slices M3–M14 built on top of without
+addressing. ~1200 LOC port of the relevant subset of `vk/surface.c`
+(currently 1760 LOC; the mtl surface.mm is 588 LOC and is a
+single-slot M2-era manager). The cause this slice closes is documented
+in decision-log "2026-05-03: Metal magenta root-caused — missing
+per-VRAM surface cache + CRTC-aware publish".
+
+**Entry**: M14 complete (it is).
+
+**Exit**: PGR2 / Crimson / Rainbow / SC2 render visually-correct
+output through the Metal renderer at this commit's pipeline / draw /
+attribute / shader infrastructure. The published front-fb matches
+the NV2A CRTC-pointed surface, not "whichever surface was most
+recently clear-bound".
+
+**Concrete tasks**:
+
+1. Replace `s_color_binding` / `s_depth_binding` with a `QTAILQ`-backed
+   per-VRAM `SurfaceBinding` cache analogous to
+   `vk/surface.c::PGRAPHVkState.surfaces`. Keys: `vram_addr` + `size`
+   + `width` + `height` + `nv097_format` + `is_color`. LRU eviction
+   (capped count, e.g. 64 entries) plus invalidation-driven eviction
+   when the underlying VRAM range is dirtied by CPU writes.
+2. Add `pgraph_mtl_surface_get(d, addr)` and
+   `pgraph_mtl_surface_get_within(d, addr)` lookup helpers — exact
+   ports of `vk/surface.c:697-724`.
+3. Compute `vram_addr` for the current bind from
+   `NV097_SET_SURFACE_OFFSET_COLOR` / `_ZETA` (plus `surface_scale`
+   awareness). Pattern: `vk/surface.c::pgraph_vk_surface_update`.
+4. Wire `pgraph_mtl_surface_update` (currently a stub at
+   `mtl/renderer.c:963`) to call into the cache for upload (CPU→tex)
+   and download (tex→CPU). Required so that newly-bound RTs pick up
+   CPU-modified VRAM contents and so that guest-side readback works.
+5. Add CPU-write callbacks (`memory_region_set_client_dirty` +
+   per-page invalidation range tracking) so that guest writes to a
+   surface's VRAM range mark the GPU-side texture as stale. Pattern:
+   `vk/surface.c::register_cpu_access_callback` +
+   `invalidate_overlapping_surfaces`.
+6. Replace `s_front_framebuffer_texture` (and its writes at
+   `mtl/surface.mm:298` and `mtl/surface.mm:465`) with an on-demand
+   `pgraph_mtl_surface_get_crtc_surface(NV2AState *d)` that mirrors
+   `vk/renderer.c:172-205`'s `pgraph_vk_surface_get_within(d,
+   d->pcrtc.start + vga_display_params.line_offset)` lookup. Adjust
+   `pgraph_mtl_get_framebuffer_metal_texture` (currently
+   `mtl/surface.mm:477-480`) to call it; preserve the
+   `id<MTLTexture>` side-channel return semantics that the
+   `pgraph_mtl_get_framebuffer_surface` doc-comment promises.
+7. Add `METAL_FRONT_FB_PUBLISHES` always-on counter (per-interval
+   delta) and a one-shot-on-change diagnostic
+   `xemu-perf: metal_front_fb_publish vram_addr=0x.. width=W
+   height=H format=FMT reason={crtc,clear,ensure}` so that future
+   regressions of this class are detectable in counter logs without
+   requiring screenshot inspection.
+8. Audit the M5.5 / M5.7 open-pass coalescing logic
+   (`mtl/draw.mm::open_pass_ensure`) for "currently-bound surface"
+   assumptions that the new cache invalidates. The pass-key currently
+   captures `(color_tex, depth_tex, color_fmt, depth_fmt,
+   sample_count)`; with a per-VRAM cache the texture pointers will
+   stay stable across binds (no more reallocation under us), so this
+   should be net-simpler — but verify the open pass is **flushed**
+   when the bound surface changes to a different cache entry.
+9. Update `automation.md` with the `METAL_FRONT_FB_PUBLISHES`
+   counter; extend `extract-perf-summary.sh` to surface it.
+
+**Gate**: paired Metal-vs-GL screenshot capture of a PGR2 mid-route
+frame (`pgr2_gameplay_b4` snapshot) with per-pixel diff ≤ 1 % on
+combiner-correct surfaces. Existing `METAL_PIPELINE_TRANSLATED_FAILED
+== 0` and `METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT` floors hold.
+M5 shader-validation harness still 7/7 PASS. Build PASS. No GL
+renderer regression.
+
+**Risks**:
+
+- The CPU-write callback wiring touches `memory_region_*` APIs that
+  cross the QEMU memory subsystem boundary. Mirror the vk impl
+  closely; do not invent new patterns.
+- LRU eviction of a still-referenced surface during an open
+  coalesced pass would crash. Cache eviction must check
+  `s_open_pass_key.color_tex` / `.depth_tex` and either skip or
+  flush-then-evict.
+- Surface upload from VRAM (task 4) is M5.9-Part-A scope. Surface
+  download (also task 4, the read path) can ship as M5.9-Part-B if
+  Part A is too large for one slice — Part-B isn't needed for
+  visual correctness on PGR2/Rainbow/Crimson per the gl/vk reference
+  (those titles do not require GPU→CPU readback for normal
+  rendering; only `get_report` and screen-capture paths do, and the
+  former is already a separate stub).
+
+**Why this slice did not exist before.** M2 explicitly listed this
+work as deferred; the M-cycle close-out (decision-log
+"2026-05-02: Metal slice M14 — hardening, doc reconciliation,
+M-cycle summary") catalogued specific deferred items (M6 Part B,
+M8.1, M10.1, M11.1, NV2A draw-pass per-stage GPU timing,
+`XEMU_METAL_DISABLE_LOSSLESS_COMPRESSION`) but did not catalogue
+the full per-VRAM surface cache because the M2 banner placed it as
+"M3+" generic deferral rather than naming a dedicated slice. The
+2026-05-03 root-cause investigation (decision-log entry of same
+date) is the trigger for promoting that deferral to its own
+named slice.
+
+### M15 — Default-on selection + GL fallback policy — **PENDING (gated on user-driven validation; gated on M5.9)**
 
 **Scope.** Decide whether Metal becomes the default on Apple Silicon.
 Decision rule: Metal becomes default-on when:
