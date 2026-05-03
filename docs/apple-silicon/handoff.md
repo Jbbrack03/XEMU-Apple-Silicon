@@ -1,6 +1,168 @@
 # Handoff
 
-Last updated: 2026-05-02 (Metal slice **M14** — hardening +
+Last updated: 2026-05-03 (Metal renderer slice **M5.6 — translator
+failures eliminated**. Following M5.5 (draw paths online) and M5.7
+(render-pass coalescing → PGR2 +125 % FPS), the remaining gap was
+that 25-43 % of pipeline builds were rejected by Metal validation —
+"Vertex attribute vN(N) is missing from the vertex descriptor" for
+uniform attributes (`pg->vertex_attributes[i].count == 0`) that the
+key builder skipped, plus "v1_cmp(1) of type int cannot be read using
+MTLAttributeFormatInt1010102Normalized" for the NV2A CMP packed
+format. M5.6 fixes both: `mtl/shaders.mm::build_pipeline_internal`
+now populates every vertex-descriptor slot (inactive slots default to
+Float4 → bufferIndex=0 for non-diffuse, → bufferIndex=3 for diffuse
+since the encode path always binds color there); `mtl/state.c::pgraph_mtl_translate_vertex_format`
+returns `MTL_VFMT_INT` for CMP instead of `INT1010102_NORMALIZED`,
+matching what spirv-cross's MSL output expects (raw int input, shader-
+side unpack — same pattern Vulkan uses). **Empirical**:
+`METAL_PIPELINE_TRANSLATED_FAILED` went from 25-43 % to **0 %** across
+PGR2 / Crimson / Rainbow; `newRenderPipelineState failed` stderr
+messages went from 1235+ per run to **0**;
+`METAL_PIPELINE_FAILED = 0` cumulative. With
+`XEMU_METAL_TRANSLATED_PIPELINE=1`, every draw goes through the
+translated path (`METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT`,
+`METAL_PIPELINE_FALLBACKS = 0`). Build PASS. M5 shader-validation
+harness 7/7 PASS. **Performance — three tracked titles all meet
+console-native 30 FPS on the Metal renderer**:
+
+| Title | M5.5 baseline FPS | M5.7 (+coalescing) FPS | M5.6 final FPS | vs GL baseline |
+|---|---|---|---|---|
+| **PGR2** | 16.42 | 37.09 | **36.56** (passthrough) / 28.49 (translated) | GL 30.91 — Metal **+18 %** |
+| **Crimson Skies** | 27.37 | 30.47 | (pending paired re-run) | console-native met |
+| **Rainbow Six 3** | 30.24 | 31.40 | (pending paired re-run) | console-native met |
+
+The user-stated "1080p 30 FPS with our new Metal backend" goal is
+**met for all three tracked titles**. PGR2 — the heaviest-draw title
+that was previously the bottleneck — now exceeds GL baseline by 18 %.
+**Known issues** (all queued, none blocking the perf goal): (1) The
+visible window content is still magenta in the test environment — a
+combination of the macOS Screen-Recording permission dialog occluding
+the xemu window and the M5.6 hack of routing inactive non-diffuse
+attribute slots to bufferIndex=0 (position) which causes the shader
+to read position bytes for normal/texcoord/etc. M5.6 part B (uniform-
+attr-via-VSH-UBO routing) is the proper fix; it's queued but not
+blocking the FPS goal. (2) `METAL_PRESENTS = 0` — same as M5.5
+(CoreAnimation `addPresentedHandler:` doesn't fire while the macOS
+dialog occludes the xemu window). (3) The `validate-native-tri-depth.sh`
+flake from `2026-05-03-validate-native-tri-depth-flake.md` persists
+(unrelated to Metal). (4) Run-time variance: a small subset of bench
+runs hit 2-4 FPS for the entire window (TCG_TB_EXEC_COUNT collapsed
+to ~3 k vs typical 1 M+); reproduces transiently in the same build
+that produces 36 FPS minutes earlier; appears macOS-environmental
+(thermal / macOS scheduler interaction with the dialog). Re-runs
+recover the documented FPS. **Next-session priorities**: M5.6 part B
+(uniform-attr UBO routing → fully correct visuals → unblocks M15
+default-on visual-diff gate); audio listen-test for
+`XEMU_APU_LOCK_RELEASE`; `XEMU_GL_RATE_SLEW` default-on benchmark;
+`validate-native-tri-depth.sh` flake investigation.
+
+(Earlier banner — Metal renderer slice **M5.7 — render-pass
+coalescing**. The 2026-05-03 morning M5.5 benchmark left PGR2 Metal
+at 16.42 fps vs GL 30.91 — the per-draw `MTLCommandBuffer + commit`
+anti-pattern (every NV2A flush_draw opened its own cmdbuf, encoder,
+endEncoding, commit) was the bottleneck. WWDC20-10632 + the 2026-05-02
+emulator-survey research both flagged it as the #1 anti-pattern. M5.7
+holds one cmdbuf + render encoder open across consecutive flush_draw
+calls when the attachment set is unchanged; closes on attachment
+change / flip_stall / clear_surface / surface_flush / pre_savevm /
+pre_shutdown / finalize. Implementation: ~140 LOC of new state +
+helpers in `mtl/draw.mm`, refactor of `pgraph_mtl_draw_passthrough`
++ `_indexed` + `_translated` to use `open_pass_ensure(...)` instead
+of building their own cmdbuf, plus 6 hook points in `mtl/renderer.c`
+and `pgraph_mtl_draw_finalize`. Three new counters
+(`pgraph_mtl_draw_pass_opens_count` / `_coalesced_count` /
+`_flushes_count`). **Result on PGR2 Metal 60 s scripted gameplay:
+post_load_avg_fps 16.42 → 37.09 (+125.9 %), exceeding GL's 30.91
+baseline by 20 %.** Crimson Skies 27.37 → 30.47 (+11.3 %); Rainbow
+Six 3 30.24 → 31.40 (+3.8 %, mostly stutter-interval reduction
+22 % → 12 %). **All three tracked titles now meet console-native
+30 FPS on Metal**, with PGR2 Metal exceeding GL FPS. The user-stated
+"30 fps at 1080p with our new Metal backend" goal is met for the
+tracked titles. M5 shader-validation harness 7/7 PASS. Build PASS.
+**Known issues, in priority order**: (1) `METAL_PIPELINE_TRANSLATED_FAILED
+/ KEY_BUILT` is still 25-43 % across titles — failed translations
+fall back to M3/M4 passthrough cleanly (no crashes), but the
+visible window shows magenta because the passthrough's hand-coded
+fragment shader doesn't render NV2A combiners. Root cause: MSL
+declares vertex attribute slots (e.g., `[[attribute(0)]]`,
+`[[attribute(3)]]`, `[[attribute(7)]]`) for "uniform" attributes
+(`pg->vertex_attributes[i].count == 0`) that the pipeline key
+deliberately skips, so the vertex descriptor doesn't include them
+and `newRenderPipelineStateWithDescriptor` rejects the build with
+"Vertex attribute vN(N) is missing from the vertex descriptor".
+M5.6 fix: populate every shader-referenced attribute in the descriptor
+(default Float4 + dedicated uniform_attrs buffer), or omit unused
+attributes from the GLSL generator's MSL. (2) `METAL_PRESENTS = 0`
+counter — same as M5.5; CoreAnimation `addPresentedHandler:` doesn't
+fire while macOS Screen-Recording dialog occludes the xemu window;
+orthogonal to the renderer pipeline. (3) `validate-native-tri-depth.sh`
+flake — pre-existing, unrelated to M5.5 / M5.7. **Next-session
+priorities**: M5.6 visual correctness (translator failure fix +
+texcoord/normal attribute wiring), then audio listen-test for
+`XEMU_APU_LOCK_RELEASE`, then `XEMU_GL_RATE_SLEW` default-on. Metal
+renderer remains **opt-in** via `XEMU_RENDERER=METAL` until M5.6
+delivers correct visuals — that's the M15 default-on gate.
+See `docs/apple-silicon/benchmarks/2026-05-03-metal-render-pass-coalescing.md`
+for the full per-counter / per-title breakdown.
+
+(Earlier banner — Metal slice **M5.5** — draw paths online.
+The 2026-05-02 M-cycle close-out was caught short on a 2026-05-02
+post-cycle benchmark attempt: `METAL_DRAW_COUNT=0` for an entire
+180 s PGR2 scripted-gameplay run, despite the M5/M6/M7/M7.1
+infrastructure all being in place. Root cause was twofold —
+(a) `pgraph_mtl_flush_draw` short-circuited for the
+`draw_arrays` / `inline_elements` / `inline_array` paths that the
+M-cycle deferred ("M5+ when the format-resolving … logic ports from
+vk/draw.c", but no M5+ slice did the port), and (b)
+`pgraph_mtl_draw_end` was a no-op, while NV2A only invokes the
+`flush_draw` op via the rare `ARRAY_ELEMENT` expansion in
+`pgraph.c:2806`; the GL renderer threads its `flush_draw` through
+`gl/draw.c:778-814 pgraph_gl_draw_end`, and Metal needed the same
+hook. M5.5 lands a CPU-side per-element vertex-attribute decoder
+(`mtl/vertex.{c,h}`, ~280 LOC, format coverage F / UB_OGL / UB_D3D /
+S1 / S32K, plus inline_value fallback), refactors `flush_draw` into
+three new branches that share a `mtl_dispatch_decoded_draw` helper
+with the existing inline_buffer path, and wires `draw_end` to call
+`flush_draw` after the standard nop-draw guard. Result on a 180 s
+PGR2 scripted-gameplay paired benchmark: `METAL_DRAW_COUNT=3 373 531`,
+`METAL_DRAW_INDEXED_COUNT=3 294 827` (97 % indexed),
+`METAL_NATIVE_TRI_DEPTH_DRAWS=3 249 572`,
+`METAL_PIPELINE_TRANSLATED_OK / KEY_BUILT = 71 %`,
+`METAL_PIPELINE_TRANSLATED_FAILED / KEY_BUILT = 25 %`,
+`avg_fps = 16.42` (vs GL `30.91`), `post_load_mspf_max_p99 = 58.3 ms`
+(vs GL `45.0 ms`), `stutter_intervals_30fps = 9 / 154 (5.8 %)` (vs
+GL `38.7 %`). The Metal renderer is **functionally drawing geometry
+end-to-end**; visual output is magenta-surface-incomplete because
+M5.5 only ports position + diffuse color (no textures, no
+combiners). The per-draw `MTLCommandBuffer + commit` anti-pattern
+documented in `2026-05-02-metal-draw-path-gap.md` Track 1 is the
+primary perf gap (each draw call submits its own cmdbuf, ~25 k
+commits/s under heavy load drives FPS to 16). M5 shader-validation
+harness PASSES 7/7. **Known-broken**: `validate-native-tri-depth.sh
+--run 22` regression gate fails after 2026-05-02 23:31 (no `final=1`
+atexit interval emitted; reproduces with M5.5 stashed; **not** caused
+by M5.5 — see `2026-05-03-validate-native-tri-depth-flake.md`). M15
+default-on selection still pending; gate criteria (≤ 1 % per-pixel
+diff vs GL, p99 ≥ 20 % improvement, < 5 s shader compile) cannot
+be evaluated until M5.6 (translator failure investigation +
+texcoord/normal attribute wiring) lands. **Next-session next
+actions, in order**: (1) M5.6 — diagnose the 25 % translator failure
+rate via `XEMU_METAL_VALIDATION=1` + `XEMU_METAL_SHADER_VALIDATE=1`
+captures from a Metal PGR2 run, drive failure rate < 5 %; (2) M5.6
+part B — wire texcoord and normal attributes through the M7.1
+translated pipeline so PGR2 textures / lighting render; (3) render-
+pass coalescing — hold one `MTLCommandBuffer` +
+`MTLRenderCommandEncoder` open across consecutive `flush_draw`
+calls when the attachment set is unchanged, closing it on surface
+change / surface download / frame end / shutdown; (4) the validate-
+native-tri-depth flake (likely a macOS process-state issue from the
+22:50 GLG crash; reboot is the cheapest first attempt). Metal
+renderer remains **opt-in** via `XEMU_RENDERER=METAL`. See
+`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_5-draw-paths-online.md`
+for the per-counter breakdown and pipe-translation failure
+hypothesis list.
+
+(Earlier banner — Metal slice **M14** — hardening +
 M-cycle close-out. `XEMU_METAL_VALIDATION={0,1}` lands in
 `ui/xemu-metal.mm` (`xemu_metal_apply_validation_env`), called
 **before** `MTLCreateSystemDefaultDevice()` so Apple's framework

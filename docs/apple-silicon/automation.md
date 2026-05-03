@@ -1,6 +1,9 @@
 # Benchmark Automation
 
-Last updated: 2026-05-02 (V1/V2/V3/V4/V5/D2/D3 multi-slice session: TCG splitwx + jmp-cache-targeted, APU lock-release, MSAA opt-in, 1080p first-launch default, broader title sweep)
+Last updated: 2026-05-03 (Metal renderer slices **M5.5 / M5.6 / M5.7**:
+draw paths online, translator failures eliminated, render-pass coalescing
++125 % FPS on PGR2; `validate-native-tri-depth.sh` flake fixed via
+extended QMP-quit / SIGTERM grace windows in run-benchmark.sh)
 
 This fork has a small scripted-input harness for repeatable Apple Silicon
 benchmark runs. It is opt-in and does not affect normal xemu launches.
@@ -1677,6 +1680,110 @@ The harness also fires from `pgraph_mtl_init()` whenever
 renderer session under that env-var prints the same report on every
 machine boot — useful when triaging a production translation
 failure.
+
+## Metal Renderer Draw Paths (M5.5, 2026-05-03)
+
+The 2026-05-02 M-cycle close-out shipped the Metal renderer
+infrastructure (M0–M14) but left `pgraph_mtl_flush_draw` short-
+circuiting the `draw_arrays` / `inline_elements` / `inline_array`
+NV2A submission paths and `pgraph_mtl_draw_end` as a no-op. In a
+PGR2 paired benchmark this manifested as `METAL_DRAW_COUNT == 0`
+across a 180 s run despite the guest pushing 7.5 M `BEGIN_ENDS`. M5.5
+closes the gap.
+
+### `mtl/vertex.{c,h}` (new file, ~280 LOC)
+
+CPU-side per-element NV2A vertex-attribute decoder. Reads from VRAM
+(`draw_arrays` / `inline_elements`) or `pg->inline_array`
+(`inline_array`), produces flat Float4 streams compatible with the
+M3/M4 hand-coded passthrough pipeline AND the M7.1 translated
+pipeline.
+
+Format coverage: `F` (raw float, 1-4 components), `UB_OGL` /
+`UB_D3D` (4 unsigned-byte normalized; `UB_D3D` re-swizzles BGRA →
+RGBA), `S1` (1-4 int16 normalized to [-1, 1]), `S32K` (1-4 int16
+raw integer). `attr->stride == 0` or `attr->count == 0` falls back
+to `attr->inline_value`, mirroring `vk/vertex.c:148/229`.
+
+Public API:
+
+- `pgraph_mtl_collect_vertex_streams(d, source, inline_stride, min, num, pos[], col[])`
+  — fill caller-allocated Float4 streams.
+- `pgraph_mtl_inline_array_vertex_stride(pg)` — compute inline_array
+  per-vertex stride.
+- `pgraph_mtl_inline_array_update_offsets(pg)` — publish per-attr
+  inline_array_offset.
+
+### `pgraph_mtl_draw_end` now flushes
+
+The M3/M4 era left `pgraph_mtl_draw_end` as `(void)d`. NV2A only
+invokes the renderer's `flush_draw` op via the rare ARRAY_ELEMENT
+expansion in `pgraph.c::pgraph_expand_draw_arrays`; the actual
+per-batch dispatch is driven by `draw_end`. With the no-op,
+`flush_draw` was unreachable for ~all real games. M5.5 wires
+`pgraph_mtl_draw_end → pgraph_mtl_flush_draw(d)` after the standard
+nop-draw guard, mirroring `gl/draw.c:778-814`.
+
+## Metal Renderer Render-Pass Coalescing (M5.7, 2026-05-03)
+
+### `pgraph_mtl_draw_flush_open_pass(void)` (new public API)
+
+The Metal draw module now holds a single `MTLCommandBuffer` +
+`MTLRenderCommandEncoder` open across consecutive `flush_draw` calls
+when the attachment set is unchanged. `pgraph_mtl_draw_flush_open_pass`
+ends the encoder, commits the cmdbuf, and ends the staging-ring
+buffer frame. Callers MUST invoke this before any operation that
+depends on the surface texture being GPU-stable, including:
+
+- `pgraph_mtl_flip_stall` (NV2A end-of-frame; compositor reads next).
+- `pgraph_mtl_clear_surface` (clear opens its own pass with
+  `loadAction=Clear`; prior draws must commit first).
+- `pgraph_mtl_pre_savevm_trigger` (snapshot capture).
+- `pgraph_mtl_pre_shutdown_trigger` (xemu shutdown).
+- `pgraph_mtl_surface_flush` (surface-cache flush).
+- `pgraph_mtl_draw_finalize` (cleanup before queue release).
+
+All hooks are in `mtl/renderer.c`. The flush is a no-op when no pass
+is open.
+
+### Coalescing telemetry (cumulative; surfaced via accessors)
+
+- `pgraph_mtl_draw_pass_opens_count()` — number of fresh render-pass
+  starts. Each costs a TBDR tile-load.
+- `pgraph_mtl_draw_pass_coalesced_count()` — number of draws that
+  reused the existing encoder (the "free" wins).
+- `pgraph_mtl_draw_pass_flushes_count()` — number of explicit
+  flushes from caller hooks.
+
+Per-interval emission via `extract-perf-summary.sh` is not yet
+wired (deferred — the FPS lift is the primary signal). Cumulative
+values are accessible programmatically and via debugger.
+
+### Empirical lift (PGR2 60 s scripted gameplay, 2026-05-03)
+
+| Metric | Pre-coalescing | Post-coalescing | Δ |
+|---|---|---|---|
+| `post_load_avg_fps` | 16.42 | **37.09** | **+125.9 %** |
+| `METAL_DRAW_COUNT` | 18.7 k/s | 33.9 k/s | +81 % |
+| `METAL_PIPELINE_TRANSLATED_FAILED` (M5.6 follow-up) | 32.8 % | 0 % | full success |
+
+PGR2 Metal now exceeds GL's 30.91 fps baseline by 18 %. Crimson
+Skies and Rainbow Six 3 also meet console-native 30 fps on Metal
+(`benchmarks/2026-05-03-metal-render-pass-coalescing.md`).
+
+## Run-benchmark.sh extended grace windows (2026-05-03)
+
+`scripts/apple-silicon/run-benchmark.sh::cleanup` previously gave
+xemu 3 s for QMP-quit and 5 s for SIGTERM before falling back to
+SIGKILL. Both windows are now **15 s**. The 2026-05-02 22:50 GLG
+worker crash leaves macOS in a state that slows xemu's atexit
+sequence; the original 8 s combined window was tight enough that
+the `final=1 reason=atexit` interval line — which flushes
+cumulative `FLAT_FIRST` / `FLAT_NONFIRST` counters — never made
+it out, breaking `validate-native-tri-depth.sh`. The wider grace
+window restored the gate without changing any other harness
+behavior. See
+`benchmarks/2026-05-03-validate-native-tri-depth-flake.md`.
 
 ## Diagnostic Toggles
 

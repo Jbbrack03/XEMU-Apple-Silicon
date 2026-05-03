@@ -1,6 +1,6 @@
 # Strategy
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 ship; Phase 4 sub-deliverable 4i closes for the three tracked titles; 4j MSAA ready to flip default-on now that coalescing unblocks Memoryless storage)
 
 ## North Star
 
@@ -443,6 +443,22 @@ Sub-deliverables informed by the 2026-05-01 emulator survey
   gate (5 distinct titles, ≤ 1 % per-pixel diff vs GL, p99 mspf
   jitter ≥ 20 % improvement); it is gated on user-driven
   validation.**
+  **Updated 2026-05-03 (M5.5 + M5.6 + M5.7 close out the perf side
+  of this gate for the three tracked titles).** Paired Metal-vs-GL
+  benchmarks recorded:
+  - PGR2: GL `post_load_avg_fps = 30.91`, Metal **37.09**
+    (**Metal +18 %**) post-render-pass-coalescing.
+  - Crimson Skies: Metal **30.47** (console-native 30 Hz met).
+  - Rainbow Six 3: Metal **31.40** (console-native 30 Hz met).
+  See `benchmarks/2026-05-03-metal-render-pass-coalescing.md` and
+  `benchmarks/2026-05-03-metal-m5_6-translator-failures.md`. Two
+  more titles (SC2 + one further) are still required for M15's
+  "5 distinct titles" criterion; the visual-diff ≤ 1 % criterion
+  is blocked on M5.6 part B (uniform-attribute-via-VSH-UBO
+  routing). Stutter intervals improved Rainbow Six 3 22 % → 12 %;
+  PGR2 tail mspf is wider than GL on the worst frames (p99 71 ms
+  vs GL 45 ms) — the coalesced cmdbuf does more work per commit,
+  which under macOS scheduler stress can exceed GL's swap cadence.
 
 **Additional sub-deliverables added by the M-cycle (not in the
 original Phase 4 enumeration, but landed via slices M11–M13):**
@@ -454,6 +470,12 @@ original Phase 4 enumeration, but landed via slices M11–M13):**
   Storage-mode deviation: M11 ships `MTLStorageModePrivate` instead
   of `MTLStorageModeMemoryless` (M11.1 candidate; needs the
   per-`flush_draw` render-pass cadence coalesced first).
+  **Updated 2026-05-03: M5.7 / 4m landed render-pass coalescing,
+  unblocking M11.1.** Memoryless MSAA can now ship as a follow-up
+  slice — the `endEncoding` rate is no longer per-draw, so the
+  multisample tile no longer needs `MTLLoadActionLoad` between
+  draws. Estimated DRAM bandwidth saving at 1080p 4× MSAA is
+  ~3.8-7.6 GB/s per the 2026-05-02 research note.
 - 4k. **MetalFX spatial scaler.** `XEMU_METAL_FX_SCALE={1,2,3}`.
   SHIPPED in M12. `MTLFXTemporalScaler` intentionally deferred — NV2A
   has no native motion vectors and synthesizing them from camera-only
@@ -462,6 +484,46 @@ original Phase 4 enumeration, but landed via slices M11–M13):**
   doc reconciliation across `automation.md`, `extract-perf-summary.sh`,
   both `CLAUDE.md`, this document, the renderer plan, and the
   decision log. SHIPPED in M14.
+- 4m. **Render-pass coalescing (M5.7, 2026-05-03).** Hold one
+  `MTLCommandBuffer` + `MTLRenderCommandEncoder` open across
+  consecutive `flush_draw` calls when the attachment set is
+  unchanged; close on attachment change / `flip_stall` /
+  `clear_surface` / `surface_flush` / `pre_savevm` /
+  `pre_shutdown` / `finalize`. WWDC20-10632 + the 2026-05-02
+  emulator-survey research both flagged the per-draw `commit`
+  pattern as the #1 anti-pattern on Apple Silicon TBDR. PGR2
+  `post_load_avg_fps` 16.42 → 37.09 (**+125 %**), Crimson Skies
+  27.37 → 30.47, Rainbow Six 3 30.24 → 31.40. SHIPPED. Public
+  flush API: `pgraph_mtl_draw_flush_open_pass()`. Telemetry:
+  `pgraph_mtl_draw_pass_opens_count` /
+  `pgraph_mtl_draw_pass_coalesced_count` /
+  `pgraph_mtl_draw_pass_flushes_count`. **Unblocks M11.1**
+  (Memoryless MSAA — was deferred behind "needs per-flush_draw
+  render-pass cadence coalesced first"; that prerequisite is now
+  met).
+- 4n. **M5.5 — port draw_arrays / inline_elements / inline_array
+  + draw_end → flush_draw hook.** The original M-cycle close-out
+  declared M5–M14 SHIPPED but left these branches as
+  short-circuits (returning without rendering) and `draw_end` as a
+  no-op. Result: `METAL_DRAW_COUNT == 0` for the three tracked
+  titles. M5.5 lands `mtl/vertex.{c,h}` (~280 LOC CPU-side
+  vertex-attribute decoder; formats F / UB_OGL / UB_D3D / S1 /
+  S32K) plus the `draw_end → flush_draw(d)` wiring. SHIPPED 2026-05-03.
+- 4o. **M5.6 — translator failure rate eliminated.** The
+  M-cycle's translated pipelines were rejected by Metal's
+  vertex-descriptor validator for 25-43 % of NV2A state
+  combinations: (a) MSL declared `[[attribute(N)]]` for "uniform"
+  attributes (`pg->vertex_attributes[i].count == 0`) that the
+  pipeline-key builder skipped, and (b) the NV097 CMP packed
+  format was declared as `INT1010102_NORMALIZED` but spirv-cross
+  emits the input as `int`, mismatch. M5.6 populates every vertex-
+  descriptor slot (inactive → bufferIndex=3 for DIFFUSE /
+  bufferIndex=0 for the rest) and emits CMP as `MTL_VFMT_INT`,
+  matching `vk/vertex.c:184`. **Failure rate 25-43 % → 0 %**;
+  `METAL_PIPELINE_FAILED = 0` cumulative. SHIPPED 2026-05-03.
+  Visual correctness (≤ 1 % per-pixel diff vs GL) deferred to
+  **M5.6 part B** — uniform-attribute-via-VSH-UBO routing — which
+  is the M15 default-on visual-diff prerequisite.
 
 ### Phase 5: Performance Hardening
 

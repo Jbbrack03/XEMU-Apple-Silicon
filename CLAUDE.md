@@ -67,6 +67,29 @@ The fork-specific source-code changes are concentrated in:
     and the `XEMU_DIAG_*` toggles.
   - `glsl/psh.c`, `glsl/psh.h` — fragment shader depth/polygon-slope
     derivation for the native path.
+  - `mtl/` — Metal renderer (slices M0–M14 + M5.5 / M5.6 / M5.7).
+    Notable per-file scope:
+    - `renderer.c` — NV2A-side ops dispatch; `flush_draw` branches
+      for inline_buffer / inline_elements / draw_arrays / inline_array
+      (M5.5); `draw_end → flush_draw` hook; six flush hooks for the
+      M5.7 coalesced pass.
+    - `draw.mm` — open-pass coalescing (`open_pass_ensure` /
+      `open_pass_close_locked` / `pgraph_mtl_draw_flush_open_pass`)
+      shared across M3/M4 passthrough + M7.1 translated paths.
+    - `vertex.{c,h}` — **(M5.5, new)** CPU-side per-element NV2A
+      vertex-attribute decoder. Public:
+      `pgraph_mtl_collect_vertex_streams`,
+      `pgraph_mtl_inline_array_vertex_stride`,
+      `pgraph_mtl_inline_array_update_offsets`. Format coverage F /
+      UB_OGL / UB_D3D / S1 / S32K (CMP falls back to inline_value;
+      M5.6 routes the descriptor as `MTL_VFMT_INT`).
+    - `shaders.mm` — pipeline build. M5.6 populates every vertex-
+      descriptor attribute slot (inactive → bufferIndex=3 for
+      DIFFUSE, → bufferIndex=0 otherwise) so the MSL's
+      `[[attribute(N)]]` slots all resolve.
+    - `state.c` — pipeline-key builder; M5.6 maps NV097 CMP format
+      to `MTL_VFMT_INT` (raw int) instead of
+      `INT1010102_NORMALIZED` to match what spirv-cross emits.
 - `ui/xemu-input.c` — `XEMU_SCRIPTED_INPUT` (CSV replay) and
   `XEMU_RECORD_INPUT` (CSV record).
 - `ui/xemu-snapshots.c` — `XEMU_SNAPSHOT_NO_THUMBNAIL=1`.

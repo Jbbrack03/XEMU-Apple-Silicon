@@ -1,6 +1,6 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03 (M5.5 + M5.6 + M5.7 ship; PGR2 / Crimson / Rainbow Six 3 all meet console-native 30 FPS on the Metal renderer; PGR2 Metal exceeds GL by 18 %)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run
