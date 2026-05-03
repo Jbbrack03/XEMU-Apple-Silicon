@@ -198,6 +198,22 @@ __attribute__((weak)) uint64_t pgraph_mtl_draws_skipped_pending_count(void)
 {
     return 0;
 }
+
+/* M5.5+ render-pass coalescing telemetry. Strong symbols in
+ * mtl/draw.mm; weak fallback returns 0 so non-Metal builds compile. */
+__attribute__((weak)) uint64_t pgraph_mtl_draw_pass_opens_count(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_draw_pass_coalesced_count(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_draw_pass_flushes_count(void)
+{
+    return 0;
+}
+
 /* Path A (full hybrid ubershader) is deferred for M8 — see
  * docs/apple-silicon/metal-renderer-plan.md M8 entry. The accessor is
  * reserved so the per-interval counter slot is allocated and surfaces

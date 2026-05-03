@@ -46,6 +46,7 @@
 #include "surface.h"
 #include "texture.h"
 #include "uniform.h"
+#include "vertex.h"
 
 /* Shared eligibility helpers for native_tri_depth / native_quad.
  * Defined in glsl/geom.c; declared via glsl/shaders.h which the GL
@@ -130,6 +131,7 @@ static _Atomic uint64_t s_pipeline_translated_fb = 0;
  * counts permanent build failures). */
 static _Atomic uint64_t s_draws_skipped_pending  = 0;
 
+
 static void pgraph_mtl_sync(NV2AState *d)
 {
     qatomic_set(&d->pgraph.sync_pending, false);
@@ -184,6 +186,12 @@ static void mtl_get_surface_dimensions(PGRAPHState const *pg,
 static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
+
+    /* M5.5+: drain any open coalesced pass before issuing the clear.
+     * The clear opens its own render pass with loadAction=Clear which
+     * implicitly invalidates whatever was in tile memory; the prior
+     * draws must therefore be committed first or they're lost. */
+    pgraph_mtl_draw_flush_open_pass();
 
     bool write_color = (parameter & NV097_CLEAR_SURFACE_COLOR);
     bool write_zeta =
@@ -248,14 +256,50 @@ static void pgraph_mtl_draw_begin(NV2AState *d)
     (void)d;
 }
 
+static void pgraph_mtl_flush_draw(NV2AState *d);
+
 static void pgraph_mtl_draw_end(NV2AState *d)
 {
-    (void)d;
+    /* M5.5: NV2A's renderer-ops contract calls draw_end after each
+     * NV097_END to flush whatever batch was accumulated between
+     * draw_begin / draw_end. The GL renderer (gl/draw.c:814) calls
+     * pgraph_gl_flush_draw(d) here; the Metal renderer mirrors that
+     * pattern. Without this hook, the only path into Metal's
+     * flush_draw was the rare ARRAY_ELEMENT expansion in
+     * pgraph.c::pgraph_expand_draw_arrays, which is why earlier
+     * Metal benchmarks showed METAL_DRAW_COUNT == 0 even though the
+     * NV2A guest was pushing tens of thousands of draws per second. */
+    PGRAPHState *pg = &d->pgraph;
+
+    /* Skip the flush for nop-draws (color / depth / stencil all masked
+     * off). Mirrors gl/draw.c:790-812. The check is repeated here
+     * (rather than relying on flush_draw) so we get parity counters
+     * with the GL path; flush_draw doesn't currently emit a "no-op
+     * skipped" line. */
+    uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+    bool mask_alpha = control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE;
+    bool mask_red   = control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE;
+    bool mask_green = control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE;
+    bool mask_blue  = control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE;
+    bool color_write = mask_alpha || mask_red || mask_green || mask_blue;
+    bool depth_test  = control_0 & NV_PGRAPH_CONTROL_0_ZENABLE;
+    bool stencil_test =
+        pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1) &
+        NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE;
+    if (!(color_write || depth_test || stencil_test)) {
+        return;
+    }
+
+    pgraph_mtl_flush_draw(d);
 }
 
 static void pgraph_mtl_flip_stall(NV2AState *d)
 {
     (void)d;
+    /* M5.5+: NV2A is signaling end-of-frame. The compositor will
+     * pick up the framebuffer surface texture for present; flush
+     * the open coalesced pass so the GPU work is committed. */
+    pgraph_mtl_draw_flush_open_pass();
 }
 
 /* MTLPrimitiveType values, mirrored from <Metal/MTLRenderCommandEncoder.h>.
@@ -449,23 +493,238 @@ static bool mtl_inline_buffer_attrs(PGRAPHState *pg,
     return true;
 }
 
+/* M5.5: dispatch the decoded vertex / index buffers through the
+ * eligibility / translated-pipeline / passthrough machinery. Shared
+ * by every flush_draw branch (inline_buffer / inline_elements /
+ * draw_arrays / inline_array). The caller owns positions / colors /
+ * indices; this helper does not free them.
+ *
+ * `indices` is non-NULL when the caller has already built an index
+ * stream (inline_elements, or expanded triangle_fan / quads). For
+ * non-indexed Metal-native primitives, pass indices=NULL, icount=0
+ * and the helper will use drawPrimitives. */
+static void mtl_dispatch_decoded_draw(NV2AState *d,
+                                      void *color_tex, void *depth_tex,
+                                      uint32_t color_fmt, uint32_t depth_fmt,
+                                      uint32_t vp_w, uint32_t vp_h,
+                                      const float *positions,
+                                      const float *colors,
+                                      unsigned int vcount,
+                                      const uint32_t *indices,
+                                      unsigned int icount,
+                                      bool native_tri, bool native_quad)
+{
+    PGRAPHState *pg = &d->pgraph;
+    if (vcount == 0) {
+        return;
+    }
+
+    uint32_t variant = (native_tri || native_quad)
+                           ? MTL_DRAW_VARIANT_NATIVE_DEPTH
+                           : MTL_DRAW_VARIANT_PASSTHROUGH;
+
+    /* Translated-pipeline lookup (shared with the original
+     * inline_buffer flow). */
+    void *translated_pipeline = NULL;
+    bool  translated_pending  = false;
+    if (!mtl_force_passthrough()) {
+        PgraphMtlPipelineKey key;
+        if (pgraph_mtl_build_pipeline_key(d, color_fmt, depth_fmt,
+                                          s_metal_msaa_sample_count, &key)) {
+            atomic_fetch_add(&s_pipeline_key_built, 1);
+            PgraphMtlPipelineLookupState st;
+            void *ps = pgraph_mtl_shaders_get_pipeline_ex(&key, &st);
+            if (st == PGRAPH_MTL_PIPELINE_READY && ps != NULL) {
+                atomic_fetch_add(&s_pipeline_translated_ok, 1);
+                translated_pipeline = ps;
+            } else if (st == PGRAPH_MTL_PIPELINE_PENDING) {
+                translated_pending = true;
+            } else {
+                atomic_fetch_add(&s_pipeline_translated_fb, 1);
+            }
+        }
+    }
+
+    if (translated_pending && mtl_use_translated_pipeline() &&
+        !mtl_force_passthrough()) {
+        atomic_fetch_add(&s_draws_skipped_pending, 1);
+        return;
+    }
+
+    bool use_translated_path =
+        translated_pipeline != NULL && mtl_use_translated_pipeline() &&
+        !mtl_force_passthrough();
+
+    bool drew = false;
+
+    if (use_translated_path) {
+        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
+            (void)pgraph_mtl_texture_bind_from_pg(pg, t);
+        }
+
+        ShaderState ss = pgraph_glsl_get_shader_state(pg);
+        pgraph_mtl_uniform_begin_frame();
+
+        void *vsh_ubo = NULL, *psh_ubo = NULL;
+        size_t vsh_off = 0, psh_off = 0;
+        size_t vsh_size =
+            pgraph_mtl_uniform_stage_vsh(pg, &ss.vsh, &vsh_ubo, &vsh_off);
+        size_t psh_size =
+            pgraph_mtl_uniform_stage_psh(pg, &ss.psh, &psh_ubo, &psh_off);
+
+        void *stage_tex[4] = { NULL, NULL, NULL, NULL };
+        void *stage_smp[4] = { NULL, NULL, NULL, NULL };
+        void *default_smp = pgraph_mtl_texture_get_default_sampler();
+        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
+            stage_tex[t] = pgraph_mtl_texture_get_metal_texture(t);
+            stage_smp[t] = pgraph_mtl_texture_get_sampler_state(t);
+            if (stage_smp[t] == NULL) {
+                stage_smp[t] = default_smp;
+            }
+        }
+
+        uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
+        if (indices != NULL && icount > 0) {
+            /* Caller already built an index stream (inline_elements,
+             * or expanded primitive). Use it as-is. */
+            uint32_t prim = mtl_prim;
+            if (prim == 0xFFFFFFFF) {
+                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
+            }
+            if (prim != 0xFFFFFFFF) {
+                pgraph_mtl_draw_translated(translated_pipeline,
+                                           positions, colors, vcount,
+                                           indices, icount,
+                                           prim, vp_w, vp_h,
+                                           color_tex, depth_tex,
+                                           depth_fmt,
+                                           vsh_ubo, vsh_off, vsh_size,
+                                           psh_ubo, psh_off, psh_size,
+                                           stage_tex, stage_smp);
+                drew = true;
+            }
+        } else if (mtl_prim != 0xFFFFFFFF) {
+            pgraph_mtl_draw_translated(translated_pipeline,
+                                       positions, colors, vcount,
+                                       NULL, 0,
+                                       mtl_prim,
+                                       vp_w, vp_h, color_tex, depth_tex,
+                                       depth_fmt,
+                                       vsh_ubo, vsh_off, vsh_size,
+                                       psh_ubo, psh_off, psh_size,
+                                       stage_tex, stage_smp);
+            drew = true;
+        } else {
+            uint32_t expanded_prim =
+                mtl_translate_expanded_primitive(pg->primitive_mode);
+            if (expanded_prim != 0xFFFFFFFF) {
+                size_t cap = mtl_expanded_index_capacity(pg->primitive_mode,
+                                                          vcount);
+                if (cap > 0) {
+                    uint32_t *exp_idx = g_malloc_n(cap, sizeof(uint32_t));
+                    unsigned int eicount =
+                        mtl_expand_indices(pg->primitive_mode, exp_idx, cap,
+                                           vcount);
+                    if (eicount > 0) {
+                        pgraph_mtl_draw_translated(translated_pipeline,
+                                                   positions, colors, vcount,
+                                                   exp_idx, eicount,
+                                                   expanded_prim, vp_w, vp_h,
+                                                   color_tex, depth_tex,
+                                                   depth_fmt,
+                                                   vsh_ubo, vsh_off, vsh_size,
+                                                   psh_ubo, psh_off, psh_size,
+                                                   stage_tex, stage_smp);
+                        drew = true;
+                    }
+                    g_free(exp_idx);
+                }
+            }
+        }
+
+        pgraph_mtl_uniform_end_frame();
+    } else {
+        if (mtl_use_translated_pipeline() && translated_pipeline == NULL &&
+            !mtl_force_passthrough()) {
+            pgraph_mtl_draw_inc_pipeline_fallback_count();
+        }
+
+        uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
+        if (indices != NULL && icount > 0) {
+            uint32_t prim = mtl_prim;
+            if (prim == 0xFFFFFFFF) {
+                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
+            }
+            if (prim != 0xFFFFFFFF) {
+                pgraph_mtl_draw_indexed(positions, colors, vcount,
+                                        indices, icount,
+                                        prim, variant,
+                                        vp_w, vp_h, color_tex, depth_tex,
+                                        color_fmt, depth_fmt);
+                drew = true;
+            }
+        } else if (mtl_prim != 0xFFFFFFFF) {
+            pgraph_mtl_draw_passthrough(positions, colors, vcount, mtl_prim,
+                                        variant, vp_w, vp_h,
+                                        color_tex, depth_tex,
+                                        color_fmt, depth_fmt);
+            drew = true;
+        } else {
+            uint32_t expanded_prim =
+                mtl_translate_expanded_primitive(pg->primitive_mode);
+            if (expanded_prim != 0xFFFFFFFF) {
+                size_t cap =
+                    mtl_expanded_index_capacity(pg->primitive_mode, vcount);
+                if (cap > 0) {
+                    uint32_t *exp_idx = g_malloc_n(cap, sizeof(uint32_t));
+                    unsigned int eicount =
+                        mtl_expand_indices(pg->primitive_mode, exp_idx, cap,
+                                           vcount);
+                    if (eicount > 0) {
+                        pgraph_mtl_draw_indexed(positions, colors, vcount,
+                                                exp_idx, eicount,
+                                                expanded_prim, variant,
+                                                vp_w, vp_h,
+                                                color_tex, depth_tex,
+                                                color_fmt, depth_fmt);
+                        drew = true;
+                    }
+                    g_free(exp_idx);
+                }
+            }
+        }
+    }
+
+    if (drew) {
+        if (native_tri) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
+            pgraph_mtl_draw_inc_native_tri_depth_count();
+        }
+        if (native_quad) {
+            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW);
+            pgraph_mtl_draw_inc_native_quad_count();
+            if (pg->primitive_mode == PRIM_TYPE_QUADS) {
+                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_LIST);
+            } else if (pg->primitive_mode == PRIM_TYPE_QUAD_STRIP) {
+                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_STRIP);
+            }
+        }
+        if (color_tex) pg->surface_color.draw_dirty = true;
+        if (depth_tex) pg->surface_zeta.draw_dirty = true;
+    }
+}
+
 static void pgraph_mtl_flush_draw(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
 
-    /* Only the inline_buffer path is implemented through M4 (the
-     * NV2A immediate-mode submission path the upstream renderers
-     * identify by `pg->inline_buffer_length > 0`). The
-     * draw_arrays / inline_elements / inline_array paths land
-     * with M5+ when the format-resolving / aligned-vertex-buffer
-     * remap logic ports from vk/draw.c. */
-    if (pg->draw_arrays_length || pg->inline_elements_length ||
-        pg->inline_array_length) {
+    if (pg->inline_buffer_length == 0 &&
+        pg->inline_elements_length == 0 &&
+        pg->draw_arrays_length == 0 &&
+        pg->inline_array_length == 0) {
         return;
     }
-    if (pg->inline_buffer_length == 0) {
-        return;
-    }
+
 
     /* Ensure surface bindings exist that match the current shape. M2
      * already does this for clear; for draw we must do the same in
@@ -498,6 +757,106 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
         color_fmt = 0;
     }
 
+    bool native_tri  = mtl_native_tri_depth_eligible(pg);
+    bool native_quad = mtl_native_quad_eligible(pg);
+
+    /* M5.5: inline_elements branch. Build a positions/colors stream
+     * for [min..max] guest elements, offset indices by min so the
+     * first decoded element is index 0 in the local arrays. */
+    if (pg->inline_elements_length > 0) {
+        uint32_t min_e = (uint32_t)-1, max_e = 0;
+        for (unsigned int i = 0; i < pg->inline_elements_length; i++) {
+            uint32_t e = pg->inline_elements[i];
+            if (e < min_e) min_e = e;
+            if (e > max_e) max_e = e;
+        }
+        if (min_e == (uint32_t)-1) {
+            return;
+        }
+        uint32_t span = max_e - min_e + 1;
+        float *pos = g_malloc_n(span * 4, sizeof(float));
+        float *col = g_malloc_n(span * 4, sizeof(float));
+        pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
+                                          min_e, span, pos, col);
+
+        uint32_t *idx = g_malloc_n(pg->inline_elements_length,
+                                    sizeof(uint32_t));
+        for (unsigned int i = 0; i < pg->inline_elements_length; i++) {
+            idx[i] = pg->inline_elements[i] - min_e;
+        }
+
+        mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
+                                  color_fmt, depth_fmt, vp_w, vp_h,
+                                  pos, col, span,
+                                  idx, pg->inline_elements_length,
+                                  native_tri, native_quad);
+
+        g_free(idx);
+        g_free(col);
+        g_free(pos);
+        return;
+    }
+
+    /* M5.5: draw_arrays branch. Decode each draw_arrays_start[i] /
+     * count[i] subrange independently — matches the GL/VK pattern of
+     * one drawcall per subrange. */
+    if (pg->draw_arrays_length > 0) {
+        for (int i = 0; i < pg->draw_arrays_length; i++) {
+            uint32_t start = pg->draw_arrays_start[i];
+            uint32_t count = pg->draw_arrays_count[i];
+            if (count == 0) {
+                continue;
+            }
+            float *pos = g_malloc_n(count * 4, sizeof(float));
+            float *col = g_malloc_n(count * 4, sizeof(float));
+            pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_VRAM, 0,
+                                              start, count, pos, col);
+
+            mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
+                                      color_fmt, depth_fmt, vp_w, vp_h,
+                                      pos, col, count,
+                                      NULL, 0,
+                                      native_tri, native_quad);
+
+            g_free(col);
+            g_free(pos);
+        }
+        return;
+    }
+
+    /* M5.5: inline_array branch. Compute the per-vertex stride from
+     * the active attribute set, publish each attribute's
+     * inline_array_offset, then decode pg->inline_array. */
+    if (pg->inline_array_length > 0) {
+        unsigned int vertex_stride = pgraph_mtl_inline_array_vertex_stride(pg);
+        if (vertex_stride == 0) {
+            return;
+        }
+        pgraph_mtl_inline_array_update_offsets(pg);
+        unsigned int vcount =
+            pg->inline_array_length * 4u / vertex_stride;
+        if (vcount == 0) {
+            return;
+        }
+        float *pos = g_malloc_n(vcount * 4, sizeof(float));
+        float *col = g_malloc_n(vcount * 4, sizeof(float));
+        pgraph_mtl_collect_vertex_streams(d, MTL_VERTEX_SRC_INLINE_ARRAY,
+                                          vertex_stride, 0, vcount, pos, col);
+
+        mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
+                                  color_fmt, depth_fmt, vp_w, vp_h,
+                                  pos, col, vcount,
+                                  NULL, 0,
+                                  native_tri, native_quad);
+
+        g_free(col);
+        g_free(pos);
+        return;
+    }
+
+
+    /* inline_buffer fallback (original M3/M4 path) — share the
+     * dispatch helper with the new branches above. */
     unsigned int vcount = pg->inline_buffer_length;
 
     const float *positions = NULL;
@@ -507,276 +866,15 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
         return;
     }
 
-    /* Decide which fragment-shader variant to run.
-     *
-     * The Metal port follows metal-renderer-plan.md §3.8: native_tri_
-     * depth and native_quad are the *only* path on Metal (Apple has
-     * no geometry shader stage), so the eligibility check determines
-     * only which fragment-shader variant we use — there is no GL-
-     * style "geometry shader fallback" to drop into. When the draw is
-     * NOT eligible for the native path (e.g. flat-non-first-provoking
-     * triangles, or non-fill polygon mode), the M4 renderer still
-     * draws via the passthrough path — depth will not match PR #2240
-     * exactly for those cases. The full GL parity for those edge
-     * cases lands when M5 ports the real PSH; in M4 the eligibility
-     * gate exists primarily so the counters parallel the GL split.
-     *
-     * Counter parity rationale: native_tri_depth_eligible and
-     * native_quad_eligible run the *same* helpers as the GL path
-     * (pgraph_glsl_native_tri_depth_supported /
-     * pgraph_glsl_native_quad_supported, gated by
-     * pgraph_glsl_native_*_enabled). With XEMU_NATIVE_TRI_DEPTH=1 and
-     * XEMU_NATIVE_QUAD=1 default-on (CLAUDE.md rule #11), the
-     * candidate counters drive identically across renderers. */
-    bool native_tri = mtl_native_tri_depth_eligible(pg);
-    bool native_quad = mtl_native_quad_eligible(pg);
-    uint32_t variant = (native_tri || native_quad)
-                           ? MTL_DRAW_VARIANT_NATIVE_DEPTH
-                           : MTL_DRAW_VARIANT_PASSTHROUGH;
-
-    /* M7.1 / M8: state-to-PipelineKey + translated-pipeline lookup +
-     * optional encode swap. Always exercises the build path so the
-     * cache warms up; the lookup counter parallels gl_shader_compile_count.
-     *
-     * M8 adds tri-state result: READY / PENDING / FAILED. PENDING means
-     * an async build is in flight — when the user has opted into the
-     * translated pipeline (XEMU_METAL_TRANSLATED_PIPELINE=1), PENDING
-     * causes the draw to be skipped (RPCS3 "skip the draw" pattern;
-     * brief visual artifact rather than a frame stall). When the
-     * translated pipeline is NOT opted in, PENDING is treated like
-     * "ready elsewhere" for cache-warmup purposes and we fall through
-     * to the M3/M4 hand-coded passthrough.
-     *
-     * Encode path selection:
-     *   - XEMU_METAL_FORCE_PASSTHROUGH=1 → M3/M4 passthrough (debug).
-     *   - XEMU_METAL_TRANSLATED_PIPELINE=1 + lookup READY → translated.
-     *   - XEMU_METAL_TRANSLATED_PIPELINE=1 + lookup PENDING → skip draw.
-     *   - XEMU_METAL_TRANSLATED_PIPELINE=1 + lookup FAILED → passthrough fallback.
-     *   - otherwise → M3/M4 passthrough. */
-    void *translated_pipeline = NULL;
-    bool  translated_pending  = false;
-    if (!mtl_force_passthrough()) {
-        PgraphMtlPipelineKey key;
-        if (pgraph_mtl_build_pipeline_key(d, color_fmt, depth_fmt,
-                                          s_metal_msaa_sample_count,
-                                          &key)) {
-            atomic_fetch_add(&s_pipeline_key_built, 1);
-            PgraphMtlPipelineLookupState st;
-            void *ps = pgraph_mtl_shaders_get_pipeline_ex(&key, &st);
-            if (st == PGRAPH_MTL_PIPELINE_READY && ps != NULL) {
-                atomic_fetch_add(&s_pipeline_translated_ok, 1);
-                translated_pipeline = ps;
-            } else if (st == PGRAPH_MTL_PIPELINE_PENDING) {
-                translated_pending = true;
-            } else {
-                atomic_fetch_add(&s_pipeline_translated_fb, 1);
-            }
-        }
-    }
-
-    /* If the user opted into the translated pipeline and the cache is
-     * still building, skip the draw rather than block on synchronous
-     * compile. Visual artifact (briefly missing geometry) instead of a
-     * frame stall. M8 cold-launch behavior. */
-    if (translated_pending && mtl_use_translated_pipeline() &&
-        !mtl_force_passthrough()) {
-        atomic_fetch_add(&s_draws_skipped_pending, 1);
-        if (synth) {
-            g_free(synth);
-        }
-        return;
-    }
-
-    bool use_translated_path =
-        translated_pipeline != NULL && mtl_use_translated_pipeline() &&
-        !mtl_force_passthrough();
-
-    if (use_translated_path) {
-        /* Bind per-stage textures from PGRAPHState. Each stage that
-         * fails (disabled / unsupported format) is unbound — the PSH
-         * still gets the default sampler so MSL-bound textures don't
-         * crash, but no real texture is sampled. */
-        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
-            (void)pgraph_mtl_texture_bind_from_pg(pg, t);
-        }
-
-        /* Build the typed VSH/PSH state and pack std140 UBOs. */
-        ShaderState ss = pgraph_glsl_get_shader_state(pg);
-
-        pgraph_mtl_uniform_begin_frame();
-
-        void *vsh_ubo = NULL, *psh_ubo = NULL;
-        size_t vsh_off = 0, psh_off = 0;
-        size_t vsh_size =
-            pgraph_mtl_uniform_stage_vsh(pg, &ss.vsh, &vsh_ubo, &vsh_off);
-        size_t psh_size =
-            pgraph_mtl_uniform_stage_psh(pg, &ss.psh, &psh_ubo, &psh_off);
-
-        /* Collect per-stage texture/sampler pointers. */
-        void *stage_tex[4]  = { NULL, NULL, NULL, NULL };
-        void *stage_smp[4]  = { NULL, NULL, NULL, NULL };
-        void *default_smp = pgraph_mtl_texture_get_default_sampler();
-        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
-            stage_tex[t] = pgraph_mtl_texture_get_metal_texture(t);
-            stage_smp[t] = pgraph_mtl_texture_get_sampler_state(t);
-            if (stage_smp[t] == NULL) {
-                stage_smp[t] = default_smp;
-            }
-        }
-
-        /* Pick the primitive type. We reuse the same expansion logic
-         * as the passthrough path — when the NV2A primitive isn't
-         * native Metal, expand to triangles via the index generator. */
-        uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
-        bool drew = false;
-        if (mtl_prim != 0xFFFFFFFF) {
-            pgraph_mtl_draw_translated(translated_pipeline,
-                                       positions, colors, vcount,
-                                       /*indices=*/NULL, /*icount=*/0,
-                                       mtl_prim,
-                                       vp_w, vp_h, color_tex, depth_tex,
-                                       depth_fmt,
-                                       vsh_ubo, vsh_off, vsh_size,
-                                       psh_ubo, psh_off, psh_size,
-                                       stage_tex, stage_smp);
-            drew = true;
-        } else {
-            uint32_t expanded_prim =
-                mtl_translate_expanded_primitive(pg->primitive_mode);
-            if (expanded_prim != 0xFFFFFFFF) {
-                size_t cap = mtl_expanded_index_capacity(pg->primitive_mode,
-                                                          vcount);
-                if (cap > 0) {
-                    uint32_t *indices = g_malloc_n(cap, sizeof(uint32_t));
-                    unsigned int icount =
-                        mtl_expand_indices(pg->primitive_mode,
-                                           indices, cap, vcount);
-                    if (icount > 0) {
-                        pgraph_mtl_draw_translated(translated_pipeline,
-                                                   positions, colors, vcount,
-                                                   indices, icount,
-                                                   expanded_prim,
-                                                   vp_w, vp_h,
-                                                   color_tex, depth_tex,
-                                                   depth_fmt,
-                                                   vsh_ubo, vsh_off, vsh_size,
-                                                   psh_ubo, psh_off, psh_size,
-                                                   stage_tex, stage_smp);
-                        drew = true;
-                    }
-                    g_free(indices);
-                }
-            }
-        }
-
-        pgraph_mtl_uniform_end_frame();
-
-        if (drew) {
-            if (native_tri) {
-                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
-                pgraph_mtl_draw_inc_native_tri_depth_count();
-            }
-            if (native_quad) {
-                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW);
-                pgraph_mtl_draw_inc_native_quad_count();
-                if (pg->primitive_mode == PRIM_TYPE_QUADS) {
-                    nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_LIST);
-                } else if (pg->primitive_mode == PRIM_TYPE_QUAD_STRIP) {
-                    nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_STRIP);
-                }
-            }
-            if (color_tex) pg->surface_color.draw_dirty = true;
-            if (depth_tex) pg->surface_zeta.draw_dirty = true;
-        }
-
-        if (synth) g_free(synth);
-        return;
-    }
-
-    /* Fallback: M3/M4 passthrough. If translation was attempted and
-     * failed (translated_pipeline == NULL while user requested it),
-     * count the fallback. */
-    if (mtl_use_translated_pipeline() && translated_pipeline == NULL &&
-        !mtl_force_passthrough()) {
-        pgraph_mtl_draw_inc_pipeline_fallback_count();
-    }
-
-    /* Try the non-indexed path first for primitives Metal handles
-     * natively. */
-    uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
-    bool drew = false;
-
-    if (mtl_prim != 0xFFFFFFFF) {
-        pgraph_mtl_draw_passthrough(positions, colors, vcount, mtl_prim,
-                                    variant, vp_w, vp_h,
-                                    color_tex, depth_tex,
-                                    color_fmt, depth_fmt);
-        drew = true;
-    } else {
-        /* Index-expanded path. */
-        uint32_t expanded_prim =
-            mtl_translate_expanded_primitive(pg->primitive_mode);
-        if (expanded_prim != 0xFFFFFFFF) {
-            size_t cap =
-                mtl_expanded_index_capacity(pg->primitive_mode, vcount);
-            if (cap > 0) {
-                uint32_t *indices = g_malloc_n(cap, sizeof(uint32_t));
-                unsigned int icount =
-                    mtl_expand_indices(pg->primitive_mode,
-                                       indices, cap, vcount);
-                if (icount > 0) {
-                    pgraph_mtl_draw_indexed(positions, colors, vcount,
-                                            indices, icount,
-                                            expanded_prim, variant,
-                                            vp_w, vp_h,
-                                            color_tex, depth_tex,
-                                            color_fmt, depth_fmt);
-                    drew = true;
-                }
-                g_free(indices);
-            }
-        }
-    }
-
-    if (drew) {
-        /* Drive the parallel GL/Metal counters so
-         * extract-perf-summary.sh's existing
-         * NATIVE_TRI_DEPTH_DRAW / NATIVE_QUAD_DRAW columns describe
-         * the Metal renderer too. METAL_NATIVE_TRI_DEPTH_DRAWS and
-         * METAL_NATIVE_QUAD_DRAWS are separate, Metal-only counters
-         * exposed via the draw module's atomics. */
-        if (native_tri) {
-            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
-            pgraph_mtl_draw_inc_native_tri_depth_count();
-        }
-        if (native_quad) {
-            nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW);
-            pgraph_mtl_draw_inc_native_quad_count();
-            if (pg->primitive_mode == PRIM_TYPE_QUADS) {
-                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_LIST);
-            } else if (pg->primitive_mode == PRIM_TYPE_QUAD_STRIP) {
-                nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW_STRIP);
-            }
-        }
-    }
+    mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
+                              color_fmt, depth_fmt, vp_w, vp_h,
+                              positions, colors, vcount,
+                              NULL, 0,
+                              native_tri, native_quad);
 
     if (synth) {
         g_free(synth);
     }
-
-    /* Mark the color binding dirty so the compositor re-samples it
-     * next present. */
-    if (color_tex) {
-        pg->surface_color.draw_dirty = true;
-    }
-    if (depth_tex) {
-        pg->surface_zeta.draw_dirty = true;
-    }
-
-    /* Reset the inline_buffer state for the next batch. The upstream
-     * renderers do this via pgraph_reset_inline_buffers(); we don't
-     * call that here because pgraph.c may also reset it as part of
-     * its own per-batch sequencing. */
 }
 
 static void pgraph_mtl_get_report(NV2AState *d, uint32_t parameter)
@@ -790,6 +888,9 @@ static void pgraph_mtl_image_blit(NV2AState *d)
 
 static void pgraph_mtl_pre_savevm_trigger(NV2AState *d)
 {
+    /* M5.5+: drain any open coalesced pass before snapshotting so the
+     * post-restore renderer doesn't trip over an in-flight encoder. */
+    pgraph_mtl_draw_flush_open_pass();
 }
 
 static void pgraph_mtl_pre_savevm_wait(NV2AState *d)
@@ -798,6 +899,8 @@ static void pgraph_mtl_pre_savevm_wait(NV2AState *d)
 
 static void pgraph_mtl_pre_shutdown_trigger(NV2AState *d)
 {
+    /* M5.5+: drain before shutdown for the same reason as savevm. */
+    pgraph_mtl_draw_flush_open_pass();
 }
 
 static void pgraph_mtl_pre_shutdown_wait(NV2AState *d)
@@ -819,8 +922,11 @@ static void pgraph_mtl_surface_update(NV2AState *d, bool upload,
 
 static void pgraph_mtl_surface_flush(NV2AState *d)
 {
-    /* No surface cache to flush yet — bindings persist for the lifetime
-     * of the renderer in M2. */
+    /* M5.5+: drain any open coalesced pass so the surface texture is
+     * GPU-stable for whatever consumer the upstream caller had in
+     * mind. The surface cache itself is still M2-era (bindings persist
+     * for the lifetime of the renderer). */
+    pgraph_mtl_draw_flush_open_pass();
 }
 
 static void pgraph_mtl_set_surface_scale_factor(NV2AState *d,
@@ -1060,3 +1166,4 @@ uint64_t pgraph_mtl_draws_skipped_pending_count(void)
 {
     return atomic_load(&s_draws_skipped_pending);
 }
+

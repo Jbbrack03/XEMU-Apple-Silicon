@@ -173,6 +173,25 @@ void     pgraph_mtl_draw_inc_pipeline_fallback_count(void);
 void pgraph_mtl_draw_inc_native_tri_depth_count(void);
 void pgraph_mtl_draw_inc_native_quad_count(void);
 
+/* M5.5+: render-pass coalescing.
+ *
+ * The draw module now holds a single MTLCommandBuffer +
+ * MTLRenderCommandEncoder open across consecutive flush_draw calls
+ * with identical attachment sets. Callers MUST invoke this flush
+ * before any operation that depends on the surface texture being
+ * stable on the GPU, including:
+ *   - flip_stall (NV2A signaled end of frame; compositor reads next).
+ *   - clear_surface (clear opens its own pass with loadAction=Clear).
+ *   - get_framebuffer_surface (compositor sees the texture).
+ *   - savevm / shutdown / surface_flush.
+ */
+void pgraph_mtl_draw_flush_open_pass(void);
+
+/* Coalescing telemetry. */
+uint64_t pgraph_mtl_draw_pass_opens_count(void);
+uint64_t pgraph_mtl_draw_pass_coalesced_count(void);
+uint64_t pgraph_mtl_draw_pass_flushes_count(void);
+
 #ifdef __cplusplus
 }
 #endif

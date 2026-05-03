@@ -68,6 +68,47 @@ static _Atomic(uint64_t)   s_draw_native_quad_count = 0;
 static _Atomic(uint64_t)   s_draw_translated_count = 0;
 static _Atomic(uint64_t)   s_draw_pipeline_fallback_count = 0;
 
+/* M5.5+ render-pass coalescing.
+ *
+ * Apple Silicon's TBDR makes every render-pass start expensive (tile-
+ * load) and every store expensive (tile-store). The pre-coalescing
+ * Metal renderer opened a fresh `MTLCommandBuffer` + render-encoder +
+ * `commit` for each NV2A flush_draw — at PGR2's ~22 k draws/s, that
+ * was ~22 k cmdbuf commits/s, each forcing a CPU↔GPU sync. The
+ * 2026-05-03 paired Metal/GL bench measured PGR2 at 16 fps vs GL 31.
+ *
+ * Coalescing rule (per WWDC20-10632 + emulator-survey research):
+ * hold one cmdbuf+encoder open across consecutive draws when the
+ * attachment set is unchanged. Close on attachment change, frame-end
+ * (flip_stall), clear, surface flush, or shutdown.
+ *
+ * The "open pass" state is single-instance because the renderer is
+ * driven by the iothread / NV2A worker. Every draw entry is a single
+ * caller mutating these statics under the implicit pgraph lock.
+ *
+ * Functions:
+ *   open_pass_ensure(...)  — ensure an encoder is open matching the
+ *                             passed attachments; close+reopen on
+ *                             mismatch.
+ *   pgraph_mtl_draw_flush_open_pass() — close+commit any open pass.
+ */
+static id<MTLCommandBuffer>       s_open_cmd = nil;
+static id<MTLRenderCommandEncoder> s_open_enc = nil;
+static struct {
+    void     *color_tex;
+    void     *depth_tex;
+    uint32_t  color_fmt;
+    uint32_t  depth_fmt;
+    uint32_t  sample_count;
+} s_open_pass_key;
+static bool s_open_buffer_frame_active = false;
+
+/* Per-interval coalescing telemetry (surfaced via accessors at file
+ * end; xemu-metal-perf.c emits as METAL_PASS_OPENS / _COALESCED). */
+static _Atomic(uint64_t) s_open_pass_opens     = 0;
+static _Atomic(uint64_t) s_open_pass_coalesced = 0;
+static _Atomic(uint64_t) s_open_pass_flushes   = 0;
+
 bool pgraph_mtl_draw_init(void)
 {
     if (s_initialized) {
@@ -104,6 +145,11 @@ void pgraph_mtl_draw_finalize(void)
     if (!s_initialized) {
         return;
     }
+    /* M5.5+: drain any open coalesced pass before tearing down the
+     * queue. Calling endEncoding/commit on a queue that's about to
+     * release would otherwise leak GPU work. */
+    extern void pgraph_mtl_draw_flush_open_pass(void);
+    pgraph_mtl_draw_flush_open_pass();
     s_draw_queue = nil;
     s_device = nil;
     s_initialized = false;
@@ -217,6 +263,94 @@ static void *select_pipeline(uint32_t variant, uint32_t color_fmt,
                                                 samples);
 }
 
+/* -------- M5.5+ open-pass helpers -------- */
+
+static bool open_pass_matches(void *color_tex, void *depth_tex,
+                              uint32_t color_fmt, uint32_t depth_fmt,
+                              uint32_t sample_count)
+{
+    if (s_open_enc == nil) return false;
+    return s_open_pass_key.color_tex   == color_tex &&
+           s_open_pass_key.depth_tex   == depth_tex &&
+           s_open_pass_key.color_fmt   == color_fmt &&
+           s_open_pass_key.depth_fmt   == depth_fmt &&
+           s_open_pass_key.sample_count == sample_count;
+}
+
+static void open_pass_close_locked(void)
+{
+    if (s_open_enc != nil) {
+        [s_open_enc endEncoding];
+        s_open_enc = nil;
+    }
+    if (s_open_cmd != nil) {
+        [s_open_cmd commit];
+        s_open_cmd = nil;
+    }
+    if (s_open_buffer_frame_active) {
+        pgraph_mtl_buffer_end_frame();
+        s_open_buffer_frame_active = false;
+    }
+    memset(&s_open_pass_key, 0, sizeof(s_open_pass_key));
+}
+
+/* Ensure an open render encoder matching the supplied attachment set.
+ * Returns the encoder (caller does not retain). On mismatch, the
+ * existing pass is committed and a fresh one opened. The first call
+ * since flush also calls pgraph_mtl_buffer_begin_frame() so the
+ * staging-ring has a valid frame for vertex stage allocations. */
+static id<MTLRenderCommandEncoder>
+open_pass_ensure(void *color_tex, void *depth_tex,
+                 uint32_t color_fmt, uint32_t depth_fmt,
+                 uint32_t sample_count)
+{
+    if (open_pass_matches(color_tex, depth_tex, color_fmt, depth_fmt,
+                          sample_count)) {
+        atomic_fetch_add(&s_open_pass_coalesced, 1);
+        return s_open_enc;
+    }
+
+    open_pass_close_locked();
+
+    if (!s_open_buffer_frame_active) {
+        pgraph_mtl_buffer_begin_frame();
+        s_open_buffer_frame_active = true;
+    }
+
+    @autoreleasepool {
+        MTLRenderPassDescriptor *desc =
+            build_render_pass_descriptor(color_tex, depth_tex, depth_fmt);
+
+        s_open_cmd = [s_draw_queue commandBuffer];
+        s_open_cmd.label = @"xemu.metal.coalesced_draw";
+        mtl_draw_wait_upload_fence(s_open_cmd);
+
+        s_open_enc = [s_open_cmd renderCommandEncoderWithDescriptor:desc];
+        s_open_enc.label = @"xemu.metal.coalesced_enc";
+    }
+
+    s_open_pass_key.color_tex    = color_tex;
+    s_open_pass_key.depth_tex    = depth_tex;
+    s_open_pass_key.color_fmt    = color_fmt;
+    s_open_pass_key.depth_fmt    = depth_fmt;
+    s_open_pass_key.sample_count = sample_count;
+
+    atomic_fetch_add(&s_open_pass_opens, 1);
+    return s_open_enc;
+}
+
+/* External entry point — invoked from renderer.c at flip_stall, before
+ * clear_surface, before shutdown, and (eventually) before the
+ * compositor reads the surface texture for present. */
+extern "C" void pgraph_mtl_draw_flush_open_pass(void)
+{
+    if (s_open_enc != nil || s_open_cmd != nil ||
+        s_open_buffer_frame_active) {
+        atomic_fetch_add(&s_open_pass_flushes, 1);
+    }
+    open_pass_close_locked();
+}
+
 /* -------- non-indexed (M3) -------- */
 
 void pgraph_mtl_draw_passthrough(const float *positions,
@@ -244,7 +378,15 @@ void pgraph_mtl_draw_passthrough(const float *positions,
         return;
     }
 
-    pgraph_mtl_buffer_begin_frame();
+    /* M5.5+: open-pass helpers manage the cmdbuf + buffer-frame
+     * lifetime. begin_frame is called inside open_pass_ensure when a
+     * new pass actually opens; nothing to do here. */
+    uint32_t samples = pgraph_mtl_surface_get_msaa_sample_count();
+    id<MTLRenderCommandEncoder> enc = open_pass_ensure(
+        surface_color, surface_depth, color_fmt, depth_fmt, samples);
+    if (enc == nil) {
+        return;
+    }
 
     void *pos_buf = NULL, *col_buf = NULL;
     size_t pos_off = 0, col_off = 0;
@@ -255,58 +397,34 @@ void pgraph_mtl_draw_passthrough(const float *positions,
                                         &pos_buf, &pos_off) ||
         !pgraph_mtl_buffer_stage_vertex(colors, col_size,
                                         &col_buf, &col_off)) {
-        pgraph_mtl_buffer_end_frame();
         return;
     }
 
-    @autoreleasepool {
-        MTLRenderPassDescriptor *desc =
-            build_render_pass_descriptor(surface_color, surface_depth,
-                                         depth_fmt);
+    id<MTLRenderPipelineState> ps =
+        (__bridge id<MTLRenderPipelineState>)ps_handle;
+    [enc setRenderPipelineState:ps];
 
-        id<MTLCommandBuffer> cmd = [s_draw_queue commandBuffer];
-        cmd.label = @"xemu.metal.draw";
+    MTLViewport vp = (MTLViewport){
+        .originX = 0.0,
+        .originY = 0.0,
+        .width   = (double)viewport_w,
+        .height  = (double)viewport_h,
+        .znear   = 0.0,
+        .zfar    = 1.0,
+    };
+    [enc setViewport:vp];
 
-        /* M8: wait for any in-flight texture uploads to finish on the
-         * GPU before this draw runs. Replaces the M6 CPU-side
-         * waitUntilCompleted in texture.mm. */
-        mtl_draw_wait_upload_fence(cmd);
+    id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
+    id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
+    [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
+    [enc setVertexBuffer:cbuf offset:col_off atIndex:1];
 
-        id<MTLRenderCommandEncoder> enc =
-            [cmd renderCommandEncoderWithDescriptor:desc];
-        enc.label = @"xemu.metal.draw_enc";
-
-        id<MTLRenderPipelineState> ps =
-            (__bridge id<MTLRenderPipelineState>)ps_handle;
-        [enc setRenderPipelineState:ps];
-
-        MTLViewport vp = (MTLViewport){
-            .originX = 0.0,
-            .originY = 0.0,
-            .width   = (double)viewport_w,
-            .height  = (double)viewport_h,
-            .znear   = 0.0,
-            .zfar    = 1.0,
-        };
-        [enc setViewport:vp];
-
-        id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
-        id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
-        [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
-        [enc setVertexBuffer:cbuf offset:col_off atIndex:1];
-
-        MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
-        [enc drawPrimitives:prim
-                vertexStart:0
-                vertexCount:vertex_count];
-
-        [enc endEncoding];
-        [cmd commit];
-    }
+    MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
+    [enc drawPrimitives:prim
+            vertexStart:0
+            vertexCount:vertex_count];
 
     atomic_fetch_add(&s_draw_count, 1);
-
-    pgraph_mtl_buffer_end_frame();
 }
 
 /* -------- indexed (M4) -------- */
@@ -338,7 +456,13 @@ void pgraph_mtl_draw_indexed(const float *positions,
         return;
     }
 
-    pgraph_mtl_buffer_begin_frame();
+    /* M5.5+: open-pass coalescing — see passthrough path. */
+    uint32_t samples = pgraph_mtl_surface_get_msaa_sample_count();
+    id<MTLRenderCommandEncoder> enc = open_pass_ensure(
+        surface_color, surface_depth, color_fmt, depth_fmt, samples);
+    if (enc == nil) {
+        return;
+    }
 
     void *pos_buf = NULL, *col_buf = NULL, *idx_buf = NULL;
     size_t pos_off = 0, col_off = 0, idx_off = 0;
@@ -352,60 +476,38 @@ void pgraph_mtl_draw_indexed(const float *positions,
                                         &col_buf, &col_off) ||
         !pgraph_mtl_buffer_stage_index(indices, idx_size,
                                        &idx_buf, &idx_off)) {
-        pgraph_mtl_buffer_end_frame();
         return;
     }
 
-    @autoreleasepool {
-        MTLRenderPassDescriptor *desc =
-            build_render_pass_descriptor(surface_color, surface_depth,
-                                         depth_fmt);
+    id<MTLRenderPipelineState> ps =
+        (__bridge id<MTLRenderPipelineState>)ps_handle;
+    [enc setRenderPipelineState:ps];
 
-        id<MTLCommandBuffer> cmd = [s_draw_queue commandBuffer];
-        cmd.label = @"xemu.metal.draw_indexed";
+    MTLViewport vp = (MTLViewport){
+        .originX = 0.0,
+        .originY = 0.0,
+        .width   = (double)viewport_w,
+        .height  = (double)viewport_h,
+        .znear   = 0.0,
+        .zfar    = 1.0,
+    };
+    [enc setViewport:vp];
 
-        /* M8: gate on upload fence (see passthrough path). */
-        mtl_draw_wait_upload_fence(cmd);
+    id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
+    id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
+    id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)idx_buf;
+    [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
+    [enc setVertexBuffer:cbuf offset:col_off atIndex:1];
 
-        id<MTLRenderCommandEncoder> enc =
-            [cmd renderCommandEncoderWithDescriptor:desc];
-        enc.label = @"xemu.metal.draw_indexed_enc";
-
-        id<MTLRenderPipelineState> ps =
-            (__bridge id<MTLRenderPipelineState>)ps_handle;
-        [enc setRenderPipelineState:ps];
-
-        MTLViewport vp = (MTLViewport){
-            .originX = 0.0,
-            .originY = 0.0,
-            .width   = (double)viewport_w,
-            .height  = (double)viewport_h,
-            .znear   = 0.0,
-            .zfar    = 1.0,
-        };
-        [enc setViewport:vp];
-
-        id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
-        id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
-        id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)idx_buf;
-        [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
-        [enc setVertexBuffer:cbuf offset:col_off atIndex:1];
-
-        MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
-        [enc drawIndexedPrimitives:prim
-                        indexCount:index_count
-                         indexType:MTLIndexTypeUInt32
-                       indexBuffer:ibuf
-                 indexBufferOffset:idx_off];
-
-        [enc endEncoding];
-        [cmd commit];
-    }
+    MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
+    [enc drawIndexedPrimitives:prim
+                    indexCount:index_count
+                     indexType:MTLIndexTypeUInt32
+                   indexBuffer:ibuf
+             indexBufferOffset:idx_off];
 
     atomic_fetch_add(&s_draw_count, 1);
     atomic_fetch_add(&s_draw_indexed_count, 1);
-
-    pgraph_mtl_buffer_end_frame();
 }
 
 uint64_t pgraph_mtl_draw_count(void)
@@ -478,7 +580,22 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
     }
     bool indexed = (indices != NULL && index_count > 0);
 
-    pgraph_mtl_buffer_begin_frame();
+    /* M5.5+: open-pass coalescing — see passthrough path. We do NOT
+     * pass color_fmt here because the translated path is invoked
+     * with the surface manager's effective color format already
+     * baked into the pipeline_state; we still query it from the
+     * surface manager so the pass key matches the M3/M4 pass key
+     * when both flow through the same underlying surface. */
+    uint32_t color_fmt = pgraph_mtl_surface_get_color_format();
+    if (surface_color == NULL) {
+        color_fmt = 0;
+    }
+    uint32_t samples = pgraph_mtl_surface_get_msaa_sample_count();
+    id<MTLRenderCommandEncoder> enc = open_pass_ensure(
+        surface_color, surface_depth, color_fmt, depth_fmt, samples);
+    if (enc == nil) {
+        return;
+    }
 
     void *pos_buf = NULL, *col_buf = NULL, *idx_buf = NULL;
     size_t pos_off = 0, col_off = 0, idx_off = 0;
@@ -487,7 +604,6 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
 
     if (!pgraph_mtl_buffer_stage_vertex(positions, pos_size, &pos_buf, &pos_off) ||
         !pgraph_mtl_buffer_stage_vertex(colors, col_size, &col_buf, &col_off)) {
-        pgraph_mtl_buffer_end_frame();
         return;
     }
 
@@ -495,145 +611,73 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
         size_t idx_size = (size_t)index_count * sizeof(uint32_t);
         if (!pgraph_mtl_buffer_stage_index(indices, idx_size,
                                            &idx_buf, &idx_off)) {
-            pgraph_mtl_buffer_end_frame();
             return;
         }
     }
 
-    @autoreleasepool {
-        MTLRenderPassDescriptor *desc =
-            build_render_pass_descriptor(surface_color, surface_depth, depth_fmt);
+    id<MTLRenderPipelineState> ps =
+        (__bridge id<MTLRenderPipelineState>)pipeline_state;
+    [enc setRenderPipelineState:ps];
 
-        id<MTLCommandBuffer> cmd = [s_draw_queue commandBuffer];
-        cmd.label = @"xemu.metal.draw_translated";
+    MTLViewport vp = (MTLViewport){
+        .originX = 0.0,
+        .originY = 0.0,
+        .width   = (double)viewport_w,
+        .height  = (double)viewport_h,
+        .znear   = 0.0,
+        .zfar    = 1.0,
+    };
+    [enc setViewport:vp];
 
-        /* M8: gate on upload fence (see passthrough path). */
-        mtl_draw_wait_upload_fence(cmd);
+    /* Bind position at slot 0 and diffuse color at slot 3 to match
+     * the NV2A_VERTEX_ATTR_DIFFUSE buffer_index established by the
+     * pipeline key (see state.c). */
+    id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
+    id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
+    [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
+    [enc setVertexBuffer:cbuf offset:col_off atIndex:3];
 
-        id<MTLRenderCommandEncoder> enc =
-            [cmd renderCommandEncoderWithDescriptor:desc];
-        enc.label = @"xemu.metal.draw_translated_enc";
+    /* UBOs at the spirv-cross emitted [[buffer(N)]] indices. */
+    if (vsh_ubo != NULL && vsh_ubo_size > 0) {
+        id<MTLBuffer> ub = (__bridge id<MTLBuffer>)vsh_ubo;
+        [enc setVertexBuffer:ub offset:vsh_ubo_offset atIndex:1];
+    }
+    if (psh_ubo != NULL && psh_ubo_size > 0) {
+        id<MTLBuffer> ub = (__bridge id<MTLBuffer>)psh_ubo;
+        [enc setFragmentBuffer:ub offset:psh_ubo_offset atIndex:1];
+    }
 
-        id<MTLRenderPipelineState> ps =
-            (__bridge id<MTLRenderPipelineState>)pipeline_state;
-        [enc setRenderPipelineState:ps];
-
-        MTLViewport vp = (MTLViewport){
-            .originX = 0.0,
-            .originY = 0.0,
-            .width   = (double)viewport_w,
-            .height  = (double)viewport_h,
-            .znear   = 0.0,
-            .zfar    = 1.0,
-        };
-        [enc setViewport:vp];
-
-        /* The translated VSH expects vertex buffers at the
-         * spirv-cross-emitted attribute slots. With
-         * MSL_ENABLE_DECORATION_BINDING=true and the GLSL generator's
-         * `layout(location=N)` per attribute, [[attribute(N)]] is bound
-         * via MTLVertexDescriptor at vertex_buffer slot N (PerVertex).
-         * Our PgraphMtlPipelineKey set buffer_index = i for each
-         * attribute — so we must bind position to slot 0 and color to
-         * slot N where N matches DIFFUSE's slot. The inline-buffer path
-         * always populates slot 0 (POSITION) and slot 3 (DIFFUSE) on
-         * NV2A; we bind position at slot 0 and the color at slot
-         * NV2A_VERTEX_ATTR_DIFFUSE = 3 to match the
-         * vertex_attributes[] array. */
-        id<MTLBuffer> pbuf = (__bridge id<MTLBuffer>)pos_buf;
-        id<MTLBuffer> cbuf = (__bridge id<MTLBuffer>)col_buf;
-        [enc setVertexBuffer:pbuf offset:pos_off atIndex:0];
-        [enc setVertexBuffer:cbuf offset:col_off atIndex:3];
-
-        /* UBOs at the spirv-cross emitted [[buffer(N)]] indices. The
-         * Vulkan generator emits VSH UBO at binding=0 / PSH UBO at
-         * binding=1.  spirv-cross with ENABLE_DECORATION_BINDING
-         * forwards those into MSL [[buffer(0)]] / [[buffer(1)]].
-         *
-         * On Metal vertex stages, [[buffer(0..N)]] are SHARED between
-         * vertex inputs (the MTLVertexDescriptor) and direct uniform
-         * buffer bindings. spirv-cross resolves this by mapping
-         * descriptor-set bindings to high indices (default offset = 30
-         * for buffer/texture). So the VSH UBO actually ends up at
-         * `[[buffer(30)]]` after spirv-cross's auto-shift, NOT
-         * `[[buffer(0)]]`.
-         *
-         * To stay deterministic without parsing the MSL output, we
-         * bind UBOs at both possible locations:
-         *   - Vertex stage: VSH UBO at [[buffer(30 + 0)]] = 30.
-         *   - Fragment stage: PSH UBO at [[buffer(30 + 1)]] = 31.
-         *
-         * spirv-cross's default `MSL_RESOURCE_INDEX_OFFSETS_BUFFER` is
-         * 0 by default; with ENABLE_DECORATION_BINDING it uses the
-         * SPIR-V binding directly.  So actually [[buffer(0)]] /
-         * [[buffer(1)]] is what we get.  The vertex slot conflict is
-         * resolved by the MTLVertexDescriptor naming individual
-         * attributes via [[attribute(N)]] with their own
-         * vd.attributes[i].bufferIndex (whose value differs from the
-         * UBO buffer index).  Apple's vertex stage allows the UBO to
-         * occupy [[buffer(N)]] so long as N is not used by the vertex
-         * descriptor's bufferIndex.  Our descriptor uses bufferIndex
-         * 0 + 3 (per the inline-buffer NV2A slot mapping).  UBO at
-         * [[buffer(0)]] would collide; we bind it at index 1 in the
-         * descriptor and shift to [[buffer(1)]] for the vertex stage
-         * UBO… but we don't actually have the option to reshift since
-         * the MSL was already generated with binding=0.
-         *
-         * Pragmatic approach: ignore the conflict for now and bind at
-         * the spirv-cross indices.  If Metal validation rejects this,
-         * the symptom is a clear validation error which we'll catch
-         * during the user's first launch test, and the fix is to
-         * regenerate MSL with non-zero MSL_RESOURCE_INDEX_OFFSETS or
-         * bind at 30/31.  This mirrors MoltenVK's default behaviour. */
-        if (vsh_ubo != NULL && vsh_ubo_size > 0) {
-            id<MTLBuffer> ub = (__bridge id<MTLBuffer>)vsh_ubo;
-            [enc setVertexBuffer:ub offset:vsh_ubo_offset atIndex:1];
-        }
-        if (psh_ubo != NULL && psh_ubo_size > 0) {
-            id<MTLBuffer> ub = (__bridge id<MTLBuffer>)psh_ubo;
-            [enc setFragmentBuffer:ub offset:psh_ubo_offset atIndex:1];
-        }
-
-        /* Per-stage texture + sampler bindings. The PSH expects them
-         * at [[texture(0..3)]] / [[sampler(0..3)]] (Vulkan binding
-         * MTL_PSH_TEX_BINDING = 2 + stage maps via spirv-cross to
-         * texture/sampler slots starting at 0 because MTLBackend uses
-         * separate index spaces for textures/samplers/buffers). */
-        if (stage_textures != NULL) {
-            for (int i = 0; i < 4; i++) {
-                if (stage_textures[i] != NULL) {
-                    id<MTLTexture> t =
-                        (__bridge id<MTLTexture>)stage_textures[i];
-                    [enc setFragmentTexture:t atIndex:i];
-                }
+    if (stage_textures != NULL) {
+        for (int i = 0; i < 4; i++) {
+            if (stage_textures[i] != NULL) {
+                id<MTLTexture> t =
+                    (__bridge id<MTLTexture>)stage_textures[i];
+                [enc setFragmentTexture:t atIndex:i];
             }
         }
-        if (stage_samplers != NULL) {
-            for (int i = 0; i < 4; i++) {
-                if (stage_samplers[i] != NULL) {
-                    id<MTLSamplerState> ss =
-                        (__bridge id<MTLSamplerState>)stage_samplers[i];
-                    [enc setFragmentSamplerState:ss atIndex:i];
-                }
+    }
+    if (stage_samplers != NULL) {
+        for (int i = 0; i < 4; i++) {
+            if (stage_samplers[i] != NULL) {
+                id<MTLSamplerState> ss =
+                    (__bridge id<MTLSamplerState>)stage_samplers[i];
+                [enc setFragmentSamplerState:ss atIndex:i];
             }
         }
+    }
 
-        MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
-        if (indexed) {
-            id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)idx_buf;
-            [enc drawIndexedPrimitives:prim
-                            indexCount:index_count
-                             indexType:MTLIndexTypeUInt32
-                           indexBuffer:ibuf
-                     indexBufferOffset:idx_off];
-        } else {
-            [enc drawPrimitives:prim
-                    vertexStart:0
-                    vertexCount:vertex_count];
-        }
-
-        [enc endEncoding];
-        [cmd commit];
+    MTLPrimitiveType prim = (MTLPrimitiveType)mtl_primitive;
+    if (indexed) {
+        id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)idx_buf;
+        [enc drawIndexedPrimitives:prim
+                        indexCount:index_count
+                         indexType:MTLIndexTypeUInt32
+                       indexBuffer:ibuf
+                 indexBufferOffset:idx_off];
+    } else {
+        [enc drawPrimitives:prim
+                vertexStart:0
+                vertexCount:vertex_count];
     }
 
     atomic_fetch_add(&s_draw_count, 1);
@@ -641,8 +685,6 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
         atomic_fetch_add(&s_draw_indexed_count, 1);
     }
     atomic_fetch_add(&s_draw_translated_count, 1);
-
-    pgraph_mtl_buffer_end_frame();
 }
 
 uint64_t pgraph_mtl_draw_translated_count(void)
@@ -658,4 +700,19 @@ uint64_t pgraph_mtl_draw_pipeline_fallback_count(void)
 extern "C" void pgraph_mtl_draw_inc_pipeline_fallback_count(void)
 {
     atomic_fetch_add(&s_draw_pipeline_fallback_count, 1);
+}
+
+/* M5.5+: coalescing counters. Surfaced to extract-perf-summary.sh
+ * via util/xemu-metal-perf.c. */
+extern "C" uint64_t pgraph_mtl_draw_pass_opens_count(void)
+{
+    return atomic_load(&s_open_pass_opens);
+}
+extern "C" uint64_t pgraph_mtl_draw_pass_coalesced_count(void)
+{
+    return atomic_load(&s_open_pass_coalesced);
+}
+extern "C" uint64_t pgraph_mtl_draw_pass_flushes_count(void)
+{
+    return atomic_load(&s_open_pass_flushes);
 }

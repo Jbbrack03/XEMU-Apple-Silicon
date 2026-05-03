@@ -34,6 +34,7 @@ specific_ss.add([metal, libglslang, spirv_cross, files(
 	'format.c',
 	'texture_pg.c',
 	'uniform.c',
+	'vertex.c',
 	'buffer.mm',
 	'draw.mm',
 	'heap.mm',

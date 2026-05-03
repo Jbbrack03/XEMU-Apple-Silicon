@@ -149,13 +149,23 @@ uint32_t pgraph_mtl_translate_vertex_format(uint32_t nv097_format_type,
 
     case NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_CMP:
         /* 3 signed normalized 10/11/11 components packed into 32 bits.
-         * Metal's Int1010102_Normalized is the closest match (one extra
-         * bit on R, one fewer on A — but A is forced to 1.0 by the
-         * pipeline anyway). vk renderer also flags this with a
-         * shader-side conversion (compressed_attrs); the same shader
-         * post-conversion still applies on Metal. */
+         *
+         * 2026-05-03 M5.6 fix: emit as raw `int` (MTL_VFMT_INT) so
+         * spirv-cross's MSL output (which declares the input as
+         * `int v1_cmp [[attribute(1)]]`) matches the descriptor type.
+         * The shader does the (11,11,10) unpacking via bitwise ops
+         * and `unpackSnorm` equivalents — same pattern Vulkan uses
+         * (`VK_FORMAT_R32_SINT` per `vk/vertex.c:184`). The previous
+         * `MTL_VFMT_INT1010102_NORMALIZED` constant was Apple's
+         * GPU-side normalized-fetch path, which is great for shaders
+         * that expect `float4`-typed input but doesn't match what
+         * spirv-cross emits for the NV2A combiner GLSL — Metal
+         * rejected the pipeline build with "vN_cmp(N) of type int
+         * cannot be read using MTLAttributeFormatInt1010102Normalized".
+         * Emitting as raw int unblocks the build; correctness lives
+         * in the shader-side unpacker which is unchanged. */
         if (count == 1) {
-            return MTL_VFMT_INT1010102_NORMALIZED;
+            return MTL_VFMT_INT;
         }
         break;
 

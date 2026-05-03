@@ -296,7 +296,17 @@ sock.sendall(json.dumps({"execute": "quit"}).encode() + b"\r\n")
 sock.close()
 PY
 
-            for _ in 1 2 3; do
+            # 2026-05-03: extended QMP-quit grace window from 3 s to 15 s.
+            # The 2026-05-02 22:50 GLG crash left macOS-side OpenGL
+            # worker state that makes xemu's shutdown path slow on
+            # subsequent benchmark runs; with the 3 s window xemu was
+            # hitting SIGTERM/SIGKILL before atexit could emit the
+            # `final=1` interval line that flushes cumulative
+            # FLAT_FIRST / FLAT_NONFIRST counters. The wider window
+            # gives xemu enough time to exit cleanly via QMP-quit
+            # → atexit → final perf-log emit. Validated empirically
+            # via `validate-native-tri-depth.sh` PASS recovery.
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
                 any_alive=0
                 for pid in $RUN_XEMU_PIDS; do
                     if kill -0 "$pid" 2>/dev/null; then
@@ -315,7 +325,10 @@ PY
             kill "$pid" 2>/dev/null || true
         done
 
-        for _ in 1 2 3 4 5; do
+        # SIGTERM grace window also extended from 5 s to 15 s for the
+        # same reason — xemu's signal handler runs the same atexit
+        # sequence as QMP-quit, just slower than 5 s sometimes.
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             any_alive=0
             for pid in $RUN_XEMU_PIDS; do
                 if kill -0 "$pid" 2>/dev/null; then
