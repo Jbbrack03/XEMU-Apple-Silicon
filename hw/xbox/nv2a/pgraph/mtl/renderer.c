@@ -183,6 +183,146 @@ static void mtl_get_surface_dimensions(PGRAPHState const *pg,
     }
 }
 
+/* M5.9: bytes-per-pixel for an NV097 color format. Local copy of the
+ * surface.mm helper so we can compute `size = pitch * height` here
+ * without crossing the .mm boundary. */
+static unsigned int mtl_color_bpp(uint32_t nv097)
+{
+    switch (nv097) {
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_Z1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1R5G5B5_O1R5G5B5:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_R5G6B5:
+        return 2;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_Z8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X8R8G8B8_O8R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_Z1A7R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_X1A7R8G8B8_O1A7R8G8B8:
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_A8R8G8B8:
+        return 4;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_B8:
+        return 1;
+    case NV097_SET_SURFACE_FORMAT_COLOR_LE_G8B8:
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+static unsigned int mtl_zeta_bpp(uint32_t nv097)
+{
+    switch (nv097) {
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z16:
+        return 2;
+    case NV097_SET_SURFACE_FORMAT_ZETA_Z24S8:
+        return 4;
+    default:
+        return 4;
+    }
+}
+
+/* M5.9: bind the NV2A's currently-configured color/depth surfaces into
+ * the per-VRAM cache. This replaces the M2-era pgraph_mtl_surface_ensure_*
+ * call sites where we know the vram_addr (cleared paths and draws that
+ * have a valid pg->dma_color/_zeta). For paths that do NOT yet know the
+ * vram_addr (early boot before SET_SURFACE_OFFSET), fall back to the
+ * legacy ensure-by-shape variant.
+ *
+ * NOTE on dimensions: the MTLTexture is allocated at the SCALED (host
+ * surface_scale_factor) dimensions, but the VRAM-side footprint is at
+ * the UNSCALED (1×) guest dimensions — guest writes 640×480, the
+ * renderer up-samples for display. We pass the scaled (w, h) for the
+ * texture allocation and the unscaled (w, h) plus actual guest pitch
+ * for the VRAM `size` so we don't read off the end of the guest's
+ * surface in upload_vram_to_texture.
+ *
+ * Returns true if at least one aspect was bound. */
+static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
+{
+    PGRAPHState *pg = &d->pgraph;
+    bool bound_any = false;
+
+    unsigned int width = 0, height = 0;
+    mtl_get_surface_dimensions(pg, &width, &height);
+    pgraph_apply_anti_aliasing_factor(pg, &width, &height);
+    /* Width/height here are the GUEST 1× dimensions (post-AA). The
+     * texture is allocated at the host-scaled dimensions. */
+    unsigned int scaled_w = width, scaled_h = height;
+    pgraph_apply_scaling_factor(pg, &scaled_w, &scaled_h);
+
+    if (color && pg->surface_shape.color_format && width > 0 && height > 0) {
+        if (pg->dma_color != 0) {
+            DMAObject dma = nv_dma_load(d, pg->dma_color);
+            if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS) {
+                hwaddr vram_addr = dma.address + pg->surface_color.offset;
+                unsigned int bpp = mtl_color_bpp(pg->surface_shape.color_format);
+                unsigned int pitch = pg->surface_color.pitch;
+                if (pitch == 0) {
+                    pitch = width * bpp;
+                }
+                /* `size` is the 1× VRAM-side footprint — caller's
+                 * upload_vram_to_texture reads from `vram_ptr +
+                 * vram_addr` for this many bytes. */
+                uint32_t natural = (uint32_t)(width * bpp);
+                uint32_t row     = pitch > natural ? pitch : natural;
+                uint32_t size    = (uint32_t)(row * height);
+                /* Sanity-clamp against the guest VRAM cap (~64 MB). If
+                 * the addr is bogus, fall through to ensure-by-shape. */
+                if (vram_addr + size <= 0x4000000) {
+                    if (pgraph_mtl_surface_bind_color(
+                            (uint32_t)vram_addr, size,
+                            scaled_w, scaled_h, pitch,
+                            pg->surface_shape.color_format,
+                            /* Skip VRAM upload for now — the cache fix
+                             * focuses on the right surface being
+                             * published, not on initial-content
+                             * synchronization. Future slice can wire
+                             * upload via the texture-staging buffer. */
+                            NULL)) {
+                        bound_any = true;
+                    }
+                }
+            }
+        }
+        if (!bound_any) {
+            pgraph_mtl_surface_ensure_color(scaled_w, scaled_h,
+                                            pg->surface_shape.color_format);
+            bound_any = true;
+        }
+    }
+    if (zeta && pg->surface_shape.zeta_format && width > 0 && height > 0) {
+        bool bound_z = false;
+        if (pg->dma_zeta != 0) {
+            DMAObject dma = nv_dma_load(d, pg->dma_zeta);
+            if (dma.dma_class == NV_DMA_IN_MEMORY_CLASS) {
+                hwaddr vram_addr = dma.address + pg->surface_zeta.offset;
+                unsigned int bpp = mtl_zeta_bpp(pg->surface_shape.zeta_format);
+                unsigned int pitch = pg->surface_zeta.pitch;
+                if (pitch == 0) {
+                    pitch = width * bpp;
+                }
+                uint32_t natural = (uint32_t)(width * bpp);
+                uint32_t row     = pitch > natural ? pitch : natural;
+                uint32_t size    = (uint32_t)(row * height);
+                if (vram_addr + size <= 0x4000000) {
+                    if (pgraph_mtl_surface_bind_depth(
+                            (uint32_t)vram_addr, size,
+                            scaled_w, scaled_h, pitch,
+                            pg->surface_shape.zeta_format, NULL)) {
+                        bound_z = true;
+                        bound_any = true;
+                    }
+                }
+            }
+        }
+        if (!bound_z) {
+            pgraph_mtl_surface_ensure_depth(scaled_w, scaled_h,
+                                            pg->surface_shape.zeta_format);
+            bound_any = true;
+        }
+    }
+    return bound_any;
+}
+
 static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -203,24 +343,10 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
 
     pg->clearing = true;
 
-    /* Decode shape. M2 does not yet implement the full surface
-     * lifecycle (vk/surface.c::pgraph_vk_surface_update); we just
-     * ensure a binding exists for whichever aspect(s) the caller is
-     * clearing. */
-    unsigned int width = 0, height = 0;
-    mtl_get_surface_dimensions(pg, &width, &height);
-
-    pgraph_apply_anti_aliasing_factor(pg, &width, &height);
-    pgraph_apply_scaling_factor(pg, &width, &height);
-
-    if (write_color && pg->surface_shape.color_format) {
-        pgraph_mtl_surface_ensure_color(width, height,
-                                        pg->surface_shape.color_format);
-    }
-    if (write_zeta && pg->surface_shape.zeta_format) {
-        pgraph_mtl_surface_ensure_depth(width, height,
-                                        pg->surface_shape.zeta_format);
-    }
+    /* M5.9: bind the current NV2A surfaces into the per-VRAM cache.
+     * Falls back to ensure-by-shape if the DMA registers are not yet
+     * configured. */
+    mtl_bind_current_surfaces(d, write_color, write_zeta);
 
     /* Decode clear color and depth. */
     float rgba[4] = { 0, 0, 0, 1 };
@@ -295,11 +421,26 @@ static void pgraph_mtl_draw_end(NV2AState *d)
 
 static void pgraph_mtl_flip_stall(NV2AState *d)
 {
-    (void)d;
     /* M5.5+: NV2A is signaling end-of-frame. The compositor will
      * pick up the framebuffer surface texture for present; flush
      * the open coalesced pass so the GPU work is committed. */
     pgraph_mtl_draw_flush_open_pass();
+
+    /* M5.9: do the CRTC-aware front-fb publish here. The Metal
+     * compositor reads `pgraph_mtl_get_framebuffer_metal_texture()`
+     * via a side-channel and never goes through the renderer-ops
+     * `get_framebuffer_surface` callback that the GL path uses, so
+     * we must publish from a hook that's called per-frame. flip_stall
+     * fires once per NV097_FLIP_STALL — exactly once per frame.
+     *
+     * Mirrors vk/renderer.c:172-205 — look up `d->pcrtc.start +
+     * vga_display_params.line_offset` in the per-VRAM cache and
+     * publish the resolved MTLTexture. On miss, leave the previous
+     * front-fb pointer in place. */
+    VGADisplayParams vga_display_params;
+    d->vga.get_params(&d->vga, &vga_display_params);
+    hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
+    pgraph_mtl_surface_publish_front_fb((uint32_t)crtc_addr, "crtc");
 }
 
 /* MTLPrimitiveType values, mirrored from <Metal/MTLRenderCommandEncoder.h>.
@@ -755,22 +896,12 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
     }
 
 
-    /* Ensure surface bindings exist that match the current shape. M2
-     * already does this for clear; for draw we must do the same in
-     * case the first event in a frame is a draw rather than a clear
-     * (uncommon but possible). */
-    unsigned int width = 0, height = 0;
-    mtl_get_surface_dimensions(pg, &width, &height);
-    pgraph_apply_anti_aliasing_factor(pg, &width, &height);
-    pgraph_apply_scaling_factor(pg, &width, &height);
-    if (pg->surface_shape.color_format) {
-        pgraph_mtl_surface_ensure_color(width, height,
-                                        pg->surface_shape.color_format);
-    }
-    if (pg->surface_shape.zeta_format) {
-        pgraph_mtl_surface_ensure_depth(width, height,
-                                        pg->surface_shape.zeta_format);
-    }
+    /* M5.9: bind the current NV2A surfaces into the per-VRAM cache.
+     * On Metal-renderer first-draw the cache lookup is a miss so we
+     * allocate; subsequent draws against the same RT hit the cache and
+     * the existing texture is reused. */
+    mtl_bind_current_surfaces(d, pg->surface_shape.color_format != 0,
+                              pg->surface_shape.zeta_format != 0);
 
     void *color_tex = pgraph_mtl_surface_get_color_texture();
     void *depth_tex = pgraph_mtl_surface_get_depth_texture();
@@ -963,19 +1094,28 @@ static void pgraph_mtl_process_pending_reports(NV2AState *d)
 static void pgraph_mtl_surface_update(NV2AState *d, bool upload,
                                       bool color_write, bool zeta_write)
 {
-    /* M2 does not implement upload/download path. The surface manager's
-     * only state-change hook for now is via clear_surface +
-     * ensure_color/ensure_depth. M3+ will route surface_update into
-     * the same per-VRAM cache the GL/VK renderers use. */
+    /* M5.9: surface_update is called frequently (NV097_WAIT_FOR_IDLE,
+     * SET_FLIP_READ, blit hooks). The current cache wires in via
+     * `clear_surface` and `flush_draw` — those are the events that
+     * actually allocate / re-bind. surface_update remains a no-op
+     * structurally; the upload / download path will land in a future
+     * slice when CPU-write callbacks are wired. The bind keeps current
+     * because each clear / draw recomputes vram_addr → cache lookup. */
+    (void)d;
+    (void)upload;
+    (void)color_write;
+    (void)zeta_write;
 }
 
 static void pgraph_mtl_surface_flush(NV2AState *d)
 {
     /* M5.5+: drain any open coalesced pass so the surface texture is
      * GPU-stable for whatever consumer the upstream caller had in
-     * mind. The surface cache itself is still M2-era (bindings persist
-     * for the lifetime of the renderer). */
+     * mind. M5.9: also drop the per-VRAM cache so a fresh
+     * surface_scale_factor / display reset does not retain stale
+     * MTLTextures. */
     pgraph_mtl_draw_flush_open_pass();
+    pgraph_mtl_surface_cache_flush();
 }
 
 static void pgraph_mtl_set_surface_scale_factor(NV2AState *d,
@@ -994,25 +1134,36 @@ static unsigned int pgraph_mtl_get_surface_scale_factor(NV2AState *d)
 
 static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
 {
-    /* The PGRAPHRenderer.ops.get_framebuffer_surface signature returns
-     * `int`. The GL impl returns a GLuint texture handle (which fits in
-     * an int). Metal's id<MTLTexture> is a 64-bit pointer, so we can't
-     * round-trip it through this signature.
+    /* M5.9: CRTC-aware publish. Mirrors vk/renderer.c:172-205 and
+     * gl/display.c:414-448 — the published front-fb is the surface in
+     * the per-VRAM cache that contains `d->pcrtc.start +
+     * vga_display_params.line_offset`, NOT whichever surface was most
+     * recently clear-bound.
      *
-     * Resolution: this op returns 1 if a framebuffer surface exists,
-     * else 0 — a truthy presence signal. The actual MTLTexture pointer
-     * is published via the side-channel
-     * pgraph_mtl_get_framebuffer_metal_texture(), read by the
+     * The signature returns `int` (the GL renderer returns a GLuint).
+     * For Metal we return 1/0 (presence signal) and publish the
+     * resolved MTLTexture via the side-channel accessor
+     * `pgraph_mtl_get_framebuffer_metal_texture()` read by the
      * compositor in ui/xemu-metal.mm.
      *
-     * Today the only consumer of this op's return value is
-     * gl_render_frame() in ui/xemu.c, and the Metal path skips that
-     * function entirely (xemu_metal_is_active() guard at xemu.c:840).
-     * So returning 1/0 here is safe.
-     *
-     * See decision-log "2026-05-02: Metal slice M2 — clear-only surface
-     * manager + side-channel framebuffer texture accessor". */
-    (void)d;
+     * On miss (no cache entry contains the CRTC address) we leave the
+     * previous front-fb pointer in place — better to display a
+     * stale-but-correct frame than reset to black mid-stream. The
+     * presence signal still returns 1 if a previous publish landed; 0
+     * if the cache is entirely empty. */
+    qemu_mutex_lock(&d->pfifo.lock);
+
+    VGADisplayParams vga_display_params;
+    d->vga.get_params(&d->vga, &vga_display_params);
+    hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
+
+    qemu_mutex_unlock(&d->pfifo.lock);
+
+    /* Try to publish the surface that contains `crtc_addr`. */
+    bool published = pgraph_mtl_surface_publish_front_fb(
+        (uint32_t)crtc_addr, "crtc");
+    (void)published;
+
     return pgraph_mtl_surface_has_front_framebuffer();
 }
 

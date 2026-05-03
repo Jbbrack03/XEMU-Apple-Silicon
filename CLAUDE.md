@@ -67,12 +67,25 @@ The fork-specific source-code changes are concentrated in:
     and the `XEMU_DIAG_*` toggles.
   - `glsl/psh.c`, `glsl/psh.h` — fragment shader depth/polygon-slope
     derivation for the native path.
-  - `mtl/` — Metal renderer (slices M0–M14 + M5.5 / M5.6 / M5.7).
+  - `mtl/` — Metal renderer (slices M0–M14 + M5.5 / M5.6 / M5.7 / M5.8 / M5.9).
     Notable per-file scope:
     - `renderer.c` — NV2A-side ops dispatch; `flush_draw` branches
       for inline_buffer / inline_elements / draw_arrays / inline_array
       (M5.5); `draw_end → flush_draw` hook; six flush hooks for the
-      M5.7 coalesced pass.
+      M5.7 coalesced pass. **(M5.9, 2026-05-03)** new
+      `mtl_bind_current_surfaces(d, color, zeta)` helper computes
+      `vram_addr = nv_dma_load(d, pg->dma_color/_zeta).address +
+      pg->surface_color/_zeta.offset`, then calls
+      `pgraph_mtl_surface_bind_color/_depth(vram_addr, size, w, h,
+      pitch, fmt, NULL)`; falls back to legacy `ensure_color/_depth`
+      if DMA registers are unset. Used from `clear_surface` and
+      `flush_draw`. `pgraph_mtl_flip_stall(d)` does the CRTC-aware
+      front-fb publish: `pgraph_mtl_surface_publish_front_fb(
+      (uint32_t)(d->pcrtc.start +
+      vga_display_params.line_offset), "crtc")`.
+      `pgraph_mtl_surface_flush(d)` calls
+      `pgraph_mtl_surface_cache_flush()` so a renderer flush /
+      reload drops every cached MTLTexture.
     - `draw.mm` — open-pass coalescing (`open_pass_ensure` /
       `open_pass_close_locked` / `pgraph_mtl_draw_flush_open_pass`)
       shared across M3/M4 passthrough + M7.1 translated paths.
@@ -115,6 +128,26 @@ The fork-specific source-code changes are concentrated in:
       bytes) and each non-NULL stream at bufferIndex
       `MTL_ATTR_BUFFER_INDEX_BASE + slot`. PSH UBO stays at
       fragment `atIndex:1`.
+    - `surface.{h,mm}` — **(M5.9, 2026-05-03)** per-VRAM surface
+      cache. `MtlSurfaceBinding` struct (vram_addr, size, pitch,
+      width, height, format, MTLTexture, MSAA companion, last_use_seq,
+      next) replaces the M2-era single-slot manager. Singly-linked
+      list, cap 16 entries with LRU eviction. New API:
+      `pgraph_mtl_surface_bind_color/_depth(vram_addr, size, w, h,
+      pitch, fmt, vram_ptr)` (cache-promote a surface keyed by VRAM
+      address); `pgraph_mtl_surface_publish_front_fb(vram_addr,
+      reason)` (CRTC-aware front-fb publish via `_get_within`
+      lookup; bumps `METAL_FRONT_FB_PUBLISHES` and emits
+      `xemu-perf: metal_front_fb_publish vram_addr=0x..` line);
+      `pgraph_mtl_surface_cache_flush()` (drops every entry, called
+      from `surface_flush`); `pgraph_mtl_surface_get_metal_texture_at`
+      / `_within` (lookup helpers — port of vk's `_get_at` / `_get_within`
+      at `vk/surface.c:697-724`). Legacy `ensure_color/_depth` API
+      kept as thin wrappers for the pre-DMA-bind paths. Counter
+      accessors: `pgraph_mtl_surface_front_fb_publishes()`,
+      `pgraph_mtl_surface_cache_entries()`. CPU-write callbacks +
+      VRAM upload/download are deferred to M5.9-followup-A/B/C/D —
+      see decision-log.
 - `ui/xemu-input.c` — `XEMU_SCRIPTED_INPUT` (CSV replay) and
   `XEMU_RECORD_INPUT` (CSV record).
 - `ui/xemu-snapshots.c` — `XEMU_SNAPSHOT_NO_THUMBNAIL=1`.

@@ -81,6 +81,8 @@ static uint64_t s_baseline_capture_frames_seen;
  * drawable. Bumped from inside the cmdbuf addCompletedHandler in
  * ui/xemu-metal.mm once the PNG has been written successfully. */
 static uint64_t s_baseline_screenshots_taken;
+/* M5.9 (2026-05-03) — per-VRAM surface cache + CRTC-aware publish. */
+static uint64_t s_baseline_front_fb_publishes;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -346,6 +348,18 @@ __attribute__((weak)) uint64_t pgraph_mtl_screenshots_taken(void)
     return 0;
 }
 
+/* M5.9 (2026-05-03) — per-VRAM surface cache + CRTC-aware publish.
+ * Strong symbols in mtl/surface.mm; weak fallbacks below for the
+ * non-Apple-Silicon link. */
+__attribute__((weak)) uint64_t pgraph_mtl_surface_front_fb_publishes(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_surface_cache_entries(void)
+{
+    return 0;
+}
+
 void xemu_metal_perf_emit_and_reset(FILE *out)
 {
     if (out == NULL) {
@@ -407,6 +421,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint32_t capture_active   = pgraph_mtl_capture_active();
     /* 2026-05-03 — PNG screenshot counter. */
     uint64_t screenshots_taken = pgraph_mtl_screenshots_taken();
+    /* M5.9 — front-fb publish counter + live cache size. */
+    uint64_t front_fb_publishes = pgraph_mtl_surface_front_fb_publishes();
+    uint64_t surface_cache_size = pgraph_mtl_surface_cache_entries();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -505,6 +522,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     /* 2026-05-03 — PNG screenshot counter delta. */
     uint64_t screenshots_taken_delta = screenshots_taken -
                                        s_baseline_screenshots_taken;
+    /* M5.9 — front-fb publish delta. */
+    uint64_t front_fb_publishes_delta = front_fb_publishes -
+                                        s_baseline_front_fb_publishes;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -552,6 +572,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_present_gpu_frames       = present_gpu_fr;
     s_baseline_capture_frames_seen      = capture_seen;
     s_baseline_screenshots_taken        = screenshots_taken;
+    s_baseline_front_fb_publishes       = front_fb_publishes;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -577,7 +598,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            fx_gpu_us_delta | vertex_us_delta |
                            fragment_us_delta | present_gpu_us_delta |
                            present_gpu_fr_delta | capture_seen_delta |
-                           screenshots_taken_delta;
+                           screenshots_taken_delta |
+                           front_fb_publishes_delta;
     if (total_delta == 0) {
         return;
     }
@@ -627,7 +649,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_PRESENT_GPU_FRAMES=%llu"
             " METAL_CAPTURE_FRAMES=%llu"
             " METAL_CAPTURE_ACTIVE=%u"
-            " METAL_SCREENSHOTS_TAKEN=%llu",
+            " METAL_SCREENSHOTS_TAKEN=%llu"
+            " METAL_FRONT_FB_PUBLISHES=%llu"
+            " METAL_SURFACE_CACHE_SIZE=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -678,5 +702,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)present_gpu_fr_delta,
             (unsigned long long)capture_seen_delta,
             (unsigned)capture_active,
-            (unsigned long long)screenshots_taken_delta);
+            (unsigned long long)screenshots_taken_delta,
+            (unsigned long long)front_fb_publishes_delta,
+            (unsigned long long)surface_cache_size);
 }

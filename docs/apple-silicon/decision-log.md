@@ -1,5 +1,155 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.9 — per-VRAM surface cache + CRTC-aware publish (architectural fix shipped)
+
+**Context.** The 2026-05-03 root-cause-investigation entry below identified
+the Metal renderer's M2-era single-slot surface manager as the architectural
+cause of the magenta-RT artifact. The "fix" that this slice ships is the
+per-VRAM-keyed surface cache + the CRTC-aware front-fb publish.
+
+**Implementation.**
+
+- New `MtlSurfaceBinding` struct in `mtl/surface.mm` (header
+  `mtl/surface.h`). Fields: `vram_addr`, `size`, `pitch`, `is_color`,
+  `width`, `height`, `nv097_format`, `mtl_pixel_format`, `texture`,
+  `msaa_texture`, `msaa_sample_count`, `last_use_seq`, `next`. Linked
+  list (singly-linked); typical depth 1–8 (cap 16, LRU eviction by
+  `last_use_seq`).
+- Replaces `s_color_binding` / `s_depth_binding` static structs with
+  pointers into the cache. The bindings persist across guest binding
+  changes; only an explicit shape mismatch at the same `vram_addr` (or
+  LRU eviction) frees a binding.
+- New API: `pgraph_mtl_surface_bind_color(vram_addr, size, w, h, pitch,
+  fmt, vram_ptr)` and `pgraph_mtl_surface_bind_depth(...)` —
+  cache-promote a surface keyed by VRAM address. Returns true on success.
+- New API: `pgraph_mtl_surface_publish_front_fb(vram_addr, reason)` —
+  look up via `pgraph_mtl_surface_get_within(vram_addr)` (range-overlap)
+  and publish the resolved MTLTexture as the front-fb. Bumps
+  `METAL_FRONT_FB_PUBLISHES` and emits a per-call
+  `xemu-perf: metal_front_fb_publish vram_addr=0x.. width=W height=H
+  format=FMT reason=<reason>` line WHEN the published texture changes.
+- New helper in `mtl/renderer.c`: `mtl_bind_current_surfaces(d, color,
+  zeta)` — computes `vram_addr = nv_dma_load(d, pg->dma_color/_zeta) +
+  pg->surface_color/_zeta.offset`, scaled width/height, then calls into
+  the cache. Used from `clear_surface` and `flush_draw`. Falls back to
+  the legacy `pgraph_mtl_surface_ensure_color/_depth` shape-only
+  variants when the DMA registers are not yet configured.
+- `pgraph_mtl_flip_stall(d)` now does the CRTC-aware publish:
+  `pgraph_mtl_surface_publish_front_fb(d->pcrtc.start +
+  vga_display_params.line_offset, "crtc")`. The Metal compositor reads
+  `pgraph_mtl_get_framebuffer_metal_texture()` via a side-channel and
+  never goes through `PGRAPHRenderer.ops.get_framebuffer_surface`, so
+  the publish is triggered from `flip_stall` (called once per
+  `NV097_FLIP_STALL`).
+- `pgraph_mtl_surface_flush(d)` now drops the cache via
+  `pgraph_mtl_surface_cache_flush()` so a renderer flush + reload (e.g.
+  surface_scale change) does not retain stale MTLTextures.
+- `pgraph_mtl_surface_update(d, upload, color_write, zeta_write)`
+  remains a structural no-op for now — clear / draw paths handle the
+  bind themselves; CPU-write callback / dirty-tracking is deferred.
+- New counters `METAL_FRONT_FB_PUBLISHES` (per-interval delta) and
+  `METAL_SURFACE_CACHE_SIZE` (live entry count) surface on the
+  `xemu-perf:` interval line. Weak symbols + emit hooks added in
+  `util/xemu-metal-perf.c`; recognized in
+  `scripts/apple-silicon/extract-perf-summary.sh`.
+
+**Validation gates met.**
+
+| Gate | Result |
+|------|--------|
+| Build (`./build.sh -a arm64`) | PASS |
+| `codesign --verify --deep --strict --verbose=2 dist/xemu.app` | PASS |
+| M5 shader-validation harness | 7/7 PASS |
+| 30 s PGR2 Metal `METAL_PIPELINE_TRANSLATED_FAILED == 0` | PASS |
+| 30 s PGR2 Metal `METAL_PIPELINE_FALLBACKS == 0` | PASS |
+| 30 s PGR2 Metal `METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT` | PASS (100 %) |
+| `METAL_FRONT_FB_PUBLISHES > 0` | PASS (6 per interval typical) |
+| GL renderer regression (60 s PGR2 GL) | PASS (post_load_avg_fps = 41.99) |
+
+**Counter-driven correctness signal.** The per-publish diagnostic line
+shows distinct surfaces being routed correctly:
+
+```
+metal_front_fb_publish vram_addr=0x3628000 width=2560 height=960 reason=clear  (back buffer)
+metal_front_fb_publish vram_addr=0x32a4000 width=1280 height=960 reason=crtc   (front buffer)
+metal_front_fb_publish vram_addr=0x2e06000 width=2048 height=1024 reason=clear (aux RT)
+```
+
+This is decisive evidence that the cache discriminates between
+distinct VRAM addresses and the CRTC publish picks the actual
+front-buffer (`0x32a4000`, 1280×960 — exactly the PGR2 main
+framebuffer at `surface_scale=2`) rather than "whichever was last
+clear-bound". Pre-M5.9 every NV2A-direct screenshot captured a
+different surface dimension because the published front-fb was
+"whichever was most recently clear-bound".
+
+**Visual validation status.** The captured PGR2 NV2A-direct
+screenshots (`/tmp/m5_9-pgr2.0001..0017.png`, 17 captures in the
+60 s run) at the CRTC-resolved surface still show solid magenta.
+This is **a separate bug from the surface-routing architectural
+cause**: the renderer is now publishing the right surface, but the
+guest is rendering scene content into a different surface (the back
+buffer at `0x3628000`) and the front-buffer surface at `0x32a4000`
+never receives the rendered content because the Metal renderer does
+not yet implement the surface-to-surface copy / blit path that the
+guest uses to swap buffers (`NV097_IMAGE_BLIT` / surface
+upload-download). The vk renderer handles this via
+`pgraph_vk_image_blit` and the `pgraph_vk_surface_update`
+upload/download path; the mtl `image_blit` callback is still a stub
+and `surface_update` is a structural no-op. **This M5.9 slice
+ships the architectural fix that the 2026-05-03 root-cause entry
+called for; the remaining "back-buffer to front-buffer copy" piece
+is the immediate follow-up.**
+
+**Deferred items (carried forward).**
+
+- M5.9-followup-A — `pgraph_mtl_image_blit` implementation: NV097_IMAGE_BLIT
+  surface-to-surface copy, the missing piece between back-buffer rendering
+  and front-buffer publish.
+- M5.9-followup-B — CPU-write callbacks to invalidate cached surfaces
+  when the guest writes to their VRAM range (`tcg_enabled() ?
+  mem_access_callback_insert : memory_region_test_and_clear_dirty`
+  fallback). Mirrors `vk/surface.c::register_cpu_access_callback` +
+  `surface_access_callback`.
+- M5.9-followup-C — VRAM-side upload at surface allocation
+  (`upload_vram_to_texture`). The surface.mm helper exists but is
+  currently bypassed (`vram_ptr=NULL`) because the swizzled / non-power-
+  of-two pitch path hasn't been wired and the linear path triggered an
+  out-of-bounds VRAM read at `surface_scale=2`. Re-enable once the
+  scaled vs unscaled dimension semantics are resolved.
+- M5.9-followup-D — surface download for read-from-RT (texture-from-RT,
+  `NV097_GET_REPORT` color readback). Required for some games' shadow /
+  reflection pipelines.
+
+**Files touched.**
+
+- `hw/xbox/nv2a/pgraph/mtl/surface.h` — extended API (new bind helpers,
+  `publish_front_fb`, `cache_flush`, counter accessors).
+- `hw/xbox/nv2a/pgraph/mtl/surface.mm` — full rewrite of the binding
+  layer; added `MtlSurfaceBinding` struct, cache list, lookup helpers,
+  publish / clear / MSAA companion.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — added `mtl_bind_current_surfaces`,
+  per-format BPP helpers, wired clear_surface / flush_draw / flip_stall
+  / surface_flush to the cache; CRTC-aware publish in flip_stall +
+  get_framebuffer_surface.
+- `util/xemu-metal-perf.c` — new weak counter accessors + emit fields
+  (`METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`).
+- `scripts/apple-silicon/extract-perf-summary.sh` — recognize
+  `METAL_FRONT_FB_PUBLISHES`.
+
+**LOC delta.** ~ +650 LOC (surface.mm/.h replacement + renderer.c
+helpers + perf counter wiring). Well below the 1200 LOC ceiling
+estimated in the root-cause entry — the difference is the deferred
+upload/download/dirty-tracking, which together account for ~600 LOC
+in vk/surface.c and is staged for the follow-up slices A/B/C/D above.
+
+**See also.** `2026-05-03: Metal magenta root-caused …` entry below
+for the diagnostic that motivated this slice;
+`hw/xbox/nv2a/pgraph/vk/surface.c:697-724` (the lookup-helper port
+target); `hw/xbox/nv2a/pgraph/vk/renderer.c:172-205` and
+`hw/xbox/nv2a/pgraph/gl/display.c:414-448` (the CRTC-publish
+template).
+
 ## 2026-05-03: Metal magenta root-caused — missing per-VRAM surface cache + CRTC-aware publish
 
 **Context.** Metal renderer produces solid-magenta NV2A render targets

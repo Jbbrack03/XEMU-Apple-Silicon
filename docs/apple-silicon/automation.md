@@ -540,6 +540,30 @@ and stack:
   `METAL_SCREENSHOTS_TAKEN` (per-interval delta) surfaces on the
   `xemu-perf:` interval line and counts only successfully-encoded
   PNGs (encoding failures log + skip without bumping the counter).
+- `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03**): per-interval
+  count of front-fb texture pointer **changes** in the Metal
+  renderer's surface cache. Always-on atomic. Bumped whenever the
+  resolved front-fb MTLTexture differs from the previously-published
+  pointer; deduped across repeated publishes of the same texture.
+  Companion always-on diagnostic line emits per-change as
+  `xemu-perf: metal_front_fb_publish vram_addr=0x.. width=W height=H
+  format=FMT reason={crtc,clear}`. `reason=crtc` indicates a CRTC-
+  scan publish from `pgraph_mtl_flip_stall` looking up
+  `d->pcrtc.start + line_offset`; `reason=clear` indicates the
+  legacy "publish-on-color-clear" fallback that fires before the
+  CRTC publish for the first frame. Steady-state: 1-8 publishes per
+  interval as the game cycles between front-buffer / back-buffer /
+  aux-RT bindings. Zero publishes after the first frame indicates
+  the renderer is stuck on the same front-fb (correctness-impacting
+  if the game expects frame-to-frame variance). Surface-routing
+  regressions of the M5.9 class are catch-able by counter
+  inspection without requiring screenshot diffing. Apple Silicon
+  performance fork; slice M5.9.
+- `METAL_SURFACE_CACHE_SIZE` (**M5.9, 2026-05-03**): live count of
+  entries in the Metal-renderer per-VRAM surface cache. Capped at
+  16 (LRU eviction). Steady-state: 4-12 entries on PGR2 / Crimson /
+  Rainbow (front buffer + back buffer + a few aux RTs). Always-on
+  gauge (not a delta). Apple Silicon performance fork; slice M5.9.
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with

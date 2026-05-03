@@ -1,24 +1,25 @@
 /*
- * NV2A PGRAPH Metal renderer — surface manager (slice M2).
+ * NV2A PGRAPH Metal renderer — surface manager (slice M2 + M5.9).
  *
- * C-callable interface to a minimal surface manager that owns the
- * current color render target, current depth render target, and the
- * "front" framebuffer texture that the present compositor blits to the
- * CAMetalLayer drawable.
+ * C-callable interface to the Metal-side surface manager. M5.9 (2026-05-03)
+ * promotes the M2-era single-slot manager to a per-VRAM-address cache that
+ * mirrors the relevant subset of `vk/surface.c`: entries keyed by
+ * `vram_addr`+`size`, persistent across binding changes, and looked up
+ * by the CRTC publish path via `pgraph_mtl_surface_get_within`.
  *
- * Compared with vk/surface.c (1760 lines), the M2 surface manager is
- * intentionally minimal:
- *   - One color binding + one depth binding at a time (no surface cache
- *     across guest VRAM bindings yet — M3 starts wiring draws and at
- *     that point we'll need a per-vram-addr cache).
- *   - clear_surface decodes the NV097_CLEAR_SURFACE_* mask and runs a
- *     single render pass with MTLLoadActionClear / no draws.
- *   - The "front" framebuffer pointer is published so the compositor in
- *     ui/xemu-metal.mm can read it via a side-channel accessor.
+ * The implementation is split:
+ *   - `surface.mm` owns the QTAILQ-equivalent doubly-linked-list,
+ *     MTLTexture + MSAA companion lifetime, and the upload-from-VRAM
+ *     blit. It does NOT include nv2a_int.h.
+ *   - `renderer.c` calls into the cache from `pgraph_mtl_surface_update`
+ *     and `pgraph_mtl_get_framebuffer_surface`. Per-target headers are
+ *     visible here only.
  *
- * Per docs/apple-silicon/metal-renderer-plan.md slice M2 the gate is
- * "a game that issues only clear_surface (no drawing) shows the cleared
- * color in the window".
+ * The legacy single-slot accessors (`pgraph_mtl_surface_ensure_color` /
+ * `_ensure_depth`, `pgraph_mtl_surface_get_color_texture`, etc.) are kept
+ * as thin wrappers over the new cache so the existing draw / clear paths
+ * keep compiling unchanged. The "currently bound" pointer is now a
+ * pointer into the cache rather than a private statics.
  *
  * Copyright (c) 2026 XEMU MacOS Apple Silicon performance fork
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -40,18 +41,63 @@ extern "C" {
 bool pgraph_mtl_surface_init(void);
 void pgraph_mtl_surface_finalize(void);
 
+/* M5.9: drop every cache entry. Called from `pgraph_mtl_surface_flush`
+ * so paired GL/Metal renderer-restart flows are byte-identical. */
+void pgraph_mtl_surface_cache_flush(void);
+
 /*
- * Ensure a color RT and (optionally) a depth RT exist with the given
- * dimensions. Reallocates from the heap when the shape changes. Either
- * width or height being 0 leaves the binding untouched (matches the
- * common "unconfigured surface" case).
+ * Bind a color or depth surface keyed by VRAM address. M5.9: replaces
+ * the M2-era pgraph_mtl_surface_ensure_color/_depth. The cache
+ * promotes a freshly-bound (vram_addr, dimensions, format) into a
+ * persistent entry; subsequent re-binds of the same vram_addr at the
+ * same shape return the existing entry instead of releasing+reallocating
+ * the underlying MTLTexture.
  *
- * Format arguments are NV097_SET_SURFACE_FORMAT_COLOR_* /
- * NV097_SET_SURFACE_FORMAT_ZETA_* values from nv2a_regs.h. The surface
- * manager translates them to MTLPixelFormat internally so renderer.c
- * (a .c file without Metal headers) does not need MTLPixelFormat.
+ * `vram_addr` is the absolute VRAM offset of the surface's first pixel.
+ * `size` is the in-VRAM byte footprint (`pitch * height` rounded up
+ * to width*bytes_per_pixel).
+ * `pitch` is the row stride in VRAM bytes (matches `pg->surface_*.pitch`).
+ * `vram_ptr` is `d->vram_ptr` (or NULL to skip the upload-from-VRAM
+ * step); the cache uses it to upload the guest's pixel data into the
+ * MTLTexture on first allocation so the freshly-bound RT picks up the
+ * caller's prior CPU writes. The pointer remains valid for the
+ * lifetime of the renderer; the cache only reads from `vram_ptr +
+ * vram_addr` synchronously inside the call.
  *
- * Called by pgraph_mtl_clear_surface and (later) pgraph_mtl_draw_begin.
+ * Returns true on success (an entry was bound, possibly newly-created),
+ * false on failure (heap exhausted, invalid arguments).
+ */
+bool pgraph_mtl_surface_bind_color(uint32_t vram_addr, uint32_t size,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t pitch,
+                                   uint32_t nv097_color_format,
+                                   const uint8_t *vram_ptr);
+bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t pitch,
+                                   uint32_t nv097_zeta_format,
+                                   const uint8_t *vram_ptr);
+
+/* Lookup helpers. Mirror vk/surface.c::pgraph_vk_surface_get and
+ * pgraph_vk_surface_get_within. The returned pointer is owned by the
+ * cache; do not release. NULL when nothing is bound at the given
+ * address. The "_within" variant returns the surface whose VRAM range
+ * contains `vram_addr` (used by the CRTC publish path; the CRTC start
+ * may not be exactly the surface's `vram_addr` if `line_offset != 0`). */
+void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
+void *pgraph_mtl_surface_get_metal_texture_within(uint32_t vram_addr,
+                                                  uint32_t *out_width,
+                                                  uint32_t *out_height,
+                                                  uint32_t *out_format);
+
+/*
+ * Legacy ensure-color/-depth wrappers. Kept so the M2-era clear path
+ * keeps working; the M5.9 cache binds a "synthetic" entry at vram_addr
+ * 0 if no bind_color/bind_depth has been called yet. Set vram_addr=0
+ * means "use whatever the renderer most recently bound for this aspect"
+ * — i.e. the legacy single-slot semantics.
+ *
+ * Either width or height being 0 leaves the binding untouched.
  */
 void pgraph_mtl_surface_ensure_color(uint32_t width, uint32_t height,
                                      uint32_t nv097_color_format);
@@ -69,11 +115,6 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                               bool write_zeta, float depth);
 
 /*
- * After a successful clear, the color binding becomes the current
- * "front" framebuffer that the compositor reads. This is a stand-in for
- * the per-VRAM-addr surface cache + sync_pending machinery the GL
- * renderer uses; M2 does not implement that yet.
- *
  * Returns 1 if a front framebuffer texture is available, else 0.
  * Matches the int return type of PGRAPHRenderer.ops.get_framebuffer_surface.
  */
@@ -82,19 +123,12 @@ int pgraph_mtl_surface_has_front_framebuffer(void);
 /*
  * Side-channel accessor for the compositor in ui/xemu-metal.mm. Returns
  * the current front framebuffer as id<MTLTexture> cast to void*, or
- * NULL if no surface has been created yet.
+ * NULL if no surface has been published yet.
  *
- * The texture is owned by the surface manager; the caller must NOT
- * release it. The caller must use the texture only on the same Metal
- * device that allocated it (the global one from xemu-metal.mm).
- *
- * This accessor exists because PGRAPHRenderer.ops.get_framebuffer_surface
- * has the type `int (*)(NV2AState *)` (the GL impl returns a GLuint).
- * Returning an id<MTLTexture> as int is not portable, so M2 publishes
- * the texture via this side-channel and the int op returns 1/0.
- *
- * Decision-log entry: "2026-05-02: Metal slice M2 — clear-only surface
- * manager + side-channel framebuffer texture accessor".
+ * M5.9: the published front-fb is the surface that the NV2A CRTC says
+ * is the active framebuffer (looked up via `d->pcrtc.start +
+ * line_offset` against the surface cache). Falls back to the most
+ * recently bound color surface if no CRTC-pointed surface exists yet.
  */
 void *pgraph_mtl_get_framebuffer_metal_texture(void);
 
@@ -103,21 +137,30 @@ void *pgraph_mtl_get_framebuffer_metal_texture(void);
  * compositor in ui/xemu-metal.mm at present time. After present, the
  * compositor calls this to release any per-frame references. For M2 the
  * surface is long-lived (no in-flight tracking), so this is a no-op.
- * Future slices may use it for fence/release pairing.
  */
 void pgraph_mtl_release_framebuffer_metal_texture(void);
 
+/* M5.9: publish the surface at `vram_addr` as the front-fb. Called
+ * from `pgraph_mtl_get_framebuffer_surface` (renderer.c) which already
+ * has access to NV2AState. The surface manager itself does not include
+ * nv2a_int.h, so renderer.c does the CRTC math and hands the result
+ * down via this call. Returns true if a matching cache entry was
+ * found and published; false otherwise (the front-fb is unchanged).
+ *
+ * Bumps the `METAL_FRONT_FB_PUBLISHES` counter when the resolved
+ * texture differs from the last published value, and emits a
+ * `xemu-perf: metal_front_fb_publish vram_addr=0x.. width=W height=H
+ * format=FMT reason=<reason>` line on the same condition.
+ *
+ * `reason` is a short literal ("crtc", "clear", "ensure", "bind") used
+ * for the diagnostic log; the cache keeps a copy of the pointer so
+ * repeated publishes for the same texture are deduped to one line.
+ */
+bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
+                                         const char *reason);
+
 /*
- * Accessors for the currently-bound color / depth render targets. Used
- * by the draw module (mtl/draw.mm) to build a render-pass descriptor
- * without round-tripping through renderer.c. Returns NULL if no
- * binding is active.
- *
- * The dimensions and pixel formats are stored alongside the textures
- * so the draw module can construct a viewport / pipeline-cache key.
- *
- * Pixel format is returned as MTLPixelFormat cast to uint32_t (matches
- * the heap.h convention).
+ * Accessors for the currently-bound color / depth render targets.
  */
 void *pgraph_mtl_surface_get_color_texture(void);
 void *pgraph_mtl_surface_get_depth_texture(void);
@@ -127,47 +170,35 @@ uint32_t pgraph_mtl_surface_get_width(void);
 uint32_t pgraph_mtl_surface_get_height(void);
 
 /*
- * M11: configure the per-renderer MSAA sample count. Called once at
- * pgraph_mtl_init after the env var has been parsed and clamped to
- * the device's `supportsTextureSampleCount:` reply. `sample_count`
- * must be 1 (off), 2, 4, or 8. Calling this with the same value as
- * the current configuration is a no-op; any change clears the MSAA
- * companion bindings so they are re-allocated against the new count.
+ * M11: configure the per-renderer MSAA sample count.
  */
 void pgraph_mtl_surface_set_msaa_sample_count(uint32_t sample_count);
 
 /*
- * M11: returns the effective MSAA sample count (1 = off). Used by
- * draw.mm and state.c to drive the render-pass `storeAction` and the
- * pipeline `rasterSampleCount` consistently with the surface
- * manager's allocations.
+ * M11: returns the effective MSAA sample count (1 = off).
  */
 uint32_t pgraph_mtl_surface_get_msaa_sample_count(void);
 
 /*
- * M11: accessor for the MSAA companion color/depth textures. These
- * are memoryless multisample textures that pair 1:1 with the
- * single-sample color/depth bindings; they are the render-pass
- * `texture` while the single-sample bindings are the
- * `resolveTexture`. Returns NULL if MSAA is disabled or the
- * companion texture has not yet been allocated.
+ * M11: accessor for the MSAA companion color/depth textures.
  */
 void *pgraph_mtl_surface_get_msaa_color_texture(void);
 void *pgraph_mtl_surface_get_msaa_depth_texture(void);
 
 /*
- * M11: counter accessors. Always-on atomics; costs nothing when MSAA
- * is off (no resolve happens, the increment is skipped). Surfaced via
- * extract-perf-summary.sh.
+ * M11: counter accessors. Always-on atomics.
  */
 uint64_t pgraph_mtl_surface_msaa_resolve_count(void);
 uint64_t pgraph_mtl_surface_msaa_resolve_us_total(void);
 
 /*
- * Diagnostic counters surfaced by extract-perf-summary.sh. These are
- * always-on atomics and have negligible cost.
+ * Diagnostic counters surfaced by extract-perf-summary.sh.
  */
 uint64_t pgraph_mtl_surface_clear_count(void);
+
+/* M5.9: counters. */
+uint64_t pgraph_mtl_surface_front_fb_publishes(void);
+uint64_t pgraph_mtl_surface_cache_entries(void);
 
 #ifdef __cplusplus
 }

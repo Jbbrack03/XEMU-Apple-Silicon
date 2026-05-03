@@ -346,6 +346,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_CAPTURE_FRAMES" ||
                    key == "METAL_CAPTURE_ACTIVE" ||
                    key == "METAL_SCREENSHOTS_TAKEN" ||
+                   key == "METAL_FRONT_FB_PUBLISHES" ||
                    key == "INPUT_USB_POLLS" ||
                    key == "INPUT_BACKEND_UPDATES" ||
                    key == "INPUT_LAT_US_TOTAL") {
@@ -566,8 +567,9 @@ END {
     keys[160] = "INPUT_USB_POLLS"
     keys[161] = "INPUT_BACKEND_UPDATES"
     keys[162] = "INPUT_LAT_US_TOTAL"
+    keys[163] = "METAL_FRONT_FB_PUBLISHES"
 
-    for (i = 1; i <= 162; i++) {
+    for (i = 1; i <= 163; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
     # Per-interval-max counters: report the running max across intervals.

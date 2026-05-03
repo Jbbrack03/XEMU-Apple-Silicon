@@ -1650,7 +1650,26 @@ slices M0–M14 and opens the user-driven validation window before
 M15. See decision-log "2026-05-02: Metal slice M14 — hardening,
 doc reconciliation, M-cycle summary".
 
-### M5.9 — Per-VRAM surface cache + CRTC-aware publish — **PENDING (next slice; gates M15)**
+### M5.9 — Per-VRAM surface cache + CRTC-aware publish — **SHIPPED 2026-05-03 (architectural fix; deferred items catalogued)**
+
+**Status (2026-05-03): SHIPPED.** The architectural fix is in place
+— the per-vram_addr surface cache exists, lookup helpers
+(`pgraph_mtl_surface_get_at`, `_get_within`) match the vk shape, the
+CRTC-aware publish runs from `flip_stall`, and the new
+`METAL_FRONT_FB_PUBLISHES` counter + per-publish diagnostic line
+confirm distinct surfaces are routed to distinct cache entries with
+the CRTC publish picking the front-buffer (vram_addr=0x32a4000,
+1280×960 — exact match for PGR2 surface_scale=2). Tasks 1, 2, 3, 6,
+7, 8, 9 below are all done. Tasks 4 and 5 (CPU-write callbacks +
+VRAM upload/download) are deferred as M5.9-followup-A/B/C/D — the
+remaining magenta artifact in PGR2 captures is now traced to the
+*absence* of a back-buffer-to-front-buffer copy path
+(`NV097_IMAGE_BLIT` is still a stub), not to the surface routing.
+See decision-log "2026-05-03: Metal slice M5.9 — per-VRAM surface
+cache + CRTC-aware publish". M15 default-on stays BLOCKED on
+M5.9-followup-A (image_blit) plus the deferred items.
+
+
 
 **Scope.** Backfill the per-VRAM-address surface cache that M2
 deferred and that subsequent slices M3–M14 built on top of without

@@ -1,6 +1,51 @@
 # Handoff
 
-Last updated: 2026-05-03 (Metal magenta artifact **root-caused** —
+Last updated: 2026-05-03 (Metal slice **M5.9 — per-VRAM surface
+cache + CRTC-aware publish — SHIPPED**. Replaces the M2-era
+single-slot surface manager with a per-vram_addr cache (`MtlSurfaceBinding`
+linked list, cap 16 with LRU eviction) that mirrors the relevant
+subset of `vk/surface.c::SurfaceBinding`. Lookup helpers
+`pgraph_mtl_surface_get_at(vram_addr)` and `_get_within(vram_addr)`
+match `vk/surface.c:697-724` exactly. The CRTC publish runs from
+`pgraph_mtl_flip_stall` once per `NV097_FLIP_STALL`: looks up
+`d->pcrtc.start + vga_display_params.line_offset` in the cache and
+publishes the resolved MTLTexture as the front-fb. New counter
+`METAL_FRONT_FB_PUBLISHES` + per-publish `xemu-perf:
+metal_front_fb_publish vram_addr=0x.. width=W height=H format=FMT
+reason={crtc,clear}` diagnostic line confirm the routing.
+**Build PASS. M5 shader-validation harness 7/7 PASS. 30 s PGR2 Metal
+benchmark: METAL_PIPELINE_TRANSLATED_FAILED=0,
+METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT (100 % translated),
+METAL_PIPELINE_FALLBACKS=0, METAL_FRONT_FB_PUBLISHES=6 per
+interval, both `reason=clear` and `reason=crtc` lines observed at
+distinct vram_addrs (0x32a4000 / 0x3628000 / 0x2e06000 — front
+buffer / back buffer / aux RT). GL renderer regression check:
+post_load_avg_fps = 41.99, no regression.** **Visual validation: the
+captured PGR2 NV2A-direct screenshots (17 captures across 60 s) at
+the CRTC-resolved surface still show solid magenta — but this is
+now a *different* bug than the surface-routing architectural cause
+that M5.9 fixed.** The 1280×960 surface at vram_addr=0x32a4000 IS
+the correct PGR2 main framebuffer (the dimensions match
+`surface_scale=2` × 640×480), and M5.9 successfully publishes it.
+The remaining magenta is because the renderer renders into the back
+buffer at vram_addr=0x3628000 and there is no copy/blit path yet
+between the back buffer and the front buffer (Metal `image_blit` is
+still a stub and `surface_update` is a structural no-op for
+upload/download — the guest's swap-buffers flow is broken). This
+is M5.9-followup-A. M15 default-on stays BLOCKED on M5.9-followup-A
+(image_blit) plus the deferred items (CPU-write callbacks, VRAM
+upload, surface download). See decision-log "2026-05-03: Metal
+slice M5.9 — per-VRAM surface cache + CRTC-aware publish" for the
+full implementation, deferred items, and LOC delta (~ +650 LOC).
+**Next-session priorities**: (1) M5.9-followup-A — implement
+`pgraph_mtl_image_blit` so the guest's back-buffer → front-buffer
+copy path lands at the right MTLTexture; this is what should let
+the rendered scene content actually reach the published front-fb;
+(2) Rainbow Six 3 FPS variance investigation; (3) Audio listen-
+test for `XEMU_APU_LOCK_RELEASE`; (4) N3 paired latency benchmark
+for `XEMU_MACOS_NATIVE_INPUT` default-on decision.
+
+(Earlier banner — Metal magenta artifact **root-caused** —
 the Metal renderer ships slices M3 → M14 on top of an **M2-era
 single-slot surface manager** (`hw/xbox/nv2a/pgraph/mtl/surface.mm`
 588 LOC vs `vk/surface.c` 1760 LOC). The ~1200 LOC delta is the
