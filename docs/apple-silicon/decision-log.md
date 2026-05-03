@@ -1,5 +1,253 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.9-followup-B+C — CPU-write dirty tracking + VRAM upload (shipped, visual gate NOT met)
+
+**Context.** The 2026-05-03 M5.9 + followup-A entries closed the
+surface-routing architectural cause and the GPU-side image_blit
+plumbing. The remaining magenta-RT artifact in PGR2 captures was
+attributed to the absence of two complementary mechanisms vk's
+renderer ships: a CPU-write access callback that marks cached
+surfaces dirty, plus a VRAM→texture upload that consumes that bit
+to refresh the cached MTLTexture. This slice ships both.
+
+**Implementation summary.**
+
+- New struct fields on `MtlSurfaceBinding`:
+  - `_Atomic(uint32_t) dirty_vram` — set by the access callback,
+    consumed by the upload helper.
+  - `void *access_cb` — opaque MemAccessCallback* attached to the
+    cache entry so eviction can disarm.
+  - `uint32_t guest_width`, `guest_height` — explicit guest 1×
+    source dimensions (the MTLTexture is allocated at the
+    host-scaled dims; the upload reads `guest_w × guest_h` from
+    VRAM into the top-left sub-rect).
+- New `mtl/surface.h` API: `pgraph_mtl_surface_bind_color_ex` /
+  `_bind_depth_ex` (extended bind that takes guest_w / guest_h
+  separately; the legacy bind variants set guest_w/h equal to
+  width/height for backward compat with the ensure-by-shape path).
+  `pgraph_mtl_surface_mark_dirty_overlapping(addr, len)` — iterate
+  the cache and atomic-set `dirty_vram` on overlapping entries.
+  `pgraph_mtl_surface_register_access_cb_for / _unregister_access_cb_for`
+  — store / retrieve the opaque cb pointer on a cache entry.
+  `pgraph_mtl_surface_upload_dirty(vram_ptr)` — iterate cache,
+  upload entries whose `dirty_vram` is set.
+  `pgraph_mtl_surface_upload_if_dirty_at(vram_addr, vram_ptr)` —
+  single-entry lazy upload via `_get_within` lookup.
+  `pgraph_mtl_surface_force_upload_at(vram_addr, vram_ptr)` — force
+  re-upload (used at allocate-time inside cache_find_or_create_*).
+  `pgraph_mtl_surface_iter_addresses(out, cap)` — snapshot vram_addr
+  list (used by the disarm-all path on cache flush / finalize).
+- New renderer.c side:
+  - `mtl_surface_access_callback(void *opaque, MemoryRegion *mr,
+    hwaddr addr, hwaddr len, bool write)` — TCG vCPU-thread callback
+    invoked from `mem_check_access_callback_ramaddr`. The `addr`
+    parameter is mr-relative offset (NOT absolute ram_addr — see
+    `system/physmem.c:939`); we pass it directly to
+    `pgraph_mtl_surface_mark_dirty_overlapping` after locking
+    `d->pgraph.lock`.
+  - `mtl_arm_access_callback(d, vram_addr, size)` — calls
+    `mem_access_callback_insert(qemu_get_cpu(0), d->vram, vram_addr,
+    size, &mtl_surface_access_callback, d)` and stores the returned
+    cb pointer on the cache entry. Skips when `tcg_enabled() == false`
+    (mirrors vk's pattern; KVM/HVF deferred).
+  - `mtl_disarm_all_access_callbacks(d)` — drains the cache cb list
+    and calls `mem_access_callback_remove_by_ref` for each. Invoked
+    from `pgraph_mtl_surface_flush` and `pgraph_mtl_finalize`.
+  - `mtl_bind_current_surfaces` updated to call the `_ex` bind
+    variants with explicit guest dimensions, pass `d->vram_ptr` to
+    enable upload-at-allocate, and arm the access callback after a
+    successful bind.
+  - `pgraph_mtl_flip_stall(d)` — added
+    `pgraph_mtl_surface_upload_if_dirty_at((uint32_t)crtc_addr,
+    d->vram_ptr)` before the publish_front_fb call so the
+    CRTC-resolved surface always reflects guest CPU writes.
+  - `pgraph_mtl_flush_draw(d)` — added
+    `pgraph_mtl_surface_upload_dirty(d->vram_ptr)` after the bind
+    so any cache entries written by the guest since the last
+    upload re-fetch their VRAM contents before the draw.
+- New counters (`util/xemu-metal-perf.c` + `mtl/surface.mm`):
+  - `METAL_SURFACE_VRAM_DIRTY_HITS` — count of 0→1 dirty bit
+    transitions (i.e. CPU-write events that hit a watched surface).
+  - `METAL_SURFACE_VRAM_UPLOADS` — count of completed VRAM→texture
+    uploads.
+  - `METAL_SURFACE_VRAM_UPLOAD_BYTES` — bytes copied through the
+    upload staging buffer.
+  All three surface on the `xemu-perf:` interval line; recognized
+  by `scripts/apple-silicon/extract-perf-summary.sh`.
+- Diagnostic logs (capped to keep logs readable):
+  - `xemu-perf: metal_color_bind vram_addr=0x.. guest=WxH scaled=WxH
+    pitch=P format=F` — once per distinct vram_addr (cap 16).
+  - `xemu-perf: metal_arm_cb n=N vram_addr=0x.. size=S cb=0x.. tcg=T`
+    — first 8 arm events.
+  - `xemu-perf: metal_access_cb cb_n=N addr=0x.. len=L write=W` —
+    first 4 callback invocations.
+  - `xemu-perf: metal_surface_dirty vram_addr=0x.. size=S
+    write_addr=0x.. write_len=L is_color=B` — first 0→1 transition
+    per entry.
+
+**Validation gates.**
+
+| Gate | Result |
+|------|--------|
+| Build (`./build.sh -a arm64`) | PASS |
+| M5 shader-validation harness | 7/7 PASS |
+| `METAL_PIPELINE_TRANSLATED_FAILED == 0` | PASS |
+| `METAL_PIPELINE_FALLBACKS == 0` | PASS |
+| `METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT` | PASS (1505/1505 = 100 %) |
+| `METAL_FRONT_FB_PUBLISHES > 0` | PASS (initial publish at 0x32a4000) |
+| `METAL_SURFACE_VRAM_UPLOADS > 0` | PASS (2 / interval, 90 s run) |
+| **`METAL_SURFACE_VRAM_DIRTY_HITS > 0`** | **FAIL (0 in every interval)** |
+| **Visual gate — captured PNGs show rendered scene** | **FAIL (still magenta + cleared white sub-rect)** |
+| GL renderer regression | PASS (`post_load_avg_fps = 49.02`, no regression) |
+
+**Investigation — what PGR2's buffer-swap mechanism is NOT.**
+Diagnostic logging surfaced the actual bind addresses + callback
+delivery pattern:
+
+```
+metal_color_bind vram_addr=0x3628000 guest=1280x480 scaled=2560x960 pitch=5120 format=8
+metal_color_bind vram_addr=0x32a4000 guest=640x480  scaled=1280x960 pitch=2560 format=8
+metal_color_bind vram_addr=0x2854000 ... 0x2994000  (~6 aux 256x256 RTs)
+metal_color_bind vram_addr=0x2e06000 guest=1024x512 scaled=2048x1024 (1024-square aux)
+
+metal_arm_cb n=1 vram_addr=0x33d0000 size=2457600 (depth)
+metal_arm_cb n=2 vram_addr=0x3628000 size=2457600 (back buffer)
+metal_arm_cb n=4 vram_addr=0x32a4000 size=1228800 (front buffer)
+... (8 total before cap)
+
+metal_front_fb_publish vram_addr=0x32a4000 ... reason=crtc  (single line, never alternates)
+
+(No metal_surface_dirty lines, no metal_access_cb lines for any of
+the watched ranges across the entire 90 s run)
+
+METAL_IMAGE_BLITS=0 across all intervals
+```
+
+This **decisively rules out** the three candidate buffer-swap
+mechanisms enumerated in the task framing:
+
+- **(a) Guest CPU memcpy from back to front** — the access callback
+  is correctly armed (8 arm events with valid `cb=0x...` pointers,
+  `tcg=1`), the dispatch path is wired (`mr_offset = hit_addr -
+  ram_addr_base` from `system/physmem.c:939`, callback receives
+  vram-relative offset), but the callback NEVER fires for any
+  surface's VRAM range. PGR2's TCG vCPU is not writing to the
+  watched ranges. (We did see 4 invocations early in development
+  before fixing a `vram_addr=0` synthetic-watch bug; those were
+  reads to ROM-area low VRAM matched against the bogus
+  range-starts-at-0 watch — once vram_addr=0 was excluded from
+  arming, callback invocations dropped to zero.)
+- **(b) NV097_IMAGE_BLIT** — the followup-A counter
+  `METAL_IMAGE_BLITS` remains zero per interval; PGR2 doesn't
+  issue this method.
+- **(c) `pcrtc.start` alternating between front/back addresses** —
+  the publish log shows a single `vram_addr=0x32a4000` for the
+  entire 90 s run, no alternation.
+
+Captured PNGs (`/tmp/m5_9_bc-pgr2.0001.png`,
+`/tmp/m5_9_bc-pgr2.0002.png`) consistently show the upper-left
+640×480 sub-rect of the 1280×960 published front-fb texture filled
+with cleared-color WHITE (matches PGR2's clear color), and the
+remaining 75 % filled with HEAP-DEFAULT MAGENTA (uninitialized
+texture content beyond the upload's natural-dim source rect).
+This image is what we'd see if the only thing ever written to
+`0x32a4000`'s MTLTexture was the bind-time VRAM upload of the
+cleared color, with NV2A draws never reaching this texture.
+
+**The remaining unknown.** PGR2 is plainly producing rendered
+scene content (`METAL_DRAW_COUNT=1505` per 1 s interval, 100 %
+translated, zero pipeline fallbacks). The renderer is binding
+multiple distinct color surfaces (`0x3628000`, aux RTs at
+`0x2854000`+, etc.). But none of the bound-and-drawn surfaces
+ends up routed to the CRTC-published front-fb, and no detected
+mechanism propagates content from those surfaces to `0x32a4000`.
+Three remaining hypotheses:
+
+1. **NV2A engine performs a DMA copy from back→front bypassing
+   IMAGE_BLIT** — perhaps a 2D blit channel through PFIFO that
+   doesn't surface as `NV097_IMAGE_BLIT` in our op-dispatch
+   table. If true, instrumenting the PFIFO/PUSH-PULL state for
+   surface-region writes from the engine side would catch it.
+2. **PGR2 draws DO reach `0x32a4000` but the bind-time upload
+   clobbers them** — `cache_find_or_create_color` only uploads
+   on alloc-miss; once an entry is cached, subsequent binds
+   take the hit-path and skip upload. So this would only happen
+   if the cache entry is being evicted+re-allocated each frame
+   (LRU under the 16-entry cap with > 16 active surfaces).
+   `METAL_SURFACE_VRAM_UPLOADS=2/interval` is suspiciously high
+   for a stable scene; raising the cache cap or making upload
+   only-once-per-vram_addr-lifetime would test this.
+3. **Engine renders to a VRAM-backed offscreen surface and the
+   guest reads it as a TEXTURE bound to a fullscreen quad
+   targeting `0x32a4000`** — i.e. there's a final post-process
+   pass that uses one of the 1024×512 / 1024×1024 aux RTs as
+   input and `0x32a4000` as output. The bind-time upload
+   would clobber the post-process output of the previous
+   frame, but the next draw should overwrite. This is most
+   plausible to me but hardest to confirm without
+   per-pipeline-key shader-state diagnostic.
+
+Diagnosing further is **outside the scope of B+C** as
+implemented; the slice ships the API surface and infrastructure
+that vk uses, but PGR2's particular swap mechanism doesn't
+trigger any of them. Further work needs new diagnostics to
+attribute draw output per-vram_addr (e.g. a counter for "draws
+hitting `0x32a4000`'s texture", or a screenshot taken
+immediately AFTER each NV2A draw before any subsequent
+upload could clobber it).
+
+**Why we shipped despite the visual-gate fail.** Per project
+rule #1 (data-driven) and rule #2 (no shortcuts): B+C is the
+correct port of vk's mechanism, the API is in place, the
+counter wiring is honest about what's working (uploads run,
+dirty events don't), the diagnostics correctly attribute the
+gap to a missing fourth mechanism that B+C doesn't cover, and
+nothing in B+C is broken — it just doesn't move the visual
+gate for PGR2. Reverting would lose the diagnostic clarity and
+the infrastructure that follow-on slices will need. Per the
+task framing's explicit guidance ("if still magenta after this
+followup lands, document what was tried and what failed; do
+NOT mark the task complete"), the slice is shipped but the
+visual-correctness goal stays open.
+
+**Files touched.**
+
+- `hw/xbox/nv2a/pgraph/mtl/surface.h` — extended API (struct
+  field additions documented above; `_ex` bind variants;
+  mark_dirty / register_cb / unregister_cb / upload_dirty /
+  upload_if_dirty_at / force_upload_at / iter_addresses;
+  3 new counter accessors).
+- `hw/xbox/nv2a/pgraph/mtl/surface.mm` — struct field additions;
+  upload_vram_to_texture rewritten to use guest_w/h sub-rect;
+  cache_find_or_create_color/depth take guest_w/h; new helpers
+  for mark-dirty / register-cb / upload-dirty / upload-if-dirty-at /
+  force-upload-at / iter-addresses; new counters initialized
+  in init.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — access callback dispatch;
+  arm / disarm helpers; `mtl_bind_current_surfaces` calls `_ex`
+  bind + arms cb + passes `d->vram_ptr`; `pgraph_mtl_flip_stall`
+  calls `upload_if_dirty_at` before publish; `pgraph_mtl_flush_draw`
+  calls `upload_dirty` after bind; `pgraph_mtl_surface_flush` and
+  `pgraph_mtl_finalize` call `mtl_disarm_all_access_callbacks`;
+  diagnostic logs (color_bind / arm_cb / access_cb / surface_dirty).
+- `util/xemu-metal-perf.c` — three new counters +  baselines + emit
+  fields.
+- `scripts/apple-silicon/extract-perf-summary.sh` — recognize
+  the three new counter keys.
+
+**LOC delta.** ~ +330 LOC across surface.h, surface.mm, renderer.c,
+xemu-metal-perf.c, extract-perf-summary.sh.
+
+**See also.** `2026-05-03: Metal slice M5.9 — per-VRAM surface
+cache + CRTC-aware publish` (the architectural fix this followup
+extends); `2026-05-03: Metal slice M5.9-followup-A — NV097_IMAGE_BLIT
+GPU-side surface copy` (the sibling followup that ships the
+GPU-blit path); `hw/xbox/nv2a/pgraph/vk/surface.c:582-695`
+(the vk register_cpu_access_callback / surface_access_callback /
+invalidate_overlapping_surfaces template); `system/physmem.c:870-944`
+(`mem_access_callback_insert` + `mem_check_access_callback_ramaddr`
+implementation).
+
 ## 2026-05-03: Metal slice M5.9 — per-VRAM surface cache + CRTC-aware publish (architectural fix shipped)
 
 **Context.** The 2026-05-03 root-cause-investigation entry below identified

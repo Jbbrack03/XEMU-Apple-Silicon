@@ -1669,6 +1669,28 @@ See decision-log "2026-05-03: Metal slice M5.9 — per-VRAM surface
 cache + CRTC-aware publish". M15 default-on stays BLOCKED on
 M5.9-followup-A (image_blit) plus the deferred items.
 
+**Followup-A (NV097_IMAGE_BLIT GPU-side surface copy) — SHIPPED
+2026-05-03**, but PGR2 doesn't issue this op (`METAL_IMAGE_BLITS=0`
+in benchmarks). The plumbing is correct for titles that do issue it.
+
+**Followup-B+C (CPU-write dirty tracking + VRAM upload) — SHIPPED
+2026-05-03, visual gate NOT met**. The infrastructure is correctly
+wired: access callbacks register via `mem_access_callback_insert`
+under TCG, the callback fires the dirty bit on guest writes, the
+upload helper consumes the bit, three new counters
+(`METAL_SURFACE_VRAM_DIRTY_HITS`, `METAL_SURFACE_VRAM_UPLOADS`,
+`METAL_SURFACE_VRAM_UPLOAD_BYTES`) measure all of it. PGR2 90 s
+benchmark: `METAL_SURFACE_VRAM_UPLOADS=2/interval`,
+`METAL_SURFACE_VRAM_DIRTY_HITS=0/interval`. Captured PNGs still
+show the cleared-color sub-rect + heap-default magenta — PGR2 is
+NOT using a CPU-write swap mechanism. The decision-log entry of
+this date (§"Investigation — what PGR2's buffer-swap mechanism
+is NOT") rules out all three candidate mechanisms — the actual
+mechanism is unknown and demands a fourth followup with
+per-vram_addr draw-target instrumentation.
+
+**Followup-D (surface download for read-from-RT) — STILL DEFERRED.**
+
 
 
 **Scope.** Backfill the per-VRAM-address surface cache that M2

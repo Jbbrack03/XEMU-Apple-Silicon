@@ -143,11 +143,58 @@ The fork-specific source-code changes are concentrated in:
       from `surface_flush`); `pgraph_mtl_surface_get_metal_texture_at`
       / `_within` (lookup helpers — port of vk's `_get_at` / `_get_within`
       at `vk/surface.c:697-724`). Legacy `ensure_color/_depth` API
-      kept as thin wrappers for the pre-DMA-bind paths. Counter
-      accessors: `pgraph_mtl_surface_front_fb_publishes()`,
-      `pgraph_mtl_surface_cache_entries()`. CPU-write callbacks +
-      VRAM upload/download are deferred to M5.9-followup-A/B/C/D —
-      see decision-log.
+      kept as thin wrappers for the pre-DMA-bind paths.
+      **(M5.9-followup-A, 2026-05-03)** GPU-side
+      `pgraph_mtl_surface_blit_copy(src_vram_addr, dst_vram_addr,
+      src_x, src_y, dst_x, dst_y, w, h)` for NV097_IMAGE_BLIT (Path
+      A: matching-format rect copy via MTLBlitCommandEncoder; Path
+      B: format mismatch invalidates dst entry; Path C: nothing in
+      cache, defer to bind-time upload). Counter
+      `METAL_IMAGE_BLITS`. PGR2 doesn't issue this op (verified 0
+      per interval); plumbing intact for titles that do.
+      **(M5.9-followup-B+C, 2026-05-03 — SHIPPED, visual gate NOT
+      met)** New struct fields: `_Atomic(uint32_t) dirty_vram`
+      (set by access callback), `void *access_cb` (opaque
+      MemAccessCallback*), `guest_width`/`guest_height` (1× source
+      sub-rect inside the host-scaled MTLTexture). New API:
+      `pgraph_mtl_surface_bind_color_ex` / `_bind_depth_ex` (extended
+      bind that takes guest_w/h),
+      `pgraph_mtl_surface_mark_dirty_overlapping(addr, len)`
+      (atomic-set `dirty_vram` on overlapping entries),
+      `register_access_cb_for` / `unregister_access_cb_for` (store
+      / retrieve the cb pointer), `upload_dirty(vram_ptr)` (iterate
+      cache, upload every dirty entry), `upload_if_dirty_at(vram_addr,
+      vram_ptr)` (single-entry lazy upload via `_get_within` lookup),
+      `force_upload_at` (used at allocate-time), `iter_addresses`
+      (snapshot for disarm-all). `upload_vram_to_texture` rewritten
+      to use `guest_w/h` source sub-rect. Counter accessors:
+      `pgraph_mtl_surface_vram_dirty_hits()`,
+      `_vram_uploads()`, `_vram_upload_bytes()` →
+      `METAL_SURFACE_VRAM_DIRTY_HITS`, `METAL_SURFACE_VRAM_UPLOADS`,
+      `METAL_SURFACE_VRAM_UPLOAD_BYTES`. **PGR2 90 s benchmark:
+      uploads=2/interval (bind-time path firing), dirty_hits=0/interval
+      (PGR2's TCG vCPU does NOT write to watched surface ranges).
+      Visual gate FAILED — captured PNGs show cleared-color sub-rect
+      + heap-default magenta; rendered scene content does not reach
+      the CRTC-published `0x32a4000` surface despite 1505 draws/s.
+      All three task-framing buffer-swap mechanisms (a) (b) (c)
+      decisively ruled out by the diagnostic counters. Followup-D
+      (surface download) still deferred.** See decision-log
+      "2026-05-03: Metal slice M5.9-followup-B+C — CPU-write dirty
+      tracking + VRAM upload" for full investigation + open
+      hypotheses.
+    - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
+      `pgraph_mtl_image_blit(NV2AState *d)` mirrors
+      `vk/blit.c::pgraph_vk_image_blit` and
+      `gl/blit.c::pgraph_gl_image_blit`. CPU-side memcpy keeps guest
+      VRAM correct (the authoritative oracle); GPU-side
+      `pgraph_mtl_surface_blit_copy` propagates the same pixels into
+      cache-resident MTLTextures. Format mismatch invalidates the
+      dst cache entry so the next bind picks up the freshly-memcpy'd
+      VRAM contents (mirrors vk's `register_cpu_access_callback +
+      surface_access_callback` flow but lazy-on-rebind instead of
+      immediate). Drains the open coalesced render pass before any
+      blit-encoder use of the affected textures.
 - `ui/xemu-input.c` — `XEMU_SCRIPTED_INPUT` (CSV replay) and
   `XEMU_RECORD_INPUT` (CSV record).
 - `ui/xemu-snapshots.c` — `XEMU_SNAPSHOT_NO_THUMBNAIL=1`.

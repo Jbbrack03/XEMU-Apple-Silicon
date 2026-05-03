@@ -131,9 +131,14 @@ typedef struct MtlSurfaceBinding {
     uint32_t pitch;
     bool     is_color;
 
-    /* Shape. */
-    uint32_t width;
-    uint32_t height;
+    /* Shape. The scaled (host-texture) dimensions match the actual
+     * MTLTexture; the guest dimensions are needed for the VRAM upload
+     * source rectangle (we read GUEST_W × GUEST_H pixels from VRAM
+     * into the top-left of the host-scaled texture). */
+    uint32_t width;          /* host-texture (scaled) width */
+    uint32_t height;         /* host-texture (scaled) height */
+    uint32_t guest_width;    /* M5.9-followup-C: 1× source width */
+    uint32_t guest_height;   /* M5.9-followup-C: 1× source height */
     uint32_t nv097_format;
     uint32_t mtl_pixel_format;
 
@@ -143,6 +148,16 @@ typedef struct MtlSurfaceBinding {
     uint32_t msaa_sample_count;
 
     uint64_t last_use_seq;     /* monotonic, for LRU eviction */
+
+    /* M5.9-followup-B (2026-05-03): CPU-write dirty tracking. The
+     * `dirty_vram` flag is set by the access-callback (registered in
+     * renderer.c) when the guest writes to the surface's VRAM range.
+     * `access_cb` is the opaque MemAccessCallback* returned from
+     * mem_access_callback_insert; surface.mm holds it as void* to keep
+     * the .mm boundary clean. The renderer.c side owns the registration
+     * + unregistration plumbing. */
+    _Atomic(uint32_t) dirty_vram;
+    void              *access_cb;
 
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
@@ -177,6 +192,10 @@ static _Atomic(uint64_t) s_clear_count          = 0;
 static _Atomic(uint64_t) s_front_fb_publishes   = 0;
 /* M5.9-followup-A: GPU-side image_blit copies issued. */
 static _Atomic(uint64_t) s_image_blits          = 0;
+/* M5.9-followup-B+C (2026-05-03): CPU-write dirty tracking + VRAM upload. */
+static _Atomic(uint64_t) s_vram_dirty_hits      = 0;
+static _Atomic(uint64_t) s_vram_uploads         = 0;
+static _Atomic(uint64_t) s_vram_upload_bytes    = 0;
 
 static bool s_initialized = false;
 
@@ -364,8 +383,23 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
     if (bpp == 0) {
         return;
     }
-    size_t row_bytes = (size_t)b->width * bpp;
-    size_t copy_size = row_bytes * b->height;
+    /* Source rectangle is GUEST 1× dimensions. */
+    uint32_t guest_w = b->guest_width  ? b->guest_width  : b->width;
+    uint32_t guest_h = b->guest_height ? b->guest_height : b->height;
+    /* Clamp the destination rect to the host MTLTexture extent — for
+     * surface_scale_factor=2 the texture is 2× the VRAM, so a 1×
+     * upload fits with room to spare. If somehow the texture is
+     * smaller than the guest source, clamp. */
+    uint32_t dst_w = guest_w;
+    uint32_t dst_h = guest_h;
+    if (dst_w > b->width)  dst_w = b->width;
+    if (dst_h > b->height) dst_h = b->height;
+    if (dst_w == 0 || dst_h == 0) {
+        return;
+    }
+
+    size_t row_bytes = (size_t)dst_w * bpp;
+    size_t copy_size = row_bytes * dst_h;
     if (copy_size == 0) {
         return;
     }
@@ -382,16 +416,17 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
         if (stage == nil) {
             return;
         }
-        if (b->pitch != 0 && b->pitch == row_bytes) {
-            memcpy(stage.contents, vram_ptr + b->vram_addr, copy_size);
-        } else if (b->pitch != 0) {
-            uint8_t *dst = (uint8_t *)stage.contents;
-            const uint8_t *src = vram_ptr + b->vram_addr;
-            for (uint32_t y = 0; y < b->height; y++) {
-                memcpy(dst + y * row_bytes, src + y * b->pitch, row_bytes);
-            }
+        const uint8_t *src = vram_ptr + b->vram_addr;
+        size_t src_pitch = b->pitch != 0 ? (size_t)b->pitch : row_bytes;
+        if (src_pitch == row_bytes) {
+            memcpy(stage.contents, src, copy_size);
         } else {
-            memcpy(stage.contents, vram_ptr + b->vram_addr, copy_size);
+            uint8_t *dst = (uint8_t *)stage.contents;
+            for (uint32_t y = 0; y < dst_h; y++) {
+                memcpy(dst + y * row_bytes,
+                       src + y * src_pitch,
+                       row_bytes);
+            }
         }
 
         id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
@@ -403,23 +438,20 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
                 sourceOffset:0
            sourceBytesPerRow:row_bytes
          sourceBytesPerImage:copy_size
-                  sourceSize:MTLSizeMake(b->width, b->height, 1)
+                  sourceSize:MTLSizeMake(dst_w, dst_h, 1)
                    toTexture:tex
             destinationSlice:0
             destinationLevel:0
            destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
         [cmd commit];
-        /* No waitUntilCompleted — Metal's queue ordering ensures the
-         * upload completes before any subsequent draw command buffer
-         * that uses the texture, since both go on s_render_queue or
-         * s_draw_queue (which doesn't share command buffers but does
-         * see consistent results once submitted in order). The
-         * upload-fence pattern in mtl/texture.mm covers the cross-queue
-         * case for the texture path; for surfaces, the heap-allocated
-         * MTLTexture is only consumed by the draw queue's render
-         * encoders which begin AFTER this commit completes (they're
-         * issued from the same iothread). */
+        /* Metal's queue ordering ensures the upload completes before
+         * any subsequent draw command buffer that uses the texture
+         * (both submitted on s_render_queue or the draw queue with
+         * consistent submit-order semantics). */
+        atomic_fetch_add(&s_vram_uploads, 1);
+        atomic_fetch_add(&s_vram_upload_bytes, (uint64_t)copy_size);
+        atomic_store(&b->dirty_vram, (uint32_t)0);
     }
 }
 
@@ -456,6 +488,9 @@ bool pgraph_mtl_surface_init(void)
     atomic_store(&s_clear_count, (uint64_t)0);
     atomic_store(&s_front_fb_publishes, (uint64_t)0);
     atomic_store(&s_image_blits, (uint64_t)0);
+    atomic_store(&s_vram_dirty_hits, (uint64_t)0);
+    atomic_store(&s_vram_uploads, (uint64_t)0);
+    atomic_store(&s_vram_upload_bytes, (uint64_t)0);
 
     s_initialized = true;
     return true;
@@ -487,6 +522,7 @@ void pgraph_mtl_surface_cache_flush(void)
 static MtlSurfaceBinding *
 cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
+                           uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_color_format,
                            const uint8_t *vram_ptr)
 {
@@ -498,6 +534,9 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
     if (e != NULL && e->is_color &&
         e->width == width && e->height == height &&
         e->nv097_format == nv097_color_format) {
+        /* Cache hit — keep guest dims fresh in case the caller resized. */
+        if (guest_width  != 0) e->guest_width  = guest_width;
+        if (guest_height != 0) e->guest_height = guest_height;
         e->last_use_seq = ++s_use_seq;
         return e;
     }
@@ -527,10 +566,14 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
     e->is_color         = true;
     e->width            = width;
     e->height           = height;
+    e->guest_width      = guest_width  ? guest_width  : width;
+    e->guest_height     = guest_height ? guest_height : height;
     e->nv097_format     = nv097_color_format;
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    atomic_store(&e->dirty_vram, (uint32_t)0);
+    e->access_cb        = NULL;
 
     msaa_ensure(e);
     upload_vram_to_texture(e, vram_ptr);
@@ -541,6 +584,7 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
 static MtlSurfaceBinding *
 cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
+                           uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_zeta_format,
                            const uint8_t *vram_ptr)
 {
@@ -552,6 +596,8 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
     if (e != NULL && !e->is_color &&
         e->width == width && e->height == height &&
         e->nv097_format == nv097_zeta_format) {
+        if (guest_width  != 0) e->guest_width  = guest_width;
+        if (guest_height != 0) e->guest_height = guest_height;
         e->last_use_seq = ++s_use_seq;
         return e;
     }
@@ -580,10 +626,14 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
     e->is_color         = false;
     e->width            = width;
     e->height           = height;
+    e->guest_width      = guest_width  ? guest_width  : width;
+    e->guest_height     = guest_height ? guest_height : height;
     e->nv097_format     = nv097_zeta_format;
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    atomic_store(&e->dirty_vram, (uint32_t)0);
+    e->access_cb        = NULL;
 
     msaa_ensure(e);
     /* upload_vram_to_texture skips depth (see the function comment). */
@@ -602,7 +652,8 @@ bool pgraph_mtl_surface_bind_color(uint32_t vram_addr, uint32_t size,
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
-        vram_addr, size, width, height, pitch, nv097_color_format, vram_ptr);
+        vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
+        pitch, nv097_color_format, vram_ptr);
     if (e == NULL) {
         return false;
     }
@@ -620,7 +671,50 @@ bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
-        vram_addr, size, width, height, pitch, nv097_zeta_format, vram_ptr);
+        vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
+        pitch, nv097_zeta_format, vram_ptr);
+    if (e == NULL) {
+        return false;
+    }
+    s_depth_binding = e;
+    return true;
+}
+
+bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t guest_width,
+                                      uint32_t guest_height,
+                                      uint32_t pitch,
+                                      uint32_t nv097_color_format,
+                                      const uint8_t *vram_ptr)
+{
+    if (!s_initialized || width == 0 || height == 0) {
+        return false;
+    }
+    MtlSurfaceBinding *e = cache_find_or_create_color(
+        vram_addr, size, width, height, guest_width, guest_height,
+        pitch, nv097_color_format, vram_ptr);
+    if (e == NULL) {
+        return false;
+    }
+    s_color_binding = e;
+    return true;
+}
+
+bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t guest_width,
+                                      uint32_t guest_height,
+                                      uint32_t pitch,
+                                      uint32_t nv097_zeta_format,
+                                      const uint8_t *vram_ptr)
+{
+    if (!s_initialized || width == 0 || height == 0) {
+        return false;
+    }
+    MtlSurfaceBinding *e = cache_find_or_create_depth(
+        vram_addr, size, width, height, guest_width, guest_height,
+        pitch, nv097_zeta_format, vram_ptr);
     if (e == NULL) {
         return false;
     }
@@ -682,7 +776,7 @@ void pgraph_mtl_surface_ensure_color(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         s_color_binding ? s_color_binding->vram_addr : 0,
-        0, width, height, 0, nv097_color_format, NULL);
+        0, width, height, 0, 0, 0, nv097_color_format, NULL);
     if (e != NULL) {
         s_color_binding = e;
     }
@@ -703,7 +797,7 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         s_depth_binding ? s_depth_binding->vram_addr : 0,
-        0, width, height, 0, nv097_zeta_format, NULL);
+        0, width, height, 0, 0, 0, nv097_zeta_format, NULL);
     if (e != NULL) {
         s_depth_binding = e;
     }
@@ -1026,6 +1120,154 @@ uint64_t pgraph_mtl_surface_msaa_resolve_us_total(void)
 uint64_t pgraph_mtl_surface_image_blits(void)
 {
     return atomic_load(&s_image_blits);
+}
+
+/* ---------------------------------------------------------------- */
+/* M5.9-followup-B+C — CPU-write dirty tracking + VRAM upload.
+ *
+ * The mark-dirty path is invoked from the CPU-write access callback
+ * registered in renderer.c. The upload paths are invoked at bind time
+ * (via the existing `upload_vram_to_texture` call inside cache_find_or_create_*)
+ * and from the publish-front-fb path so the published surface always
+ * reflects the latest guest CPU writes when CPU-writes are the
+ * inter-buffer-copy mechanism.
+ *
+ * All entry-list iteration here happens under the same external lock
+ * that protects the cache (the renderer-ops dispatch holds
+ * `d->pgraph.lock`; the access callback acquires it before calling
+ * into mark_dirty_overlapping). The atomic _Atomic(uint32_t)
+ * dirty_vram bit is the cross-thread synchronization primitive
+ * between callback and bind-time check.
+ */
+
+uint64_t pgraph_mtl_surface_vram_dirty_hits(void)
+{
+    return atomic_load(&s_vram_dirty_hits);
+}
+
+uint64_t pgraph_mtl_surface_vram_uploads(void)
+{
+    return atomic_load(&s_vram_uploads);
+}
+
+uint64_t pgraph_mtl_surface_vram_upload_bytes(void)
+{
+    return atomic_load(&s_vram_upload_bytes);
+}
+
+void pgraph_mtl_surface_mark_dirty_overlapping(uint32_t addr, uint32_t len)
+{
+    if (!s_initialized || len == 0) {
+        return;
+    }
+    uint32_t range_end = addr + len;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        uint32_t ent_end = e->vram_addr + e->size;
+        bool overlaps = !(e->vram_addr >= range_end || addr >= ent_end);
+        if (!overlaps) {
+            continue;
+        }
+        uint32_t prev = atomic_exchange(&e->dirty_vram, (uint32_t)1);
+        if (prev == 0) {
+            atomic_fetch_add(&s_vram_dirty_hits, 1);
+            /* One-shot diagnostic per dirty event. Capped natively by
+             * dirty_vram only being 0→1 once until consumed. */
+            fprintf(stderr,
+                    "xemu-perf: metal_surface_dirty vram_addr=0x%x "
+                    "size=%u write_addr=0x%x write_len=%u "
+                    "is_color=%d\n",
+                    (unsigned)e->vram_addr, e->size,
+                    (unsigned)addr, (unsigned)len,
+                    (int)e->is_color);
+        }
+    }
+}
+
+void pgraph_mtl_surface_register_access_cb_for(uint32_t vram_addr, void *cb)
+{
+    if (!s_initialized) {
+        return;
+    }
+    MtlSurfaceBinding *e = cache_get_at(vram_addr);
+    if (e != NULL) {
+        e->access_cb = cb;
+    }
+}
+
+void pgraph_mtl_surface_unregister_access_cb_for(uint32_t vram_addr,
+                                                 void **out_cb)
+{
+    if (out_cb) {
+        *out_cb = NULL;
+    }
+    if (!s_initialized) {
+        return;
+    }
+    MtlSurfaceBinding *e = cache_get_at(vram_addr);
+    if (e != NULL) {
+        if (out_cb) {
+            *out_cb = e->access_cb;
+        }
+        e->access_cb = NULL;
+    }
+}
+
+unsigned int pgraph_mtl_surface_upload_dirty(const uint8_t *vram_ptr)
+{
+    if (!s_initialized || vram_ptr == NULL) {
+        return 0;
+    }
+    unsigned int n = 0;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (atomic_load(&e->dirty_vram)) {
+            upload_vram_to_texture(e, vram_ptr);
+            n++;
+        }
+    }
+    return n;
+}
+
+void pgraph_mtl_surface_upload_if_dirty_at(uint32_t vram_addr,
+                                           const uint8_t *vram_ptr)
+{
+    if (!s_initialized || vram_ptr == NULL) {
+        return;
+    }
+    /* Use the within-range lookup so a CRTC publish at a non-zero
+     * line_offset still resolves to the surface that contains it. */
+    MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    if (e == NULL) {
+        return;
+    }
+    if (atomic_load(&e->dirty_vram)) {
+        upload_vram_to_texture(e, vram_ptr);
+    }
+}
+
+void pgraph_mtl_surface_force_upload_at(uint32_t vram_addr,
+                                        const uint8_t *vram_ptr)
+{
+    if (!s_initialized || vram_ptr == NULL) {
+        return;
+    }
+    MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    if (e == NULL) {
+        return;
+    }
+    upload_vram_to_texture(e, vram_ptr);
+}
+
+unsigned int pgraph_mtl_surface_iter_addresses(uint32_t *out, unsigned int cap)
+{
+    if (!s_initialized || out == NULL || cap == 0) {
+        return 0;
+    }
+    unsigned int n = 0;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL && n < cap;
+         e = e->next) {
+        out[n++] = e->vram_addr;
+    }
+    return n;
 }
 
 /* Compute the effective host-space rectangle for a given guest-space

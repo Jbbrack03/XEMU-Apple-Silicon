@@ -1,6 +1,73 @@
 # Handoff
 
-Last updated: 2026-05-03 (Metal slice **M5.9 — per-VRAM surface
+Last updated: 2026-05-03 (Metal slice **M5.9-followup-B+C — CPU-write
+dirty tracking + VRAM upload — SHIPPED, visual gate NOT met**.
+Adds `_Atomic(uint32_t) dirty_vram` + opaque `void *access_cb`
+fields to `MtlSurfaceBinding`, plus explicit `guest_width`/`guest_height`
+fields so the upload path knows the 1× source sub-rect inside the
+host-scaled MTLTexture. New API in `mtl/surface.h`:
+`pgraph_mtl_surface_bind_color_ex` / `_bind_depth_ex` (extended bind
+with explicit guest dims), `mark_dirty_overlapping`,
+`register_access_cb_for` / `unregister_access_cb_for`,
+`upload_dirty(vram_ptr)`, `upload_if_dirty_at(vram_addr, vram_ptr)`,
+`force_upload_at`, `iter_addresses`. New side in `mtl/renderer.c`:
+the TCG vCPU-thread access callback `mtl_surface_access_callback`
+(invokes `mark_dirty_overlapping` under `d->pgraph.lock`); the
+arm / disarm helpers `mtl_arm_access_callback` / `_disarm_all_*`
+(call `mem_access_callback_insert` / `_remove_by_ref`);
+`mtl_bind_current_surfaces` updated to use `_ex` bind + arm cb +
+pass `d->vram_ptr` for upload-at-allocate; `pgraph_mtl_flip_stall`
+calls `upload_if_dirty_at` before publish; `pgraph_mtl_flush_draw`
+calls `upload_dirty` after bind. Three new counters
+(`METAL_SURFACE_VRAM_DIRTY_HITS`, `METAL_SURFACE_VRAM_UPLOADS`,
+`METAL_SURFACE_VRAM_UPLOAD_BYTES`) + diagnostic logs
+(`metal_color_bind`, `metal_arm_cb`, `metal_access_cb`,
+`metal_surface_dirty`) on the `xemu-perf:` interval line.
+**Build PASS. M5 shader-validation harness 7/7 PASS. 90 s PGR2
+Metal benchmark: METAL_PIPELINE_TRANSLATED_FAILED=0,
+METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT (100 % translated, 1505
+draws/s), METAL_PIPELINE_FALLBACKS=0, METAL_SURFACE_VRAM_UPLOADS=2
+per interval (bind-time upload firing), but
+**METAL_SURFACE_VRAM_DIRTY_HITS=0 across every interval** —
+the access callback is correctly armed (8 arm events with valid
+`cb=0x..`, `tcg=1`) but never fires for any watched surface
+range. PGR2's TCG vCPU does NOT write to back-buffer or
+front-buffer VRAM. GL renderer regression check:
+`post_load_avg_fps = 49.02`, no regression.** **Visual validation:
+the captured PGR2 NV2A-direct screenshots show the upper-left
+640×480 sub-rect of the 1280×960 published front-fb texture
+filled with cleared-color WHITE, and the remaining 75 % filled
+with HEAP-DEFAULT MAGENTA. The bind-time upload IS reaching the
+texture (the white area = the GUEST 1× upload from VRAM), but
+the rendered scene content (which IS being produced — 1505
+draws/s) does not propagate to the CRTC-published surface at
+`0x32a4000`.** This **decisively rules out** all three buffer-
+swap mechanisms enumerated in the followup-B+C task framing:
+mechanism (a) guest CPU memcpy back→front fails the dirty-event
+test; mechanism (b) NV097_IMAGE_BLIT fails the
+`METAL_IMAGE_BLITS=0` check; mechanism (c) `pcrtc.start`
+alternation fails the publish-log-stable check (single
+`vram_addr=0x32a4000` for the entire run). The remaining open
+hypotheses are listed in the decision-log entry "2026-05-03:
+Metal slice M5.9-followup-B+C — CPU-write dirty tracking +
+VRAM upload" §"The remaining unknown": (1) NV2A engine
+DMA-copies bypassing IMAGE_BLIT (PFIFO-driven 2D blit
+channel?); (2) PGR2 draws DO reach `0x32a4000` but the
+bind-time upload clobbers them under LRU eviction at the
+16-entry cap; (3) PGR2 final-pass post-process targets
+`0x32a4000` from an aux RT input. M15 default-on stays
+**BLOCKED** on a fourth followup that diagnoses + addresses
+PGR2's actual swap mechanism. **Next-session priorities**:
+(1) **Add a per-vram_addr draw-target counter** — instrument
+`flush_draw` to bump `metal_draw_target=0x...` so we can see
+whether `0x32a4000` is ever a draw target (testing
+hypothesis 2 + 3); (2) consider raising the cache cap above
+16 to test hypothesis 2 directly; (3) search for any 2D /
+DMA copy paths in `pgraph.c` that the Metal renderer might
+not be hooking; (4) audio listen-test for
+`XEMU_APU_LOCK_RELEASE` (still UNBLOCKED).
+
+(Earlier banner — Metal slice **M5.9 — per-VRAM surface
 cache + CRTC-aware publish — SHIPPED**. Replaces the M2-era
 single-slot surface manager with a per-vram_addr cache (`MtlSurfaceBinding`
 linked list, cap 16 with LRU eviction) that mirrors the relevant

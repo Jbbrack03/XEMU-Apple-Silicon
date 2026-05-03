@@ -564,6 +564,44 @@ and stack:
   16 (LRU eviction). Steady-state: 4-12 entries on PGR2 / Crimson /
   Rainbow (front buffer + back buffer + a few aux RTs). Always-on
   gauge (not a delta). Apple Silicon performance fork; slice M5.9.
+- `METAL_IMAGE_BLITS` (**M5.9-followup-A, 2026-05-03**): per-interval
+  delta of GPU-side surface-to-surface copies issued through
+  `pgraph_mtl_surface_blit_copy` (the path A handler for
+  NV097_IMAGE_BLIT — matching pixel-format rect-to-rect copy via
+  MTLBlitCommandEncoder). Path B (format mismatch — invalidates
+  dst entry, deferred to bind-time upload) and Path C (neither in
+  cache — defer to bind-time) do NOT bump the counter. PGR2 doesn't
+  use this op (counter is 0 in benchmarks); titles that DO use it
+  see ~1-10 per interval at frame boundaries. Apple Silicon
+  performance fork; slice M5.9-followup-A.
+- `METAL_SURFACE_VRAM_DIRTY_HITS` (**M5.9-followup-B+C, 2026-05-03**):
+  per-interval count of 0→1 transitions on a surface's `dirty_vram`
+  atomic (i.e. the access-callback-detected events where guest CPU
+  wrote to a watched VRAM range). Always-on. Companion diagnostic
+  line emits per first-transition as
+  `xemu-perf: metal_surface_dirty vram_addr=0x.. size=S
+  write_addr=0x.. write_len=L is_color=B`. Steady-state for titles
+  that use guest CPU memcpy as their back→front swap mechanism:
+  positive (often 1-5/interval). For titles that don't (PGR2 is one
+  — confirmed 0/interval in 90 s benchmark), it stays at zero.
+  Apple Silicon performance fork; slice M5.9-followup-B+C.
+- `METAL_SURFACE_VRAM_UPLOADS` (**M5.9-followup-B+C, 2026-05-03**):
+  per-interval count of completed VRAM→texture uploads through
+  `pgraph_mtl_surface::upload_vram_to_texture`. Triggered (1) at
+  cache-allocate inside `cache_find_or_create_color/_depth` and
+  (2) at runtime via `upload_dirty(vram_ptr)` (called from
+  `pgraph_mtl_flush_draw`) and `upload_if_dirty_at(vram_addr,
+  vram_ptr)` (called from `pgraph_mtl_flip_stall` before the
+  CRTC publish). Always-on. Steady-state for the bind-allocate
+  path: 1-2/sec on PGR2 (matches the cache churn at the 16-entry
+  cap). Spikes when titles render to many distinct surfaces.
+  Apple Silicon performance fork; slice M5.9-followup-B+C.
+- `METAL_SURFACE_VRAM_UPLOAD_BYTES` (**M5.9-followup-B+C,
+  2026-05-03**): per-interval bytes copied through the upload
+  staging buffer (sum of guest 1× source sub-rect sizes for each
+  upload). Useful for checking the bandwidth cost of frequent
+  upload activity. Always-on. Apple Silicon performance fork;
+  slice M5.9-followup-B+C.
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with

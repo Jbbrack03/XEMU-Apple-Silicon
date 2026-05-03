@@ -78,6 +78,33 @@ bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
                                    uint32_t nv097_zeta_format,
                                    const uint8_t *vram_ptr);
 
+/*
+ * M5.9-followup-C (2026-05-03): bind_color_ex / bind_depth_ex —
+ * extended bind that takes explicit GUEST 1× dimensions. The MTLTexture
+ * is allocated at the host-scaled dims (caller passes those as
+ * `width`/`height`), but the VRAM-side upload reads `guest_width ×
+ * guest_height` pixels into the top-left sub-rect. The plain bind
+ * variants above set `guest_*` equal to `width`/`height` for backward
+ * compat with the legacy ensure-by-shape path; new call sites should
+ * use the `_ex` variants and pass distinct values.
+ *
+ * Returns true on success.
+ */
+bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t guest_width,
+                                      uint32_t guest_height,
+                                      uint32_t pitch,
+                                      uint32_t nv097_color_format,
+                                      const uint8_t *vram_ptr);
+bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t guest_width,
+                                      uint32_t guest_height,
+                                      uint32_t pitch,
+                                      uint32_t nv097_zeta_format,
+                                      const uint8_t *vram_ptr);
+
 /* Lookup helpers. Mirror vk/surface.c::pgraph_vk_surface_get and
  * pgraph_vk_surface_get_within. The returned pointer is owned by the
  * cache; do not release. NULL when nothing is bound at the given
@@ -231,6 +258,71 @@ bool pgraph_mtl_surface_blit_copy(uint32_t src_vram_addr,
 
 /* M5.9-followup-A: counter accessor. Always-on atomic. */
 uint64_t pgraph_mtl_surface_image_blits(void);
+
+/*
+ * M5.9-followup-B+C (2026-05-03): CPU-write dirty tracking + VRAM upload.
+ *
+ * The cache supports lazy upload from guest VRAM into the cached
+ * MTLTexture. Two trigger paths:
+ *   - On bind / re-bind: if the entry was just created (or its
+ *     dirty_vram bit is set), upload from `vram_ptr + vram_addr`.
+ *   - Before publish-front-fb: if the resolved entry's dirty_vram bit
+ *     is set, upload before bumping the published-texture pointer.
+ *
+ * The dirty_vram bit is set by `pgraph_mtl_surface_mark_dirty_overlapping`
+ * which is invoked from the CPU-write access callback registered in
+ * `mtl/renderer.c` via `mem_access_callback_insert` (TCG path) or via
+ * `memory_region_test_and_clear_dirty` polled at bind time (KVM/HVF
+ * path; mirrors vk/surface.c::update_surface_part).
+ *
+ * `pgraph_mtl_surface_register_access_cb_for(vram_addr, cb)` and
+ * `_unregister_access_cb_for` attach an opaque `MemAccessCallback*`
+ * (typed as void* here so surface.mm doesn't include cpu.h) to the
+ * cache entry so the tear-down on eviction can remove it.
+ */
+void pgraph_mtl_surface_mark_dirty_overlapping(uint32_t addr, uint32_t len);
+void pgraph_mtl_surface_register_access_cb_for(uint32_t vram_addr, void *cb);
+void pgraph_mtl_surface_unregister_access_cb_for(uint32_t vram_addr,
+                                                 void **out_cb);
+/*
+ * Iterate every cache entry; for each entry whose dirty_vram bit is
+ * set OR is_color but never-uploaded, upload `vram_ptr + entry.vram_addr`
+ * into the cached MTLTexture. Returns the number of uploads performed.
+ * The caller (renderer.c) supplies a `vram_ptr` valid for the lifetime
+ * of this call.
+ */
+unsigned int pgraph_mtl_surface_upload_dirty(const uint8_t *vram_ptr);
+
+/*
+ * Lazy single-entry upload: if the entry at `vram_addr` is dirty (or
+ * never-initialized), upload from `vram_ptr + vram_addr`. Used by the
+ * publish-front-fb path so the published surface always reflects the
+ * latest guest CPU writes when CPU-writes are the swap mechanism.
+ */
+void pgraph_mtl_surface_upload_if_dirty_at(uint32_t vram_addr,
+                                           const uint8_t *vram_ptr);
+
+/*
+ * Force-upload an entry. Used at first cache-allocate to seed the
+ * texture with whatever is in VRAM (the BIOS framebuffer, the menu
+ * surface, etc.). Mirrors vk's "upload at bind when dirty" pattern.
+ */
+void pgraph_mtl_surface_force_upload_at(uint32_t vram_addr,
+                                        const uint8_t *vram_ptr);
+
+/*
+ * Snapshot helpers — number of cache entries currently allocated and
+ * whether `vram_addr` is present. Used by renderer.c for the
+ * registration / unregistration loop. The cache itself is the
+ * single-source-of-truth for which addresses have callbacks attached;
+ * use these to drive the registration side-effects.
+ */
+unsigned int pgraph_mtl_surface_iter_addresses(uint32_t *out, unsigned int cap);
+
+/* M5.9-followup-B+C: counter accessors. Always-on atomics. */
+uint64_t pgraph_mtl_surface_vram_dirty_hits(void);
+uint64_t pgraph_mtl_surface_vram_uploads(void);
+uint64_t pgraph_mtl_surface_vram_upload_bytes(void);
 
 #ifdef __cplusplus
 }

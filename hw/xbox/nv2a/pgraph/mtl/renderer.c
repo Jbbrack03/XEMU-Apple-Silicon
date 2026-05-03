@@ -131,6 +131,138 @@ static _Atomic uint64_t s_pipeline_translated_fb = 0;
  * counts permanent build failures). */
 static _Atomic uint64_t s_draws_skipped_pending  = 0;
 
+/* M5.9-followup-B (2026-05-03): CPU-write access callback dispatch.
+ *
+ * The callback runs from the TCG vCPU thread when guest code writes
+ * to a watched VRAM range (registered via mem_access_callback_insert).
+ * The xemu fork's `MemAccessCallbackFunc` signature is
+ *     void (*MemAccessCallbackFunc)(void *opaque, MemoryRegion *mr,
+ *                                   hwaddr addr, hwaddr len, bool write);
+ * `addr` is a RAM-address (mr->ram_addr + offset) — the same
+ * coordinate space we used at registration; the surface manager keys
+ * on `vram_addr` which is the VRAM-relative offset. Translation:
+ * `vram_addr_offset = addr - memory_region_get_ram_addr(d->vram)`. */
+static void mtl_surface_access_callback(void *opaque, MemoryRegion *mr,
+                                        hwaddr addr, hwaddr len, bool write)
+{
+    NV2AState *d = (NV2AState *)opaque;
+    if (d == NULL || d->vram == NULL) {
+        return;
+    }
+
+    /* M5.9-followup-B+C diagnostic: count callback invocations even
+     * when the affected entry is missing/non-overlapping. Helps
+     * confirm registration is wired and the TCG vCPU thread is
+     * actually delivering events. */
+    static _Atomic(uint64_t) s_cb_invocations = 0;
+    uint64_t cb_n = atomic_fetch_add(&s_cb_invocations, 1) + 1;
+    if (cb_n <= 4) {
+        fprintf(stderr,
+                "xemu-perf: metal_access_cb cb_n=%llu addr=0x%llx len=%llu "
+                "write=%d\n",
+                (unsigned long long)cb_n,
+                (unsigned long long)addr, (unsigned long long)len,
+                (int)write);
+    }
+
+    /* Only writes mark surfaces dirty for the upload path. Reads of
+     * a draw-dirty surface require a download (deferred to
+     * followup-D). */
+    if (!write) {
+        return;
+    }
+
+    /* The callback's `addr` parameter is the OFFSET WITHIN the
+     * MemoryRegion — already vram-relative. See physmem.c line 939:
+     * `mr_offset = hit_addr - ram_addr_base`. No subtraction
+     * needed; pass directly to the cache. */
+    if (addr > UINT32_MAX || len > UINT32_MAX) {
+        return;
+    }
+
+    qemu_mutex_lock(&d->pgraph.lock);
+    pgraph_mtl_surface_mark_dirty_overlapping((uint32_t)addr, (uint32_t)len);
+    qemu_mutex_unlock(&d->pgraph.lock);
+}
+
+/* Track the set of vram_addrs currently armed with an access
+ * callback. The callback void* is owned by the surface cache (via
+ * register_access_cb_for); this side just orchestrates registration
+ * + unregistration calls. */
+static void mtl_arm_access_callback(NV2AState *d, uint32_t vram_addr,
+                                    uint32_t size)
+{
+    /* Only TCG-mode supports the per-callback memory-access
+     * notification (mem_access_callback_insert is gated on
+     * tcg_enabled() in vk/surface.c). KVM/HVF would need
+     * memory_region_test_and_clear_dirty polling — deferred. */
+    if (!tcg_enabled()) {
+        return;
+    }
+    if (size == 0) {
+        return;
+    }
+    /* M5.9 ensure_color/ensure_depth promote a synthetic vram_addr=0
+     * entry when no SET_SURFACE_OFFSET has fired yet. Don't arm a
+     * callback at addr=0 — it would watch the entire low VRAM range
+     * and fire spuriously for every VGA / boot-time write. The real
+     * arm happens once the first DMA-bound surface lands. */
+    if (vram_addr == 0) {
+        return;
+    }
+    /* If a callback is already armed for this vram_addr, don't double-
+     * register. The surface cache stores the void* on the entry. */
+    void *existing = pgraph_mtl_surface_get_metal_texture_at(vram_addr);
+    (void)existing; /* presence indicator only */
+
+    /* Pull whatever was previously registered (likely NULL on first
+     * arm), and replace it. Mirrors vk's
+     * `surface->access_cb = mem_access_callback_insert(...)`. */
+    void *prev_cb = NULL;
+    pgraph_mtl_surface_unregister_access_cb_for(vram_addr, &prev_cb);
+    if (prev_cb != NULL) {
+        mem_access_callback_remove_by_ref(qemu_get_cpu(0),
+                                          (MemAccessCallback *)prev_cb);
+    }
+
+    MemAccessCallback *cb = mem_access_callback_insert(
+        qemu_get_cpu(0), d->vram, (hwaddr)vram_addr, (hwaddr)size,
+        &mtl_surface_access_callback, d);
+    pgraph_mtl_surface_register_access_cb_for(vram_addr, cb);
+
+    /* M5.9-followup-B diag: one-shot per arm so we can see what
+     * ranges are being watched. Capped to keep logs readable. */
+    static _Atomic(uint64_t) s_arms = 0;
+    uint64_t n = atomic_fetch_add(&s_arms, 1) + 1;
+    if (n <= 8) {
+        fprintf(stderr,
+                "xemu-perf: metal_arm_cb n=%llu vram_addr=0x%x size=%u "
+                "cb=%p tcg=%d\n",
+                (unsigned long long)n,
+                (unsigned)vram_addr, (unsigned)size,
+                cb, (int)tcg_enabled());
+    }
+}
+
+static void mtl_disarm_all_access_callbacks(NV2AState *d)
+{
+    if (!tcg_enabled()) {
+        return;
+    }
+    /* Iterate cache addresses; for each, pull the stored cb pointer
+     * and tell QEMU to remove it. */
+    uint32_t addrs[32];
+    unsigned int n = pgraph_mtl_surface_iter_addresses(addrs, 32);
+    for (unsigned int i = 0; i < n; i++) {
+        void *cb = NULL;
+        pgraph_mtl_surface_unregister_access_cb_for(addrs[i], &cb);
+        if (cb != NULL) {
+            mem_access_callback_remove_by_ref(qemu_get_cpu(0),
+                                              (MemAccessCallback *)cb);
+        }
+    }
+}
+
 
 static void pgraph_mtl_sync(NV2AState *d)
 {
@@ -259,6 +391,29 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                 if (pitch == 0) {
                     pitch = width * bpp;
                 }
+                /* M5.9-followup-B+C diagnostic: log distinct color binds
+                 * once each so we can see what addresses the guest is
+                 * binding (front, back, aux RTs). Capped to avoid
+                 * log spam. */
+                static uint32_t s_logged_color_addrs[16];
+                static unsigned int s_n_logged_color = 0;
+                bool already = false;
+                for (unsigned int i = 0; i < s_n_logged_color; i++) {
+                    if (s_logged_color_addrs[i] == (uint32_t)vram_addr) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already && s_n_logged_color < 16) {
+                    s_logged_color_addrs[s_n_logged_color++] =
+                        (uint32_t)vram_addr;
+                    fprintf(stderr,
+                            "xemu-perf: metal_color_bind vram_addr=0x%x "
+                            "guest=%ux%u scaled=%ux%u pitch=%u format=%u\n",
+                            (unsigned)vram_addr, width, height,
+                            scaled_w, scaled_h, pitch,
+                            (unsigned)pg->surface_shape.color_format);
+                }
                 /* `size` is the 1× VRAM-side footprint — caller's
                  * upload_vram_to_texture reads from `vram_ptr +
                  * vram_addr` for this many bytes. */
@@ -268,16 +423,26 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                 /* Sanity-clamp against the guest VRAM cap (~64 MB). If
                  * the addr is bogus, fall through to ensure-by-shape. */
                 if (vram_addr + size <= 0x4000000) {
-                    if (pgraph_mtl_surface_bind_color(
+                    /* M5.9-followup-C (2026-05-03): pass guest 1× dims
+                     * explicitly so the upload path knows the source
+                     * sub-rect inside the host-scaled MTLTexture.
+                     * d->vram_ptr supplies VRAM upload data so a
+                     * freshly cache-allocated entry picks up whatever
+                     * the guest already wrote. */
+                    if (pgraph_mtl_surface_bind_color_ex(
                             (uint32_t)vram_addr, size,
-                            scaled_w, scaled_h, pitch,
+                            scaled_w, scaled_h,
+                            width, height,
+                            pitch,
                             pg->surface_shape.color_format,
-                            /* Skip VRAM upload for now — the cache fix
-                             * focuses on the right surface being
-                             * published, not on initial-content
-                             * synchronization. Future slice can wire
-                             * upload via the texture-staging buffer. */
-                            NULL)) {
+                            d->vram_ptr)) {
+                        /* M5.9-followup-B (2026-05-03): arm a CPU-write
+                         * access callback for the surface's VRAM
+                         * range so guest CPU writes (e.g. back→front
+                         * memcpy) re-mark dirty and trigger upload on
+                         * next read. */
+                        mtl_arm_access_callback(d, (uint32_t)vram_addr,
+                                                size);
                         bound_any = true;
                     }
                 }
@@ -304,10 +469,19 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                 uint32_t row     = pitch > natural ? pitch : natural;
                 uint32_t size    = (uint32_t)(row * height);
                 if (vram_addr + size <= 0x4000000) {
-                    if (pgraph_mtl_surface_bind_depth(
+                    /* Depth surfaces don't currently upload (the
+                     * upload helper skips !is_color), but arming the
+                     * callback is still correct so a future depth-
+                     * upload path lights up automatically. */
+                    if (pgraph_mtl_surface_bind_depth_ex(
                             (uint32_t)vram_addr, size,
-                            scaled_w, scaled_h, pitch,
-                            pg->surface_shape.zeta_format, NULL)) {
+                            scaled_w, scaled_h,
+                            width, height,
+                            pitch,
+                            pg->surface_shape.zeta_format,
+                            d->vram_ptr)) {
+                        mtl_arm_access_callback(d, (uint32_t)vram_addr,
+                                                size);
                         bound_z = true;
                         bound_any = true;
                     }
@@ -440,6 +614,19 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
     hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
+
+    /* M5.9-followup-C (2026-05-03): if the resolved front-fb surface
+     * has dirty_vram set (guest CPU wrote to its VRAM range since the
+     * last upload), upload from VRAM into the texture before the
+     * compositor samples it. This is the path that handles guest
+     * software-renderer / back→front memcpy buffer-swap mechanisms
+     * where the guest's CPU writes are the authoritative pixel
+     * source. */
+    if (d->vram_ptr != NULL) {
+        pgraph_mtl_surface_upload_if_dirty_at((uint32_t)crtc_addr,
+                                              d->vram_ptr);
+    }
+
     pgraph_mtl_surface_publish_front_fb((uint32_t)crtc_addr, "crtc");
 }
 
@@ -903,6 +1090,14 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
     mtl_bind_current_surfaces(d, pg->surface_shape.color_format != 0,
                               pg->surface_shape.zeta_format != 0);
 
+    /* M5.9-followup-C (2026-05-03): upload any cached surface whose
+     * VRAM range was dirtied by guest CPU writes since the last
+     * upload. The check is per-entry-cheap (atomic_load); the upload
+     * itself only runs on entries whose dirty_vram bit is set. */
+    if (d->vram_ptr != NULL) {
+        pgraph_mtl_surface_upload_dirty(d->vram_ptr);
+    }
+
     void *color_tex = pgraph_mtl_surface_get_color_texture();
     void *depth_tex = pgraph_mtl_surface_get_depth_texture();
     uint32_t color_fmt = pgraph_mtl_surface_get_color_format();
@@ -1116,8 +1311,11 @@ static void pgraph_mtl_surface_flush(NV2AState *d)
      * GPU-stable for whatever consumer the upstream caller had in
      * mind. M5.9: also drop the per-VRAM cache so a fresh
      * surface_scale_factor / display reset does not retain stale
-     * MTLTextures. */
+     * MTLTextures. M5.9-followup-B: disarm any access-callbacks before
+     * the cache is freed so we don't leave dangling MemAccessCallback
+     * pointers in the per-CPU watch list. */
     pgraph_mtl_draw_flush_open_pass();
+    mtl_disarm_all_access_callbacks(d);
     pgraph_mtl_surface_cache_flush();
 }
 
@@ -1303,7 +1501,10 @@ uint32_t pgraph_mtl_renderer_msaa_sample_count(void)
 
 static void pgraph_mtl_finalize(NV2AState *d)
 {
-    /* Tear down in reverse init order. */
+    /* Tear down in reverse init order. M5.9-followup-B: disarm all
+     * access callbacks before the cache is finalized to avoid
+     * dangling pointers in the per-CPU watch list. */
+    mtl_disarm_all_access_callbacks(d);
     pgraph_mtl_uniform_finalize();
     pgraph_mtl_texture_finalize();
     pgraph_mtl_shaders_finalize();
