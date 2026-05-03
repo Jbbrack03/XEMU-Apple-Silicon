@@ -351,6 +351,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_SURFACE_VRAM_DIRTY_HITS" ||
                    key == "METAL_SURFACE_VRAM_UPLOADS" ||
                    key == "METAL_SURFACE_VRAM_UPLOAD_BYTES" ||
+                   key == "METAL_SURFACE_RECREATE_SHAPE_MISMATCH" ||
                    key == "INPUT_USB_POLLS" ||
                    key == "INPUT_BACKEND_UPDATES" ||
                    key == "INPUT_LAT_US_TOTAL") {

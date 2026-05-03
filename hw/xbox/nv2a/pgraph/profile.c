@@ -284,6 +284,16 @@ static void nv2a_profile_log_emit_interval(int64_t now, bool final,
 
     fprintf(stderr, "\n");
 
+    /* 2026-05-03 magenta-RT diagnostic — emit a per-vram_addr
+     * draw-target snapshot AFTER the main interval line is terminated
+     * so the existing key=value parser is unaffected. Each line is
+     * `xemu-perf: metal_draw_target vram_addr=0x.. count=N`. No-op when
+     * Metal renderer is not active. */
+    {
+        extern void pgraph_mtl_draw_target_emit_interval(FILE *out);
+        pgraph_mtl_draw_target_emit_interval(stderr);
+    }
+
     perf_log.interval_start_us = now;
     perf_log.interval_id++;
     perf_log.frames = 0;

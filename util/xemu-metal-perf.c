@@ -89,6 +89,8 @@ static uint64_t s_baseline_image_blits;
 static uint64_t s_baseline_vram_dirty_hits;
 static uint64_t s_baseline_vram_uploads;
 static uint64_t s_baseline_vram_upload_bytes;
+/* 2026-05-03 magenta-RT diagnostic — cache shape-mismatch recreate. */
+static uint64_t s_baseline_recreate_shape_mismatch;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -390,6 +392,23 @@ __attribute__((weak)) uint64_t pgraph_mtl_surface_vram_upload_bytes(void)
     return 0;
 }
 
+/* 2026-05-03 magenta-RT diagnostic — cache shape-mismatch recreate. */
+__attribute__((weak)) uint64_t
+pgraph_mtl_surface_recreate_shape_mismatch(void)
+{
+    return 0;
+}
+
+/* 2026-05-03 magenta-RT diagnostic — per-vram_addr draw-target table.
+ * Strong symbol in mtl/renderer.c; weak fallback (no-op) for the
+ * non-Apple-Silicon link. The emit prints zero-or-more
+ * `xemu-perf: metal_draw_target vram_addr=0x.. count=N` lines per
+ * interval. */
+__attribute__((weak)) void pgraph_mtl_draw_target_emit_interval(FILE *out)
+{
+    (void)out;
+}
+
 void xemu_metal_perf_emit_and_reset(FILE *out)
 {
     if (out == NULL) {
@@ -460,6 +479,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t vram_dirty_hits    = pgraph_mtl_surface_vram_dirty_hits();
     uint64_t vram_uploads       = pgraph_mtl_surface_vram_uploads();
     uint64_t vram_upload_bytes  = pgraph_mtl_surface_vram_upload_bytes();
+    /* 2026-05-03 magenta-RT diagnostic — shape-mismatch recreates. */
+    uint64_t recreate_mismatch  = pgraph_mtl_surface_recreate_shape_mismatch();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -571,6 +592,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                         s_baseline_vram_uploads;
     uint64_t vram_upload_bytes_delta  = vram_upload_bytes -
                                         s_baseline_vram_upload_bytes;
+    uint64_t recreate_mismatch_delta  = recreate_mismatch -
+                                        s_baseline_recreate_shape_mismatch;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -623,6 +646,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_vram_dirty_hits          = vram_dirty_hits;
     s_baseline_vram_uploads             = vram_uploads;
     s_baseline_vram_upload_bytes        = vram_upload_bytes;
+    s_baseline_recreate_shape_mismatch  = recreate_mismatch;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -653,7 +677,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            image_blits_delta |
                            vram_dirty_hits_delta |
                            vram_uploads_delta |
-                           vram_upload_bytes_delta;
+                           vram_upload_bytes_delta |
+                           recreate_mismatch_delta;
     if (total_delta == 0) {
         return;
     }
@@ -709,7 +734,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_IMAGE_BLITS=%llu"
             " METAL_SURFACE_VRAM_DIRTY_HITS=%llu"
             " METAL_SURFACE_VRAM_UPLOADS=%llu"
-            " METAL_SURFACE_VRAM_UPLOAD_BYTES=%llu",
+            " METAL_SURFACE_VRAM_UPLOAD_BYTES=%llu"
+            " METAL_SURFACE_RECREATE_SHAPE_MISMATCH=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -766,5 +792,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)image_blits_delta,
             (unsigned long long)vram_dirty_hits_delta,
             (unsigned long long)vram_uploads_delta,
-            (unsigned long long)vram_upload_bytes_delta);
+            (unsigned long long)vram_upload_bytes_delta,
+            (unsigned long long)recreate_mismatch_delta);
 }

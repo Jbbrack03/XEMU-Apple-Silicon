@@ -195,6 +195,14 @@ uint32_t pgraph_mtl_surface_get_color_format(void);
 uint32_t pgraph_mtl_surface_get_depth_format(void);
 uint32_t pgraph_mtl_surface_get_width(void);
 uint32_t pgraph_mtl_surface_get_height(void);
+/* 2026-05-03 magenta-RT investigation: vram_addr of the currently-bound
+ * color/depth render target. Returns 0 if no binding exists OR if the
+ * active binding came from the legacy ensure-by-shape fallback (which
+ * does not know its VRAM address). Used by the per-vram_addr
+ * `metal_draw_target` diagnostic counter in mtl/renderer.c so we can
+ * see WHICH cached SurfaceBinding is the actual draw destination. */
+uint32_t pgraph_mtl_surface_get_color_vram_addr(void);
+uint32_t pgraph_mtl_surface_get_depth_vram_addr(void);
 
 /*
  * M11: configure the per-renderer MSAA sample count.
@@ -226,6 +234,12 @@ uint64_t pgraph_mtl_surface_clear_count(void);
 /* M5.9: counters. */
 uint64_t pgraph_mtl_surface_front_fb_publishes(void);
 uint64_t pgraph_mtl_surface_cache_entries(void);
+/* 2026-05-03 magenta-RT diagnostic: monotonic count of cache entries
+ * destroyed + recreated due to shape mismatch on same-vram_addr rebind.
+ * Each shape-mismatch destroy clobbers all previously rendered content
+ * for that vram_addr, so a non-zero rate explains "draws hit but
+ * screenshots show fresh texture content". */
+uint64_t pgraph_mtl_surface_recreate_shape_mismatch(void);
 
 /*
  * M5.9-followup-A (2026-05-03): NV097_IMAGE_BLIT GPU-side surface copy.

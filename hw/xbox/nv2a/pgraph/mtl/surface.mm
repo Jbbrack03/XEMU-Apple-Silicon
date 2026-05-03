@@ -166,7 +166,16 @@ typedef struct MtlSurfaceBinding {
  * num_invalid_surfaces_to_keep=10 as the soft cap on stale entries.
  * Apple Silicon GPUs have plenty of VRAM but heap_color_rts has a
  * fixed budget at heap_init; cap aggressively. */
-static const unsigned int kMaxCacheEntries = 16;
+/* 2026-05-03 magenta-RT fix: raised from 16 to 32 because PGR2 has at
+ * least 11 distinct color render targets + ~4 depth surfaces + the
+ * synthetic vram_addr=0 ensure-by-shape entries — at 16 the cap is
+ * always reached and LRU eviction kicks out infrequently-bound entries
+ * (notably the published front-fb) while the back-buffer + aux RTs hog
+ * the cache. 32 gives PGR2 (and similar AAA Xbox titles) margin to
+ * avoid eviction during steady-state gameplay. Each entry is small
+ * (struct + MTLTexture + maybe an MSAA companion) — 32 entries is on
+ * the order of tens of MB on Apple Silicon UMA, well within budget. */
+static const unsigned int kMaxCacheEntries = 32;
 
 static MtlSurfaceBinding *s_cache_head = NULL;
 static unsigned int       s_cache_size = 0;
@@ -196,6 +205,9 @@ static _Atomic(uint64_t) s_image_blits          = 0;
 static _Atomic(uint64_t) s_vram_dirty_hits      = 0;
 static _Atomic(uint64_t) s_vram_uploads         = 0;
 static _Atomic(uint64_t) s_vram_upload_bytes    = 0;
+/* 2026-05-03 magenta-RT diagnostic: count cache entries destroyed +
+ * recreated due to shape mismatch on a same-vram_addr rebind. */
+static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
 
 static bool s_initialized = false;
 
@@ -249,6 +261,37 @@ static MtlSurfaceBinding *cache_get_at(uint32_t vram_addr)
 {
     for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
         if (e->vram_addr == vram_addr) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+/* 2026-05-03 magenta-RT fix: color/depth-filtered lookups so a
+ * same-vram_addr color binding and depth binding don't collide on
+ * cache_get_at and destroy each other every bind. The legacy
+ * ensure-by-shape paths use vram_addr=0 as a sentinel, and PGR2 has at
+ * least one real color surface that resolves to vram_addr=0 too — both
+ * collide with the depth bindings keyed at 0. Splitting the lookup by
+ * is_color lets the cache hold one color + one depth entry per
+ * vram_addr safely (matching how the vk renderer treats them as
+ * orthogonal). The destroy-and-recreate fall-through in
+ * cache_find_or_create_color/_depth is now properly limited to a real
+ * shape change of the SAME aspect, never a color-vs-depth confusion. */
+static MtlSurfaceBinding *cache_get_at_color(uint32_t vram_addr)
+{
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e->vram_addr == vram_addr && e->is_color) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static MtlSurfaceBinding *cache_get_at_depth(uint32_t vram_addr)
+{
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e->vram_addr == vram_addr && !e->is_color) {
             return e;
         }
     }
@@ -313,14 +356,30 @@ static void cache_insert_head(MtlSurfaceBinding *e)
 }
 
 /* Evict by LRU on `last_use_seq` until <= kMaxCacheEntries-1 entries
- * remain. Skips currently-bound entries; if those alone exceed the
- * cap we raise the soft limit silently (not worth thrashing). */
+ * remain. Skips currently-bound entries AND the entry whose texture is
+ * the currently-published front-fb (so the compositor never reads from
+ * a freed MTLTexture). If only pinned entries remain we raise the soft
+ * limit silently (not worth thrashing).
+ *
+ * 2026-05-03 magenta-RT fix: front-fb pin added because PGR2 binds the
+ * back-buffer for rendering (which makes back-buffer = s_color_binding)
+ * while the front-fb at pcrtc.start (the displayed framebuffer) is not
+ * currently bound and was eligible for eviction. The publish dedupe in
+ * pgraph_mtl_surface_publish_front_fb returns early when the published
+ * texture is already current and DOES NOT bump last_use_seq, so a
+ * stably-published front-fb's LRU score grew stale and the cache was
+ * happy to evict it — destroying the texture the compositor is showing.
+ * Pinning fixes that without changing the publish path. */
 static void cache_evict_lru(void)
 {
     while (s_cache_size >= kMaxCacheEntries) {
         MtlSurfaceBinding *oldest = NULL;
+        void *front_tex = atomic_load(&s_front_framebuffer_texture);
         for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
             if (e == s_color_binding || e == s_depth_binding) {
+                continue;
+            }
+            if (front_tex != NULL && e->texture == front_tex) {
                 continue;
             }
             if (oldest == NULL || e->last_use_seq < oldest->last_use_seq) {
@@ -328,7 +387,7 @@ static void cache_evict_lru(void)
             }
         }
         if (oldest == NULL) {
-            return; /* everything is bound — bail */
+            return; /* everything is pinned — bail */
         }
         cache_unlink(oldest);
         binding_destroy(oldest);
@@ -530,8 +589,11 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
 
-    MtlSurfaceBinding *e = cache_get_at(vram_addr);
-    if (e != NULL && e->is_color &&
+    /* 2026-05-03 magenta-RT fix: color-only lookup so a same-vram_addr
+     * depth binding doesn't trigger a destroy-and-recreate of this
+     * color slot. */
+    MtlSurfaceBinding *e = cache_get_at_color(vram_addr);
+    if (e != NULL &&
         e->width == width && e->height == height &&
         e->nv097_format == nv097_color_format) {
         /* Cache hit — keep guest dims fresh in case the caller resized. */
@@ -540,8 +602,43 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
         e->last_use_seq = ++s_use_seq;
         return e;
     }
-    /* Existing entry but shape changed — release and recreate. */
+    /* Existing entry but shape changed — release and recreate.
+     *
+     * 2026-05-03 magenta-RT diagnostic: bump a counter and emit a bounded
+     * log line whenever we recreate due to shape mismatch. PGR2 may bind
+     * the same vram_addr at multiple distinct shapes (e.g. a 1280×480
+     * supersampled back-buffer reconfigured as 640×480 mid-frame). Each
+     * recreate destroys all previously rendered content for that
+     * vram_addr — explaining "draws hit but screenshots show fresh
+     * texture content".
+     *
+     * Counter accumulates monotonically; xemu-metal-perf.c reads it as
+     * METAL_SURFACE_RECREATE_SHAPE_MISMATCH per interval. Diagnostic log
+     * line is rate-limited to first 16 events. */
     if (e != NULL) {
+        atomic_fetch_add(&s_recreate_shape_mismatch, 1);
+        static _Atomic uint32_t s_recreate_log_count = 0;
+        if (atomic_load(&s_recreate_log_count) < 16) {
+            atomic_fetch_add(&s_recreate_log_count, 1);
+            fprintf(stderr,
+                    "xemu-perf: metal_surface_recreate vram_addr=0x%x "
+                    "old=%ux%u/fmt%u new=%ux%u/fmt%u (color)\n",
+                    (unsigned)vram_addr,
+                    e->width, e->height, e->nv097_format,
+                    width, height, nv097_color_format);
+        }
+        /* 2026-05-03 magenta-RT fix (codex-validate finding): if the
+         * entry being destroyed is the currently-published front-fb,
+         * clear the publish pointer first so the compositor doesn't
+         * dereference a freed MTLTexture. Symmetric with the LRU
+         * front-fb pin in cache_evict_lru — that pin protects against
+         * eviction; this clear protects against shape-change destroy.
+         * Without this, a guest-side surface reconfiguration of the
+         * displayed buffer would reproduce the heap-default magenta
+         * class artifact via a different mechanism. */
+        if (atomic_load(&s_front_framebuffer_texture) == e->texture) {
+            atomic_store(&s_front_framebuffer_texture, (void *)NULL);
+        }
         cache_unlink(e);
         binding_destroy(e);
     }
@@ -592,8 +689,10 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
 
-    MtlSurfaceBinding *e = cache_get_at(vram_addr);
-    if (e != NULL && !e->is_color &&
+    /* 2026-05-03 magenta-RT fix: depth-only lookup. Symmetric with the
+     * color-only filter above. */
+    MtlSurfaceBinding *e = cache_get_at_depth(vram_addr);
+    if (e != NULL &&
         e->width == width && e->height == height &&
         e->nv097_format == nv097_zeta_format) {
         if (guest_width  != 0) e->guest_width  = guest_width;
@@ -602,6 +701,17 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
         return e;
     }
     if (e != NULL) {
+        atomic_fetch_add(&s_recreate_shape_mismatch, 1);
+        static _Atomic uint32_t s_recreate_log_count_d = 0;
+        if (atomic_load(&s_recreate_log_count_d) < 16) {
+            atomic_fetch_add(&s_recreate_log_count_d, 1);
+            fprintf(stderr,
+                    "xemu-perf: metal_surface_recreate vram_addr=0x%x "
+                    "old=%ux%u/fmt%u new=%ux%u/fmt%u (depth)\n",
+                    (unsigned)vram_addr,
+                    e->width, e->height, e->nv097_format,
+                    width, height, nv097_zeta_format);
+        }
         cache_unlink(e);
         binding_destroy(e);
     }
@@ -816,13 +926,18 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
         return false;
     }
 
+    /* 2026-05-03 magenta-RT fix: bump last_use_seq before the dedupe
+     * check so a stably-published front-fb keeps a fresh LRU score and
+     * is never picked as the eviction victim while the compositor is
+     * actively reading it. The front-fb-pin guard in cache_evict_lru is
+     * the primary protection; this is a belt-and-suspenders refresh. */
+    e->last_use_seq = ++s_use_seq;
     void *prev = atomic_load(&s_front_framebuffer_texture);
     if (prev == e->texture) {
         return true;
     }
     atomic_store(&s_front_framebuffer_texture, e->texture);
     atomic_fetch_add(&s_front_fb_publishes, 1);
-    e->last_use_seq = ++s_use_seq;
     fprintf(stderr,
             "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
             "width=%u height=%u format=%u reason=%s\n",
@@ -1062,6 +1177,18 @@ uint32_t pgraph_mtl_surface_get_height(void)
     return 0;
 }
 
+uint32_t pgraph_mtl_surface_get_color_vram_addr(void)
+{
+    if (!s_initialized || s_color_binding == NULL) return 0;
+    return s_color_binding->vram_addr;
+}
+
+uint32_t pgraph_mtl_surface_get_depth_vram_addr(void)
+{
+    if (!s_initialized || s_depth_binding == NULL) return 0;
+    return s_depth_binding->vram_addr;
+}
+
 /* -------- M11 MSAA accessors -------- */
 
 void pgraph_mtl_surface_set_msaa_sample_count(uint32_t sample_count)
@@ -1159,6 +1286,11 @@ uint64_t pgraph_mtl_surface_image_blits(void)
 uint64_t pgraph_mtl_surface_vram_dirty_hits(void)
 {
     return atomic_load(&s_vram_dirty_hits);
+}
+
+uint64_t pgraph_mtl_surface_recreate_shape_mismatch(void)
+{
+    return atomic_load(&s_recreate_shape_mismatch);
 }
 
 uint64_t pgraph_mtl_surface_vram_uploads(void)

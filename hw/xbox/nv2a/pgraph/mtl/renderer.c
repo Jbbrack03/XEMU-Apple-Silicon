@@ -32,6 +32,8 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "ui/xemu-settings.h"
 
+#include <stdatomic.h>
+
 #include "buffer.h"
 #include "draw.h"
 #include "format.h"
@@ -60,6 +62,126 @@ static bool s_force_passthrough_cached = false;
 static int  s_force_passthrough        = -1;
 static bool s_use_translated_cached    = false;
 static int  s_use_translated           = -1;
+
+/* 2026-05-03 magenta-RT diagnostic: per-vram_addr "draw target" table.
+ *
+ * For each `pgraph_mtl_flush_draw` invocation, after `mtl_bind_current_surfaces`
+ * succeeds, we bump a counter keyed by the bound color binding's vram_addr.
+ * On every nv2a_profile_log_emit_interval the table is dumped as one
+ * `xemu-perf: metal_draw_target vram_addr=0x.. count=N` line per distinct
+ * address (capped to MTL_DRAW_TARGET_TABLE_SIZE entries; addresses beyond
+ * the cap are accumulated into `s_draw_target_overflow`).
+ *
+ * This is the decisive measurement for the 2026-05-03 followup-B+C open
+ * question: WHICH SurfaceBinding receives the rendered scene? PGR2's
+ * METAL_DRAW_COUNT runs at 75k draws/min but the screenshot path shows
+ * none of the front buffer (0x32a4000), back buffer (0x3628000), or
+ * aux RT (0x2c06000) contain it. This counter answers it directly.
+ *
+ * Always-on; zero hot-path cost when no flush_draw fires (which is the
+ * GL-renderer case). Per-flush_draw cost is one linear scan over up to
+ * 32 entries plus an atomic add — negligible vs the actual draw work.
+ */
+#define MTL_DRAW_TARGET_TABLE_SIZE 32
+typedef struct MtlDrawTargetEntry {
+    uint32_t vram_addr;
+    _Atomic(uint64_t) count;
+} MtlDrawTargetEntry;
+static MtlDrawTargetEntry s_draw_target_table[MTL_DRAW_TARGET_TABLE_SIZE];
+static _Atomic(uint32_t)  s_draw_target_used = 0;
+static _Atomic(uint64_t)  s_draw_target_overflow = 0;
+static _Atomic(uint64_t)  s_draw_target_zero_addr = 0;
+static QemuMutex          s_draw_target_lock;
+static bool               s_draw_target_lock_init = false;
+
+static void mtl_draw_target_lock_ensure(void)
+{
+    /* Initialized lazily on first bump. The flush_draw call site already
+     * runs under d->pgraph.lock so two concurrent renderer threads are
+     * not possible, but the emit path is called from the profile log
+     * timer and may race with a future renderer thread; guard the
+     * insert/scan with a small mutex to keep the table coherent. */
+    if (!s_draw_target_lock_init) {
+        qemu_mutex_init(&s_draw_target_lock);
+        s_draw_target_lock_init = true;
+    }
+}
+
+static void mtl_draw_target_bump(uint32_t vram_addr)
+{
+    if (vram_addr == 0) {
+        atomic_fetch_add(&s_draw_target_zero_addr, 1);
+        return;
+    }
+    mtl_draw_target_lock_ensure();
+    qemu_mutex_lock(&s_draw_target_lock);
+    uint32_t used = atomic_load(&s_draw_target_used);
+    for (uint32_t i = 0; i < used; i++) {
+        if (s_draw_target_table[i].vram_addr == vram_addr) {
+            atomic_fetch_add(&s_draw_target_table[i].count, 1);
+            qemu_mutex_unlock(&s_draw_target_lock);
+            return;
+        }
+    }
+    if (used < MTL_DRAW_TARGET_TABLE_SIZE) {
+        s_draw_target_table[used].vram_addr = vram_addr;
+        atomic_store(&s_draw_target_table[used].count, 1);
+        atomic_store(&s_draw_target_used, used + 1);
+        qemu_mutex_unlock(&s_draw_target_lock);
+        /* One-shot diagnostic line per distinct vram_addr — fires at
+         * most MTL_DRAW_TARGET_TABLE_SIZE times per session. Useful for
+         * spotting newly appearing draw targets without waiting for
+         * the next interval emit. */
+        fprintf(stderr,
+                "xemu-perf: metal_draw_target_first vram_addr=0x%x slot=%u\n",
+                (unsigned)vram_addr, (unsigned)used);
+        return;
+    }
+    atomic_fetch_add(&s_draw_target_overflow, 1);
+    qemu_mutex_unlock(&s_draw_target_lock);
+}
+
+void pgraph_mtl_draw_target_emit_interval(FILE *out);
+
+void pgraph_mtl_draw_target_emit_interval(FILE *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    if (!s_draw_target_lock_init) {
+        return;
+    }
+    qemu_mutex_lock(&s_draw_target_lock);
+    uint32_t used = atomic_load(&s_draw_target_used);
+    uint64_t overflow = atomic_load(&s_draw_target_overflow);
+    uint64_t zero_addr = atomic_load(&s_draw_target_zero_addr);
+    /* Snapshot + reset so each interval reports its own deltas. The
+     * vram_addr slot table is preserved across resets — addresses that
+     * keep receiving draws keep their slot — but the count is reset to
+     * zero on each emit. */
+    for (uint32_t i = 0; i < used; i++) {
+        uint64_t c = atomic_exchange(&s_draw_target_table[i].count, 0);
+        if (c > 0) {
+            fprintf(out,
+                    "xemu-perf: metal_draw_target vram_addr=0x%x count=%llu\n",
+                    (unsigned)s_draw_target_table[i].vram_addr,
+                    (unsigned long long)c);
+        }
+    }
+    if (overflow > 0) {
+        atomic_store(&s_draw_target_overflow, 0);
+        fprintf(out,
+                "xemu-perf: metal_draw_target_overflow count=%llu\n",
+                (unsigned long long)overflow);
+    }
+    if (zero_addr > 0) {
+        atomic_store(&s_draw_target_zero_addr, 0);
+        fprintf(out,
+                "xemu-perf: metal_draw_target_zero count=%llu\n",
+                (unsigned long long)zero_addr);
+    }
+    qemu_mutex_unlock(&s_draw_target_lock);
+}
 
 /* M11: effective MSAA sample count (1 = off; 2/4/8 when on). Latched
  * at pgraph_mtl_init from XEMU_METAL_MSAA, clamped against the active
@@ -1089,6 +1211,14 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
      * the existing texture is reused. */
     mtl_bind_current_surfaces(d, pg->surface_shape.color_format != 0,
                               pg->surface_shape.zeta_format != 0);
+
+    /* 2026-05-03 magenta-RT diagnostic: bump the per-vram_addr draw-target
+     * counter for the bound color binding. Reads vram_addr off the
+     * cached SurfaceBinding directly so we measure the actual draw
+     * target after any cache-resolution logic, not the raw DMA-derived
+     * address (the two should match in steady state but the counter
+     * also catches ensure-by-shape fallbacks where vram_addr=0). */
+    mtl_draw_target_bump(pgraph_mtl_surface_get_color_vram_addr());
 
     /* M5.9-followup-C (2026-05-03): upload any cached surface whose
      * VRAM range was dirtied by guest CPU writes since the last
