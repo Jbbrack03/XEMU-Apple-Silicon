@@ -1,6 +1,40 @@
 # Handoff
 
-Last updated: 2026-05-03 (Metal renderer slice **M5.8 — full
+Last updated: 2026-05-03 (Multi-title MSAA + 1080p validation across
+PGR2 / Crimson / Rainbow / SC2 on the GL renderer with
+`XEMU_GL_MSAA=4` + `surface_scale=2`. **PGR2 47 fps, Crimson 30 fps,
+Rainbow 26 fps avg (max 60 in many intervals — bimodal due to
+guest-intrinsic asset-stream stutters), SC2 58 fps.** MSAA cost
+1-9% of frame budget; cheap on PGR2/Crimson/SC2, more expensive on
+Rainbow's stutter-prone intervals. **GL renderer remains the
+production path for visual correctness; Metal renderer produces
+solid-magenta render targets** despite 100% pipeline-build success
+post-M5.8 — diagnostic capture
+(`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, added 2026-05-03) confirms
+the magenta is renderer-side, not OS-level layer substitution.
+Possible root causes (queued): wrong NV097_SET_COLOR_CLEAR_VALUE
+handling, texture sampling producing transparent output, PSH
+combiner translation, or surface-routing bug. **Input slices N1+N2
+shipped (opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework
+backend; INPUT_USB_POLLS / INPUT_BACKEND_UPDATES /
+INPUT_LAT_US_TOTAL/_MAX counters always-on).** **Programmatic
+Metal screenshot path shipped** (`XEMU_METAL_SCREENSHOT_PATH`,
+`XEMU_METAL_SCREENSHOT_AT_FRAME`, `XEMU_METAL_SCREENSHOT_INTERVAL`,
+`XEMU_METAL_SCREENSHOT_SOURCE={drawable,nv2a}`). **`run-benchmark.sh`
+extended with `sc2` + `halo` title keys.** See
+`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
+for the per-title MSAA validation table and user-goal mapping.
+**Next-session priorities**: (1) Metal magenta investigation —
+inspect NV097_SET_COLOR_CLEAR_VALUE handling, the M3/M4
+passthrough fragment-shader output for a specific scene, and the
+PSH translation for PGR2's combiner state; (2) Rainbow Six 3 FPS
+variance investigation (avg 26 vs target 30, max 60 — bimodal
+distribution suggests guest-intrinsic stutters dominate the
+average); (3) Audio listen-test for `XEMU_APU_LOCK_RELEASE` (still
+UNBLOCKED since 2026-05-02); (4) N3 paired latency benchmark for
+`XEMU_MACOS_NATIVE_INPUT` default-on decision.
+
+(Earlier banner — Metal renderer slice **M5.8 — full
 per-vertex attribute decoder — SHIPPED**. Replaces M5.6 Part B's
 "everything except POSITION + DIFFUSE goes uniform" mask shortcut
 with a proper per-attribute decoder that mirrors `vk/vertex.c`. The

@@ -1,5 +1,73 @@
 # Decision Log
 
+## 2026-05-03: Multi-title MSAA + 1080p validation; GL is the production path
+
+**Context.** User-stated goals: console-native FPS at 1080p, high-quality
+antialiasing, no jitter, low input latency, correct colors. M5.8 closed
+the Metal vertex-decoder gap; M5.6 Part B's bufferIndex hack is gone;
+N1+N2 shipped opt-in input latency improvements; programmatic screenshot
+path lets us inspect renderer output without macOS Screen-Recording.
+
+**Investigation.** Captured PGR2 frames via the new
+`XEMU_METAL_SCREENSHOT_PATH` path. Drawable captures: black on early
+frames, pure magenta after ~frame 4200 (game booted past BIOS).
+Diagnostic NV2A-direct capture (`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`,
+added in this session) reads the NV2A render target pre-present:
+also magenta, at the expected NV2A surface dimensions (1280×960 for
+the main RT). The magenta is therefore **renderer-side**, not the
+OS-level Screen-Recording substitute layer the M5.8 agent had
+hypothesized. With `METAL_PIPELINE_TRANSLATED_FAILED == 0` and
+`METAL_DRAW_INDEXED_COUNT > 50,000/60s`, draws are succeeding but
+their output is being clobbered (clear-color overwriting drawn
+geometry, depth-test rejecting all fragments, texture sampling
+returning transparent, or PSH combiner translation producing magenta
+constants). Root cause not isolated in this session.
+
+**Decision.** GL renderer remains the production path for the user's
+"correct colors" goal until the Metal magenta artifact is investigated
+and fixed. Per-title GL benchmark sweep with `XEMU_GL_MSAA=4` +
+`surface_scale=2`:
+
+| Title | Engine cap | Avg FPS | MSAA % | Status |
+|---|---|---|---|---|
+| PGR2 | 30 | 47.08 | 3.0 % | ✅ above cap |
+| Crimson | 30 | 30.23 | 1.2 % | ✅ at cap |
+| Rainbow | 30 | 26.81 | 5.4 % | ⚠ avg below; max 60 in many intervals |
+| SC2 | 60 | 58.19 | 1.9 % | ✅ near cap |
+
+`XEMU_GL_MSAA=4` is the recommended user setting for high-quality AA
+at 1080p; stays opt-in (default 0) until Rainbow's bimodal-FPS
+investigation completes — the 5-9% MSAA cost on Rainbow's
+stutter-prone intervals could push more frames below 30 fps.
+
+**Consequences.**
+
+- Three of four tracked titles meet console-native FPS target with 4×
+  MSAA at 1080p on the GL renderer. Rainbow shows variance (max FPS
+  60+, min 6-10) — average is dragged down by guest-intrinsic stutter
+  intervals already documented in V6/V7/V9/V10 attribution.
+- M15 default-on decision **stays BLOCKED** on Metal magenta artifact.
+- N1+N2 input latency work is shipped and counter-validated; default-on
+  decision queued behind a paired latency benchmark (N3).
+- `XEMU_MACOS_NATIVE_INPUT=1` is the recommended user setting for low
+  input latency.
+- `run-benchmark.sh` extended with `sc2` and `halo` keys for broader
+  validation coverage.
+
+**See also**: `docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`.
+
+## 2026-05-03: Metal screenshot diagnostic source switch (XEMU_METAL_SCREENSHOT_SOURCE)
+
+Added a `drawable | nv2a` selector to the Metal screenshot path so the
+NV2A render target can be captured BEFORE the present pipeline
+composites it into the drawable. Used to disprove the M5.8 agent's
+hypothesis that magenta-substitution was OS-level — the NV2A's private
+MTLTexture (which the OS doesn't touch) is also magenta, so the bug is
+renderer-side.
+
+Implementation in `ui/xemu-metal.mm`. Default `drawable` (no behavior
+change for existing scripts).
+
 ## 2026-05-03: Metal slice M5.8 — full per-vertex attribute decoder
 
 **Context.** M5.6 Part B closed the M5.6 "missing attribute" pipeline

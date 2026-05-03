@@ -151,6 +151,16 @@ case "$1" in
         DISC="${ROOT_DIR}/scripts/apple-silicon/xbe-tests/flat-tri-depth/flat-tri-depth.iso"
         DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/noop.csv"
         ;;
+    sc2)
+        GAME_NAME="soul-calibur-2"
+        DISC="$(find_test_disc "Soul Calibur 2.xiso.iso")"
+        DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/noop.csv"
+        ;;
+    halo)
+        GAME_NAME="halo-ce"
+        DISC="$(find_test_disc "Halo - Combat Evolved.xiso.iso")"
+        DEFAULT_SCRIPT="${ROOT_DIR}/scripts/apple-silicon/input-scripts/noop.csv"
+        ;;
     *)
         usage >&2
         exit 2
