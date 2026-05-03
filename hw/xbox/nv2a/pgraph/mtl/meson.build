@@ -25,6 +25,7 @@ if metal.found()
 # glslang dependency wiring.
 specific_ss.add([metal, libglslang, spirv_cross, files(
 	'renderer.c',
+	'blit.c',
 	'index_gen.c',
 	'disk_cache.c',
 	'glsl.c',

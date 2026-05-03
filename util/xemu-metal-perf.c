@@ -83,6 +83,8 @@ static uint64_t s_baseline_capture_frames_seen;
 static uint64_t s_baseline_screenshots_taken;
 /* M5.9 (2026-05-03) — per-VRAM surface cache + CRTC-aware publish. */
 static uint64_t s_baseline_front_fb_publishes;
+/* M5.9-followup-A (2026-05-03) — NV097_IMAGE_BLIT GPU-side copies. */
+static uint64_t s_baseline_image_blits;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -360,6 +362,14 @@ __attribute__((weak)) uint64_t pgraph_mtl_surface_cache_entries(void)
     return 0;
 }
 
+/* M5.9-followup-A (2026-05-03) — NV097_IMAGE_BLIT GPU-side copies.
+ * Strong symbol in mtl/surface.mm; weak fallback for the
+ * non-Apple-Silicon link. */
+__attribute__((weak)) uint64_t pgraph_mtl_surface_image_blits(void)
+{
+    return 0;
+}
+
 void xemu_metal_perf_emit_and_reset(FILE *out)
 {
     if (out == NULL) {
@@ -424,6 +434,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     /* M5.9 — front-fb publish counter + live cache size. */
     uint64_t front_fb_publishes = pgraph_mtl_surface_front_fb_publishes();
     uint64_t surface_cache_size = pgraph_mtl_surface_cache_entries();
+    /* M5.9-followup-A — NV097_IMAGE_BLIT GPU-side copies. */
+    uint64_t image_blits        = pgraph_mtl_surface_image_blits();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -525,6 +537,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     /* M5.9 — front-fb publish delta. */
     uint64_t front_fb_publishes_delta = front_fb_publishes -
                                         s_baseline_front_fb_publishes;
+    /* M5.9-followup-A — NV097_IMAGE_BLIT GPU-side copy delta. */
+    uint64_t image_blits_delta        = image_blits -
+                                        s_baseline_image_blits;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -573,6 +588,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_capture_frames_seen      = capture_seen;
     s_baseline_screenshots_taken        = screenshots_taken;
     s_baseline_front_fb_publishes       = front_fb_publishes;
+    s_baseline_image_blits              = image_blits;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -599,7 +615,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            fragment_us_delta | present_gpu_us_delta |
                            present_gpu_fr_delta | capture_seen_delta |
                            screenshots_taken_delta |
-                           front_fb_publishes_delta;
+                           front_fb_publishes_delta |
+                           image_blits_delta;
     if (total_delta == 0) {
         return;
     }
@@ -651,7 +668,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_CAPTURE_ACTIVE=%u"
             " METAL_SCREENSHOTS_TAKEN=%llu"
             " METAL_FRONT_FB_PUBLISHES=%llu"
-            " METAL_SURFACE_CACHE_SIZE=%llu",
+            " METAL_SURFACE_CACHE_SIZE=%llu"
+            " METAL_IMAGE_BLITS=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -704,5 +722,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned)capture_active,
             (unsigned long long)screenshots_taken_delta,
             (unsigned long long)front_fb_publishes_delta,
-            (unsigned long long)surface_cache_size);
+            (unsigned long long)surface_cache_size,
+            (unsigned long long)image_blits_delta);
 }

@@ -1062,9 +1062,12 @@ static void pgraph_mtl_get_report(NV2AState *d, uint32_t parameter)
     pgraph_write_zpass_pixel_cnt_report(d, parameter, 0);
 }
 
-static void pgraph_mtl_image_blit(NV2AState *d)
-{
-}
+/* M5.9-followup-A: NV097_IMAGE_BLIT handler implemented in mtl/blit.c
+ * (mirrors vk/blit.c + gl/blit.c). Kept in a separate .c file so this
+ * file's renderer-ops dispatch table stays uncluttered, and so blit.c
+ * can compile against the per-target preprocessor flags via
+ * specific_ss the same way renderer.c does. */
+extern void pgraph_mtl_image_blit(NV2AState *d);
 
 static void pgraph_mtl_pre_savevm_trigger(NV2AState *d)
 {

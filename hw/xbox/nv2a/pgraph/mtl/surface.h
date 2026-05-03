@@ -200,6 +200,38 @@ uint64_t pgraph_mtl_surface_clear_count(void);
 uint64_t pgraph_mtl_surface_front_fb_publishes(void);
 uint64_t pgraph_mtl_surface_cache_entries(void);
 
+/*
+ * M5.9-followup-A (2026-05-03): NV097_IMAGE_BLIT GPU-side surface copy.
+ *
+ * Look up `src_vram_addr` and `dst_vram_addr` in the per-VRAM cache; if
+ * both resolve to MTLTextures with matching pixel format, encode a
+ * MTLBlitCommandEncoder copyFromTexture from the src rect to the dst
+ * rect. If formats mismatch (or either entry is missing), invalidate the
+ * destination cache entry so the next bind reallocates with a fresh
+ * upload from VRAM — the caller is expected to have already updated
+ * guest VRAM via the CPU-side memcpy path (mirroring vk/gl's blit).
+ *
+ * `src_x` / `src_y` / `dst_x` / `dst_y` / `width` / `height` are in
+ * GUEST 1x pixel space; the cache scales them by the surface entry's
+ * (texture_dim / vram_dim) ratio to address the host-scaled MTLTexture
+ * (surface_scale_factor=2 means texture is 2x the VRAM dims).
+ *
+ * Returns true if a GPU-side blit was issued; false if the path fell
+ * back to invalidate-on-mismatch (or both src/dst missing). Bumps the
+ * METAL_IMAGE_BLITS counter on a successful GPU blit.
+ *
+ * The caller MUST have already called pgraph_mtl_draw_flush_open_pass
+ * so any in-flight render encoder against either texture is committed.
+ */
+bool pgraph_mtl_surface_blit_copy(uint32_t src_vram_addr,
+                                  uint32_t dst_vram_addr,
+                                  uint32_t src_x, uint32_t src_y,
+                                  uint32_t dst_x, uint32_t dst_y,
+                                  uint32_t width, uint32_t height);
+
+/* M5.9-followup-A: counter accessor. Always-on atomic. */
+uint64_t pgraph_mtl_surface_image_blits(void);
+
 #ifdef __cplusplus
 }
 #endif

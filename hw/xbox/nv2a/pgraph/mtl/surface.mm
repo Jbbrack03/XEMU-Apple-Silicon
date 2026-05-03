@@ -175,6 +175,8 @@ static _Atomic(void *) s_front_framebuffer_texture = nullptr;
 /* Diagnostic counters. */
 static _Atomic(uint64_t) s_clear_count          = 0;
 static _Atomic(uint64_t) s_front_fb_publishes   = 0;
+/* M5.9-followup-A: GPU-side image_blit copies issued. */
+static _Atomic(uint64_t) s_image_blits          = 0;
 
 static bool s_initialized = false;
 
@@ -453,6 +455,7 @@ bool pgraph_mtl_surface_init(void)
     atomic_store(&s_front_framebuffer_texture, (void *)NULL);
     atomic_store(&s_clear_count, (uint64_t)0);
     atomic_store(&s_front_fb_publishes, (uint64_t)0);
+    atomic_store(&s_image_blits, (uint64_t)0);
 
     s_initialized = true;
     return true;
@@ -734,28 +737,13 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
     return true;
 }
 
-/* Internal helper used by clear / ensure when they want to (re-)publish
- * the currently-bound color surface. Mirrors publish-by-vram-addr
- * semantically but uses the cached binding pointer directly. */
-static void publish_color_binding(const char *reason)
-{
-    if (s_color_binding == NULL) {
-        return;
-    }
-    void *prev = atomic_load(&s_front_framebuffer_texture);
-    if (prev == s_color_binding->texture) {
-        return;
-    }
-    atomic_store(&s_front_framebuffer_texture, s_color_binding->texture);
-    atomic_fetch_add(&s_front_fb_publishes, 1);
-    s_color_binding->last_use_seq = ++s_use_seq;
-    fprintf(stderr,
-            "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-            "width=%u height=%u format=%u reason=%s\n",
-            (unsigned)s_color_binding->vram_addr,
-            s_color_binding->width, s_color_binding->height,
-            s_color_binding->nv097_format, reason ? reason : "?");
-}
+/* M5.9-followup-A (2026-05-03): the M5.9-era publish_color_binding()
+ * helper used to be called from `pgraph_mtl_surface_clear` to publish
+ * every cleared color surface as the front-fb. That stopgap is now
+ * removed (see the comment in `pgraph_mtl_surface_clear`); the front-fb
+ * is published exclusively by `pgraph_mtl_surface_publish_front_fb`,
+ * which is invoked from `pgraph_mtl_flip_stall` with the CRTC-pointed
+ * vram_addr. The helper is gone to keep the publish path single-source. */
 
 /* ---------------------------------------------------------------- */
 
@@ -862,7 +850,27 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
 
     if (have_color_target) {
         s_color_binding->last_use_seq = ++s_use_seq;
-        publish_color_binding("clear");
+        /* M5.9-followup-A (2026-05-03): do NOT publish the cleared
+         * surface as the front-fb. M5.9 published-on-clear as a stopgap
+         * so the SDL window shows *something* before the first
+         * NV097_FLIP_STALL — but on a steady-state per-frame cadence
+         * the render path issues several clears (back buffer + Z buffer
+         * + aux RTs) per frame, each of which would clobber the
+         * CRTC-published front-fb pointer set at flip_stall.
+         *
+         * The result was that the compositor's
+         * pgraph_mtl_get_framebuffer_metal_texture() race-read
+         * whichever surface had been cleared most recently, not the
+         * CRTC-pointed surface — surfacing as a wrong-dimension
+         * (back-buffer-shaped) texture in the captured screenshots.
+         *
+         * We publish ONLY at flip_stall (renderer.c:pgraph_mtl_flip_stall
+         * → pgraph_mtl_surface_publish_front_fb(crtc_addr, "crtc")) and
+         * on the explicit get_framebuffer_surface call from the
+         * compositor. If no flip_stall has fired yet (very early boot
+         * before the first guest swap) the front-fb pointer remains
+         * NULL and the compositor falls back to its blank drawable —
+         * better than displaying an arbitrary cleared depth buffer. */
     }
 }
 
@@ -994,4 +1002,197 @@ uint64_t pgraph_mtl_surface_msaa_resolve_count(void)
 uint64_t pgraph_mtl_surface_msaa_resolve_us_total(void)
 {
     return atomic_load(&s_msaa_resolve_us_total);
+}
+
+/* ---------------------------------------------------------------- */
+/* M5.9-followup-A — NV097_IMAGE_BLIT GPU-side surface copy.
+ *
+ * The CPU-side memcpy in mtl/blit.c keeps guest VRAM correct (matching
+ * vk/gl). This GPU-side blit additionally propagates the source pixels
+ * into the destination MTLTexture so the per-VRAM cache's resolved
+ * texture (which is what the CRTC publish path ultimately reads) shows
+ * the rendered scene content rather than a stale clear color.
+ *
+ * Path A — formats match: encode a copyFromTexture rect-to-rect blit on
+ *   a fresh command buffer.
+ * Path B — formats mismatch (or src not in cache): invalidate the dst
+ *   cache entry. The next bind_color at dst_vram_addr will allocate a
+ *   fresh MTLTexture and upload-from-VRAM picks up the CPU-side memcpy
+ *   the caller just wrote.
+ * Path C — dst not in cache either: nothing to do. The next bind at
+ *   dst_vram_addr will create + upload from VRAM (already fresh).
+ */
+
+uint64_t pgraph_mtl_surface_image_blits(void)
+{
+    return atomic_load(&s_image_blits);
+}
+
+/* Compute the effective host-space rectangle for a given guest-space
+ * (x, y, w, h) on the MTLTexture of binding `b`. The MTLTexture is
+ * allocated at the SCALED dimensions (surface_scale_factor=2 -> 2x VRAM)
+ * but the guest writes blit coordinates in 1x space. For cache entries
+ * that were bound at the scaled dims (the common path through
+ * mtl_bind_current_surfaces) we scale by texture_dim / 1.
+ *
+ * We do not have a separate "guest dim" field on the binding — the
+ * b->width/height ARE the texture dims. So if the caller passed guest
+ * rect (x=0, y=0, w=640, h=480) and the binding is 1280x960, we infer
+ * the scale from b->width / known_guest_width. To keep this robust
+ * without storing the guest dim explicitly we use the simpler rule:
+ * if width/height matches the binding 1:1 we pass through; otherwise
+ * we proportionally scale. */
+static void scale_rect_for_binding(MtlSurfaceBinding *b,
+                                   uint32_t guest_max_w,
+                                   uint32_t guest_max_h,
+                                   uint32_t *x, uint32_t *y,
+                                   uint32_t *w, uint32_t *h)
+{
+    if (b == NULL || guest_max_w == 0 || guest_max_h == 0) {
+        return;
+    }
+    /* Scale factor is texture_dim / guest_dim, rounded down. The
+     * guest_max is the larger of (caller width, caller x+w) so a
+     * partial-rect blit infers the scale from the surface footprint
+     * not the rect alone. */
+    uint32_t sx = b->width >= guest_max_w
+        ? b->width / (guest_max_w ? guest_max_w : 1) : 1;
+    uint32_t sy = b->height >= guest_max_h
+        ? b->height / (guest_max_h ? guest_max_h : 1) : 1;
+    if (sx == 0) sx = 1;
+    if (sy == 0) sy = 1;
+    *x *= sx;
+    *y *= sy;
+    *w *= sx;
+    *h *= sy;
+    /* Clamp to texture extent in case of rounding. */
+    if (*x >= b->width)  *x = b->width  ? b->width  - 1 : 0;
+    if (*y >= b->height) *y = b->height ? b->height - 1 : 0;
+    if (*x + *w > b->width)  *w = b->width  - *x;
+    if (*y + *h > b->height) *h = b->height - *y;
+}
+
+bool pgraph_mtl_surface_blit_copy(uint32_t src_vram_addr,
+                                  uint32_t dst_vram_addr,
+                                  uint32_t src_x, uint32_t src_y,
+                                  uint32_t dst_x, uint32_t dst_y,
+                                  uint32_t width, uint32_t height)
+{
+    if (!s_initialized || width == 0 || height == 0) {
+        return false;
+    }
+
+    MtlSurfaceBinding *src = cache_get_within(src_vram_addr);
+    MtlSurfaceBinding *dst = cache_get_within(dst_vram_addr);
+
+    /* Path C: neither in cache (or only dst) -> nothing GPU-side. The
+     * caller's memcpy already updated VRAM; future bind picks it up. */
+    if (src == NULL && dst == NULL) {
+        return false;
+    }
+    /* Only-src (no dst): invalidating doesn't apply (no entry to drop).
+     * Future bind on dst_vram_addr will do a fresh upload. Done. */
+    if (src == NULL) {
+        return false;
+    }
+
+    /* Path B: src exists but dst either missing or format/aspect mismatch.
+     * Drop the dst entry so the next bind reallocates with fresh upload-
+     * from-VRAM (the caller's memcpy is the authoritative state). */
+    bool format_match =
+        dst != NULL &&
+        dst->is_color == src->is_color &&
+        dst->mtl_pixel_format == src->mtl_pixel_format;
+
+    if (!format_match) {
+        if (dst != NULL) {
+            /* Don't evict if dst is the actively-bound color/depth — that
+             * would yank the texture out from a draw in progress. The
+             * caller drained the open pass via flush_open_pass; if dst is
+             * still bound for the next draw, mtl_bind_current_surfaces
+             * will rebuild it on demand. Safe to drop. */
+            cache_unlink(dst);
+            if (dst == s_color_binding) s_color_binding = NULL;
+            if (dst == s_depth_binding) s_depth_binding = NULL;
+            /* Also clear the front-fb pointer if it referenced this dst. */
+            if (atomic_load(&s_front_framebuffer_texture) == dst->texture) {
+                atomic_store(&s_front_framebuffer_texture, (void *)NULL);
+            }
+            binding_destroy(dst);
+        }
+        return false;
+    }
+
+    /* Path A: GPU-side rect-to-rect copy. */
+
+    /* Translate the guest-space rect to host MTLTexture-space rects.
+     * The blit width/height arrives as guest 1x; surfaces are allocated
+     * at scaled dims. We use the larger of (rect right edge, surface
+     * footprint dim) to infer the scale.
+     *
+     * Conservative path: if width/height already match the surface
+     * dimensions exactly we don't scale at all. */
+    uint32_t s_x = src_x, s_y = src_y, s_w = width, s_h = height;
+    uint32_t d_x = dst_x, d_y = dst_y, d_w = width, d_h = height;
+
+    /* Heuristic: if either rect plus its origin fits inside surface dims
+     * already, leave as-is (caller passed host-space coords). Otherwise
+     * scale. The blit is most often "copy the entire RT to the front",
+     * so we mainly hit the fits-inside fast path with origin (0,0). */
+    if (src_x + width > src->width || src_y + height > src->height) {
+        scale_rect_for_binding(src,
+                               src_x + width, src_y + height,
+                               &s_x, &s_y, &s_w, &s_h);
+    }
+    if (dst_x + width > dst->width || dst_y + height > dst->height) {
+        scale_rect_for_binding(dst,
+                               dst_x + width, dst_y + height,
+                               &d_x, &d_y, &d_w, &d_h);
+    }
+
+    /* Final clamp — the source-rect dims must equal the dest-rect dims
+     * for copyFromTexture (rect-to-rect, no scaling). Use the smaller of
+     * the two if they diverged after scaling/clamping. */
+    uint32_t copy_w = s_w < d_w ? s_w : d_w;
+    uint32_t copy_h = s_h < d_h ? s_h : d_h;
+    if (copy_w == 0 || copy_h == 0) {
+        return false;
+    }
+
+    @autoreleasepool {
+        id<MTLTexture> src_tex = (__bridge id<MTLTexture>)src->texture;
+        id<MTLTexture> dst_tex = (__bridge id<MTLTexture>)dst->texture;
+        if (src_tex == nil || dst_tex == nil) {
+            return false;
+        }
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.image_blit";
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.image_blit_enc";
+        [blit copyFromTexture:src_tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(s_x, s_y, 0)
+                   sourceSize:MTLSizeMake(copy_w, copy_h, 1)
+                    toTexture:dst_tex
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(d_x, d_y, 0)];
+        [blit endEncoding];
+        [cmd commit];
+
+        /* Mark dst entry recently-used to keep it from LRU eviction. */
+        dst->last_use_seq = ++s_use_seq;
+        src->last_use_seq = ++s_use_seq;
+    }
+
+    atomic_fetch_add(&s_image_blits, 1);
+
+    /* If the destination is the front-fb (CRTC published) surface, the
+     * cache pointer is unchanged — the texture has been updated in
+     * place. The compositor reads the same atomic pointer next present,
+     * which now contains the blitted scene content. */
+
+    return true;
 }
