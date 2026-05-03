@@ -2008,9 +2008,35 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full->xlat_section, attrs, addr, ra);
     mr = section->mr;
 
-    BQL_LOCK_GUARD();
-    return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
-                           type, ra, mr, mr_offset);
+    int64_t mmio_start_us = 0;
+    if (xemu_stutter_trace_enabled || xemu_spike_log_tcg_enabled) {
+        mmio_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    }
+
+    uint64_t result;
+    {
+        BQL_LOCK_GUARD();
+        result = int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
+                                 type, ra, mr, mr_offset);
+    }
+
+    if (xemu_stutter_trace_enabled || xemu_spike_log_tcg_enabled) {
+        int64_t mmio_us =
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) - mmio_start_us;
+        const char *mr_name = mr && mr->name ? mr->name : "?";
+        xemu_tcg_perf_record_mmio_read(addr, mr_offset, result, size,
+                                       mr_name, mmio_us > 0 ? mmio_us : 0);
+        if (xemu_spike_log_tcg_enabled && mmio_us >= xemu_spike_threshold_us) {
+            char extra[160];
+            snprintf(extra, sizeof(extra),
+                     "size=%d addr=0x%llx mr=%s value=0x%llx",
+                     size, (unsigned long long)addr, mr_name,
+                     (unsigned long long)result);
+            xemu_spike_emit("mmio_read_helper_block", mmio_us, extra);
+        }
+    }
+
+    return result;
 }
 
 static Int128 do_ld16_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,

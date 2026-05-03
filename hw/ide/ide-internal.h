@@ -328,6 +328,8 @@ typedef struct IDEBufferedRequest {
     QEMUIOVector *original_qiov;
     BlockCompletionFunc *original_cb;
     void *original_opaque;
+    int64_t xemu_perf_submit_us;
+    uint64_t xemu_perf_bytes;
     bool orphaned;
 } IDEBufferedRequest;
 

@@ -77,6 +77,8 @@ typedef struct NvNetState {
     uint8_t rx_ring_index;
 } NvNetState;
 
+static void reset_phy_regs(NvNetState *s);
+
 struct RingDesc {
     uint32_t buffer_addr;
     uint16_t length;
@@ -682,6 +684,20 @@ static void autoneg_done(void *opaque)
     set_link_up(s);
 }
 
+static void complete_autoneg_if_link_up(NvNetState *s)
+{
+    timer_del(s->autoneg_timer);
+
+    if (qemu_get_queue(s->nic)->link_down) {
+        update_regs_on_link_down(s);
+        return;
+    }
+
+    s->phy_regs[MII_ANLPAR] |= MII_ANLPAR_ACK;
+    s->phy_regs[MII_BMSR] |= MII_BMSR_AN_COMP;
+    update_regs_on_link_up(s);
+}
+
 static void autoneg_timer(void *opaque)
 {
     NvNetState *s = opaque;
@@ -741,8 +757,38 @@ static void phy_reg_write(NvNetState *s, uint8_t reg, uint16_t value)
     trace_nvnet_phy_reg_write(PHY_ADDR, reg, get_phy_reg_name(reg),
                               value);
 
-    if (reg < ARRAY_SIZE(s->phy_regs)) {
+    if (reg >= ARRAY_SIZE(s->phy_regs)) {
+        return;
+    }
+
+    switch (reg) {
+    case MII_BMCR:
+        if (value & MII_BMCR_RESET) {
+            reset_phy_regs(s);
+        }
+
+        /*
+         * RESET and ANRESTART are self-clearing in MII BMCR. Leaving them
+         * latched makes the Xbox kernel burn time in MDIO delay loops.
+         */
+        s->phy_regs[MII_BMCR] =
+            value & ~(MII_BMCR_RESET | MII_BMCR_ANRESTART);
+
+        if (value & (MII_BMCR_RESET | MII_BMCR_ANRESTART)) {
+            complete_autoneg_if_link_up(s);
+        }
+        break;
+
+    case MII_ANAR:
         s->phy_regs[reg] = value;
+        if (have_autoneg(s)) {
+            complete_autoneg_if_link_up(s);
+        }
+        break;
+
+    default:
+        s->phy_regs[reg] = value;
+        break;
     }
 }
 

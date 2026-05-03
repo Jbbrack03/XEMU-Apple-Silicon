@@ -22,6 +22,7 @@
 #include "nv2a_int.h"
 #include "qemu/timer.h"
 #include "qemu/xemu-spike-log.h"
+#include "qemu/xemu-pfifo-perf.h"
 
 /* V3 attribution: time the pfifo (renderer) thread's wait on pg->lock.
  * Off-state cost is one global load + branch and a normal qemu_mutex_lock. */
@@ -152,17 +153,31 @@ static bool pfifo_stall_for_flip(NV2AState *d)
         } else {
             d->pgraph.waiting_for_flip = false;
         }
+        xemu_pfifo_perf_record_flip_stall_check(should_stall);
         qemu_mutex_unlock(&d->pgraph.lock);
     }
 
     return should_stall;
 }
 
-static bool pfifo_puller_should_stall(NV2AState *d)
+static uint32_t pfifo_puller_stall_reasons(NV2AState *d)
 {
-    return pfifo_stall_for_flip(d) || qatomic_read(&d->pgraph.waiting_for_nop) ||
-           qatomic_read(&d->pgraph.waiting_for_context_switch) ||
-           !can_fifo_access(d);
+    uint32_t reasons = 0;
+
+    if (pfifo_stall_for_flip(d)) {
+        reasons |= XEMU_PFIFO_STALL_FLIP;
+    }
+    if (qatomic_read(&d->pgraph.waiting_for_nop)) {
+        reasons |= XEMU_PFIFO_STALL_NOP;
+    }
+    if (qatomic_read(&d->pgraph.waiting_for_context_switch)) {
+        reasons |= XEMU_PFIFO_STALL_CONTEXT;
+    }
+    if (!can_fifo_access(d)) {
+        reasons |= XEMU_PFIFO_STALL_FIFO_ACCESS;
+    }
+
+    return reasons;
 }
 
 static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
@@ -170,7 +185,11 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
                                 size_t num_words_available,
                                 size_t max_lookahead_words)
 {
-    if (pfifo_puller_should_stall(d)) {
+    xemu_pfifo_perf_record_puller_call();
+
+    uint32_t stall_reasons = pfifo_puller_stall_reasons(d);
+    if (stall_reasons) {
+        xemu_pfifo_perf_record_puller_stall(stall_reasons);
         return -1;
     }
 
@@ -261,10 +280,18 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
     return num_proc;
 }
 
-static bool pfifo_pusher_should_stall(NV2AState *d)
+static uint32_t pfifo_pusher_stall_reasons(NV2AState *d)
 {
-    return !can_fifo_access(d) ||
-           qatomic_read(&d->pgraph.waiting_for_nop);
+    uint32_t reasons = 0;
+
+    if (!can_fifo_access(d)) {
+        reasons |= XEMU_PFIFO_STALL_FIFO_ACCESS;
+    }
+    if (qatomic_read(&d->pgraph.waiting_for_nop)) {
+        reasons |= XEMU_PFIFO_STALL_NOP;
+    }
+
+    return reasons;
 }
 
 static void pfifo_run_pusher(NV2AState *d)
@@ -310,10 +337,21 @@ static void pfifo_run_pusher(NV2AState *d)
     hwaddr dma_len;
     uint8_t *dma = nv_dma_map(d, dma_instance, &dma_len);
 
-    while (!pfifo_pusher_should_stall(d)) {
+    xemu_pfifo_perf_record_pusher_run();
+
+    while (true) {
+        uint32_t stall_reasons = pfifo_pusher_stall_reasons(d);
+        if (stall_reasons) {
+            xemu_pfifo_perf_record_pusher_stall(stall_reasons);
+            break;
+        }
+
         uint32_t dma_get_v = *dma_get;
         uint32_t dma_put_v = *dma_put;
         if (dma_get_v == dma_put_v) break;
+        if (dma_put_v >= dma_get_v) {
+            xemu_pfifo_perf_sample_dma_backlog(dma_put_v - dma_get_v);
+        }
         if (dma_get_v >= dma_len) {
             assert(false);
             SET_MASK(*dma_state, NV_PFIFO_CACHE1_DMA_STATE_ERROR,
@@ -362,6 +400,8 @@ static void pfifo_run_pusher(NV2AState *d)
                 break;
             }
 
+            xemu_pfifo_perf_add_pusher_words(num_words_processed);
+            xemu_pfifo_perf_add_puller_method_words(num_words_processed);
             dma_get_v += (num_words_processed-1)*4;
 
             if (method_type == NV_PFIFO_CACHE1_DMA_STATE_METHOD_TYPE_INC) {
@@ -375,6 +415,7 @@ static void pfifo_run_pusher(NV2AState *d)
         } else {
             /* no command active - this is the first word of a new one */
             d->pfifo.regs[NV_PFIFO_CACHE1_DMA_RSVD_SHADOW] = word;
+            xemu_pfifo_perf_add_pusher_words(1);
 
             /* match all forms */
             if ((word & 0xe0000003) == 0x20000000) {

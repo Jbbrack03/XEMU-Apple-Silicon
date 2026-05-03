@@ -18,6 +18,7 @@
 
 bool xemu_spike_log_renderer_enabled;
 bool xemu_spike_log_tcg_enabled;
+bool xemu_stutter_trace_enabled;
 bool xemu_tcg_phase_log_enabled;
 int64_t xemu_spike_threshold_us = 50000;
 
@@ -38,6 +39,7 @@ void xemu_spike_log_init(void)
 
     xemu_spike_log_renderer_enabled = env_flag_enabled("XEMU_PERF_SPIKE_LOG");
     xemu_spike_log_tcg_enabled = env_flag_enabled("XEMU_PERF_SPIKE_LOG_TCG");
+    xemu_stutter_trace_enabled = env_flag_enabled("XEMU_STUTTER_TRACE");
     xemu_tcg_phase_log_enabled = env_flag_enabled("XEMU_TCG_PHASE_LOG");
 
     const char *threshold_env = getenv("XEMU_PERF_SPIKE_LOG_THRESHOLD_US");

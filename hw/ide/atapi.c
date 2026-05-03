@@ -25,6 +25,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
+#include "qemu/xemu-ide-perf.h"
 #include "hw/scsi/scsi.h"
 #include "system/block-backend.h"
 #include "scsi/constants.h"
@@ -92,6 +94,7 @@ static int
 cd_read_sector_sync(IDEState *s)
 {
     int ret;
+    int64_t start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     block_acct_start(blk_get_stats(s->blk), &s->acct,
                      ATAPI_SECTOR_SIZE, BLOCK_ACCT_READ);
 
@@ -121,6 +124,10 @@ cd_read_sector_sync(IDEState *s)
         s->lba++;
         s->io_buffer_index = 0;
     }
+
+    int64_t latency_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_us;
+    xemu_ide_perf_record_atapi_pio_sync(ATAPI_SECTOR_SIZE,
+                                        latency_us > 0 ? latency_us : 0);
 
     return ret;
 }

@@ -20,6 +20,7 @@
  */
 
 #include "nv2a_int.h"
+#include "qemu/xemu-pfifo-perf.h"
 
 /* USER - PFIFO MMIO and DMA submission area */
 uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
@@ -45,9 +46,11 @@ uint64_t user_read(void *opaque, hwaddr addr, unsigned int size)
             switch (addr & 0xFFFF) {
             case NV_USER_DMA_PUT:
                 r = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
+                xemu_pfifo_perf_record_user_dma_put_read();
                 break;
             case NV_USER_DMA_GET:
                 r = d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
+                xemu_pfifo_perf_record_user_dma_get_read();
                 break;
             case NV_USER_REF:
                 r = d->pfifo.regs[NV_PFIFO_CACHE1_REF];
@@ -92,9 +95,15 @@ void user_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
             switch (addr & 0xFFFF) {
             case NV_USER_DMA_PUT:
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] = val;
+                xemu_pfifo_perf_record_user_dma_put_write();
+                if (val >= d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]) {
+                    xemu_pfifo_perf_sample_dma_backlog(
+                        val - d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]);
+                }
                 break;
             case NV_USER_DMA_GET:
                 d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET] = val;
+                xemu_pfifo_perf_record_user_dma_get_write();
                 break;
             case NV_USER_REF:
                 d->pfifo.regs[NV_PFIFO_CACHE1_REF] = val;

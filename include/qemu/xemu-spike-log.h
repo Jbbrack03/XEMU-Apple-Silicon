@@ -47,6 +47,12 @@ extern bool xemu_spike_log_renderer_enabled;
 extern bool xemu_spike_log_tcg_enabled;
 extern int64_t xemu_spike_threshold_us;
 
+/* Stutter flight-recorder enable. Mirrors XEMU_STUTTER_TRACE=1; off by
+ * default. When on, TCG records per-interval guest-PC chain histograms so
+ * slow frame intervals can be attributed to the guest code regions that
+ * consumed wall time inside cpu_tb_exec. */
+extern bool xemu_stutter_trace_enabled;
+
 /* V7 cumulative-phase enable. Mirrors XEMU_TCG_PHASE_LOG=1; off by
  * default. When on, cpu_exec_loop accumulates per-phase wallclock
  * (tb_lookup, tb_gen_code, cpu_handle_interrupt) into the

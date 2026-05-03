@@ -56,6 +56,30 @@ void xemu_tcg_perf_add_tb_lookup_ns(uint64_t ns);
 void xemu_tcg_perf_add_tb_gen_code_ns(uint64_t ns);
 void xemu_tcg_perf_add_handle_interrupt_ns(uint64_t ns);
 
+/* Stutter attribution: record one MMIO load helper, including the
+ * BQL acquire + MemoryRegion read callback wall time. Callers gate the
+ * clock reads on xemu_stutter_trace_enabled / spike logging. */
+void xemu_tcg_perf_record_mmio_read(uint64_t addr, uint64_t mr_offset,
+                                    uint64_t value, uint32_t size,
+                                    const char *mr_name, uint64_t wall_us);
+
+/* Stutter flight recorder: record one cpu_exec_loop TB-chain pass,
+ * keyed by its first guest PC and weighted by wall time. Callers gate
+ * clock reads on xemu_stutter_trace_enabled. */
+void xemu_tcg_perf_record_chain(uint64_t first_pc, uint64_t wall_us,
+                                uint32_t tb_count);
+
+/* Record one C-visible TB dispatch keyed by the dynamic guest PC from
+ * cpu_loop_exec_tb(). This does not see direct-chained TBs inside the
+ * generated code, but it gives a cheap top-N view of entry pressure and
+ * guest instruction weight for stutter intervals. */
+void xemu_tcg_perf_record_tb_entry(uint64_t pc, uint32_t icount,
+                                   uint32_t guest_size);
+
+/* Apple/Xbox idle-loop experiment: record observed kernel idle loop
+ * entries and how often the host yielded/halted from that loop. */
+void xemu_tcg_perf_record_xbox_idle_loop(bool yielded, bool halted);
+
 /* V3 attribution: per-second sliding-window rate detectors. Each tick
  * is one event; once the window closes (1 s wallclock) the helper
  * compares the count to the storm threshold and, if exceeded, calls

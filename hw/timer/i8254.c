@@ -26,6 +26,7 @@
 #include "hw/irq.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/atomic.h"
 #include "hw/timer/i8254.h"
 #include "hw/timer/i8254_internal.h"
 #include "qom/object.h"
@@ -49,6 +50,146 @@ struct PITClass {
 };
 
 static void pit_irq_timer_update(PITChannelState *s, int64_t current_time);
+
+#ifdef XBOX
+/*
+ * Apple Silicon performance fork: Xbox's PIT channel 0 is programmed as
+ * the 1 kHz system clock. When host-side emulation falls behind, QEMU's
+ * virtual-clock timer loop can otherwise replay every missed PIT transition
+ * back-to-back. On Apple Silicon TCG that turns one late period into a burst
+ * of Xbox clock interrupts (IDT vector 0x30), which is exactly the hot kernel
+ * PC seen in the stutter flight recorder.
+ *
+ * Default-on for Apple Silicon builds, env-overridable for A/B testing:
+ *   XEMU_PIT_COALESCE=0|1
+ *   XEMU_PIT_COALESCE_THRESHOLD_US=N  (default 4000)
+ */
+#define XEMU_PIT_COALESCE_DEFAULT false
+
+static bool xemu_pit_coalesce_enabled;
+static bool xemu_pit_coalesce_init_done;
+static int64_t xemu_pit_coalesce_threshold_ns = 4000 * SCALE_US;
+static uint64_t xemu_pit_irq_timer_fires;
+static uint64_t xemu_pit_coalesce_events;
+static uint64_t xemu_pit_coalesce_late_us_total;
+static uint64_t xemu_pit_coalesce_late_us_max;
+static uint64_t xemu_pit_coalesce_skipped_transitions;
+
+static void xemu_pit_update_max(uint64_t *dst, uint64_t value)
+{
+    uint64_t cur = qatomic_read(dst);
+    while (value > cur) {
+        uint64_t prev = qatomic_cmpxchg(dst, cur, value);
+        if (prev == cur) {
+            break;
+        }
+        cur = prev;
+    }
+}
+
+static void xemu_pit_coalesce_init(void)
+{
+    if (xemu_pit_coalesce_init_done) {
+        return;
+    }
+
+    const char *env = getenv("XEMU_PIT_COALESCE");
+    bool enabled = XEMU_PIT_COALESCE_DEFAULT;
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0) {
+            enabled = false;
+        } else if (strcmp(env, "1") == 0) {
+            enabled = true;
+        }
+    }
+
+    const char *threshold_env = getenv("XEMU_PIT_COALESCE_THRESHOLD_US");
+    if (threshold_env && threshold_env[0]) {
+        char *end = NULL;
+        long long value = strtoll(threshold_env, &end, 10);
+        if (end && *end == '\0' && value >= 1000 && value <= 1000000) {
+            xemu_pit_coalesce_threshold_ns = value * SCALE_US;
+        } else {
+            fprintf(stderr,
+                    "xemu-perf: invalid XEMU_PIT_COALESCE_THRESHOLD_US "
+                    "'%s', using %lld\n",
+                    threshold_env,
+                    (long long)(xemu_pit_coalesce_threshold_ns / SCALE_US));
+        }
+    }
+
+    xemu_pit_coalesce_enabled = enabled;
+    xemu_pit_coalesce_init_done = true;
+
+    fprintf(stderr,
+            "xemu-perf: pit_coalesce=%d source=%s threshold_us=%lld\n",
+            (int)xemu_pit_coalesce_enabled,
+            (env && env[0]) ? "env" : "auto-default",
+            (long long)(xemu_pit_coalesce_threshold_ns / SCALE_US));
+}
+
+static bool xemu_pit_coalesce_late_fire(PITChannelState *s,
+                                        int64_t *fire_time)
+{
+    xemu_pit_coalesce_init();
+    if (!xemu_pit_coalesce_enabled || !fire_time ||
+        s->next_transition_time < 0 || s->count <= 0 ||
+        s->irq_disabled || (s->mode != 2 && s->mode != 3)) {
+        return false;
+    }
+
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t late_ns = now - s->next_transition_time;
+    if (late_ns <= xemu_pit_coalesce_threshold_ns) {
+        return false;
+    }
+
+    uint64_t late_us = late_ns / SCALE_US;
+    uint64_t elapsed_pit_counts =
+        muldiv64((uint64_t)late_ns, PIT_FREQ, NANOSECONDS_PER_SECOND);
+    uint64_t skipped = elapsed_pit_counts / (uint64_t)s->count;
+    if (skipped == 0) {
+        skipped = 1;
+    }
+
+    qatomic_inc(&xemu_pit_coalesce_events);
+    qatomic_add(&xemu_pit_coalesce_late_us_total, late_us);
+    qatomic_add(&xemu_pit_coalesce_skipped_transitions, skipped);
+    xemu_pit_update_max(&xemu_pit_coalesce_late_us_max, late_us);
+
+    *fire_time = now;
+    return true;
+}
+
+void xemu_pit_perf_emit_and_reset(FILE *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    uint64_t fires = qatomic_xchg(&xemu_pit_irq_timer_fires, 0);
+    uint64_t events = qatomic_xchg(&xemu_pit_coalesce_events, 0);
+    uint64_t late_total = qatomic_xchg(&xemu_pit_coalesce_late_us_total, 0);
+    uint64_t late_max = qatomic_xchg(&xemu_pit_coalesce_late_us_max, 0);
+    uint64_t skipped = qatomic_xchg(&xemu_pit_coalesce_skipped_transitions, 0);
+
+    if ((fires | events | late_total | late_max | skipped) == 0) {
+        return;
+    }
+
+    fprintf(out,
+            " PIT_IRQ_TIMER_FIRES=%llu"
+            " PIT_COALESCE_EVENTS=%llu"
+            " PIT_COALESCE_LATE_US_TOTAL=%llu"
+            " PIT_COALESCE_LATE_US_MAX=%llu"
+            " PIT_COALESCE_SKIPPED_TRANSITIONS=%llu",
+            (unsigned long long)fires,
+            (unsigned long long)events,
+            (unsigned long long)late_total,
+            (unsigned long long)late_max,
+            (unsigned long long)skipped);
+}
+#endif /* XBOX */
 
 static int pit_get_count(PITChannelState *s)
 {
@@ -283,8 +424,14 @@ static void pit_irq_timer_update(PITChannelState *s, int64_t current_time)
 static void pit_irq_timer(void *opaque)
 {
     PITChannelState *s = opaque;
+    int64_t fire_time = s->next_transition_time;
 
-    pit_irq_timer_update(s, s->next_transition_time);
+#ifdef XBOX
+    qatomic_inc(&xemu_pit_irq_timer_fires);
+    xemu_pit_coalesce_late_fire(s, &fire_time);
+#endif
+
+    pit_irq_timer_update(s, fire_time);
 }
 
 static void pit_reset(DeviceState *dev)

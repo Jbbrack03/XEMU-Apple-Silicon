@@ -27,6 +27,7 @@
 #include "qemu/timer.h"
 #include "qemu/xemu-spike-log.h"
 #include "qemu/xemu-display-perf.h"
+#include "qemu/xemu-pfifo-perf.h"
 #include "util.h"
 #include "swizzle.h"
 #include "nv2a_vsh_emulator.h"
@@ -141,6 +142,9 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
             r = qatomic_read(&pg->regs_[addr]);
             break;
         }
+        if (addr == NV_PGRAPH_PATT_COLOR0) {
+            xemu_pfifo_perf_record_patt_color0_read();
+        }
         nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
         return r;
     }
@@ -178,6 +182,10 @@ uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
     }
 
     qemu_mutex_unlock(&pg->lock);
+
+    if (addr == NV_PGRAPH_PATT_COLOR0) {
+        xemu_pfifo_perf_record_patt_color0_read();
+    }
 
     nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
     return r;
@@ -819,6 +827,7 @@ int pgraph_method(NV2AState *d, unsigned int subchannel,
         switch (method) {
         case NV044_SET_MONOCHROME_COLOR0:
             pgraph_reg_w(pg, NV_PGRAPH_PATT_COLOR0, parameter);
+            xemu_pfifo_perf_record_patt_color0_write();
             break;
         default:
             goto unhandled;
@@ -1026,6 +1035,7 @@ DEF_METHOD(NV097, FLIP_STALL)
      * NV2A_PRESENT_HEARTBEAT (which counts the actual READ_3D pointer
      * advance / page flip completion). */
     xemu_display_perf_flip_stall();
+    xemu_pfifo_perf_record_flip_stall_set();
     pg->waiting_for_flip = true;
 }
 

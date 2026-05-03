@@ -85,5 +85,8 @@ static inline ISADevice *kvm_pit_init(ISABus *bus, int base)
 
 void pit_set_gate(PITCommonState *pit, int channel, int val);
 void pit_get_channel_info(PITCommonState *pit, int channel, PITChannelInfo *info);
+#ifdef XBOX
+void xemu_pit_perf_emit_and_reset(FILE *out);
+#endif
 
 #endif /* HW_I8254_H */

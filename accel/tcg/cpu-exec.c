@@ -913,6 +913,9 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
+    if (xemu_stutter_trace_enabled) {
+        xemu_tcg_perf_record_tb_entry(pc, tb->icount, tb->size);
+    }
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
     if (*tb_exit != TB_EXIT_REQUESTED) {
@@ -977,10 +980,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
          * "many short chains back-to-back." Gated by the TCG enable
          * bit so steady-state cost is one branch + one clock read. */
         int64_t chain_start_ns = 0;
+        int64_t chain_excluded_ns = 0;
         uint32_t chain_tb_count = 0;
         vaddr chain_first_pc = 0;
         bool chain_have_first_pc = false;
-        if (xemu_spike_log_tcg_enabled) {
+        bool chain_time_enabled = (xemu_spike_log_tcg_enabled |
+                                   xemu_stutter_trace_enabled);
+        if (chain_time_enabled) {
             chain_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
         }
 
@@ -1142,7 +1148,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tb_add_jump(last_tb, tb_exit, tb);
             }
 
-            if (xemu_spike_log_tcg_enabled) {
+            if (chain_time_enabled) {
                 if (!chain_have_first_pc) {
                     chain_first_pc = s.pc;
                     chain_have_first_pc = true;
@@ -1154,7 +1160,14 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
             /* Try to align the host and virtual clocks
                if the guest is in advance */
-            align_clocks(sc, cpu);
+            if (chain_time_enabled) {
+                int64_t align_start_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
+                align_clocks(sc, cpu);
+                chain_excluded_ns +=
+                    qemu_clock_get_ns(QEMU_CLOCK_HOST) - align_start_ns;
+            } else {
+                align_clocks(sc, cpu);
+            }
         }
 
         /* V3: emit the chain spike line if this inner-loop pass
@@ -1162,9 +1175,16 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
          * executions plus any patched direct jumps between them; an
          * outlier here points the bottleneck at the vCPU thread being
          * stuck inside one chain. */
-        if (xemu_spike_log_tcg_enabled && chain_tb_count > 0) {
+        if (chain_time_enabled && chain_tb_count > 0) {
             int64_t chain_end_ns = qemu_clock_get_ns(QEMU_CLOCK_HOST);
-            int64_t chain_us = (chain_end_ns - chain_start_ns) / 1000;
+            int64_t chain_ns =
+                chain_end_ns - chain_start_ns - chain_excluded_ns;
+            int64_t chain_us = (chain_ns > 0 ? chain_ns : 0) / 1000;
+            if (xemu_stutter_trace_enabled) {
+                xemu_tcg_perf_record_chain(chain_first_pc,
+                                           (uint64_t)chain_us,
+                                           chain_tb_count);
+            }
             if (chain_us >= xemu_spike_threshold_us) {
                 char extra[96];
                 snprintf(extra, sizeof(extra),

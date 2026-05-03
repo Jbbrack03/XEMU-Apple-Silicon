@@ -41,6 +41,7 @@
 #include "qemu/cutils.h"
 #include "system/replay.h"
 #include "system/runstate.h"
+#include "qemu/xemu-ide-perf.h"
 #include "ide-internal.h"
 #include "trace.h"
 
@@ -682,6 +683,14 @@ static void ide_rw_error(IDEState *s) {
 static void ide_buffered_readv_cb(void *opaque, int ret)
 {
     IDEBufferedRequest *req = opaque;
+    int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    int64_t latency_us = now_us - req->xemu_perf_submit_us;
+
+    if (latency_us < 0) {
+        latency_us = 0;
+    }
+    xemu_ide_perf_record_complete(req->xemu_perf_bytes, latency_us);
+
     if (!req->orphaned) {
         if (!ret) {
             assert(req->qiov.size == req->original_qiov->size);
@@ -709,6 +718,7 @@ BlockAIOCB *ide_buffered_readv(IDEState *s, int64_t sector_num,
     QLIST_FOREACH(req, &s->buffered_requests, list) {
         c++;
     }
+    xemu_ide_perf_record_inflight(c + 1);
     if (c > MAX_BUFFERED_REQS) {
         return blk_abort_aio_request(s->blk, cb, opaque, -EIO);
     }
@@ -717,8 +727,11 @@ BlockAIOCB *ide_buffered_readv(IDEState *s, int64_t sector_num,
     req->original_qiov = iov;
     req->original_cb = cb;
     req->original_opaque = opaque;
+    req->xemu_perf_submit_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    req->xemu_perf_bytes = iov->size;
     qemu_iovec_init_buf(&req->qiov, blk_blockalign(s->blk, iov->size),
                         iov->size);
+    xemu_ide_perf_record_submit(iov->size);
 
     aioreq = blk_aio_preadv(s->blk, sector_num << BDRV_SECTOR_BITS,
                             &req->qiov, 0, ide_buffered_readv_cb, req);
