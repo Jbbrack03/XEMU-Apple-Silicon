@@ -98,6 +98,7 @@ static NSString *const k_present_msl =
  * type is `int` and an id<MTLTexture> doesn't fit. See
  * hw/xbox/nv2a/pgraph/mtl/surface.h. */
 extern "C" void *pgraph_mtl_get_framebuffer_metal_texture(void);
+extern "C" void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
 extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void);
 
 /* M5 — weak forward decl of the per-target shader-validation harness.
@@ -264,11 +265,12 @@ static uint64_t              s_screenshot_at_frame;      /* 1-indexed; 0 = disab
 static uint64_t              s_screenshot_interval;      /* 0 = single shot */
 /* 2026-05-03 diagnostic — XEMU_METAL_SCREENSHOT_SOURCE selects the
  * texture captured. "drawable" (default) reads the post-HUD final
- * drawable; "nv2a" reads the NV2A framebuffer texture (pre-present),
- * useful for isolating renderer-side vs present-pipeline-side
- * artifacts (e.g. when the macOS Screen-Recording dialog substitutes
- * the drawable). 0 = drawable, 1 = nv2a. */
-static int                   s_screenshot_source;        /* 0 = drawable, 1 = nv2a */
+ * drawable; "nv2a" reads the NV2A framebuffer texture (pre-present);
+ * "vram:0xADDR" reads a specific cached SurfaceBinding by vram_addr
+ * (useful to inspect back-buffer / aux RTs without going through
+ * CRTC publish — magenta artifact investigation). */
+static int                   s_screenshot_source;        /* 0=drawable, 1=nv2a, 2=vram_addr */
+static uint32_t              s_screenshot_vram_addr;     /* used when source==2 */
 static _Atomic uint64_t      s_screenshots_taken;        /* counter for METAL_SCREENSHOTS_TAKEN */
 static _Atomic uint64_t      s_screenshots_done;         /* in-flight + completed; for filename suffix */
 /* Separate "end-of-frame" tick: bumps every time
@@ -715,6 +717,16 @@ static void parse_screenshot_env(void)
     if (src_env != NULL && src_env[0] != '\0') {
         if (strcmp(src_env, "nv2a") == 0 || strcmp(src_env, "1") == 0) {
             s_screenshot_source = 1;
+        } else if (strncmp(src_env, "vram:", 5) == 0) {
+            /* "vram:0x3628000" — capture from a specific cached
+             * SurfaceBinding by vram_addr. Used to inspect back buffer
+             * contents without going through CRTC publish. */
+            char *endp = NULL;
+            unsigned long n = strtoul(src_env + 5, &endp, 0);
+            if (endp != NULL && *endp == '\0' && n != 0) {
+                s_screenshot_source = 2;
+                s_screenshot_vram_addr = (uint32_t)n;
+            }
         }
     }
 
@@ -1441,6 +1453,12 @@ void xemu_metal_end_imgui_frame(void)
             id<MTLTexture> source_tex = drawable_tex;
             if (s_screenshot_source == 1 && present_input_tex != nil) {
                 source_tex = present_input_tex;
+            } else if (s_screenshot_source == 2) {
+                void *t = pgraph_mtl_surface_get_metal_texture_at(
+                    s_screenshot_vram_addr);
+                if (t != NULL) {
+                    source_tex = (__bridge id<MTLTexture>)t;
+                }
             }
             NSUInteger w = source_tex.width;
             NSUInteger h = source_tex.height;

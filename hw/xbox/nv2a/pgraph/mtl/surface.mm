@@ -858,6 +858,22 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
         return;
     }
 
+    /* 2026-05-03 diagnostic — capped log of surface-clear operations to
+     * identify what color the guest is clearing to (magenta artifact
+     * investigation). Limited to first 32 calls to keep the log
+     * bounded; controlled by XEMU_METAL_DIAG_CLEAR=1. */
+    static _Atomic uint32_t s_clear_diag_count = 0;
+    if (have_color_target && getenv("XEMU_METAL_DIAG_CLEAR") &&
+        atomic_load(&s_clear_diag_count) < 32) {
+        atomic_fetch_add(&s_clear_diag_count, 1);
+        fprintf(stderr,
+                "xemu-perf: metal_surface_clear vram_addr=0x%x "
+                "rgba=(%.3f,%.3f,%.3f,%.3f) write_zeta=%d\n",
+                (unsigned)s_color_binding->vram_addr,
+                rgba[0], rgba[1], rgba[2], rgba[3],
+                write_zeta ? 1 : 0);
+    }
+
     bool have_msaa_color =
         have_color_target && s_color_binding->msaa_texture != NULL &&
         s_color_binding->msaa_sample_count > 1;
