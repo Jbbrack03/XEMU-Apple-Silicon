@@ -41,6 +41,21 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+/* W4 (2026-05-04): per-draw color RT dump (XEMU_METAL_DUMP_DRAW_RT).
+ * fpng.h pulls in <vector>; libc++'s <atomic> conflicts with the C11
+ * <stdatomic.h> we already need. Forward-declare the two FPNG entry
+ * points by hand — same pattern as ui/xemu-metal.mm's screenshot path.
+ */
+namespace fpng {
+    void fpng_init();
+    bool fpng_encode_image_to_file(const char *pFilename,
+                                   const void *pImage,
+                                   uint32_t w,
+                                   uint32_t h,
+                                   uint32_t num_chans,
+                                   uint32_t flags);
+}
+
 extern "C" void *xemu_metal_get_device(void);
 
 /* M8: gate the draw command buffer on the latest texture upload by
@@ -97,6 +112,23 @@ static _Atomic(uint64_t)   s_draw_translated_count = 0;
 static _Atomic(uint64_t)   s_draw_pipeline_fallback_count = 0;
 static _Atomic(uint64_t)   s_draw_encode_us_total = 0;
 static _Atomic(uint64_t)   s_open_pass_flush_us_total = 0;
+
+/* W4 (2026-05-04): per-draw color RT dump. See draw.h for env-var
+ * semantics. The dump is gated on `s_dump_enabled` (loaded once at
+ * init); when off the entire after-flush_draw helper short-circuits
+ * to one global load + branch. The cumulative draw counter
+ * (`s_dump_draw_index`) is bumped UNCONDITIONALLY when init parsed a
+ * valid config; this matches Mesa/RADV debug-dump semantics where the
+ * draw index is the cumulative-per-RUN count irrespective of whether
+ * the current draw is in range. */
+static bool        s_dump_enabled = false;
+static uint64_t    s_dump_start = 0;
+static uint64_t    s_dump_end = 0;
+static char       *s_dump_prefix = NULL;
+static _Atomic(uint64_t) s_dump_draw_index = 0;
+static _Atomic(uint64_t) s_dump_log_emitted = 0;
+static _Atomic(uint64_t) s_dump_count = 0;
+static bool        s_dump_fpng_inited = false;
 
 static inline int64_t mtl_now_us(void)
 {
@@ -1143,4 +1175,217 @@ extern "C" uint64_t pgraph_mtl_draw_encode_us_total(void)
 extern "C" uint64_t pgraph_mtl_draw_open_pass_flush_us_total(void)
 {
     return atomic_load(&s_open_pass_flush_us_total);
+}
+
+/* W4 (2026-05-04): parse XEMU_METAL_DUMP_DRAW_RT once. Format
+ * `START:END:PREFIX`. Anything malformed leaves the dump disabled
+ * with zero hot-path cost (one global load + branch). */
+extern "C" void pgraph_mtl_draw_dump_rt_init(void)
+{
+    s_dump_enabled = false;
+    if (s_dump_prefix != NULL) {
+        free(s_dump_prefix);
+        s_dump_prefix = NULL;
+    }
+    atomic_store(&s_dump_draw_index, (uint64_t)0);
+    atomic_store(&s_dump_log_emitted, (uint64_t)0);
+
+    const char *env = getenv("XEMU_METAL_DUMP_DRAW_RT");
+    if (env == NULL || env[0] == '\0') {
+        return;
+    }
+    const char *first_colon = strchr(env, ':');
+    if (first_colon == NULL || first_colon == env) {
+        fprintf(stderr,
+                "xemu-perf: metal_dump_draw_rt malformed (missing first ':') "
+                "value=%s\n",
+                env);
+        return;
+    }
+    const char *second_colon = strchr(first_colon + 1, ':');
+    if (second_colon == NULL || second_colon == first_colon + 1 ||
+        second_colon[1] == '\0') {
+        fprintf(stderr,
+                "xemu-perf: metal_dump_draw_rt malformed (missing second "
+                "':' or empty prefix) value=%s\n",
+                env);
+        return;
+    }
+
+    char *endp = NULL;
+    unsigned long long start = strtoull(env, &endp, 10);
+    if (endp != first_colon) {
+        fprintf(stderr,
+                "xemu-perf: metal_dump_draw_rt START is not a number "
+                "value=%s\n",
+                env);
+        return;
+    }
+    unsigned long long end = strtoull(first_colon + 1, &endp, 10);
+    if (endp != second_colon) {
+        fprintf(stderr,
+                "xemu-perf: metal_dump_draw_rt END is not a number "
+                "value=%s\n",
+                env);
+        return;
+    }
+    if (end < start) {
+        fprintf(stderr,
+                "xemu-perf: metal_dump_draw_rt END(%llu) < START(%llu); "
+                "disabled\n",
+                end, start);
+        return;
+    }
+    s_dump_start = (uint64_t)start;
+    s_dump_end = (uint64_t)end;
+    s_dump_prefix = strdup(second_colon + 1);
+    if (s_dump_prefix == NULL) {
+        return;
+    }
+    s_dump_enabled = true;
+    fprintf(stderr,
+            "xemu-perf: metal_dump_draw_rt enabled start=%llu end=%llu "
+            "prefix=%s\n",
+            (unsigned long long)s_dump_start,
+            (unsigned long long)s_dump_end,
+            s_dump_prefix);
+}
+
+/* W4 (2026-05-04): swap BGRA → RGBA in place. FPNG expects RGBA byte
+ * order; Metal color RTs are typically BGRA8Unorm / BGRA8Unorm_sRGB on
+ * Apple Silicon. Per-pixel scalar swap — runs once-per-dump on the
+ * cmdbuf completion handler off the renderer thread. */
+static void mtl_dump_swap_bgra_to_rgba(uint8_t *p, size_t pixels)
+{
+    for (size_t i = 0; i < pixels; ++i) {
+        uint8_t b = p[i * 4 + 0];
+        uint8_t r = p[i * 4 + 2];
+        p[i * 4 + 0] = r;
+        p[i * 4 + 2] = b;
+    }
+}
+
+/* W4 (2026-05-04): the post-flush_draw hook.
+ *
+ * Bumps the cumulative-per-RUN draw index unconditionally when a parsed
+ * config is active. When the bumped index is in [start, end] and a
+ * non-NULL color RT was supplied, opens a blit encoder, copies the
+ * texture into a host-shared MTLBuffer, and queues an
+ * addCompletedHandler that BGRA→RGBA swaps and writes the PNG via
+ * FPNG. Errors are logged once and swallowed.
+ *
+ * Caller contract: invoke AFTER pgraph_mtl_draw_flush_open_pass() so
+ * the post-MSAA-resolve color texture is what the blit reads, NOT the
+ * multisample companion.
+ */
+extern "C" void pgraph_mtl_draw_dump_rt_after_flush_draw(void *color_texture)
+{
+    if (!s_dump_enabled) {
+        return;
+    }
+
+    /* 0-indexed; pre-increment so the first flush_draw is index 0. */
+    uint64_t idx = atomic_fetch_add(&s_dump_draw_index, 1);
+    if (idx < s_dump_start || idx > s_dump_end) {
+        return;
+    }
+    if (color_texture == NULL || s_device == nil || s_draw_queue == nil) {
+        return;
+    }
+
+    @autoreleasepool {
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)color_texture;
+        NSUInteger w = tex.width;
+        NSUInteger h = tex.height;
+        if (w == 0 || h == 0) {
+            return;
+        }
+        size_t bytes_per_row = (size_t)w * 4u;
+        size_t total_bytes   = bytes_per_row * (size_t)h;
+
+        id<MTLBuffer> readback =
+            [s_device newBufferWithLength:total_bytes
+                                  options:MTLResourceStorageModeShared];
+        if (readback == nil) {
+            fprintf(stderr,
+                    "xemu-perf: metal_draw_rt_dump readback alloc failed "
+                    "idx=%llu size=%zu\n",
+                    (unsigned long long)idx, total_bytes);
+            return;
+        }
+        readback.label = @"xemu.metal.draw_rt_dump_readback";
+
+        id<MTLCommandBuffer> cmd = [s_draw_queue commandBuffer];
+        cmd.label = @"xemu.metal.draw_rt_dump";
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.draw_rt_dump_blit";
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(w, h, 1)
+                     toBuffer:readback
+            destinationOffset:0
+       destinationBytesPerRow:bytes_per_row
+     destinationBytesPerImage:total_bytes];
+        [blit endEncoding];
+
+        /* Build "<prefix>.<idx_padded6>.png". */
+        size_t plen = strlen(s_dump_prefix);
+        size_t fname_len = plen + 32;
+        char *fname = (char *)malloc(fname_len);
+        if (fname == NULL) {
+            return;
+        }
+        snprintf(fname, fname_len, "%s.%06llu.png",
+                 s_dump_prefix, (unsigned long long)idx);
+
+        uint32_t shot_w = (uint32_t)w;
+        uint32_t shot_h = (uint32_t)h;
+        uint64_t shot_idx = idx;
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> /*cb*/) {
+            uint8_t *bytes = (uint8_t *)[readback contents];
+            if (bytes != NULL && fname != NULL) {
+                if (!s_dump_fpng_inited) {
+                    fpng::fpng_init();
+                    s_dump_fpng_inited = true;
+                }
+                mtl_dump_swap_bgra_to_rgba(bytes,
+                                           (size_t)shot_w * (size_t)shot_h);
+                bool ok = fpng::fpng_encode_image_to_file(
+                    fname, bytes, shot_w, shot_h, 4, 0);
+                if (ok) {
+                    atomic_fetch_add(&s_dump_count, 1);
+                    /* Rate-limit the console line: first 5 dumps emit a
+                     * one-line confirmation; further dumps land silently
+                     * (METAL_DRAW_RT_DUMPS reflects the running total). */
+                    uint64_t n =
+                        atomic_fetch_add(&s_dump_log_emitted, 1) + 1;
+                    if (n <= 5) {
+                        fprintf(stderr,
+                                "xemu-perf: metal_draw_rt_dump idx=%llu "
+                                "path=%s w=%u h=%u\n",
+                                (unsigned long long)shot_idx,
+                                fname,
+                                (unsigned)shot_w,
+                                (unsigned)shot_h);
+                    }
+                } else {
+                    fprintf(stderr,
+                            "xemu-perf: metal_draw_rt_dump fpng_encode "
+                            "failed idx=%llu path=%s\n",
+                            (unsigned long long)shot_idx, fname);
+                }
+            }
+            if (fname != NULL) {
+                free(fname);
+            }
+        }];
+        [cmd commit];
+    }
+}
+
+extern "C" uint64_t pgraph_mtl_draw_rt_dumps_count(void)
+{
+    return atomic_load(&s_dump_count);
 }

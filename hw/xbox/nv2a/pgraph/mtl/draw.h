@@ -236,6 +236,28 @@ void pgraph_mtl_draw_get_open_pass_textures(void **out_color,
 void pgraph_mtl_draw_get_done_event_state(void **out_event,
                                           uint64_t *out_value);
 
+/*
+ * W4 (2026-05-04): per-draw color RT dump.
+ *
+ * Parses XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX exactly once at
+ * pgraph_mtl_init time. When set, every per-flush_draw invocation
+ * whose 0-indexed cumulative-per-RUN counter falls within [START,END]
+ * has its bound color render target snapshotted as a PNG at
+ * `<PREFIX>.<index_padded_6>.png`. Empty / unset / malformed values
+ * disable the dump (zero hot-path cost — one global load + branch).
+ *
+ * The dump is asynchronous: the open render pass is closed (so the
+ * post-MSAA-resolve color texture is the source of truth), then a
+ * blit-encoder copies the texture into a host-shared MTLBuffer, and
+ * the cmdbuf's addCompletedHandler writes the PNG via FPNG. The
+ * renderer thread does not block.
+ *
+ * Counter: METAL_DRAW_RT_DUMPS (per-interval delta).
+ */
+void pgraph_mtl_draw_dump_rt_init(void);
+void pgraph_mtl_draw_dump_rt_after_flush_draw(void *color_texture);
+uint64_t pgraph_mtl_draw_rt_dumps_count(void);
+
 #ifdef __cplusplus
 }
 #endif

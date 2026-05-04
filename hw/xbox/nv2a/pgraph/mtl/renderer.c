@@ -1670,7 +1670,7 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     mtl_add_elapsed_us(&s_dispatch_us_total, dispatch_start_us);
 }
 
-static void pgraph_mtl_flush_draw(NV2AState *d)
+static void pgraph_mtl_flush_draw_inner(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
 
@@ -1862,6 +1862,36 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
     pgraph_mtl_restore_attr_masks(pg, saved_u, saved_c, saved_s);
     /* Borrowed pointers — no free. */
+}
+
+/* W4 (2026-05-04): wrapper around pgraph_mtl_flush_draw_inner that
+ * runs the per-draw color RT dump after the inner flush returns. The
+ * dump path closes the open coalesced render pass first so the
+ * post-MSAA-resolve color texture is the source of the blit (the
+ * resolveTexture survives the close; the multisample companion is
+ * persisted-then-discarded on the next pass open). When
+ * XEMU_METAL_DUMP_DRAW_RT is unset the after-hook short-circuits to
+ * one global load + branch.
+ *
+ * The cumulative draw index is bumped once per flush_draw call (the
+ * NV2A logical draw boundary). It is independent of the per-pipeline
+ * METAL_DRAW_COUNT (which counts each MTL drawIndexedPrimitives /
+ * drawPrimitives encode) — flush_draw maps 1:1 to a guest draw call,
+ * which is the index the caller cares about when correlating against
+ * the equivalent GL render pass.
+ */
+static void pgraph_mtl_flush_draw(NV2AState *d)
+{
+    pgraph_mtl_flush_draw_inner(d);
+
+    /* Flush the open coalesced pass so the resolved color texture is
+     * what the dump's blit reads. Without this the resolve has not
+     * happened yet (it happens at pass close), and an MSAA companion's
+     * sub-pixel layout is not what the caller wants. */
+    pgraph_mtl_draw_flush_open_pass();
+
+    void *color_tex = pgraph_mtl_surface_get_color_texture();
+    pgraph_mtl_draw_dump_rt_after_flush_draw(color_tex);
 }
 
 static void pgraph_mtl_get_report(NV2AState *d, uint32_t parameter)
@@ -2079,6 +2109,12 @@ static void pgraph_mtl_init(NV2AState *d, Error **errp)
         fprintf(stderr, "pgraph_mtl_init: draw init failed; "
                         "draws will be no-ops\n");
     }
+
+    /* W4 (2026-05-04): parse XEMU_METAL_DUMP_DRAW_RT once. Must
+     * happen after pgraph_mtl_draw_init so the queue / device handles
+     * exist before the first flush_draw runs. Off-by-default; zero
+     * hot-path cost when unset. */
+    pgraph_mtl_draw_dump_rt_init();
 
     /* M5: bring up the GLSL → SPIR-V → MSL translator. Failure here
      * is non-fatal — without the translator, shader-state-driven
