@@ -1,11 +1,20 @@
 # Benchmark Automation
 
-Last updated: 2026-05-04 (Visual Flight Recorder added and wired into
-`run-benchmark.sh` behind `XEMU_BENCH_VISUAL_ANALYSIS=1`; PGR2 Metal
-surface/RTT canary is clean; Rainbow Six 3 loading-screen canary is
-clean; Xbox boot/flubber canary is clean after the front-face fix. The
-earlier green/wireframe report was the boot animation, not in-game
-Crimson Skies. Crimson gameplay automation now completes without
+Last updated: 2026-05-04 (Metal porting workflow rollout: auto-on
+Metal validation + post-build M5 gate (W1), paired Metal-vs-GL diff
+harness `metal-gl-compare.sh` (W2), single-renderer canary regression
+gate `metal-canary-regress.sh` (W3), per-draw color RT dump
+`XEMU_METAL_DUMP_DRAW_RT` / `XEMU_GL_DUMP_DRAW_RT` (W4), MoltenVK +
+pgraph/vk triangulation backend BLOCKED (W5), Codex-flagged Phase 2
+gate fix-ups: window-targeted GL capture, paired-diff HUD-off, doc
+flag corrections, range-semantics standardized, Vulkan demoted to
+fallback (W6); see `metal-porting-workflow.md` for the canonical
+operating playbook. Earlier today: Visual Flight Recorder added and
+wired into `run-benchmark.sh` behind `XEMU_BENCH_VISUAL_ANALYSIS=1`;
+PGR2 Metal surface/RTT canary is clean; Rainbow Six 3 loading-screen
+canary is clean; Xbox boot/flubber canary is clean after the front-face
+fix. The earlier green/wireframe report was the boot animation, not
+in-game Crimson Skies. Crimson gameplay automation now completes without
 aborting after the texture-DMA bounds and invalid-stage shader fixes,
 but its current screenshot lands on a black transition/loading frame
 and is not a visual canary. Added diagnostics

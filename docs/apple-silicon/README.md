@@ -1,6 +1,12 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-04 (Metal boot/flubber + surface/RTT follow-up.
+Last updated: 2026-05-04 (Metal porting workflow rollout: adopted a
+formal five-phase playbook in `metal-porting-workflow.md` and landed
+six implementation slices plus one Codex fix-up — auto-on validation
+(W1), paired diff harness (W2), canary regression gate (W3), per-draw
+RT dump (W4), MoltenVK triangulation BLOCKED (W5), Phase-2 gate
+fix-ups (W6). Project is now in Phase 1 (Translation Correctness,
+ACTIVE). Earlier today: Metal boot/flubber + surface/RTT follow-up.
 PGR2 has clean Metal menu/logo/text/color output with the translated
 pipeline and front-fb fallback; Rainbow Six 3 loading-screen output is
 also clean. The previously reported green/wireframe failure was the
