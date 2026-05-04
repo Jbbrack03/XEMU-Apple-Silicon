@@ -743,6 +743,36 @@ slice M5.10.
   per-interval bytes copied through the download staging buffer
   (sum of guest 1× source sub-rect sizes for each download).
 
+`XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (**M5.10 experimental, 2026-05-03**)
+— additional opt-in publish path that does NOT depend on VRAM
+coherency. Default 0 (off). After the CRTC-strict publish in
+`pgraph_mtl_flip_stall`, when the flag is on, the renderer ALSO calls
+`pgraph_mtl_surface_publish_latest_draw_fallback()` which publishes
+`s_color_binding` (the most-recently-bound color RT) as the front-fb
+side-channel. Last write wins, so the fallback overwrites the
+CRTC-strict publish; the compositor sees whatever surface was last
+drawn into. Use case: titles like PGR2 whose CRTC-pointed surface
+receives only sporadic draws (likely HUD overlay) while the actual
+rendered scene goes to a back buffer at a different vram_addr; the
+M5.9-followup-B+C diagnostic decisively ruled out CPU memcpy,
+NV097_IMAGE_BLIT, and pcrtc.start cycling as the back→front
+mechanism, so a host-side direct publish of the back buffer is the
+cheapest possible bridge while the real mechanism is still under
+investigation. Does NOT require `XEMU_METAL_FRONT_FB_DOWNLOAD=1` —
+the two flags are independent and the fallback is purely host-side.
+Emits `xemu-perf: metal_front_fb_publish ... reason=fallback-latest-draw`
+and bumps `METAL_FRONT_FB_PUBLISHES` per publish. **NOT
+correctness-faithful**: the back buffer may have a different aspect
+ratio than the front (PGR2: 2560×960 back vs 1280×960 front at
+scale=2), and titles that legitimately use both front and back
+surfaces (e.g. those with a real software composite step) will see
+the wrong content. The compositor's present pipeline scales whatever
+texture it gets to drawable extent regardless of input dims.
+Implementation: `pgraph_mtl_surface_publish_latest_draw_fallback` at
+`mtl/surface.mm:1202`, called from `pgraph_mtl_flip_stall` at
+`mtl/renderer.c:868`. Apple Silicon performance fork; slice M5.10
+experimental.
+
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with

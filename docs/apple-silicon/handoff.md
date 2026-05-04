@@ -1,40 +1,86 @@
 # Handoff
 
-Last updated: 2026-05-03 (post-M5.10 — **VRAM-coherent surface
-download infrastructure shipped default-off**). M5.10 lands the
-public download API (`pgraph_mtl_surface_download_if_dirty_at` /
-`_dirty_all` / `_in_range_if_dirty`), mirrors vk's
-`pgraph_vk_surface_download_if_dirty` field-for-field including the
-`MTLBlitCommandEncoder copyFromTexture:toBuffer:` + waitUntilCompleted
-+ memcpy_image flow, adds a cross-queue `MTLSharedEvent` fence between
-the draw queue and the render queue, adds KVM/HVF parity polling in
-`pgraph_mtl_surface_update`, and gates everything behind
-`XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` default 0. Codex-validate ran
-and found 4 issues (2 HIGH, 2 MEDIUM); all addressed in-slice
-(scaled-surface readback corruption → defensive skip; KVM/HVF 4 KB
-polling → per-entry full size; depth callback spurious mark →
-`download_surface_to_vram` returns bool with callback gated;
-CLAUDE.md flag doc gap → added). **Visual gate still FAILS** —
-infrastructure is correct but does not bridge PGR2's specific
-back→front mechanism (still unidentified post-followup-B+C; queued
-for next investigation). M15 default-on stays **BLOCKED**.
+Last updated: 2026-05-03 (post-M5.10 + experimental fallback +
+**Metal cold-boot / snapshot regression discovered**). Two commits
+shipped this session:
+
+1. **`b283abcb27`** — M5.10 base infrastructure (default-off behind
+   `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}`): public download API
+   (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
+   `_in_range_if_dirty`) mirroring vk's
+   `pgraph_vk_surface_download_if_dirty` field-for-field
+   (MTLBlitCommandEncoder copyFromTexture:toBuffer: + waitUntilCompleted
+   + memcpy_image), cross-queue `MTLSharedEvent` fence
+   (`s_draw_done_event` in `mtl/draw.mm`), KVM/HVF parity polling in
+   `pgraph_mtl_surface_update` (TCG-gated, full-size `_iter_address_size`),
+   open-pass pin in `cache_evict_lru`. Codex-validate ran; 4 findings
+   (2 HIGH, 2 MEDIUM) all addressed in-slice (scaled-surface readback
+   corruption → defensive skip; KVM/HVF 4 KB polling → per-entry
+   full size; depth callback spurious mark → bool return with gated
+   callback; CLAUDE.md flag doc gap → added). New counters
+   `METAL_SURFACE_DOWNLOADS` / `_BYTES`.
+2. **`5154cb599b`** — M5.10 experimental fallback path (default-off
+   behind `XEMU_METAL_FRONT_FB_FALLBACK={0,1}`): when on, publishes
+   `s_color_binding` (the most-recently-bound color RT) as the
+   front-fb after the CRTC-strict publish; last write wins. Cheap
+   host-side bridge for titles like PGR2 whose CRTC-pointed surface
+   receives only sporadic draws while the actual scene goes to a
+   different back buffer. NOT correctness-faithful (aspect mismatch
+   risk; legitimate dual-surface titles will misframe), but enables
+   visual content for the bridge-needed cases without VRAM coherency.
+
+**Visual gate STILL FAILS, but now for a different reason than the
+prior M5.9-followup-E framing**: this session uncovered two
+pre-existing regressions independent of M5.10 that block visual
+validation:
+
+- **Metal cold-boot perf has regressed since M5.7.** The 2026-05-03
+  M5.7 render-pass-coalescing benchmark reported
+  `post_load_avg_fps = 37.09` on PGR2 starting from the profile-prep
+  HDD. Re-running the same setup on HEAD (with M5.10 default-off, so
+  the regression is independent of M5.10) produces 7-16 perf-log
+  intervals over 60 s wall-clock with `fps ≈ 1-2` — the renderer
+  never progresses past the BIOS animation. Verified by
+  stash-and-rebuild bisection in this session: M5.10 default-off ≈
+  pre-M5.10 baseline ≈ 14-16 intervals, both far below M5.7-era. The
+  introducing slice is in {M5.8, M5.9, followup-A, followup-B+C,
+  followup-E}.
+- **Metal+snapshot path doesn't progress the guest.** Loading
+  `pgr2_gameplay_b4` under Metal yields `NV2A_FLIP_STALL_WRITES=1-3`
+  in 60 s; same snapshot loads cleanly under GL with ~7-8 flips per
+  2-second interval. Also a regression along with the cold-boot
+  freeze.
+
+These together prevent any visual capture of M5.10 / fallback in a
+gameplay-rendering state. M15 default-on stays **BLOCKED**.
+
 User-stated runtime goals (1080p, 30/60 fps, AA, correct colors,
 no jitter, no input-latency) **MET TODAY** via GL +
 `XEMU_GL_MSAA=4` + `surface_scale=2` + `XEMU_MACOS_NATIVE_INPUT=1`.
 
-**Highest-priority next-session action**: enable the M5.10 path at
-`XEMU_DISPLAY_SCALE=1 XEMU_METAL_FRONT_FB_DOWNLOAD=1` and capture a
-PGR2 gameplay-state screenshot via the `pgr2_gameplay_b4` snapshot
-to test whether the download path bridges the back→front gap when
-no scaling-skip is in the way. If PGR2 shows scene content, M5.10
-is sufficient infrastructure-wise and only the surface_scale=2
-GPU-downsample pass is the remaining slice. If still magenta /
-empty, PGR2 uses a fourth back→front mechanism (likely an
-unimplemented NV2A engine class — NV3089 / NV0039 / 2D blit
-subchannel — or a software post-process draw pass that we'd see
-via texture-bind reads of `0x3628000`). See decision-log "2026-05-03:
-Metal slice M5.10" and benchmark note
-`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`.
+**Highest-priority next-session action (revised)**: bisect the
+Metal cold-boot regression. Start from `6b37b02d28` (M5.5/M5.6/M5.7
+ship, where 37 fps was achievable) and walk forward through
+`14b012f9f4` (M5.8/M5.6-PartB), `45664d9426` (M5.9), `21e3a4bedc`
+(followup-A), `f8f0e9d134` (followup-B+C), `aa114443bf`
+(followup-E), `b283abcb27` (M5.10), `5154cb599b` (M5.10 fallback)
+to identify which commit(s) introduced the freeze. Use the
+profile-prep HDD source for fast iteration. Once cold-boot is
+restored:
+
+- Re-run the queued `XEMU_METAL_FRONT_FB_DOWNLOAD=1 XEMU_DISPLAY_SCALE=1`
+  PGR2 visual test from M5.10 base.
+- If still empty/magenta, escalate to investigating PGR2's actual
+  back→front mechanism (likely an unimplemented NV2A engine class:
+  NV3089 / NV0039 / 2D blit subchannel) — that is a separate slice.
+- Try `XEMU_METAL_FRONT_FB_FALLBACK=1` as a host-side bridge while
+  the proper mechanism remains unidentified; document per-title
+  visual caveats.
+
+See decision-log "2026-05-03: Metal slice M5.10 experimental — front-fb
+publish fallback" and the M5.10 base entry, plus benchmark note
+`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`
+(includes the fallback addendum + the cold-boot regression measurement).
 
 (Earlier banner — post-followup-E surface-cache fixes —
 **three real bugs in the Metal surface cache shipped + one decisive

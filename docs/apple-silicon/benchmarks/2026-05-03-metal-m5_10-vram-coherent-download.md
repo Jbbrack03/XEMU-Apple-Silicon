@@ -321,3 +321,120 @@ the GL renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` first-launch
 default + `XEMU_MACOS_NATIVE_INPUT=1`. See
 `docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`
 for the per-title validation table.
+
+---
+
+## Addendum: M5.10 experimental fallback (commit `5154cb599b`) and Metal cold-boot / snapshot regressions
+
+After the M5.10 base slice committed, this session attempted the
+queued visual validation and discovered two issues independent of
+M5.10 that block validation. Both are documented here and in
+`decision-log.md` "2026-05-03: Metal slice M5.10 experimental — front-fb
+publish fallback to latest draw".
+
+### Fallback flag — `XEMU_METAL_FRONT_FB_FALLBACK={0,1}`
+
+Default 0. When set, `pgraph_mtl_flip_stall` calls
+`pgraph_mtl_surface_publish_latest_draw_fallback()` AFTER the
+CRTC-strict publish; publishes `s_color_binding` (most-recently-bound
+color RT) as the front-fb side-channel; last write wins. Cheap
+host-side bridge for the back→front mechanism gap, independent of
+the M5.10 download path. NOT correctness-faithful — the back buffer
+may have a different aspect than the front (PGR2: 2560×960 back vs
+1280×960 front at scale=2); titles that legitimately use both
+surfaces will see the wrong content.
+
+| File | Change |
+|------|--------|
+| `mtl/surface.h` | New prototype `pgraph_mtl_surface_publish_latest_draw_fallback`. |
+| `mtl/surface.mm` | New helper at line 1202; publishes `s_color_binding->texture` to the side-channel; emits `xemu-perf: metal_front_fb_publish ... reason=fallback-latest-draw`. |
+| `mtl/renderer.c` | New `mtl_front_fb_fallback_enabled()` cached env-var read; `pgraph_mtl_flip_stall` calls the fallback after the crtc publish, gated. |
+| `xemu-fork/CLAUDE.md` | Runtime-flag doc entry. |
+
+LOC delta: +106 / -1 across 4 files. Build PASS. M5 shader-validation
+harness 7/7 PASS.
+
+### Cold-boot perf regression
+
+The M5.7 render-pass-coalescing benchmark
+(`benchmarks/2026-05-03-metal-render-pass-coalescing.md`) reported
+`post_load_avg_fps = 37.09` on PGR2 with the profile-prep HDD source.
+This session attempted to reproduce, with the M5.10 flag default-off
+so the regression is independent of M5.10:
+
+| Commit | Setup | Result |
+|--------|-------|--------|
+| `b9b9c3af16` (pre-M5.10 baseline) | PGR2 cold-boot, profile-prep, 60s, M5.10 flag absent | 14 intervals, fps ≈ 2, never reached gameplay |
+| `b283abcb27` (M5.10 base, flag-OFF) | same setup | 16 intervals, fps ≈ 1.5, same |
+| `b283abcb27` (M5.10 base, flag-ON, scale=2) | same setup | 1 interval, fps ≈ 0.04, frozen — but flag-ON adds known cost |
+| `5154cb599b` (current HEAD, flags off) | same setup | 16 intervals, fps ≈ 1.5, same as M5.10 base flag-off |
+
+M5.7 era: 37 fps post-load. Current HEAD (any flag): never reaches
+post-load state. **The introducing commit is somewhere in {M5.8
+(`14b012f9f4`), M5.9 (`45664d9426`), followup-A (`21e3a4bedc`),
+followup-B+C (`f8f0e9d134`), followup-E (`aa114443bf`)}** — M5.10
+itself is verified not to add to it (default-off matches pre-M5.10
+baseline).
+
+### Metal+snapshot regression
+
+Loading the `pgr2_gameplay_b4` snapshot under Metal (the standard
+fast-iteration path used at M5.7 era) yields:
+
+- `NV2A_FLIP_STALL_WRITES = 1-3` over 60 s wall-clock
+- Guest TCG runs (TCG_TB_EXEC_COUNT in millions) but produces
+  effectively no NV2A frames
+- Same snapshot under GL: ~7-8 NV2A flips per 2-second interval
+  (normal post-load gameplay rate)
+
+The snapshot was saved under GL renderer state (per its
+`metadata.txt`); something about the resumed state under Metal
+holds the guest in a non-progressing busy loop. Did not exist at
+M5.7 era; appears to have regressed alongside the cold-boot perf.
+
+### Visual gate result
+
+Both flags exercised:
+
+- `XEMU_METAL_FRONT_FB_DOWNLOAD=1 XEMU_DISPLAY_SCALE=1` (M5.10 base
+  with the codex HIGH defensive scaled-skip bypassed): downloads
+  fire (`METAL_SURFACE_DOWNLOADS = 10`, `_BYTES = 9.1 MB`); pipeline
+  floors hold; but cold-boot doesn't reach a state where any draw
+  hits the back buffer in volume (back buffer at `0x3628000` gets
+  ≤ 2 draws total per 60 s run). Screenshot at frame 100/500: solid
+  black against xemu UI overlay.
+- `XEMU_METAL_FRONT_FB_FALLBACK=1`: fallback wires correctly (helper
+  visible in source; flag check returns true). Screenshot captured
+  at frame 100 shows xemu UI overlay against a solid black NV2A
+  texture — the back buffer the fallback publishes is itself empty
+  at that early cold-boot frame because the BIOS animation hasn't
+  produced rendered content yet.
+
+Conclusion: **the visual gate cannot be evaluated** until the
+cold-boot / snapshot regressions are resolved.
+
+### Revised next-session priority
+
+1. **Bisect cold-boot regression.** Start from `6b37b02d28`
+   (M5.5/M5.6/M5.7 ship — known good per M5.7 benchmark). Walk
+   forward: M5.8 → M5.9 → followup-A → followup-B+C → followup-E →
+   M5.10 base → M5.10 fallback. For each, build and run a 60 s PGR2
+   cold-boot from profile-prep HDD; the introducing commit is the
+   first one where intervals drop from M5.7-era's progression-to-
+   gameplay to current HEAD's stuck-in-BIOS pattern. Estimated
+   1-2 hours of bisect work.
+2. **Bisect snapshot regression.** Same range; `pgr2_gameplay_b4`
+   loads but freezes under Metal. May share root cause with #1.
+3. **Re-attempt M5.10 visual test.** Once cold-boot reaches
+   gameplay, rerun `XEMU_METAL_FRONT_FB_DOWNLOAD=1
+   XEMU_DISPLAY_SCALE=1` and capture screenshot. If scene shows up,
+   the only remaining slice is the GPU-side downsample for
+   `surface_scale=2`. If still empty, escalate to NV2A engine
+   investigation.
+4. **Re-attempt fallback test.** Same gameplay state with
+   `XEMU_METAL_FRONT_FB_FALLBACK=1`; document per-title visual
+   caveats. If the fallback produces visually-acceptable output
+   for ≥ 2 titles, consider adding it to the M15 default-on
+   eligibility list as a per-title compatibility option.
+5. **Until then, GL renderer remains the production path** for the
+   user-stated goals.

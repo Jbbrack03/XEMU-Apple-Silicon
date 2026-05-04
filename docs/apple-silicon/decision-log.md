@@ -1,5 +1,117 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.10 experimental — front-fb publish fallback to latest draw (additional default-off path; pre-existing Metal cold-boot + snapshot regressions surfaced)
+
+**Context.** M5.10's CRTC-strict download path (decision-log entry
+immediately below) does not bridge PGR2's specific back→front gap on
+its own: the download writes back-buffer pixels to VRAM at
+`0x3628000`, the CRTC-pointed front-fb upload reads VRAM at
+`0x32a4000`, and the M5.9-followup-B+C diagnostic ruled out every
+plausible CPU-mediated mechanism that would copy `0x3628000` →
+`0x32a4000` in VRAM. While investigating in this session two further
+findings surfaced that are independent of M5.10:
+
+- **Metal cold-boot perf has regressed substantially since M5.7.**
+  M5.7's render-pass coalescing benchmark (decision-log "2026-05-03:
+  Metal slice M5.7", `benchmarks/2026-05-03-metal-render-pass-coalescing.md`)
+  reported `post_load_avg_fps = 37.09` after running PGR2 for 60 s of
+  scripted gameplay starting from the profile-prep HDD. With the
+  M5.10 flag default-off (i.e. the renderer at HEAD with no M5.10
+  hot-path overhead), the same setup produces 7-16 perf-log intervals
+  over 60 s wall-clock with `fps ≈ 1-2` — the renderer never
+  progresses past the BIOS animation. Verified by stash-and-rebuild
+  bisection in this session: pre-M5.10 baseline (commit `b9b9c3af16`)
+  reaches 14 intervals in 60 s; post-M5.10 default-off (commit
+  `b283abcb27`) reaches 7-16 intervals; both are well below the M5.7
+  era's progression. Likely culprit is a cumulative regression
+  introduced by M5.8 / M5.9 / M5.9-followup-A/B+C/E (M5.10 itself,
+  default-off, is verified not to add to it).
+- **Metal+snapshot path doesn't progress the guest.** Loading the
+  `pgr2_gameplay_b4` snapshot under Metal yields
+  `NV2A_FLIP_STALL_WRITES = 1-3` over 60 s wall-clock with the guest
+  effectively frozen, while loading the same snapshot under GL gets
+  ~7-8 NV2A flips per 2-second interval. The snapshot was saved under
+  GL renderer state (per its `metadata.txt`); under Metal something
+  about the resumed state holds the guest in a non-progressing busy
+  loop. Did not exist at M5.7 time when the snapshot was the standard
+  fast-iteration path; appears to have regressed via M5.8 / M5.9 /
+  followups along with the cold-boot perf.
+
+These regressions block any visual-correctness validation of the
+M5.10 download path on PGR2 because there is no usable benchmark
+window in which guest rendering reaches a state worth diff'ing. The
+"highest-priority next-session action" recorded after the prior
+M5.10 entry — enable the path at `XEMU_DISPLAY_SCALE=1` and capture
+a gameplay screenshot — was attempted in this session and produced
+empty (BIOS-state) front-fb captures regardless of the flag, because
+the cold-boot never reached a rendering-active state and the
+snapshot path froze the guest.
+
+**Decision.** Land an additional opt-in flag
+`XEMU_METAL_FRONT_FB_FALLBACK={0,1}` default 0 that does NOT depend
+on VRAM coherency at all. After the CRTC-strict publish in
+`pgraph_mtl_flip_stall`, when the flag is on, the renderer also
+publishes `s_color_binding` (the most-recently-bound color RT) as
+the front-fb side-channel; last write wins. This is the host-side
+direct bridge for titles like PGR2 whose CRTC-pointed surface gets
+sporadic draws while the actual scene goes to a back buffer. Cheap
+and non-invasive — adds one helper in `mtl/surface.mm`, one feature
+gate in `mtl/renderer.c`, one call in `pgraph_mtl_flip_stall`. **Not
+correctness-faithful** — the back buffer may have a different
+aspect / dimensions from the front (PGR2: 2560×960 back vs 1280×960
+front at scale=2); titles that legitimately use both surfaces will
+see wrong content; opt-in keeps the CRTC-strict default behavior
+intact.
+
+**What landed.**
+
+- `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` runtime flag, default 0,
+  cached at first read in `mtl_front_fb_fallback_enabled()`
+  (`mtl/renderer.c:261`).
+- New API `pgraph_mtl_surface_publish_latest_draw_fallback(void)`
+  in `mtl/surface.mm:1202` and prototype in `mtl/surface.h`.
+  Publishes `s_color_binding->texture` to the
+  `s_front_framebuffer_texture` side-channel; emits
+  `xemu-perf: metal_front_fb_publish ... reason=fallback-latest-draw`;
+  bumps `METAL_FRONT_FB_PUBLISHES`. Standard atomic dedupe so the
+  same texture isn't re-published every flip.
+- `pgraph_mtl_flip_stall` (`mtl/renderer.c:858-870`) calls the
+  fallback after the CRTC publish, gated by the flag.
+- `xemu-fork/CLAUDE.md` runtime-flag list updated.
+
+**Validation.** Build PASS. M5 shader-validation harness 7/7 PASS.
+GL renderer regression check: not run (mtl/-only diff). Snapshot +
+flag test: 16 perf intervals over 60 s wall-clock — same range as
+flag-off (the flag itself is cheap; cold-boot perf regression is
+independent). Cold-boot screenshot captures at frame 100 / frame
+500: xemu UI overlay against a black NV2A texture — the back buffer
+the fallback publishes is itself unrendered at those early frames.
+**Visual gate not closed** because the cold-boot regression
+prevents reaching a state where the back buffer has actual scene
+content.
+
+**Files touched (LOC delta ~ +106 / -1 across 4 files, commit
+`5154cb599b`).** Full bullet inventory in this session's M5.10
+benchmark note at
+`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`
+(addendum section).
+
+**Highest-priority next-session action (revised).** Bisect the
+Metal cold-boot regression. Start from M5.7 commit
+(`6b37b02d28`) where `post_load_avg_fps = 37.09` was achievable; walk
+forward through M5.8 (`14b012f9f4`), M5.9 (`45664d9426`),
+followup-A (`21e3a4bedc`), followup-B+C (`f8f0e9d134`),
+followup-E (`aa114443bf`) and identify which commit(s) introduced
+the cold-boot freeze. The visual gate cannot be re-attempted until
+this is restored. Do this BEFORE any further M5.10 / Path B / NV2A
+mechanism investigation work — without a working cold-boot path
+there is no way to evaluate any additional change. The
+`profile-prep` HDD source under `benchmark-runs/profile-prep/` is the
+canonical fast-iteration target.
+
+**See also**: the M5.10 base entry below; the M5.7 entry deeper in
+this log; the benchmark note above.
+
 ## 2026-05-03: Metal slice M5.10 — VRAM-coherent surface download (default-off infrastructure shipped)
 
 **Context.** M5.9-followup-E closed the magenta heap-default artifact

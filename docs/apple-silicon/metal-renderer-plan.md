@@ -1741,25 +1741,72 @@ surface-cache color/depth split + front-fb pin + cap raise" for the
 full investigation, the per-vram_addr draw distribution measurements
 on PGR2, and the codex-validate review notes.
 
-### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **INFRASTRUCTURE SHIPPED 2026-05-03 (default-off; visual gate still BLOCKED)**
+### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **INFRASTRUCTURE SHIPPED 2026-05-03 (default-off; visual gate still BLOCKED on a pre-existing cold-boot perf regression)**
 
-**Status (2026-05-03): SHIPPED, default-off.** The public download
-API and supporting cross-queue fence + KVM/HVF polling landed, gated
-behind `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` default 0. The path
-mirrors `vk/surface.c::pgraph_vk_surface_download_if_dirty`
-field-for-field. Codex-validate ran (rule #15); 4 findings (2 HIGH,
-2 MEDIUM) all addressed in-slice. **Visual gate STILL FAILS** —
-PGR2's specific back→front buffer-swap mechanism remains
-unidentified, and on its own M5.10 cannot bridge a download at
-`0x3628000` to an upload at `0x32a4000`. M15 default-on stays
-BLOCKED. See decision-log "2026-05-03: Metal slice M5.10" and
-`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`
-for the full implementation, codex findings + fixes, deferred items,
-and the next-session investigation plan. The original "PENDING"
-description below is preserved for the audit trail; the planned
-tasks are partially-complete (path A primitives shipped; Path B
-compositor rework deferred; codex MEDIUM/LOW from M5.9-followup-E
-still partially deferred).
+**Status (2026-05-03): SHIPPED, default-off (two commits).**
+
+- **Commit `b283abcb27`** — M5.10 base infrastructure. Public download
+  API (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
+  `_in_range_if_dirty`) mirroring
+  `vk/surface.c::pgraph_vk_surface_download_if_dirty` field-for-field;
+  cross-queue `MTLSharedEvent` fence; KVM/HVF parity polling
+  (TCG-gated); open-pass pin in `cache_evict_lru`. Gated behind
+  `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` default 0. Codex-validate ran;
+  4 findings (2 HIGH, 2 MEDIUM) all addressed in-slice.
+- **Commit `5154cb599b`** — M5.10 experimental fallback. Additional
+  opt-in path that does NOT depend on VRAM coherency: when
+  `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` is set, `flip_stall` calls
+  `pgraph_mtl_surface_publish_latest_draw_fallback()` after the
+  CRTC-strict publish, publishing `s_color_binding` (most-recently-
+  bound color RT) as the front-fb side-channel; last write wins.
+  Bridges PGR2's back→front gap host-side. NOT correctness-faithful
+  (aspect mismatch on many titles).
+
+**Visual gate STILL FAILS, but the framing has shifted.** This
+session's testing surfaced two pre-existing regressions independent
+of M5.10:
+
+- **Metal cold-boot perf has regressed since M5.7.** M5.7 era
+  reported `post_load_avg_fps = 37.09` on PGR2 from profile-prep HDD;
+  current HEAD with M5.10 default-off produces 7-16 perf intervals in
+  60 s wall-clock with `fps ≈ 1-2` and never reaches BIOS animation.
+  Verified independent of M5.10 by stash-and-rebuild bisection. The
+  introducing commit is in {M5.8, M5.9, followup-A, followup-B+C,
+  followup-E}.
+- **Metal+snapshot path doesn't progress the guest.** `pgr2_gameplay_b4`
+  loads but yields `NV2A_FLIP_STALL_WRITES=1-3` in 60 s under Metal
+  (vs ~7-8 per 2 s under GL). Also a regression along with cold-boot.
+
+These two together prevent any in-gameplay visual capture, so the
+M5.10 + fallback paths cannot be validated against actual rendered
+content until the regressions are resolved.
+
+**Highest-priority next-session action (revised).** Bisect the Metal
+cold-boot regression starting from `6b37b02d28` (M5.5/M5.6/M5.7 ship)
+and walking forward through M5.8 / M5.9 / followups / M5.10 to
+identify the introducing commit(s). Once restored, re-run the
+M5.10 visual test with `XEMU_METAL_FRONT_FB_DOWNLOAD=1
+XEMU_DISPLAY_SCALE=1` and the fallback test with
+`XEMU_METAL_FRONT_FB_FALLBACK=1`. If neither closes the gate,
+escalate to identifying PGR2's actual back→front mechanism (likely
+an unimplemented NV2A engine class).
+
+M15 default-on stays BLOCKED on:
+1. Cold-boot regression bisect + fix.
+2. Snapshot+Metal regression bisect + fix.
+3. Visual gate: ≤ 1 % per-pixel diff vs GL on ≥ 2 distinct titles.
+4. (Stretch) GPU-side downsample render pass for `surface_scale > 1`
+   so the M5.10 download path is not structurally inert at the
+   Apple Silicon system default scale.
+
+See decision-log "2026-05-03: Metal slice M5.10 experimental —
+front-fb publish fallback to latest draw" (which also documents the
+cold-boot/snapshot regression findings), the M5.10 base entry below,
+and `docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`.
+The original "PENDING" description below is preserved for the audit
+trail; the planned tasks are partially-complete (Path A primitives
+shipped; Path B compositor rework deferred; codex MEDIUM/LOW from
+M5.9-followup-E still partially deferred).
 
 **Original PENDING text (preserved):**
 
