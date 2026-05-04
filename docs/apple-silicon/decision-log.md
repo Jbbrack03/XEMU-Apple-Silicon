@@ -6657,3 +6657,162 @@ Next-session priority:
   Metal validation by default; no caller change required.
 - W3 — canary regression gate can build on the post-build hook by
   appending its own gate after the shader-validation step.
+## 2026-05-04: Adopt formal Metal porting workflow (five-phase model + canonical playbook)
+
+**Context.** The Metal renderer port has shipped slices M0–M14 plus
+the M5.x correctness follow-ups through 2026-05-04, and the green
+canary set (PGR2, Rainbow Six 3, Halo CE, Xbox boot/flubber) now
+passes at MSAA4. The Crimson Skies gameplay route and the Soul
+Calibur 2 no-input route remain BLOCKED with black drawable
+captures, and M15 default-on stays gated on the broader Metal-vs-GL
+visual-diff and perf-parity gate plus the front-fb fallback policy
+decision. As the work moves from "stand up missing infrastructure"
+into "drive each title to visual correctness and then to perf
+parity", the day-to-day operation has stopped being a series of
+one-off probes and started looking like a phased process: build &
+boot → translation correctness → visual parity → perf parity →
+default-on. Until now the project's planning documents
+(`metal-renderer-plan.md`, `handoff.md`, `decision-log.md`) covered
+the slice-level "what to build" but not the session-level "how to
+operate"; sessions therefore reinvented the loop each time, and the
+overlap between investigation lenses (validation layer, paired diff,
+per-draw RT dump, `.gputrace`, MoltenVK triangulation) was not
+standardized.
+
+**Decision.** Adopt a formal five-phase Metal porting workflow,
+documented in the new `docs/apple-silicon/metal-porting-workflow.md`,
+as the canonical operating playbook for the port. The five phases:
+
+- **Phase 0 — Build & boot** (DONE; M0–M14 SHIPPED).
+- **Phase 1 — Translation correctness** (ACTIVE; per-game route
+  correctness with the Metal validation layer + shader validation
+  green).
+- **Phase 2 — Visual parity gate** (paired Metal-vs-GL ≤ 1 % per-pixel
+  on PGR2 / Rainbow / Crimson / SC2 / one broader-sweep title at
+  matched intervals).
+- **Phase 3 — Performance parity & polish** (console-native FPS via
+  Metal; p99 mspf jitter ≥ 20 % improvement vs GL on
+  PGR2/Rainbow/Crimson; cold-launch shader compile < 5 s).
+- **Phase 4 — Default-on / shipping** (M15 met; pre-warmed pipeline
+  cache shipped).
+
+The workflow document specifies, for the active phase, the literal
+command-by-command daily loop (validation-on build, paired diff for
+the suspected failing canary, per-draw RT dump for triage, MoltenVK
+triangulation when stuck plus the fallback path if MoltenVK is
+blocked), a tools index mapping every Metal-relevant flag / script /
+counter to the phase that consumes it, a triage flowchart from
+symptom to next diagnostic to next tool, the concrete exit-gate
+procedures for each phase transition, and a triangulation appendix
+that combines MoltenVK + per-draw RT dump + Xcode `.gputrace` +
+paired diff to localize a hard correctness bug to a single NV2A
+command.
+
+**Rationale.** This is the commercial-port playbook adoption: every
+shipped emulator Metal port the project surveyed
+(`docs/apple-silicon/emulator-metal-survey.md` — Dolphin, PCSX2,
+DuckStation) operates on a phased correctness-then-perf-then-flip
+process rather than ad-hoc probing. Adopting the same model here
+moves the project from "we have a working renderer but each session
+re-derives the loop" to "the loop is documented, sessions follow it,
+findings accumulate". This addresses three concrete pain points that
+the M-cycle close-out
+(`2026-05-02: Metal slice M14 — hardening, doc reconciliation,
+M-cycle summary`) implicitly catalogued: (1) "what to do when stuck"
+was unwritten and varied per session; (2) the validation layer was
+opt-in but should be auto-on for any dev run (now landing in the
+parallel W1 slice this session); (3) there was no single canonical
+place pointing at the paired-diff and per-draw inspection tools that
+have grown around the port over the past two weeks.
+
+**Parallel slices implementing this session.** The workflow document
+forward-references five parallel automation slices that other agents
+in this session are landing alongside D1 (the workflow doc itself):
+
+- **W1 — Auto-on Metal validation in dev runs.** Promotes
+  `XEMU_METAL_VALIDATION=1` and `XEMU_METAL_HUD=1` (the latter is a
+  new flag promoting `MTL_HUD_ENABLED=1` for Apple's Metal Performance
+  HUD overlay) automatically when `run-benchmark.sh` detects
+  `XEMU_RENDERER=METAL`; opt-out via new `--metal-no-validate` and
+  `--metal-no-hud` flags. Removes the per-session "did I remember to
+  set the validation env var" failure mode.
+- **W2 — Paired Metal-vs-GL diff harness.** New
+  `scripts/apple-silicon/metal-gl-compare.sh` modelled on
+  `native-tri-depth-compare.sh`; runs the same scripted route under
+  GL and Metal at matched screenshot intervals, runs Visual Flight
+  Recorder over each, writes a side-by-side diff. The Phase 2 exit
+  gate's primary tool.
+- **W3 — Canary regression gate.** New
+  `scripts/apple-silicon/metal-canary-regress.sh` runs the green
+  canary set (PGR2 / Rainbow / Halo / boot) at MSAA4 and gates on
+  per-pixel diff against the recorded
+  `benchmark-runs/visual-checks/` baselines. Depends on W2's diff
+  harness. Wired into the Phase 1 daily loop as a post-change
+  check.
+- **W4 — Per-draw color RT dump (Metal + GL).** Two new env vars
+  `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` and
+  `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` snapshot the bound color
+  render target to a PNG after each draw across a configurable
+  range. Enables first-divergent-draw isolation between Metal and
+  GL — the central Phase 1 triage primitive.
+- **W5 — Enable pgraph/vk + MoltenVK as triangulation backend.**
+  Wires `XEMU_RENDERER=VULKAN` on Apple Silicon through MoltenVK so
+  the same scripted route runs through xemu's Vulkan renderer on top
+  of MoltenVK's translation. **HEDGE: MoltenVK 1.3.x for Apple7+
+  does not implement `VK_EXT_geometry_shader`, which xemu's Vulkan
+  renderer requires; W5 may land BLOCKED, in which case the
+  triangulation appendix's three-step fallback (per-draw RT dump
+  alone + Xcode `.gputrace` + GL/Metal code read) is the operational
+  path.**
+
+Each slice's current implementation status is tracked in
+`handoff.md` rather than this entry — the entry binds the *adoption*
+of the workflow, not the per-slice landing dates.
+
+**What landed in this slice (D1, doc-only).**
+
+- `docs/apple-silicon/metal-porting-workflow.md` (new, ~1000 lines)
+  — the canonical playbook described above.
+- `docs/apple-silicon/README.md` — Documentation Map updated with a
+  pointer to the new doc, ordered above the existing Metal-track
+  references.
+- `docs/apple-silicon/handoff.md` — single-line pointer near the top
+  ("For the canonical Metal porting workflow, see
+  metal-porting-workflow.md") so a session that reads handoff.md
+  first finds the workflow.
+- `xemu-fork/CLAUDE.md` "Canonical project documentation" section —
+  new bullet for `metal-porting-workflow.md`, ordered as a meta-doc
+  before the existing Metal track sub-list.
+- This decision-log entry.
+
+**No code or scripts changed in this slice.** The W1/W2/W3/W4/W5
+implementation slices are owned by parallel agents in the same
+session; this slice is doc-only and the workflow document uses
+forward-language references to those tools ("introduced 2026-05-04
+in slice W1/W2/W3/W4/W5") so it remains accurate regardless of which
+implementation slice merges first. Cross-agent reconciliation is the
+final-orchestration step.
+
+**Verification.** `wc -l metal-porting-workflow.md` confirms the doc
+size is in the prescribed 500-1100 range. Cross-pointer presence
+confirmed by `grep -nE "metal-porting-workflow"` across
+`xemu-fork/CLAUDE.md`, `handoff.md`, and `README.md`. No build or
+runtime changes; doc-only slice.
+
+**Consequences.**
+
+- Future Metal-track sessions read the workflow doc once at start
+  (after `handoff.md`), follow the active-phase daily loop, and use
+  the triage flowchart when stuck. The "where to start" question is
+  now answered by a single document instead of four.
+- The phase model gives a shared vocabulary for status reporting:
+  "we are in Phase 1 with Crimson and SC2 BLOCKED; PGR2 / Rainbow /
+  Halo / boot are Phase 1 PASS" replaces the longer prose state
+  descriptions that have proliferated across `handoff.md` over the
+  past two weeks.
+- The workflow doc is the natural place to land the next round of
+  process improvements (e.g. "Phase 1.5 — pre-Phase-2 readiness
+  audit") rather than appending more banners to `handoff.md`.
+- `metal-renderer-plan.md` remains the slice-level implementation
+  plan; the workflow doc references it for the M15 acceptance
+  criteria but does not duplicate them.
