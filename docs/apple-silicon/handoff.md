@@ -1,37 +1,48 @@
 # Handoff
 
-Last updated: 2026-05-04 (post-PGR2 Metal surface/RTT correctness
-follow-up). Current branch: `apple-silicon-performance`.
+Last updated: 2026-05-04 (post-boot/flubber + Crimson stability +
+PGR2/Rainbow Metal correctness follow-up). Current branch:
+`apple-silicon-performance`.
 
-**Current Metal status.** PGR2 and Rainbow Six 3 are now useful green
-canaries; Crimson Skies remains the visual blocker for the Metal
-default-on decision.
+**Current Metal status.** PGR2, Rainbow Six 3, and the Xbox
+boot/flubber animation are now useful green canaries. The user's
+reported green/wireframe failure was the Xbox boot animation, not
+in-game Crimson Skies. Metal default-on remains blocked by the broader
+Metal-vs-GL visual-diff/gameplay gate, not by that specific
+boot-animation failure.
 
 - **PGR2 PASS (visual canary).** With
   `XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1
   XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1
   XEMU_METAL_FRONT_FB_FALLBACK=1`, the menu/logo/textures/colors are
-  clean. Run: `benchmark-runs/20260504-024441-pgr2`; screenshot:
-  `benchmark-runs/visual-checks/pgr2-final-f900.png`.
+  clean. Latest run: `benchmark-runs/20260504-092708-pgr2`;
+  screenshot:
+  `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`.
 - **PGR2 counters clean.** Late intervals show
   `METAL_PIPELINE_TRANSLATED_FAILED=0`,
   `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
   `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`. Late FPS mostly ranges
   from ~32 to 59, and input max is ~2.1-2.5 ms.
 - **Rainbow Six 3 PASS (loading-screen visual canary).** Logo/loading
-  screen colors and textures are clean. Run:
-  `benchmark-runs/20260504-024617-rainbow-six-3`; screenshot:
-  `benchmark-runs/visual-checks/rainbow-final-f600.png`. Counters are
-  clean, but loading-screen FPS is still bimodal/low and needs a real
-  gameplay pass after Crimson is fixed.
-- **Crimson Skies FAIL (remaining blocker).** Smoke capture:
-  `benchmark-runs/visual-checks/crimson-smoke-f300.png` shows an
-  untextured green aircraft over a black scene; the translated
-  pipeline counters are clean. Passthrough diagnostic capture
-  `benchmark-runs/visual-checks/crimson-passthrough-f300.png` is
-  all-white, so passthrough is not a better oracle. Next work should
-  focus on Crimson shader/texture semantics, not the old PGR2
-  surface-churn problem.
+  screen colors and textures are clean. Latest run:
+  `benchmark-runs/20260504-092750-rainbow-six-3`; screenshot:
+  `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
+  Counters are clean, but loading-screen FPS is still bimodal/low and
+  needs a real gameplay pass in the broader gate.
+- **Xbox boot/flubber PASS (visual canary).** The previous green
+  blob/wireframe failure is fixed. Latest run:
+  `benchmark-runs/20260504-092824-crimson-skies`; screenshot:
+  `benchmark-runs/visual-checks/boot-post-oob-f300.png`. Counters
+  are clean: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
+- **Crimson Skies gameplay stability PASS, visual route still needs a
+  better capture point.** `crimson-gameplay.csv` now completes without
+  aborting after the texture-DMA bounds and invalid-stage shader fixes.
+  Latest run: `benchmark-runs/20260504-092403-crimson-skies`;
+  screenshot `benchmark-runs/visual-checks/crimson-gameplay-metal-f1800.png`
+  is a black transition/loading frame, so it is useful for stability
+  and FPS/input counters but not yet a visual canary.
 
 **What changed this session.**
 
@@ -46,6 +57,11 @@ default-on decision.
    surface fast path. This fixes PGR2's dotted/yellow menu text and
    channel/alpha normalization mismatch. Diagnostic env:
    `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`.
+4. Metal now handles out-of-bounds enabled texture stages without
+   aborting: `pgraph_try_get_texture_phys_addr()` reports invalid DMA
+   texture offsets, Metal unbinds/logs them as `metal_tex_oob`, and the
+   GLSL/Metal shader state masks those invalid stages before sampler
+   generation.
 
 **Validation already run.**
 
@@ -54,21 +70,19 @@ default-on decision.
 - Build: `./build.sh -a arm64` PASS.
 - Bundle signing: `codesign --verify --deep --strict --verbose=2
   dist/xemu.app` PASS.
-- Visual canaries: PGR2 PASS, Rainbow Six 3 PASS, Crimson Skies FAIL
-  as described above.
+- Visual canaries: PGR2 PASS, Rainbow Six 3 PASS, Xbox boot/flubber
+  PASS. Crimson gameplay stability route PASS; its current automated
+  screenshot lands on black transition/loading output.
+- Shader validation: `scripts/apple-silicon/metal-shader-validation/run-validation.sh`
+  PASS, 7/7 fixtures passed.
 
-**Highest-priority next-session action.** Fix Crimson Skies Metal
-visual correctness. Start with the smoke route at frame 300; compare
-translated and passthrough captures; enable
-`XEMU_METAL_DIAG_TEX_BIND=1`, `XEMU_METAL_DIAG_SURFACE_TEX=1`, and
-`XEMU_METAL_DUMP_TARGET_SHADER=all` as needed. If the issue is still
-ambiguous, build a small nxdk/pbkit custom XBE that isolates the
-suspected texture-combiner, alpha/channel, render-target-as-texture,
-or vertex-color behavior. Avoid proprietary/leaked XDK dependencies.
-
-After any Crimson shader/texture change, re-run the PGR2 and Rainbow
-canaries above. **M15 default-on remains BLOCKED** until PGR2,
-Rainbow, Crimson, and the broader visual-diff gate are all correct.
+**Highest-priority next-session action.** Run the broader Metal-vs-GL
+gameplay gate: PGR2, Rainbow Six 3, Crimson Skies after the boot
+animation, SC2, plus one further title with paired screenshots,
+FPS/jitter counters, and input-latency counters. Re-run the PGR2,
+Rainbow, and boot/flubber canaries after any Metal renderer change.
+**M15 default-on remains BLOCKED** until that broader visual-diff gate
+is correct.
 
 The older banners below are preserved for the empirical audit trail.
 

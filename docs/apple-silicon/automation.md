@@ -1,11 +1,16 @@
 # Benchmark Automation
 
 Last updated: 2026-05-04 (PGR2 Metal surface/RTT canary is clean;
-Rainbow Six 3 loading-screen canary is clean; Crimson Skies remains the
-Metal visual blocker. Added diagnostic
-`XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`; front-fb fallback docs now
-reflect that it publishes the selected render-target binding. Existing
-diagnostics/counters from 2026-05-03 remain available:
+Rainbow Six 3 loading-screen canary is clean; Xbox boot/flubber canary
+is clean after the front-face fix. The earlier green/wireframe report
+was the boot animation, not in-game Crimson Skies. Crimson gameplay
+automation now completes without aborting after the texture-DMA bounds
+and invalid-stage shader fixes, but its current screenshot lands on a
+black transition/loading frame and is not a visual canary. Added
+diagnostics `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1` and
+`metal_tex_oob`; front-fb fallback docs now reflect that it publishes
+the selected render-target binding. Existing diagnostics/counters from
+2026-05-03 remain available:
 `XEMU_METAL_DIAG_CLEAR=1`, `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`,
 `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
 `METAL_IMAGE_BLITS`, `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`,

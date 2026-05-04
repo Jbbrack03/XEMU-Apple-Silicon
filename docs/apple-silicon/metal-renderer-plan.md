@@ -1,13 +1,14 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-04 (M5.x surface/RTT correctness follow-up.
-PGR2 now passes the Metal visual canary with clean menu/logo/textures
-and colors; Rainbow Six 3 loading-screen output is also clean. The old
-white/magenta front-buffer failure is closed. Crimson Skies remains the
-active Metal visual blocker: translated counters are clean, but the
-smoke capture shows an untextured green aircraft over a black scene and
-the passthrough diagnostic is all-white. M15 default-on stays BLOCKED
-until Crimson plus the broader Metal-vs-GL visual-diff gate pass.)
+Last updated: 2026-05-04 (M5.x boot/flubber + surface/RTT correctness
+follow-up. PGR2 passes the Metal visual canary with clean
+menu/logo/textures and colors; Rainbow Six 3 loading-screen output is
+also clean. The old white/magenta front-buffer failure is closed. The
+green/wireframe capture was the Xbox boot/flubber animation, not
+in-game Crimson Skies, and that boot canary now renders shaded geometry
+and glow without texture blobs after the Metal front-face fix. M15
+default-on stays BLOCKED until the broader Metal-vs-GL visual-diff and
+gameplay gate pass.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon
@@ -1739,10 +1740,11 @@ surface-cache color/depth split + front-fb pin + cap raise" for the
 full investigation, the per-vram_addr draw distribution measurements
 on PGR2, and the codex-validate review notes.
 
-### M5.10 / M5.11 — VRAM-coherent surface download + PGR2 surface/RTT follow-up — **SHIPPED 2026-05-04 (PGR2 PASS; Crimson BLOCKED)**
+### M5.10 / M5.11 — VRAM-coherent surface download + PGR2 surface/RTT follow-up — **SHIPPED 2026-05-04 (PGR2/Rainbow/boot PASS; Crimson stability PASS)**
 
 **Status (2026-05-04): SHIPPED for the PGR2/Rainbow canaries; Metal
-default-on remains blocked by Crimson visual correctness.**
+default-on remains blocked by the broader Metal-vs-GL gameplay and
+visual-diff gate.**
 
 - **Commit `b283abcb27`** — M5.10 base infrastructure. Public download
   API (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
@@ -1783,31 +1785,35 @@ failure is closed by a set of targeted surface/RTT fixes:
 
 **Validation (2026-05-04).**
 
-- PGR2 PASS: `benchmark-runs/20260504-024441-pgr2`,
-  `benchmark-runs/visual-checks/pgr2-final-f900.png`.
+- PGR2 PASS: `benchmark-runs/20260504-092708-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`.
   `METAL_PIPELINE_TRANSLATED_FAILED=0`,
   `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`,
   `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`; late FPS mostly ~32-59.
 - Rainbow Six 3 PASS for the loading-screen canary:
-  `benchmark-runs/20260504-024617-rainbow-six-3`,
-  `benchmark-runs/visual-checks/rainbow-final-f600.png`.
-- Crimson Skies FAIL: `benchmark-runs/visual-checks/crimson-smoke-f300.png`
-  shows an untextured green aircraft / black scene; passthrough
-  `benchmark-runs/visual-checks/crimson-passthrough-f300.png` is
-  all-white. Because counters are clean, the next work is shader or
-  texture semantics rather than PGR2-style surface churn.
+  `benchmark-runs/20260504-092750-rainbow-six-3`,
+  `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
+- Xbox boot/flubber PASS: `benchmark-runs/20260504-092824-crimson-skies`,
+  `benchmark-runs/visual-checks/boot-post-oob-f300.png`. This is
+  the capture the user identified as the broken green/wireframe boot
+  animation rather than in-game Crimson Skies. It now renders shaded
+  geometry and glow with `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
+- Crimson Skies gameplay stability PASS:
+  `benchmark-runs/20260504-092403-crimson-skies` completes without
+  aborting after the texture-DMA bounds and invalid-stage shader fixes.
+  The current frame-1800 screenshot is black transition/loading output,
+  so the route is not yet a visual canary.
 
-**Highest-priority next-session action.** Fix Crimson Skies visual
-correctness under Metal. Start with the smoke frame-300 capture, compare
-translated vs passthrough, and enable `XEMU_METAL_DIAG_TEX_BIND=1`,
-`XEMU_METAL_DIAG_SURFACE_TEX=1`, and
-`XEMU_METAL_DUMP_TARGET_SHADER=all` as needed. If evidence is still
-ambiguous, create a small nxdk/pbkit XBE to isolate texture-combiner,
-alpha/channel, render-target-as-texture, or vertex-color behavior
-without relying on proprietary/leaked XDK assets.
+**Highest-priority next-session action.** Run the broader Metal-vs-GL
+gameplay gate: PGR2, Rainbow Six 3, Crimson Skies after the boot
+animation, SC2, plus one further title with paired screenshots,
+FPS/jitter counters, and input-latency counters. Keep the PGR2,
+Rainbow, and boot/flubber canaries above green after each Metal change.
 
 M15 default-on stays BLOCKED on:
-1. Crimson Skies Metal visual correctness.
+1. Broader Metal-vs-GL visual correctness across the gameplay gate.
 2. Paired Metal-vs-GL visual diff on PGR2, Rainbow, Crimson, SC2, and
    one broader-sweep title.
 3. Console-native FPS plus p99 jitter validation on the same set.

@@ -1112,6 +1112,81 @@ static unsigned int mtl_expand_indices(uint32_t nv097_primitive,
 }
 
 static size_t mtl_expanded_index_capacity(uint32_t nv097_primitive,
+                                          unsigned int vertex_count);
+
+static unsigned int mtl_expand_indexed_indices(uint32_t nv097_primitive,
+                                               uint32_t *out,
+                                               size_t out_capacity,
+                                               const uint32_t *indices,
+                                               unsigned int index_count)
+{
+    if (out == NULL || indices == NULL) {
+        return 0;
+    }
+
+    size_t needed = mtl_expanded_index_capacity(nv097_primitive, index_count);
+    if (needed == 0 || out_capacity < needed) {
+        return 0;
+    }
+
+    switch (nv097_primitive) {
+    case PRIM_TYPE_TRIANGLE_FAN:
+    case PRIM_TYPE_POLYGON: {
+        unsigned int triangles = index_count - 2;
+        for (unsigned int i = 0; i < triangles; i++) {
+            out[i * 3 + 0] = indices[0];
+            out[i * 3 + 1] = indices[i + 1];
+            out[i * 3 + 2] = indices[i + 2];
+        }
+        return triangles * 3;
+    }
+    case PRIM_TYPE_QUADS: {
+        unsigned int quads = index_count / 4;
+        for (unsigned int i = 0; i < quads; i++) {
+            uint32_t a = indices[4 * i + 0];
+            uint32_t b = indices[4 * i + 1];
+            uint32_t c = indices[4 * i + 2];
+            uint32_t d = indices[4 * i + 3];
+            out[i * 6 + 0] = b;
+            out[i * 6 + 1] = c;
+            out[i * 6 + 2] = a;
+            out[i * 6 + 3] = c;
+            out[i * 6 + 4] = d;
+            out[i * 6 + 5] = a;
+        }
+        return quads * 6;
+    }
+    case PRIM_TYPE_QUAD_STRIP: {
+        unsigned int quads = (index_count - 2) / 2;
+        for (unsigned int i = 0; i < quads; i++) {
+            uint32_t a = indices[2 * i + 0];
+            uint32_t b = indices[2 * i + 1];
+            uint32_t c = indices[2 * i + 2];
+            uint32_t d = indices[2 * i + 3];
+            out[i * 6 + 0] = a;
+            out[i * 6 + 1] = b;
+            out[i * 6 + 2] = c;
+            out[i * 6 + 3] = c;
+            out[i * 6 + 4] = b;
+            out[i * 6 + 5] = d;
+        }
+        return quads * 6;
+    }
+    case PRIM_TYPE_LINE_LOOP: {
+        for (unsigned int i = 0; i < index_count - 1; i++) {
+            out[i * 2 + 0] = indices[i];
+            out[i * 2 + 1] = indices[i + 1];
+        }
+        out[(index_count - 1) * 2 + 0] = indices[index_count - 1];
+        out[(index_count - 1) * 2 + 1] = indices[0];
+        return index_count * 2;
+    }
+    default:
+        return 0;
+    }
+}
+
+static size_t mtl_expanded_index_capacity(uint32_t nv097_primitive,
                                           unsigned int vertex_count)
 {
     switch (nv097_primitive) {
@@ -1364,9 +1439,6 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
         if (indices != NULL && icount > 0) {
             uint32_t prim = mtl_prim;
-            if (prim == 0xFFFFFFFF) {
-                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
-            }
             if (prim != 0xFFFFFFFF) {
                 pgraph_mtl_draw_translated(translated_pipeline,
                                            streams,
@@ -1385,6 +1457,37 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                            psh_ubo, psh_off, psh_size,
                                            stage_tex, stage_smp);
                 drew = true;
+            } else {
+                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
+                size_t cap = mtl_expanded_index_capacity(pg->primitive_mode,
+                                                          icount);
+                if (prim != 0xFFFFFFFF && cap > 0) {
+                    uint32_t *exp_idx = g_malloc_n(cap, sizeof(uint32_t));
+                    unsigned int eicount =
+                        mtl_expand_indexed_indices(pg->primitive_mode,
+                                                   exp_idx, cap,
+                                                   indices, icount);
+                    if (eicount > 0) {
+                        pgraph_mtl_draw_translated(translated_pipeline,
+                                                   streams,
+                                                   MTL_VERTEX_NUM_ATTRIBUTES,
+                                                   vcount,
+                                                   exp_idx, eicount,
+                                                   prim, vp_w, vp_h,
+                                                   color_tex, depth_tex,
+                                                   depth_fmt,
+                                                   blend_color,
+                                                   control_0, control_1,
+                                                   control_2, setup_raster,
+                                                   scissor_x, scissor_y,
+                                                   scissor_w, scissor_h,
+                                                   vsh_ubo, vsh_off, vsh_size,
+                                                   psh_ubo, psh_off, psh_size,
+                                                   stage_tex, stage_smp);
+                        drew = true;
+                    }
+                    g_free(exp_idx);
+                }
             }
         } else if (mtl_prim != 0xFFFFFFFF) {
             pgraph_mtl_draw_translated(translated_pipeline,
@@ -1449,9 +1552,6 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
         if (indices != NULL && icount > 0) {
             uint32_t prim = mtl_prim;
-            if (prim == 0xFFFFFFFF) {
-                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
-            }
             if (prim != 0xFFFFFFFF) {
                 pgraph_mtl_draw_indexed(positions, colors, vcount,
                                         indices, icount,
@@ -1459,6 +1559,27 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                         vp_w, vp_h, color_tex, depth_tex,
                                         color_fmt, depth_fmt);
                 drew = true;
+            } else {
+                prim = mtl_translate_expanded_primitive(pg->primitive_mode);
+                size_t cap = mtl_expanded_index_capacity(pg->primitive_mode,
+                                                          icount);
+                if (prim != 0xFFFFFFFF && cap > 0) {
+                    uint32_t *exp_idx = g_malloc_n(cap, sizeof(uint32_t));
+                    unsigned int eicount =
+                        mtl_expand_indexed_indices(pg->primitive_mode,
+                                                   exp_idx, cap,
+                                                   indices, icount);
+                    if (eicount > 0) {
+                        pgraph_mtl_draw_indexed(positions, colors, vcount,
+                                                exp_idx, eicount,
+                                                prim, variant,
+                                                vp_w, vp_h,
+                                                color_tex, depth_tex,
+                                                color_fmt, depth_fmt);
+                        drew = true;
+                    }
+                    g_free(exp_idx);
+                }
             }
         } else if (mtl_prim != 0xFFFFFFFF) {
             pgraph_mtl_draw_passthrough(positions, colors, vcount, mtl_prim,

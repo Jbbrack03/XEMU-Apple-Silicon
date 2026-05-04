@@ -1,16 +1,17 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-04 (Metal surface/RTT follow-up. PGR2 now has
-clean Metal menu/logo/text/color output with the translated pipeline and
-front-fb fallback; Rainbow Six 3 loading-screen output is also clean.
-Crimson Skies remains the active Metal visual blocker: the current smoke
-capture shows an untextured green aircraft over a black scene while
-pipeline/surface counters are otherwise clean. **The user's stated
-30/60 FPS at 1080p / high-quality AA / correct-colors goals remain met
-today via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2`;
-Metal remains opt-in / experimental until Crimson and the wider visual
-diff gate pass. Input slices N1+N2 also shipped via opt-in
-`XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend.)
+Last updated: 2026-05-04 (Metal boot/flubber + surface/RTT follow-up.
+PGR2 has clean Metal menu/logo/text/color output with the translated
+pipeline and front-fb fallback; Rainbow Six 3 loading-screen output is
+also clean. The previously reported green/wireframe failure was the
+Xbox boot/flubber animation, not in-game Crimson Skies, and that boot
+canary now renders shaded geometry and glow without texture blobs.
+**The user's stated 30/60 FPS at 1080p / high-quality AA /
+correct-colors goals remain met today via the GL renderer** with
+`XEMU_GL_MSAA=4` + `surface_scale=2`; Metal remains opt-in /
+experimental until the broader visual-diff/gameplay gate passes. Input
+slices N1+N2 also shipped via opt-in `XEMU_MACOS_NATIVE_INPUT=1`
+GameController.framework backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run
@@ -220,10 +221,11 @@ wins when the two diverge.
   + the `XEMU_RENDERER` env-var bridge (14 total Metal-track flags),
   50 `METAL_*` performance counters, plus the 2 graphics-API-agnostic
   `RATE_SLEW_*` counters surface on the `xemu-perf:` interval line.
-  PGR2 and Rainbow Six 3 visual canaries are now clean; Crimson Skies
-  remains visually incorrect. Default renderer remains OpenGL; M15
-  (default-on flip) is BLOCKED on Crimson plus the broader visual-diff
-  gate.
+  PGR2 and Rainbow Six 3 visual canaries are clean; the Xbox
+  boot/flubber canary is also clean after the Metal front-face fix.
+  Default renderer remains OpenGL; M15 (default-on flip) is BLOCKED on
+  a broader Metal-vs-GL visual-diff and gameplay gate rather than this
+  specific boot-animation failure.
 - **Judder pillar declared "best effort complete" (2026-05-02 after
   V9 + V10).** All xemu-side cost classes < 100 ms (~7 %) of the
   Crimson 1.3 s worst-frame interval; remaining ~93 % is raw JIT'd
@@ -238,20 +240,21 @@ wins when the two diverge.
 
 **Next-action priority.**
 
-1. **Fix Crimson Skies Metal visual correctness.** Current smoke
-   capture `benchmark-runs/visual-checks/crimson-smoke-f300.png`
-   shows an untextured green aircraft / black scene; passthrough is
-   all-white. Use Metal texture/shader diagnostics and, if needed,
-   a small nxdk/pbkit custom XBE to isolate the texture-combiner or
-   channel/alpha behavior.
-2. **Re-run green canaries after every Crimson fix.** PGR2:
-   `benchmark-runs/20260504-024441-pgr2` /
-   `benchmark-runs/visual-checks/pgr2-final-f900.png`. Rainbow:
-   `benchmark-runs/20260504-024617-rainbow-six-3` /
-   `benchmark-runs/visual-checks/rainbow-final-f600.png`.
-3. **Only then revisit M15 default-on.** Run PGR2, Rainbow, Crimson,
-   SC2, plus one further title through paired Metal-vs-GL visual diff
-   and FPS/jitter validation. Outcome feeds the M15 decision.
+1. **Run the broader Metal-vs-GL gameplay gate.** Include PGR2,
+   Rainbow Six 3, Crimson Skies gameplay after the boot animation, SC2,
+   and one further title with paired screenshots/FPS/jitter/input
+   counters before revisiting M15 default-on.
+2. **Keep the green canaries green after each Metal fix.** PGR2:
+   `benchmark-runs/20260504-092708-pgr2` /
+   `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`. Rainbow:
+   `benchmark-runs/20260504-092750-rainbow-six-3` /
+   `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
+   Boot/flubber: `benchmark-runs/20260504-092824-crimson-skies` /
+   `benchmark-runs/visual-checks/boot-post-oob-f300.png`. Crimson
+   gameplay stability:
+   `benchmark-runs/20260504-092403-crimson-skies`.
+3. **Only then revisit M15 default-on.** Outcome from the paired
+   gameplay and visual-diff sweep feeds the M15 decision.
 4. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
    UNBLOCKED, GL-side, orthogonal to Metal):** A human listener
    plays Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice

@@ -2,9 +2,12 @@
 
 ## Summary
 
-This session closed the PGR2 Metal menu/logo/text/color canary. The
-remaining Metal default-on blocker is Crimson Skies visual correctness,
-not the older PGR2 white/magenta/front-buffer failure.
+This session closed the PGR2 Metal menu/logo/text/color canary and was
+later superseded by the same-day boot/flubber + Crimson stability
+follow-up. The earlier green/wireframe report was the Xbox boot
+animation, not in-game Crimson Skies. The boot/flubber canary now
+passes; Metal default-on remains blocked by the broader Metal-vs-GL
+gameplay/visual-diff gate, not by this specific boot-animation failure.
 
 ## Build / Signing
 
@@ -57,6 +60,11 @@ XEMU_METAL_DUMP_TARGET_SHADER=all
 - A8R8G8B8 render targets sampled as linear A8R8G8B8-family texture
   views use the CPU texture path, fixing PGR2's dotted/yellow text and
   color normalization mismatch.
+- Follow-up in the same session fixed Metal front-face winding for the
+  Xbox boot/flubber animation, added indexed unsupported-primitive
+  expansion, hardened cubemap-border handling, and made invalid texture
+  DMA offsets non-fatal via `pgraph_try_get_texture_phys_addr()` /
+  `metal_tex_oob`.
 
 ## Validation Results
 
@@ -64,8 +72,10 @@ XEMU_METAL_DUMP_TARGET_SHADER=all
 | --- | --- | --- | --- |
 | PGR2 | `benchmark-runs/20260504-024441-pgr2` | `benchmark-runs/visual-checks/pgr2-final-f900.png` | PASS: menu/logo/textures/colors clean |
 | Rainbow Six 3 | `benchmark-runs/20260504-024617-rainbow-six-3` | `benchmark-runs/visual-checks/rainbow-final-f600.png` | PASS: loading-screen logo/colors clean |
-| Crimson Skies | `benchmark-runs/20260504-024740-crimson-skies` | `benchmark-runs/visual-checks/crimson-smoke-f300.png` | FAIL: untextured green aircraft over black scene |
-| Crimson Skies passthrough | `benchmark-runs/20260504-024830-crimson-skies` | `benchmark-runs/visual-checks/crimson-passthrough-f300.png` | FAIL: all-white; not a better oracle |
+| PGR2 latest | `benchmark-runs/20260504-092708-pgr2` | `benchmark-runs/visual-checks/pgr2-post-oob-f900.png` | PASS after texture-OOB hardening |
+| Rainbow Six 3 latest | `benchmark-runs/20260504-092750-rainbow-six-3` | `benchmark-runs/visual-checks/rainbow-post-oob-f600.png` | PASS after texture-OOB hardening |
+| Xbox boot/flubber | `benchmark-runs/20260504-092824-crimson-skies` | `benchmark-runs/visual-checks/boot-post-oob-f300.png` | PASS: shaded boot animation and glow; no green wireframe/blob failure |
+| Crimson Skies gameplay stability | `benchmark-runs/20260504-092403-crimson-skies` | `benchmark-runs/visual-checks/crimson-gameplay-metal-f1800.png` | STABILITY PASS: no abort; screenshot is black transition/loading output, so not a visual canary |
 
 PGR2 late-interval counter floors:
 
@@ -78,14 +88,13 @@ PGR2 late FPS mostly ranged from ~32 to 59. Input max was about
 
 ## Next Steps
 
-1. Fix Crimson Skies Metal visual correctness. The clean counters point
-   toward shader/texture semantics rather than surface churn.
-2. Compare Crimson translated vs passthrough captures; use texture-bind,
-   surface-texture, and target-shader diagnostics.
-3. If needed, add a small nxdk/pbkit custom XBE to isolate the suspected
-   texture-combiner, alpha/channel, render-target-as-texture, or
-   vertex-color behavior. Avoid proprietary/leaked XDK dependencies.
-4. Re-run the PGR2 and Rainbow canaries after every Crimson fix.
-5. Keep M15 default-on blocked until PGR2, Rainbow, Crimson, SC2, and one
-   broader-sweep title pass paired Metal-vs-GL visual diff and FPS/jitter
-   validation.
+1. Run the broader Metal-vs-GL gameplay gate: PGR2, Rainbow Six 3,
+   Crimson Skies after the boot animation, SC2, and one broader-sweep
+   title.
+2. Add or retune the Crimson gameplay automation so it captures a
+   rendered gameplay frame instead of the current black
+   transition/loading frame.
+3. For every Metal renderer change, re-run PGR2, Rainbow Six 3, and
+   Xbox boot/flubber canaries plus the Crimson stability route.
+4. Keep M15 default-on blocked until the paired visual diff, FPS/jitter,
+   and input-latency gate passes.

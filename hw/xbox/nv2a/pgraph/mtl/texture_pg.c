@@ -167,6 +167,27 @@ static bool mtl_diag_tex_bind_all_targets(void)
     return e != NULL && e[0] != '\0' && e[0] != '0';
 }
 
+static void mtl_log_texture_addr_oob(PGRAPHState *pg, int stage,
+                                     TextureShape s, uint32_t ctl_0)
+{
+    static unsigned int s_oob_diag_count = 0;
+    if (s_oob_diag_count >= 64) {
+        return;
+    }
+
+    uint32_t fmt = pgraph_reg_r(pg, NV_PGRAPH_TEXFMT0 + stage * 4);
+    hwaddr tex_offset = pgraph_reg_r(pg, NV_PGRAPH_TEXOFFSET0 + stage * 4);
+    fprintf(stderr,
+            "xemu-perf: metal_tex_oob stage=%d tex_offset=0x%llx "
+            "dim=%u cubemap=%d size=%ux%ux%u pitch=%u fmt=%u "
+            "levels=%u texfmt=0x%08x ctl0=0x%08x\n",
+            stage, (unsigned long long)tex_offset,
+            (unsigned)s.dimensionality, s.cubemap ? 1 : 0,
+            s.width, s.height, s.depth, s.pitch, s.color_format, s.levels,
+            (unsigned)fmt, (unsigned)ctl_0);
+    s_oob_diag_count++;
+}
+
 static uint32_t translate_addr_mode(uint32_t nv2a_mode)
 {
     /* NV_PGRAPH_TEXADDRESS0_ADDRU values:
@@ -258,6 +279,12 @@ static inline uint8_t expand_6_to_8(uint32_t v)
 static inline uint16_t load_le16(const uint8_t *p)
 {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static inline void store_le16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xff);
+    p[1] = (uint8_t)(v >> 8);
 }
 
 static uint8_t *mtl_convert_texture_data_bgra8(TextureShape s,
@@ -361,6 +388,33 @@ static uint8_t *mtl_convert_texture_data_bgra8(TextureShape s,
                 dst[3] = 255;
                 break;
             }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8B8G8R8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8: {
+                const uint8_t *p = src + (size_t)x * 4;
+                dst[0] = p[2];
+                dst[1] = p[1];
+                dst[2] = p[0];
+                dst[3] = p[3];
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_B8G8R8A8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_B8G8R8A8: {
+                const uint8_t *p = src + (size_t)x * 4;
+                dst[0] = p[3];
+                dst[1] = p[2];
+                dst[2] = p[1];
+                dst[3] = p[0];
+                break;
+            }
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R8G8B8A8:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R8G8B8A8: {
+                const uint8_t *p = src + (size_t)x * 4;
+                dst[0] = p[1];
+                dst[1] = p[2];
+                dst[2] = p[3];
+                dst[3] = p[0];
+                break;
+            }
             default:
                 g_free(out);
                 return NULL;
@@ -370,6 +424,134 @@ static uint8_t *mtl_convert_texture_data_bgra8(TextureShape s,
 
     *converted_size = size;
     return out;
+}
+
+static uint8_t *mtl_convert_texture_data_rgba16(TextureShape s,
+                                                const uint8_t *data,
+                                                unsigned int width,
+                                                unsigned int height,
+                                                unsigned int row_pitch,
+                                                size_t *converted_size)
+{
+    if (data == NULL || converted_size == NULL) {
+        return NULL;
+    }
+
+    size_t size = (size_t)width * height * 8;
+    uint8_t *out = (uint8_t *)g_malloc(size);
+    uint8_t *dst = out;
+
+    for (unsigned int y = 0; y < height; y++) {
+        const uint8_t *src = data + (size_t)y * row_pitch;
+        for (unsigned int x = 0; x < width; x++, dst += 8) {
+            uint16_t v = load_le16(src + (size_t)x * 2);
+            switch (s.color_format) {
+            case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_DEPTH_Y16_FIXED:
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_DEPTH_Y16_FIXED:
+                store_le16(dst + 0, v);
+                store_le16(dst + 2, 0);
+                store_le16(dst + 4, 0);
+                store_le16(dst + 6, 0);
+                break;
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_DEPTH_Y16_FLOAT:
+                store_le16(dst + 0, v);
+                store_le16(dst + 2, 0);
+                store_le16(dst + 4, 0x3c00);
+                store_le16(dst + 6, 0);
+                break;
+            case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_Y16:
+                store_le16(dst + 0, v);
+                store_le16(dst + 2, v);
+                store_le16(dst + 4, v);
+                store_le16(dst + 6, 0xffff);
+                break;
+            default:
+                g_free(out);
+                return NULL;
+            }
+        }
+    }
+
+    *converted_size = size;
+    return out;
+}
+
+static uint8_t *mtl_crop_texture_2d(const uint8_t *data,
+                                    unsigned int src_width,
+                                    unsigned int src_height,
+                                    unsigned int src_row_bytes,
+                                    unsigned int dst_width,
+                                    unsigned int dst_height,
+                                    unsigned int skip_x,
+                                    unsigned int skip_y,
+                                    size_t *cropped_size)
+{
+    if (data == NULL || cropped_size == NULL || src_width == 0 ||
+        src_height == 0 || dst_width == 0 || dst_height == 0 ||
+        skip_x >= src_width || skip_y >= src_height) {
+        return NULL;
+    }
+
+    unsigned int bytes_per_pixel = src_row_bytes / src_width;
+    if (bytes_per_pixel == 0 || src_row_bytes % src_width != 0 ||
+        skip_x + dst_width > src_width || skip_y + dst_height > src_height) {
+        return NULL;
+    }
+
+    size_t dst_row_bytes = (size_t)dst_width * bytes_per_pixel;
+    size_t size = dst_row_bytes * dst_height;
+    uint8_t *out = (uint8_t *)g_malloc(size);
+
+    const uint8_t *src = data + (size_t)skip_y * src_row_bytes +
+                         (size_t)skip_x * bytes_per_pixel;
+    for (unsigned int y = 0; y < dst_height; y++) {
+        memcpy(out + y * dst_row_bytes, src + (size_t)y * src_row_bytes,
+               dst_row_bytes);
+    }
+
+    *cropped_size = size;
+    return out;
+}
+
+static size_t mtl_get_cubemap_face_size(PGRAPHState *pg, TextureShape s)
+{
+    BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
+    bool is_compressed = pgraph_is_texture_format_compressed(pg,
+                                                             s.color_format);
+    unsigned int w = s.width;
+    unsigned int h = s.height;
+    size_t face_size = 0;
+
+    if (!f.linear && s.border) {
+        w = MAX(16, w * 2);
+        h = MAX(16, h * 2);
+    }
+
+    if (is_compressed) {
+        unsigned int block_size =
+            (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5)
+            ? 8 : 16;
+        for (unsigned int level = 0; level < s.levels; level++) {
+            unsigned int lw = w ? w : 1;
+            unsigned int lh = h ? h : 1;
+            unsigned int pw = (lw + 3) & ~3u;
+            unsigned int ph = (lh + 3) & ~3u;
+            face_size += ((size_t)pw / 4) * ((size_t)ph / 4) * block_size;
+            if (w > 1) w /= 2;
+            if (h > 1) h /= 2;
+        }
+    } else {
+        for (unsigned int level = 0; level < s.levels; level++) {
+            unsigned int lw = w ? w : 1;
+            unsigned int lh = h ? h : 1;
+            face_size += (size_t)lw * lh * f.bytes_per_pixel;
+            if (w > 1) w /= 2;
+            if (h > 1) h /= 2;
+        }
+    }
+
+    return (face_size + NV2A_CUBEMAP_FACE_ALIGNMENT - 1) &
+           ~(NV2A_CUBEMAP_FACE_ALIGNMENT - 1);
 }
 
 static bool surface_texture_compatible(uint32_t surface_fmt,
@@ -473,10 +655,18 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
 {
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
     bool is_compressed = pgraph_is_texture_format_compressed(pg, s.color_format);
-    unsigned int width = s.width;
-    unsigned int height = s.height;
+    unsigned int src_width = s.width;
+    unsigned int src_height = s.height;
+    unsigned int dst_width = s.width;
+    unsigned int dst_height = s.height;
     const uint8_t *p = vram_base + face_byte_offset;
     const uint8_t *p_end = p + face_size;
+    bool crop_cubemap_border = s.cubemap && s.border && !f.linear;
+
+    if (crop_cubemap_border) {
+        src_width = MAX(16, src_width * 2);
+        src_height = MAX(16, src_height * 2);
+    }
 
     unsigned int levels_to_decode = s.levels;
     if (levels_to_decode > max_levels) levels_to_decode = max_levels;
@@ -485,8 +675,10 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
     *out_decoded_count = 0;
 
     for (unsigned int level = 0; level < levels_to_decode; level++) {
-        unsigned int w = width  ? width  : 1;
-        unsigned int h = height ? height : 1;
+        unsigned int w = src_width  ? src_width  : 1;
+        unsigned int h = src_height ? src_height : 1;
+        unsigned int out_w = dst_width  ? dst_width  : 1;
+        unsigned int out_h = dst_height ? dst_height : 1;
 
         if (is_compressed) {
             unsigned int physical_width  = (w + 3) & ~3u;
@@ -506,11 +698,30 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
             if (!rgba) {
                 return false;
             }
-            out_levels[base_index + level].width         = w;
-            out_levels[base_index + level].height        = h;
-            out_levels[base_index + level].bytes_per_row = w * 4;
+            size_t rgba_size = (size_t)w * h * 4;
+            if (crop_cubemap_border && w != out_w && h != out_h) {
+                unsigned int skip_x = (w - out_w) / 2;
+                unsigned int skip_y = (h - out_h) / 2;
+                size_t cropped_size = 0;
+                uint8_t *cropped = mtl_crop_texture_2d(
+                    rgba, w, h, w * 4, out_w, out_h, skip_x, skip_y,
+                    &cropped_size);
+                if (cropped == NULL) {
+                    g_free(rgba);
+                    return false;
+                }
+                g_free(rgba);
+                rgba = cropped;
+                rgba_size = cropped_size;
+            }
+            out_levels[base_index + level].width         =
+                crop_cubemap_border ? out_w : w;
+            out_levels[base_index + level].height        =
+                crop_cubemap_border ? out_h : h;
+            out_levels[base_index + level].bytes_per_row =
+                (crop_cubemap_border ? out_w : w) * 4;
             out_levels[base_index + level].data          = rgba;
-            out_levels[base_index + level].data_size     = (size_t)w * h * 4;
+            out_levels[base_index + level].data_size     = rgba_size;
             p += consumed;
         } else if (f.linear) {
             /* Linear texture path — pgraph_convert_texture_data does
@@ -529,6 +740,10 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
                 converted = mtl_convert_texture_data_bgra8(
                     s, p, w, h, pitch, &converted_size);
             }
+            if (!converted) {
+                converted = mtl_convert_texture_data_rgba16(
+                    s, p, w, h, pitch, &converted_size);
+            }
             if (!converted &&
                 s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_I8_A8R8G8B8) {
                 return false;
@@ -542,8 +757,25 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
                            p + y * pitch, dst_stride);
                 }
             }
-            out_levels[base_index + level].width         = w;
-            out_levels[base_index + level].height        = h;
+            if (crop_cubemap_border && w != out_w && h != out_h) {
+                unsigned int skip_x = (w - out_w) / 2;
+                unsigned int skip_y = (h - out_h) / 2;
+                size_t cropped_size = 0;
+                uint8_t *cropped = mtl_crop_texture_2d(
+                    converted, w, h, converted_size / h, out_w, out_h,
+                    skip_x, skip_y, &cropped_size);
+                if (cropped == NULL) {
+                    g_free(converted);
+                    return false;
+                }
+                g_free(converted);
+                converted = cropped;
+                converted_size = cropped_size;
+            }
+            out_levels[base_index + level].width         =
+                crop_cubemap_border ? out_w : w;
+            out_levels[base_index + level].height        =
+                crop_cubemap_border ? out_h : h;
             out_levels[base_index + level].bytes_per_row =
                 (uint32_t)((converted_size / h) ? (converted_size / h) : (w * 4));
             out_levels[base_index + level].data          = converted;
@@ -568,6 +800,10 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
                 converted = mtl_convert_texture_data_bgra8(
                     s, unswizzled, w, h, pitch, &converted_size);
             }
+            if (!converted) {
+                converted = mtl_convert_texture_data_rgba16(
+                    s, unswizzled, w, h, pitch, &converted_size);
+            }
             if (converted) {
                 g_free(unswizzled);
             } else if (s.color_format ==
@@ -578,10 +814,31 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
                 converted = unswizzled;
                 converted_size = swizzled_size;
             }
-            out_levels[base_index + level].width         = w;
-            out_levels[base_index + level].height        = h;
+            if (crop_cubemap_border && w != out_w && h != out_h) {
+                unsigned int skip_x = (w - out_w) / 2;
+                unsigned int skip_y = (h - out_h) / 2;
+                size_t cropped_size = 0;
+                uint8_t *cropped = mtl_crop_texture_2d(
+                    converted, w, h, converted_size / h, out_w, out_h,
+                    skip_x, skip_y, &cropped_size);
+                if (cropped == NULL) {
+                    g_free(converted);
+                    return false;
+                }
+                g_free(converted);
+                converted = cropped;
+                converted_size = cropped_size;
+            }
+            out_levels[base_index + level].width         =
+                crop_cubemap_border ? out_w : w;
+            out_levels[base_index + level].height        =
+                crop_cubemap_border ? out_h : h;
             out_levels[base_index + level].bytes_per_row =
-                (uint32_t)((converted_size / h) ? (converted_size / h) : (w * 4));
+                (uint32_t)((converted_size /
+                             (crop_cubemap_border ? out_h : h)) ?
+                            (converted_size /
+                             (crop_cubemap_border ? out_h : h)) :
+                            ((crop_cubemap_border ? out_w : w) * 4));
             out_levels[base_index + level].data          = converted;
             out_levels[base_index + level].data_size     = converted_size;
             p += swizzled_size;
@@ -589,8 +846,10 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
 
         (*out_decoded_count)++;
 
-        if (width  > 1) width  /= 2;
-        if (height > 1) height /= 2;
+        if (src_width  > 1) src_width  /= 2;
+        if (src_height > 1) src_height /= 2;
+        if (dst_width  > 1) dst_width  /= 2;
+        if (dst_height > 1) dst_height /= 2;
     }
     return true;
 }
@@ -615,6 +874,25 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     uint32_t mtl_fmt = pgraph_mtl_texture_color_format_to_mtl(
         s.color_format, &is_compressed, &is_indexed, &needs_unswizzle);
     if (mtl_fmt == 0) {
+        if (mtl_diag_tex_bind_enabled()) {
+            static unsigned int s_unsupported_diag_count = 0;
+            if (s_unsupported_diag_count < 64) {
+                hwaddr offset = 0;
+                bool addr_ok =
+                    pgraph_try_get_texture_phys_addr(pg, stage, &offset);
+                fprintf(stderr,
+                        "xemu-perf: metal_tex_unsupported stage=%d "
+                        "tex=%s0x%llx dim=%u cubemap=%d size=%ux%ux%u "
+                        "pitch=%u fmt=%u levels=%u ctl0=0x%08x\n",
+                        stage, addr_ok ? "" : "invalid:",
+                        (unsigned long long)offset,
+                        (unsigned)s.dimensionality,
+                        s.cubemap ? 1 : 0,
+                        s.width, s.height, s.depth, s.pitch,
+                        s.color_format, s.levels, (unsigned)ctl_0);
+                s_unsupported_diag_count++;
+            }
+        }
         /* Unsupported format — leave the slot whatever it currently is
          * (likely the default-sampler-only state). */
         pgraph_mtl_texture_unbind_slot(stage);
@@ -627,7 +905,12 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     }
 
     NV2AState *d = container_of(pg, NV2AState, pgraph);
-    hwaddr offset = pgraph_get_texture_phys_addr(pg, stage);
+    hwaddr offset;
+    if (!pgraph_try_get_texture_phys_addr(pg, stage, &offset)) {
+        mtl_log_texture_addr_oob(pg, stage, s, ctl_0);
+        pgraph_mtl_texture_unbind_slot(stage);
+        return false;
+    }
     size_t texture_length = pgraph_get_texture_length(pg, &s);
     const uint8_t *vram = (const uint8_t *)d->vram_ptr;
     const uint8_t *palette_data = NULL;
@@ -656,6 +939,10 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     if (levels > MTL_TEX_MAX_LEVELS) levels = MTL_TEX_MAX_LEVELS;
 
     unsigned int faces = s.cubemap ? 6 : 1;
+    size_t face_size = faces > 1 ? mtl_get_cubemap_face_size(pg, s) : 0;
+    if (faces > 1 && face_size != 0) {
+        texture_length = face_size * faces;
+    }
 
     void *surface_tex = NULL;
     uint32_t surface_w = 0, surface_h = 0;
@@ -705,14 +992,16 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
             (*count)++;
             fprintf(stderr,
                     "xemu-perf: metal_tex_bind_diag target=0x%x "
-                    "stage=%d tex=0x%llx dim=%u size=%ux%u pitch=%u "
+                    "stage=%d tex=0x%llx dim=%u cubemap=%d "
+                    "size=%ux%ux%u pitch=%u "
                     "fmt=%u mtl_fmt=%u levels=%u linear=%d "
                     "surf=%d self=%d surf_guest=%ux%u "
                     "surf_scaled=%ux%u surf_pitch=%u surf_fmt=%u "
                     "prim=%u ctl0=0x%08x\n",
                     (unsigned)color_target, stage,
                     (unsigned long long)offset,
-                    (unsigned)s.dimensionality, s.width, s.height,
+                    (unsigned)s.dimensionality, s.cubemap ? 1 : 0,
+                    s.width, s.height, s.depth,
                     s.pitch, s.color_format, mtl_fmt, levels,
                     f.linear ? 1 : 0,
                     has_compatible_surface ? 1 : 0,
@@ -756,35 +1045,6 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
 
     PgraphMtlTextureLevel decoded[MTL_TEX_MAX_FACES * MTL_TEX_MAX_LEVELS];
     memset(decoded, 0, sizeof(decoded));
-
-    /* Compute face byte size for cubemaps via the same formula as vk. */
-    size_t face_size = 0;
-    if (faces > 1) {
-        unsigned int w = s.width, h = s.height;
-        if (is_compressed) {
-            unsigned int block_size =
-                (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5)
-                ? 8 : 16;
-            for (unsigned int level = 0; level < s.levels; level++) {
-                unsigned int pw = (w + 3) & ~3u;
-                unsigned int ph = (h + 3) & ~3u;
-                face_size += ((size_t)pw / 4) * ((size_t)ph / 4) * block_size;
-                if (w > 1) w /= 2;
-                if (h > 1) h /= 2;
-            }
-        } else {
-            for (unsigned int level = 0; level < s.levels; level++) {
-                unsigned int lw = w ? w : 1;
-                unsigned int lh = h ? h : 1;
-                face_size += (size_t)lw * lh * f.bytes_per_pixel;
-                if (w > 1) w /= 2;
-                if (h > 1) h /= 2;
-            }
-        }
-        /* NV2A_CUBEMAP_FACE_ALIGNMENT not used here; the per-face data
-         * layout is contiguous in the assumption used for the texture
-         * cache. Borders / alignment are deferred. */
-    }
 
     bool ok = true;
     for (unsigned int face = 0; face < faces; face++) {

@@ -1,14 +1,19 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-04 (PGR2 Metal surface/RTT validation added in
+Last updated: 2026-05-04 (Metal boot/flubber + PGR2/Rainbow follow-up
+added in
 `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`. GL
 renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` remains the
 production configuration meeting the user's stated 30/60 FPS at 1080p
 goals. Metal visual canaries: PGR2 PASS, Rainbow Six 3 loading screen
-PASS, Crimson Skies FAIL and blocks M15. Input-latency counters
-`INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` / `INPUT_LAT_US_TOTAL` /
-`INPUT_LAT_US_MAX` always-on; `XEMU_MACOS_NATIVE_INPUT=1` opt-in for
-the GameController.framework backend.)
+PASS, Xbox boot/flubber PASS. Crimson gameplay automation completes
+without aborting, but the current screenshot lands on black
+transition/loading output and is not yet a visual canary. M15 remains
+blocked on the broader Metal-vs-GL gameplay/visual-diff gate.
+Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
+`INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
+`XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
+backend.)
 
 ## Benchmarking Rules
 
@@ -118,7 +123,8 @@ Known emulator files:
 | --- | --- | --- | --- | --- | --- | --- |
 | M5.11-PGR2 | Surface/RTT + A8 linear texture-view fix | Metal | PGR2 menu/logo/text canary | frame 900 screenshot | PASS | `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md` |
 | M5.11-R6 | Surface/RTT regression canary | Metal | Rainbow Six 3 loading screen | frame 600 screenshot | PASS | `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md` |
-| M5.11-CS | Remaining Metal visual blocker | Metal | Crimson Skies smoke | frame 300 screenshot | FAIL | untextured green aircraft / black scene; same benchmark note |
+| M5.12-BOOT | Front-face + cubemap-border canary | Metal | Xbox boot/flubber animation | frame 300 screenshot | PASS | `benchmark-runs/20260504-092824-crimson-skies`, `benchmark-runs/visual-checks/boot-post-oob-f300.png` |
+| M5.12-CS-STAB | Texture-DMA OOB + invalid-stage shader hardening | Metal | Crimson Skies gameplay route | frame 1800 screenshot + 70s run | STABILITY PASS / VISUAL PENDING | `benchmark-runs/20260504-092403-crimson-skies`; screenshot lands on black transition/loading output |
 
 
 ## Retail Gameplay Targets

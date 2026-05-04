@@ -29,6 +29,7 @@
 #include "qemu/osdep.h"
 #include "hw/xbox/nv2a/debug.h"
 #include "hw/xbox/nv2a/pgraph/pgraph.h"
+#include "hw/xbox/nv2a/pgraph/texture.h"
 #include "geom.h"
 #include "psh.h"
 
@@ -142,6 +143,13 @@ void pgraph_glsl_set_psh_state(PGRAPHState *pg, PshState *state)
         bool enabled = pgraph_is_texture_stage_active(pg, i) &&
                        (ctl_0 & NV_PGRAPH_TEXCTL0_0_ENABLE);
         if (!enabled) {
+            state->shader_stage_program &= ~(0x1f << (i * 5));
+            continue;
+        }
+
+        hwaddr texture_vram_offset;
+        if (!pgraph_try_get_texture_phys_addr(pg, i, &texture_vram_offset)) {
+            state->shader_stage_program &= ~(0x1f << (i * 5));
             continue;
         }
 

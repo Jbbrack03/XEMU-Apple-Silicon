@@ -318,10 +318,14 @@ static void apply_translated_raster_state(id<MTLRenderCommandEncoder> enc,
         [enc setCullMode:MTLCullModeNone];
     }
 
+    /* Match GL's effective winding for the generated vertex shaders. The
+     * Metal SPIR-V->MSL path fixes depth convention, but it does not flip
+     * clip-space Y, so using Vulkan's front-face mapping culls the boot
+     * animation's translucent glow quads. */
     [enc setFrontFacingWinding:
         (setup_raster & NV_PGRAPH_SETUPRASTER_FRONTFACE)
-            ? MTLWindingCounterClockwise
-            : MTLWindingClockwise];
+            ? MTLWindingClockwise
+            : MTLWindingCounterClockwise];
 
     bool has_depth = surface_depth != NULL;
     bool has_stencil = has_depth && mtl_format_has_stencil(depth_fmt);

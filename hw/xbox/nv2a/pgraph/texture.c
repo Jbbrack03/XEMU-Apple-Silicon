@@ -78,10 +78,16 @@ const BasicColorFormatInfo kelvin_color_format_info_map[66] = {
     [NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R8G8B8A8] = { 4, true },
 };
 
-hwaddr pgraph_get_texture_phys_addr(PGRAPHState *pg, int texture_idx)
+bool pgraph_try_get_texture_phys_addr(PGRAPHState *pg, int texture_idx,
+                                      hwaddr *phys_addr)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     int i = texture_idx;
+
+    if (phys_addr == NULL) {
+        return false;
+    }
+    *phys_addr = 0;
 
     uint32_t fmt = pgraph_reg_r(pg, NV_PGRAPH_TEXFMT0 + i*4);
     unsigned int dma_select =
@@ -96,10 +102,27 @@ hwaddr pgraph_get_texture_phys_addr(PGRAPHState *pg, int texture_idx)
     } else {
         texture_data = (uint8_t*)nv_dma_map(d, pg->dma_a, &dma_len);
     }
-    assert(offset < dma_len);
-    texture_data += offset;
+    if (texture_data == NULL || offset >= dma_len) {
+        return false;
+    }
 
-    return texture_data - d->vram_ptr;
+    uintptr_t texture_addr = (uintptr_t)(texture_data + offset);
+    uintptr_t vram_addr = (uintptr_t)d->vram_ptr;
+    hwaddr vram_size = memory_region_size(d->vram);
+    if (texture_addr < vram_addr || texture_addr >= vram_addr + vram_size) {
+        return false;
+    }
+
+    *phys_addr = texture_addr - vram_addr;
+    return true;
+}
+
+hwaddr pgraph_get_texture_phys_addr(PGRAPHState *pg, int texture_idx)
+{
+    hwaddr phys_addr;
+    bool ok = pgraph_try_get_texture_phys_addr(pg, texture_idx, &phys_addr);
+    assert(ok);
+    return phys_addr;
 }
 
 hwaddr pgraph_get_texture_palette_phys_addr_length(PGRAPHState *pg, int texture_idx, size_t *length)
