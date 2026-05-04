@@ -116,6 +116,25 @@ void *pgraph_mtl_surface_get_metal_texture_within(uint32_t vram_addr,
                                                   uint32_t *out_width,
                                                   uint32_t *out_height,
                                                   uint32_t *out_format);
+bool pgraph_mtl_surface_get_color_surface_info_at(uint32_t vram_addr,
+                                                  void **out_texture,
+                                                  uint32_t *out_width,
+                                                  uint32_t *out_height,
+                                                  uint32_t *out_guest_width,
+                                                  uint32_t *out_guest_height,
+                                                  uint32_t *out_pitch,
+                                                  uint32_t *out_format);
+bool pgraph_mtl_surface_get_color_surface_info_for(uint32_t vram_addr,
+                                                   uint32_t guest_width,
+                                                   uint32_t guest_height,
+                                                   uint32_t pitch,
+                                                   void **out_texture,
+                                                   uint32_t *out_width,
+                                                   uint32_t *out_height,
+                                                   uint32_t *out_guest_width,
+                                                   uint32_t *out_guest_height,
+                                                   uint32_t *out_pitch,
+                                                   uint32_t *out_format);
 
 /*
  * Legacy ensure-color/-depth wrappers. Kept so the M2-era clear path
@@ -165,7 +184,7 @@ void *pgraph_mtl_get_framebuffer_metal_texture(void);
  * compositor calls this to release any per-frame references. For M2 the
  * surface is long-lived (no in-flight tracking), so this is a no-op.
  */
-void pgraph_mtl_release_framebuffer_metal_texture(void);
+void pgraph_mtl_release_framebuffer_metal_texture(void *texture);
 
 /* M5.9: publish the surface at `vram_addr` as the front-fb. Called
  * from `pgraph_mtl_get_framebuffer_surface` (renderer.c) which already
@@ -185,6 +204,11 @@ void pgraph_mtl_release_framebuffer_metal_texture(void);
  */
 bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
                                          const char *reason);
+bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
+                                                 uint32_t display_width,
+                                                 uint32_t display_height,
+                                                 uint32_t vga_line_offset,
+                                                 const char *reason);
 
 /*
  * Accessors for the currently-bound color / depth render targets.
@@ -346,10 +370,11 @@ unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
                                                   unsigned int cap);
 
 /* M5.10 experimental fallback (2026-05-03): publish the
- * most-recently-bound color RT (s_color_binding) as the front-fb. See
+ * dominant per-frame color draw target as the front-fb. See
  * `surface.mm::pgraph_mtl_surface_publish_latest_draw_fallback` for
  * the full rationale. Gated by `XEMU_METAL_FRONT_FB_FALLBACK=1` at
  * the renderer level. */
+void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write);
 bool pgraph_mtl_surface_publish_latest_draw_fallback(void);
 
 /* M5.9-followup-B+C: counter accessors. Always-on atomics. */

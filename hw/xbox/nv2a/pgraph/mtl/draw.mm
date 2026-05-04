@@ -28,7 +28,10 @@
 #include "pipeline.h"
 #include "surface.h"
 #include "texture.h"
+#include "uniform.h"
 #include "vertex.h"  /* MtlAttributeStream + MTL_ATTR_BUFFER_INDEX_BASE */
+
+#include "hw/xbox/nv2a/nv2a_regs.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -45,13 +48,13 @@ extern "C" void *xemu_metal_get_device(void);
  * `[cb waitUntilCompleted]` in mtl/texture.mm. Skipped when the
  * fence value is 0 — no upload has yet signaled, so there is
  * nothing to wait on. */
-static inline void mtl_draw_wait_upload_fence(id<MTLCommandBuffer> cb)
+static inline void mtl_draw_wait_upload_fence(id<MTLCommandBuffer> cb,
+                                              uint64_t value)
 {
     void *event_handle = pgraph_mtl_texture_get_upload_fence_event();
     if (event_handle == NULL) {
         return;
     }
-    uint64_t value = pgraph_mtl_texture_get_upload_fence_value();
     if (value == 0) {
         return;
     }
@@ -92,6 +95,18 @@ static _Atomic(uint64_t)   s_draw_native_quad_count = 0;
 static _Atomic(uint64_t)   s_draw_translated_count = 0;
 static _Atomic(uint64_t)   s_draw_pipeline_fallback_count = 0;
 
+typedef struct MtlDepthStencilCacheEntry {
+    uint32_t control_0;
+    uint32_t control_1;
+    uint32_t control_2;
+    bool     has_depth_attachment;
+    bool     has_stencil_attachment;
+    id<MTLDepthStencilState> state;
+} MtlDepthStencilCacheEntry;
+
+static MtlDepthStencilCacheEntry s_depth_stencil_cache[64];
+static unsigned int s_depth_stencil_cache_count = 0;
+
 /* M5.5+ render-pass coalescing.
  *
  * Apple Silicon's TBDR makes every render-pass start expensive (tile-
@@ -125,6 +140,7 @@ static struct {
     uint32_t  depth_fmt;
     uint32_t  sample_count;
 } s_open_pass_key;
+static uint64_t s_open_upload_fence_value = 0;
 static bool s_open_buffer_frame_active = false;
 
 /* Per-interval coalescing telemetry (surfaced via accessors at file
@@ -132,6 +148,221 @@ static bool s_open_buffer_frame_active = false;
 static _Atomic(uint64_t) s_open_pass_opens     = 0;
 static _Atomic(uint64_t) s_open_pass_coalesced = 0;
 static _Atomic(uint64_t) s_open_pass_flushes   = 0;
+static bool s_wait_for_open_pass_close = false;
+
+static void argb_pack32_to_rgba_float(uint32_t argb, float rgba[4])
+{
+    rgba[0] = (float)((argb >> 16) & 0xff) / 255.0f;
+    rgba[1] = (float)((argb >> 8) & 0xff) / 255.0f;
+    rgba[2] = (float)(argb & 0xff) / 255.0f;
+    rgba[3] = (float)((argb >> 24) & 0xff) / 255.0f;
+}
+
+static inline uint32_t mtl_get_mask(uint32_t v, uint32_t mask)
+{
+    return mask ? ((v & mask) >> __builtin_ctz(mask)) : 0;
+}
+
+static bool mtl_env_flag_enabled(const char *name)
+{
+    const char *e = getenv(name);
+    return e != NULL && e[0] != '\0' && e[0] != '0';
+}
+
+static const MTLCompareFunction pgraph_compare_mtl_map[8] = {
+    MTLCompareFunctionNever,
+    MTLCompareFunctionLess,
+    MTLCompareFunctionEqual,
+    MTLCompareFunctionLessEqual,
+    MTLCompareFunctionGreater,
+    MTLCompareFunctionNotEqual,
+    MTLCompareFunctionGreaterEqual,
+    MTLCompareFunctionAlways,
+};
+
+static const MTLStencilOperation pgraph_stencil_op_mtl_map[9] = {
+    MTLStencilOperationKeep,
+    MTLStencilOperationKeep,
+    MTLStencilOperationZero,
+    MTLStencilOperationReplace,
+    MTLStencilOperationIncrementClamp,
+    MTLStencilOperationDecrementClamp,
+    MTLStencilOperationInvert,
+    MTLStencilOperationIncrementWrap,
+    MTLStencilOperationDecrementWrap,
+};
+
+static const MTLCullMode pgraph_cull_mode_mtl_map[4] = {
+    MTLCullModeNone,
+    MTLCullModeFront,
+    MTLCullModeBack,
+    MTLCullModeBack,
+};
+
+static bool mtl_format_has_stencil(uint32_t depth_fmt)
+{
+    MTLPixelFormat fmt = (MTLPixelFormat)depth_fmt;
+    return fmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
+           fmt == MTLPixelFormatDepth32Float_Stencil8 ||
+           fmt == MTLPixelFormatStencil8;
+}
+
+static id<MTLDepthStencilState>
+get_depth_stencil_state(uint32_t control_0, uint32_t control_1,
+                        uint32_t control_2, bool has_depth_attachment,
+                        bool has_stencil_attachment)
+{
+    for (unsigned int i = 0; i < s_depth_stencil_cache_count; i++) {
+        MtlDepthStencilCacheEntry *e = &s_depth_stencil_cache[i];
+        if (e->control_0 == control_0 &&
+            e->control_1 == control_1 &&
+            e->control_2 == control_2 &&
+            e->has_depth_attachment == has_depth_attachment &&
+            e->has_stencil_attachment == has_stencil_attachment) {
+            return e->state;
+        }
+    }
+
+    bool force_no_depth_stencil =
+        mtl_env_flag_enabled("XEMU_METAL_DEBUG_DISABLE_DEPTH_STENCIL");
+    bool depth_test =
+        has_depth_attachment &&
+        !force_no_depth_stencil &&
+        (control_0 & NV_PGRAPH_CONTROL_0_ZENABLE) != 0;
+    bool depth_write =
+        has_depth_attachment &&
+        !force_no_depth_stencil &&
+        (control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE) != 0;
+    bool stencil_test =
+        has_stencil_attachment &&
+        !force_no_depth_stencil &&
+        (control_1 & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE) != 0;
+
+    MTLDepthStencilDescriptor *desc = [MTLDepthStencilDescriptor new];
+    desc.depthCompareFunction = MTLCompareFunctionAlways;
+    desc.depthWriteEnabled = depth_write ? YES : NO;
+    if (depth_test) {
+        uint32_t func =
+            mtl_get_mask(control_0, NV_PGRAPH_CONTROL_0_ZFUNC) & 7u;
+        desc.depthCompareFunction = pgraph_compare_mtl_map[func];
+    }
+
+    if (stencil_test) {
+        uint32_t func =
+            mtl_get_mask(control_1, NV_PGRAPH_CONTROL_1_STENCIL_FUNC) & 7u;
+        uint32_t op_fail =
+            mtl_get_mask(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_FAIL);
+        uint32_t op_zfail =
+            mtl_get_mask(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZFAIL);
+        uint32_t op_zpass =
+            mtl_get_mask(control_2, NV_PGRAPH_CONTROL_2_STENCIL_OP_ZPASS);
+
+        MTLStencilDescriptor *stencil = [MTLStencilDescriptor new];
+        stencil.stencilCompareFunction = pgraph_compare_mtl_map[func];
+        stencil.stencilFailureOperation =
+            pgraph_stencil_op_mtl_map[op_fail < 9 ? op_fail : 1];
+        stencil.depthFailureOperation =
+            pgraph_stencil_op_mtl_map[op_zfail < 9 ? op_zfail : 1];
+        stencil.depthStencilPassOperation =
+            pgraph_stencil_op_mtl_map[op_zpass < 9 ? op_zpass : 1];
+        stencil.readMask =
+            mtl_get_mask(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_READ);
+        stencil.writeMask =
+            mtl_get_mask(control_1, NV_PGRAPH_CONTROL_1_STENCIL_MASK_WRITE);
+        desc.frontFaceStencil = stencil;
+        desc.backFaceStencil = stencil;
+    }
+
+    id<MTLDepthStencilState> state =
+        [s_device newDepthStencilStateWithDescriptor:desc];
+    if (state == nil) {
+        return nil;
+    }
+
+    MtlDepthStencilCacheEntry *slot = NULL;
+    if (s_depth_stencil_cache_count <
+        sizeof(s_depth_stencil_cache) / sizeof(s_depth_stencil_cache[0])) {
+        slot = &s_depth_stencil_cache[s_depth_stencil_cache_count++];
+    } else {
+        slot = &s_depth_stencil_cache[0];
+    }
+    slot->control_0 = control_0;
+    slot->control_1 = control_1;
+    slot->control_2 = control_2;
+    slot->has_depth_attachment = has_depth_attachment;
+    slot->has_stencil_attachment = has_stencil_attachment;
+    slot->state = state;
+    return state;
+}
+
+static void apply_translated_raster_state(id<MTLRenderCommandEncoder> enc,
+                                          uint32_t viewport_w,
+                                          uint32_t viewport_h,
+                                          uint32_t depth_fmt,
+                                          void *surface_depth,
+                                          uint32_t control_0,
+                                          uint32_t control_1,
+                                          uint32_t control_2,
+                                          uint32_t setup_raster,
+                                          uint32_t scissor_x,
+                                          uint32_t scissor_y,
+                                          uint32_t scissor_w,
+                                          uint32_t scissor_h)
+{
+    if (!mtl_env_flag_enabled("XEMU_METAL_DEBUG_DISABLE_CULL") &&
+        (setup_raster & NV_PGRAPH_SETUPRASTER_CULLENABLE) != 0) {
+        uint32_t cull =
+            mtl_get_mask(setup_raster, NV_PGRAPH_SETUPRASTER_CULLCTRL);
+        [enc setCullMode:pgraph_cull_mode_mtl_map[cull < 4 ? cull : 0]];
+    } else {
+        [enc setCullMode:MTLCullModeNone];
+    }
+
+    [enc setFrontFacingWinding:
+        (setup_raster & NV_PGRAPH_SETUPRASTER_FRONTFACE)
+            ? MTLWindingCounterClockwise
+            : MTLWindingClockwise];
+
+    bool has_depth = surface_depth != NULL;
+    bool has_stencil = has_depth && mtl_format_has_stencil(depth_fmt);
+    id<MTLDepthStencilState> ds =
+        get_depth_stencil_state(control_0, control_1, control_2,
+                                has_depth, has_stencil);
+    if (ds != nil) {
+        [enc setDepthStencilState:ds];
+    }
+    if (has_stencil) {
+        uint32_t ref =
+            mtl_get_mask(control_1, NV_PGRAPH_CONTROL_1_STENCIL_REF);
+        [enc setStencilReferenceValue:ref];
+    }
+
+    if (mtl_env_flag_enabled("XEMU_METAL_DEBUG_DISABLE_SCISSOR") ||
+        scissor_w == 0 || scissor_h == 0) {
+        scissor_x = 0;
+        scissor_y = 0;
+        scissor_w = viewport_w;
+        scissor_h = viewport_h;
+    }
+    if (scissor_x > viewport_w) scissor_x = viewport_w;
+    if (scissor_y > viewport_h) scissor_y = viewport_h;
+    if (scissor_x + scissor_w > viewport_w) {
+        scissor_w = viewport_w - scissor_x;
+    }
+    if (scissor_y + scissor_h > viewport_h) {
+        scissor_h = viewport_h - scissor_y;
+    }
+    if (scissor_w == 0) scissor_w = 1;
+    if (scissor_h == 0) scissor_h = 1;
+
+    MTLScissorRect scissor = {
+        .x = (NSUInteger)scissor_x,
+        .y = (NSUInteger)scissor_y,
+        .width = (NSUInteger)scissor_w,
+        .height = (NSUInteger)scissor_h,
+    };
+    [enc setScissorRect:scissor];
+}
 
 bool pgraph_mtl_draw_init(void)
 {
@@ -174,6 +405,7 @@ bool pgraph_mtl_draw_init(void)
     atomic_store(&s_draw_native_quad_count, (uint64_t)0);
     atomic_store(&s_draw_translated_count, (uint64_t)0);
     atomic_store(&s_draw_pipeline_fallback_count, (uint64_t)0);
+    s_depth_stencil_cache_count = 0;
     s_initialized = true;
     return true;
 }
@@ -187,7 +419,13 @@ void pgraph_mtl_draw_finalize(void)
      * queue. Calling endEncoding/commit on a queue that's about to
      * release would otherwise leak GPU work. */
     extern void pgraph_mtl_draw_flush_open_pass(void);
+    s_wait_for_open_pass_close = true;
     pgraph_mtl_draw_flush_open_pass();
+    s_wait_for_open_pass_close = false;
+    for (unsigned int i = 0; i < s_depth_stencil_cache_count; i++) {
+        s_depth_stencil_cache[i].state = nil;
+    }
+    s_depth_stencil_cache_count = 0;
     s_draw_done_event = nil;
     s_draw_queue = nil;
     s_device = nil;
@@ -368,6 +606,9 @@ static void open_pass_close_locked(void)
             [s_open_cmd encodeSignalEvent:s_draw_done_event value:v];
         }
         [s_open_cmd commit];
+        if (s_wait_for_open_pass_close) {
+            [s_open_cmd waitUntilCompleted];
+        }
         s_open_cmd = nil;
     }
     if (s_open_buffer_frame_active) {
@@ -375,6 +616,7 @@ static void open_pass_close_locked(void)
         s_open_buffer_frame_active = false;
     }
     memset(&s_open_pass_key, 0, sizeof(s_open_pass_key));
+    s_open_upload_fence_value = 0;
 }
 
 /* Ensure an open render encoder matching the supplied attachment set.
@@ -387,8 +629,10 @@ open_pass_ensure(void *color_tex, void *depth_tex,
                  uint32_t color_fmt, uint32_t depth_fmt,
                  uint32_t sample_count)
 {
+    uint64_t upload_fence_value = pgraph_mtl_texture_get_upload_fence_value();
     if (open_pass_matches(color_tex, depth_tex, color_fmt, depth_fmt,
-                          sample_count)) {
+                          sample_count) &&
+        s_open_upload_fence_value == upload_fence_value) {
         atomic_fetch_add(&s_open_pass_coalesced, 1);
         return s_open_enc;
     }
@@ -406,7 +650,8 @@ open_pass_ensure(void *color_tex, void *depth_tex,
 
         s_open_cmd = [s_draw_queue commandBuffer];
         s_open_cmd.label = @"xemu.metal.coalesced_draw";
-        mtl_draw_wait_upload_fence(s_open_cmd);
+        mtl_draw_wait_upload_fence(s_open_cmd, upload_fence_value);
+        s_open_upload_fence_value = upload_fence_value;
 
         s_open_enc = [s_open_cmd renderCommandEncoderWithDescriptor:desc];
         s_open_enc.label = @"xemu.metal.coalesced_enc";
@@ -645,6 +890,15 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
                                 void *surface_color,
                                 void *surface_depth,
                                 uint32_t depth_fmt,
+                                uint32_t blend_color,
+                                uint32_t control_0,
+                                uint32_t control_1,
+                                uint32_t control_2,
+                                uint32_t setup_raster,
+                                uint32_t scissor_x,
+                                uint32_t scissor_y,
+                                uint32_t scissor_w,
+                                uint32_t scissor_h,
                                 void *vsh_ubo,
                                 size_t vsh_ubo_offset,
                                 size_t vsh_ubo_size,
@@ -721,6 +975,18 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
     id<MTLRenderPipelineState> ps =
         (__bridge id<MTLRenderPipelineState>)pipeline_state;
     [enc setRenderPipelineState:ps];
+    apply_translated_raster_state(enc, viewport_w, viewport_h,
+                                  depth_fmt, surface_depth,
+                                  control_0, control_1, control_2,
+                                  setup_raster,
+                                  scissor_x, scissor_y,
+                                  scissor_w, scissor_h);
+    float blend_rgba[4];
+    argb_pack32_to_rgba_float(blend_color, blend_rgba);
+    [enc setBlendColorRed:blend_rgba[0]
+                    green:blend_rgba[1]
+                     blue:blend_rgba[2]
+                    alpha:blend_rgba[3]];
 
     MTLViewport vp = (MTLViewport){
         .originX = 0.0,
@@ -766,7 +1032,8 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
             if (stage_textures[i] != NULL) {
                 id<MTLTexture> t =
                     (__bridge id<MTLTexture>)stage_textures[i];
-                [enc setFragmentTexture:t atIndex:i];
+                [enc setFragmentTexture:t
+                                atIndex:PGRAPH_MTL_PSH_TEX_BINDING_INDEX + i];
             }
         }
     }
@@ -775,7 +1042,8 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
             if (stage_samplers[i] != NULL) {
                 id<MTLSamplerState> ss =
                     (__bridge id<MTLSamplerState>)stage_samplers[i];
-                [enc setFragmentSamplerState:ss atIndex:i];
+                [enc setFragmentSamplerState:ss
+                                      atIndex:PGRAPH_MTL_PSH_TEX_BINDING_INDEX + i];
             }
         }
     }
@@ -794,6 +1062,12 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
                 vertexCount:vertex_count];
     }
 
+    bool color_write =
+        (control_0 & (NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE |
+                      NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE |
+                      NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE |
+                      NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)) != 0;
+    pgraph_mtl_surface_note_color_draw(surface_color, color_write);
     atomic_fetch_add(&s_draw_count, 1);
     if (indexed) {
         atomic_fetch_add(&s_draw_indexed_count, 1);

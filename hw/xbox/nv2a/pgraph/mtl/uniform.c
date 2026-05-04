@@ -29,6 +29,8 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 
 #include "uniform.h"
+#include "surface.h"
+#include "texture.h"
 
 #include "hw/xbox/nv2a/pgraph/glsl/common.h"
 #include "hw/xbox/nv2a/pgraph/glsl/vsh.h"
@@ -64,6 +66,32 @@ extern void *pgraph_mtl_uniform_ring_reserve(size_t size,
 /* Counters. */
 static _Atomic uint64_t s_pack_count = 0;
 static _Atomic uint64_t s_pack_bytes = 0;
+static _Atomic uint64_t s_vsh_uniform_diag_lines = 0;
+static _Atomic uint64_t s_psh_uniform_diag_lines = 0;
+
+static bool mtl_vsh_uniform_diag_enabled(void)
+{
+    const char *e = getenv("XEMU_METAL_DIAG_VSH");
+    return e != NULL && e[0] != '\0' && e[0] != '0';
+}
+
+static bool mtl_psh_uniform_diag_enabled(uint32_t target)
+{
+    const char *e = getenv("XEMU_METAL_DIAG_PSH");
+    if (e == NULL || e[0] == '\0' || strcmp(e, "0") == 0) {
+        return false;
+    }
+    if (strcmp(e, "1") == 0 || strcmp(e, "all") == 0) {
+        return true;
+    }
+
+    char *end = NULL;
+    uint64_t wanted = strtoull(e, &end, 0);
+    if (end != e && *end == '\0') {
+        return target == (uint32_t)wanted;
+    }
+    return true;
+}
 
 bool pgraph_mtl_uniform_init(void)
 {
@@ -273,6 +301,24 @@ size_t pgraph_mtl_uniform_stage_vsh(PGRAPHState *pg,
     VshUniformValues values;
     memset(&values, 0, sizeof(values));
     pgraph_glsl_set_vsh_uniform_values(pg, state, locs, &values);
+    if (mtl_vsh_uniform_diag_enabled() &&
+        atomic_fetch_add(&s_vsh_uniform_diag_lines, 1) < 96) {
+        fprintf(stderr,
+                "xemu-perf: metal_vsh_uniform_diag uniform=0x%04x "
+                "clip={%.6g,%.6g,%.6g,%.6g} surface={%.6g,%.6g} "
+                "inline0={%.6g,%.6g,%.6g,%.6g} "
+                "c0={%.6g,%.6g,%.6g,%.6g} c1={%.6g,%.6g,%.6g,%.6g}\n",
+                state->uniform_attrs,
+                values.clipRange[0][0], values.clipRange[0][1],
+                values.clipRange[0][2], values.clipRange[0][3],
+                values.surfaceSize[0][0], values.surfaceSize[0][1],
+                values.inlineValue[0][0], values.inlineValue[0][1],
+                values.inlineValue[0][2], values.inlineValue[0][3],
+                values.c[0][0], values.c[0][1],
+                values.c[0][2], values.c[0][3],
+                values.c[1][0], values.c[1][1],
+                values.c[1][2], values.c[1][3]);
+    }
 
     /* Reserve, pack into the buffer, and return. */
     void *mtl_buf = NULL;
@@ -318,11 +364,31 @@ size_t pgraph_mtl_uniform_stage_psh(PGRAPHState *pg,
     memset(&values, 0, sizeof(values));
     pgraph_glsl_set_psh_uniform_values(pg, locs, &values);
 
-    /* texScale defaults to 1.0 — vk fills these from per-binding
-     * surface_scale; the M7.1 path uses 1.0 (no scale) until the
-     * surface-to-texture path lands. */
     for (int i = 0; i < 4; i++) {
-        values.texScale[i] = 1.0f;
+        values.texScale[i] = pgraph_mtl_texture_get_stage_scale(i);
+    }
+
+    uint32_t target = pgraph_mtl_surface_get_color_vram_addr();
+    if (mtl_psh_uniform_diag_enabled(target) &&
+        atomic_fetch_add(&s_psh_uniform_diag_lines, 1) < 128) {
+        fprintf(stderr,
+                "xemu-perf: metal_psh_uniform_diag target=0x%x "
+                "alphaRef=%d texScale={%.6g,%.6g,%.6g,%.6g} "
+                "c0_2={%.6g,%.6g,%.6g,%.6g} "
+                "c0_4={%.6g,%.6g,%.6g,%.6g} "
+                "c8_0={%.6g,%.6g,%.6g,%.6g} "
+                "c8_1={%.6g,%.6g,%.6g,%.6g}\n",
+                (unsigned)target, values.alphaRef[0],
+                values.texScale[0], values.texScale[1],
+                values.texScale[2], values.texScale[3],
+                values.consts[4][0], values.consts[4][1],
+                values.consts[4][2], values.consts[4][3],
+                values.consts[8][0], values.consts[8][1],
+                values.consts[8][2], values.consts[8][3],
+                values.consts[16][0], values.consts[16][1],
+                values.consts[16][2], values.consts[16][3],
+                values.consts[17][0], values.consts[17][1],
+                values.consts[17][2], values.consts[17][3]);
     }
 
     void *mtl_buf = NULL;

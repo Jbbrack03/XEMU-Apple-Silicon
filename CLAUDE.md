@@ -34,8 +34,10 @@ the task touches the Metal port):
 - `docs/apple-silicon/metal-renderer-plan.md` — staged Metal renderer
   implementation plan, slices M0–M15, validation gates, risk register
   R1–R8, open questions Q1–Q6 (all resolved as of M14).
-  **Slices M0–M14 SHIPPED 2026-05-02; M15 (default-on selection)
-  PENDING — gated on user-driven validation.** Read this when the
+  **Slices M0–M14 SHIPPED 2026-05-02; M5.x correctness follow-ups
+  continue through 2026-05-04; M15 (default-on selection) BLOCKED
+  on Crimson Skies visual correctness plus broader visual diff.**
+  Read this when the
   task touches the Metal port; per-slice "Status (2026-05-02):
   SHIPPED" annotations document the landed implementation.
 - `docs/apple-silicon/metal-api-reference.md` — Apple Metal API
@@ -221,6 +223,23 @@ The fork-specific source-code changes are concentrated in:
       register a Metal `get_framebuffer_surface` ops callback) is
       the next blocker for M15 default-on. See decision-log
       "2026-05-03: Metal slice M5.9-followup-E".
+      **(M5.10/M5.11 follow-up, 2026-05-04 — PGR2 visual canary
+      PASS; Crimson BLOCKED)** PGR2's old white/magenta/front-fb
+      failure is closed. Surface cache now retains multiple shapes per
+      VRAM address, uses exact/near shape lookup, caps at 64 entries,
+      publishes the selected fallback binding directly, performs
+      dimension-aware render-target texture lookup, registers access
+      callbacks across all same-VRAM siblings, and uploads every dirty
+      sibling. Scaled VRAM upload fills the full host-scaled texture.
+      A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
+      texture views use the CPU texture path; diagnostic env
+      `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`. PGR2 screenshot
+      `benchmark-runs/visual-checks/pgr2-final-f900.png` and Rainbow
+      `benchmark-runs/visual-checks/rainbow-final-f600.png` are clean;
+      Crimson `benchmark-runs/visual-checks/crimson-smoke-f300.png`
+      shows an untextured green aircraft / black scene. Next Metal
+      work should target Crimson shader/texture semantics, then re-run
+      PGR2 and Rainbow before revisiting M15.
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and
@@ -646,13 +665,13 @@ Stable opt-in:
   against the render-queue blit reading a draw-target texture
   mid-render. Counters `METAL_SURFACE_DOWNLOADS` and
   `METAL_SURFACE_DOWNLOAD_BYTES` surface on the `xemu-perf:`
-  interval line. **Default off because** (1) the path does NOT yet
-  bridge PGR2's specific back→front buffer-swap mechanism (still
-  under investigation post M5.9-followup-B+C), and (2) the
-  GPU→VRAM blit + waitUntilCompleted has measurable cold-boot
-  perf cost (~4× slowdown on PGR2 cold-boot per 2026-05-03
-  measurements). Enable with `XEMU_METAL_FRONT_FB_DOWNLOAD=1` for
-  development / bisection. Apple Silicon performance fork; slice
+  interval line. **Default off because** the current PGR2 canary is
+  bridged by the host-side fallback plus the 2026-05-04 surface/RTT
+  fixes, while the GPU→VRAM blit + waitUntilCompleted path has
+  measurable historical cold-boot perf cost (~4× slowdown on PGR2
+  cold-boot per 2026-05-03 measurements). Enable with
+  `XEMU_METAL_FRONT_FB_DOWNLOAD=1` for development / bisection. Apple
+  Silicon performance fork; slice
   M5.10. Note: at the Apple Silicon system default
   `surface_scale=2` the download path detects the host-scaled
   texture mismatch and skips per-entry (the M5.10 MVP does not
@@ -662,26 +681,26 @@ Stable opt-in:
   `pgraph_mtl_surface_update` is gated `!tcg_enabled()` and
   always-on when active; uses the cache entry's full size for
   `memory_region_test_and_clear_dirty`.
-- `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (M5.10 experimental, 2026-05-03) —
-  opt-in fallback that publishes the most-recently-bound color RT
-  (`s_color_binding`) as the front-fb after the CRTC publish. Default 0
-  (off). Use case: titles like PGR2 where the CRTC-pointed surface
-  receives ~1 draw per interval (likely HUD only) while the actual
-  rendered scene goes to a back buffer at a different vram_addr; the
-  M5.9-followup-B+C diagnostic decisively ruled out CPU memcpy,
-  NV097_IMAGE_BLIT, and pcrtc.start cycling as the back→front
-  mechanism, so a host-side direct publish of the back buffer is the
-  cheapest possible bridge while the actual mechanism is still under
-  investigation. NOT correctness-faithful — the back buffer may have a
-  different aspect ratio than the front (PGR2's 2560×960 back vs
-  1280×960 front at scale=2), and titles that legitimately use both
-  front and back surfaces will see the wrong content. Implementation:
+- `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (M5.10 experimental,
+  2026-05-03; PGR2 canary PASS after 2026-05-04 surface/RTT fixes) —
+  opt-in fallback that publishes the selected color render-target
+  binding as the front-fb after the CRTC publish. Default 0 (off). Use
+  case: titles like PGR2 where the CRTC-pointed surface receives only
+  sporadic draws while the actual rendered scene goes to another render
+  target. NOT correctness-faithful — titles that legitimately use both
+  front and back surfaces may see the wrong content. Implementation:
   `pgraph_mtl_surface_publish_latest_draw_fallback` in `mtl/surface.mm`,
   invoked from `pgraph_mtl_flip_stall` AFTER the CRTC publish so the
-  fallback wins. Side-channel atomic `s_front_framebuffer_texture` is
-  the only path that's affected; the rest of the renderer is
-  unchanged. When OFF, behavior is exactly the current CRTC-strict
-  publish. Apple Silicon performance fork; slice M5.10 experimental.
+  fallback wins. When OFF, behavior is exactly the current CRTC-strict
+  publish. Apple Silicon performance fork; slice M5.10 experimental
+  plus 2026-05-04 follow-up.
+- `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS={0,1}` (2026-05-04 diagnostic) —
+  disables direct render-target-as-texture lookup by VRAM address and
+  forces the CPU texture path. Useful for isolating surface texture
+  aliasing and channel/alpha normalization issues. The default direct
+  path now uses dimension-aware lookup and still forces A8R8G8B8 render
+  targets sampled as linear A8R8G8B8-family texture views through the
+  CPU path; that rule fixed PGR2's dotted/yellow text.
 - `XEMU_METAL_VALIDATION={0,1}` (M14, 2026-05-02) — opt-in Metal
   API validation layer for development. When set, `xemu_metal_init`
   promotes `MTL_DEBUG_LAYER=1` into the process environment **before**

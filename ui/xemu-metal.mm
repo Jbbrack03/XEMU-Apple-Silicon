@@ -99,7 +99,7 @@ static NSString *const k_present_msl =
  * hw/xbox/nv2a/pgraph/mtl/surface.h. */
 extern "C" void *pgraph_mtl_get_framebuffer_metal_texture(void);
 extern "C" void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
-extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void);
+extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void *texture);
 
 /* M5 — weak forward decl of the per-target shader-validation harness.
  * Lives in libqemu-i386-softmmu.a (per-target). The weak link lets
@@ -133,6 +133,7 @@ static id<CAMetalDrawable>     s_current_drawable;
 static MTLRenderPassDescriptor *s_current_pass_desc;
 static id<MTLCommandBuffer>    s_current_cmd;
 static id<MTLRenderCommandEncoder> s_current_enc;
+static bool                    s_imgui_frame_active;
 
 /* M10 — frame pacing state. */
 static bool                       s_force_legacy_present;
@@ -730,13 +731,22 @@ static void parse_screenshot_env(void)
         }
     }
 
+    char source_desc[32];
+    if (s_screenshot_source == 1) {
+        snprintf(source_desc, sizeof(source_desc), "nv2a");
+    } else if (s_screenshot_source == 2) {
+        snprintf(source_desc, sizeof(source_desc), "vram:0x%08x",
+                 s_screenshot_vram_addr);
+    } else {
+        snprintf(source_desc, sizeof(source_desc), "drawable");
+    }
     fprintf(stderr,
             "xemu-perf: metal_screenshot path=%s at_frame=%llu interval=%llu "
             "source=%s\n",
             s_screenshot_path,
             (unsigned long long)s_screenshot_at_frame,
             (unsigned long long)s_screenshot_interval,
-            s_screenshot_source == 1 ? "nv2a" : "drawable");
+            source_desc);
 }
 
 /* 2026-05-03 — derive the per-shot filename. For single-shot mode the
@@ -1269,6 +1279,9 @@ bool xemu_metal_begin_imgui_frame(void)
     if (!s_active) {
         return false;
     }
+    if (s_imgui_frame_active) {
+        return true;
+    }
 
     /* The CAMetalLayer's drawableSize is auto-updated by SDL_Metal_CreateView
      * when the host view resizes. We don't override it here; if M2
@@ -1295,8 +1308,14 @@ bool xemu_metal_begin_imgui_frame(void)
      * imgui_impl_metal.mm comment confirms this ordering. */
     ImGui_ImplMetal_NewFrame(s_current_pass_desc);
     ImGui_ImplSDL3_NewFrame();
+    s_imgui_frame_active = true;
 
     return true;
+}
+
+bool xemu_metal_imgui_frame_active(void)
+{
+    return s_imgui_frame_active;
 }
 
 void xemu_metal_end_imgui_frame(void)
@@ -1307,6 +1326,7 @@ void xemu_metal_end_imgui_frame(void)
         s_current_drawable = nil;
         s_current_pass_desc = nil;
         s_current_cmd = nil;
+        s_imgui_frame_active = false;
         return;
     }
 
@@ -1404,7 +1424,7 @@ void xemu_metal_end_imgui_frame(void)
         }
     }
     if (fb_tex_handle != NULL) {
-        pgraph_mtl_release_framebuffer_metal_texture();
+        pgraph_mtl_release_framebuffer_metal_texture(fb_tex_handle);
     }
 
     /* C++ HUD has already called ImGui::Render(); we encode its draw
@@ -1676,6 +1696,7 @@ void xemu_metal_end_imgui_frame(void)
     s_current_cmd = nil;
     s_current_pass_desc = nil;
     s_current_drawable = nil;
+    s_imgui_frame_active = false;
 }
 
 /* Forward declarations of C / C-callable HUD entry points. xemu.c and
@@ -1699,6 +1720,13 @@ void xemu_metal_render_frame(void)
      * xemu_metal_end_imgui_frame() on the Metal path. So this
      * function only orchestrates the lock/unlock dance — the
      * actual Metal command-buffer work is in begin/end. */
+
+    /* Acquire CAMetalDrawable and set up the Metal/SDL ImGui frame before
+     * taking BQL. nextDrawable can block behind the window server; holding
+     * BQL there starves vCPU, IDE, and PFIFO progress in automated runs. */
+    if (!xemu_metal_begin_imgui_frame()) {
+        return;
+    }
 
     xemu_main_loop_lock();
     xemu_hud_update();

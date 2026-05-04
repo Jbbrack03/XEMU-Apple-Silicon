@@ -27,6 +27,7 @@
 
 #include "state.h"
 #include "shaderstate.h"
+#include "texture.h"
 #include "vertex.h" /* MTL_ATTR_BUFFER_INDEX_BASE */
 
 #include "hw/xbox/nv2a/pgraph/glsl/shaders.h"
@@ -207,6 +208,11 @@ bool pgraph_mtl_build_pipeline_key(NV2AState *d,
      * deterministic.  This is the same call the GL and VK renderers make
      * on a shader-state dirty event. */
     out_key->shader_state = pgraph_glsl_get_shader_state(pg);
+    for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
+        if (pgraph_mtl_texture_stage_uses_external_surface(i)) {
+            out_key->shader_state.psh.rect_tex[i] = true;
+        }
+    }
 
     /* Per-pipeline reg snapshot. The 9-entry order matches vk/draw.c's
      * init_pipeline_key for cross-renderer parity (so the two caches

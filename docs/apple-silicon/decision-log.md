@@ -6392,3 +6392,65 @@ Constraint adherence: no edits under
 agent owns that subtree). Stayed strictly in `ui/xemu-metal.mm`,
 `util/xemu-metal-perf.c`, and `scripts/apple-silicon/`.
 
+## 2026-05-04: Metal PGR2 surface/RTT visual canary passes; Crimson remains blocker
+
+The 2026-05-03 handoff correctly identified that PGR2's visible failure
+had moved from shader-pipeline construction to surface/display/RTT
+semantics, but its immediate next-step framing is now superseded by the
+2026-05-04 follow-up.
+
+Decision:
+
+- Treat PGR2 as a green Metal visual canary for the menu/logo/text/color
+  path under the translated pipeline plus front-fb fallback.
+- Keep Metal opt-in and keep M15 default-on blocked because Crimson
+  Skies is still visually incorrect.
+- Use official-safe test tooling only: xemu traces/counters, Metal
+  diagnostics, and custom nxdk/pbkit XBEs as needed. Do not depend on
+  proprietary or leaked Xbox XDK tooling.
+
+What landed:
+
+- Full host-scaled VRAM upload avoids heap-default/uninitialized regions
+  in scaled render targets.
+- The display-compose fallback is upright and publishes the selected
+  render-target binding directly.
+- The Metal surface cache can retain multiple shapes per VRAM address,
+  uses exact/near shape lookup, raises the cap to 64 entries, and walks
+  all same-VRAM siblings for access-callback registration and dirty
+  upload.
+- Render-target-as-texture lookup is dimension-aware.
+- A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
+  texture views take the CPU texture path, fixing the PGR2 dotted/yellow
+  text and color/alpha mismatch. Added diagnostic env
+  `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`.
+
+Validation:
+
+- Build: `./build.sh -a arm64` PASS.
+- Signing: `codesign --verify --deep --strict --verbose=2
+  dist/xemu.app` PASS.
+- PGR2: `benchmark-runs/20260504-024441-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-final-f900.png` PASS. Late
+  intervals show `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
+- Rainbow Six 3: `benchmark-runs/20260504-024617-rainbow-six-3`,
+  `benchmark-runs/visual-checks/rainbow-final-f600.png` PASS for the
+  loading-screen canary.
+- Crimson Skies: `benchmark-runs/visual-checks/crimson-smoke-f300.png`
+  FAILS with an untextured green aircraft over a black scene;
+  passthrough `benchmark-runs/visual-checks/crimson-passthrough-f300.png`
+  is all-white and is not a better oracle.
+
+Next-session priority:
+
+1. Fix Crimson Skies Metal visual correctness using texture-bind,
+   surface-texture, and target-shader diagnostics.
+2. If the root cause is still ambiguous, create a small nxdk/pbkit XBE
+   to isolate texture combiner, channel/alpha, render-target-as-texture,
+   or vertex-color behavior.
+3. Re-run PGR2 and Rainbow canaries after every shader/texture change.
+4. Revisit M15 only after PGR2, Rainbow, Crimson, SC2, and one
+   broader-sweep title pass paired Metal-vs-GL visual diff and FPS/jitter
+   validation.

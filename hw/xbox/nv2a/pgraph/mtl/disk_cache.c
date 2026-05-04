@@ -43,6 +43,8 @@ static QemuCond  s_writer_cond;     /* Signaled when a writer exits; finalize wa
 static bool      s_writer_lock_inited = false;
 static unsigned  s_active_writers    = 0;
 
+#define MTL_DISK_CACHE_ABI_TAG "metal-vsh-full-ubo-20260504"
+
 /* In-flight writer thread tracking. Cap is concurrent (running)
  * writers; new saves block synchronously when the cap is hit (the
  * cache is best-effort but skipping the write entirely is worse than
@@ -83,6 +85,11 @@ static bool env_cache_enabled(void)
         return true;  /* Default ON on Apple Silicon. */
     }
     return e[0] != '0';
+}
+
+static char *cache_version_string(void)
+{
+    return g_strdup_printf("%s|%s", xemu_version, MTL_DISK_CACHE_ABI_TAG);
 }
 
 /* -------- path helpers -------- */
@@ -254,6 +261,7 @@ char *pgraph_mtl_disk_cache_load_msl(const struct PgraphMtlPipelineKey *key)
 
     char *cached_xemu_version = NULL;
     char *cached_feature_set  = NULL;
+    char *expected_version    = cache_version_string();
     void *state_blob          = NULL;
     char *msl_source          = NULL;
 
@@ -279,7 +287,8 @@ char *pgraph_mtl_disk_cache_load_msl(const struct PgraphMtlPipelineKey *key)
     cached_xemu_version = g_malloc((size_t)xv_len + 1);
     READ_OR_FAIL(cached_xemu_version, (size_t)xv_len);
     cached_xemu_version[xv_len] = '\0';
-    if (strcmp(cached_xemu_version, xemu_version) != 0) {
+    if (expected_version == NULL ||
+        strcmp(cached_xemu_version, expected_version) != 0) {
         goto fail;
     }
 
@@ -311,6 +320,7 @@ char *pgraph_mtl_disk_cache_load_msl(const struct PgraphMtlPipelineKey *key)
         g_free(file_path);
         g_free(cached_xemu_version);
         g_free(cached_feature_set);
+        g_free(expected_version);
         g_free(state_blob);
         atomic_fetch_add(&s_misses, 1);
         return NULL;
@@ -332,6 +342,7 @@ char *pgraph_mtl_disk_cache_load_msl(const struct PgraphMtlPipelineKey *key)
     g_free(file_path);
     g_free(cached_xemu_version);
     g_free(cached_feature_set);
+    g_free(expected_version);
     g_free(state_blob);
 
     atomic_fetch_add(&s_hits, 1);
@@ -348,6 +359,7 @@ fail:
     g_free(file_path);
     g_free(cached_xemu_version);
     g_free(cached_feature_set);
+    g_free(expected_version);
     g_free(state_blob);
     g_free(msl_source);
     atomic_fetch_add(&s_misses, 1);
@@ -372,6 +384,8 @@ static void *writer_thread(void *arg)
 
     char *bin_dir   = bin_dir_for_hash(ctx->hash);
     char *file_path = bin_path_for_hash(bin_dir, ctx->hash);
+    char *cache_version = NULL;
+    FILE *f = NULL;
 
     /* Best-effort mkdir; ignore EEXIST. */
     if (qemu_mkdir(bin_dir) < 0 && errno != EEXIST) {
@@ -381,7 +395,7 @@ static void *writer_thread(void *arg)
         goto cleanup;
     }
 
-    FILE *f = qemu_fopen(file_path, "wb");
+    f = qemu_fopen(file_path, "wb");
     if (f == NULL) {
         fprintf(stderr,
                 "pgraph_mtl_disk_cache: open %s for write failed: %s\n",
@@ -389,7 +403,12 @@ static void *writer_thread(void *arg)
         goto cleanup;
     }
 
-    uint64_t xv_len = (uint64_t)(strlen(xemu_version) + 1);
+    cache_version = cache_version_string();
+    if (cache_version == NULL) {
+        goto cleanup;
+    }
+
+    uint64_t xv_len = (uint64_t)(strlen(cache_version) + 1);
     uint64_t fs_len = (uint64_t)s_feature_set_len;
     uint64_t st_len = (uint64_t)sizeof(PgraphMtlPipelineKey);
     uint64_t ms_len = (uint64_t)strlen(ctx->msl_source);
@@ -402,7 +421,7 @@ static void *writer_thread(void *arg)
     } while (0)
 
     WRITE_OR_FAIL(&xv_len, sizeof(xv_len));
-    WRITE_OR_FAIL(xemu_version, (size_t)xv_len);
+    WRITE_OR_FAIL(cache_version, (size_t)xv_len);
 
     WRITE_OR_FAIL(&fs_len, sizeof(fs_len));
     WRITE_OR_FAIL(s_feature_set, (size_t)fs_len);
@@ -416,6 +435,9 @@ static void *writer_thread(void *arg)
 #undef WRITE_OR_FAIL
 
     fclose(f);
+    f = NULL;
+    g_free(cache_version);
+    cache_version = NULL;
 
     /* Append the hash to the LRU index file. Single-writer at a time
      * via s_writer_lock so concurrent saves don't interleave. */
@@ -442,9 +464,14 @@ write_fail:
             "partial file\n",
             file_path, strerror(errno));
     fclose(f);
+    f = NULL;
     qemu_unlink(file_path);
 
 cleanup:
+    if (f != NULL) {
+        fclose(f);
+    }
+    g_free(cache_version);
     g_free(bin_dir);
     g_free(file_path);
     g_free(ctx->msl_source);

@@ -1,23 +1,19 @@
 # Benchmark Automation
 
-Last updated: 2026-05-03 (Metal slices through **M5.9 + followup-A +
-followup-B+C + followup-E** ship. **followup-E** adds the
-per-vram_addr `metal_draw_target` diagnostic counter, splits the
-surface cache by aspect (color vs depth) so same-vram_addr bindings
-no longer thrash, raises `kMaxCacheEntries` from 16 to 32, and pins
-the published front-fb against LRU eviction + shape-mismatch destroy.
-New counter `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`. New diagnostic
-log lines `metal_draw_target`, `metal_draw_target_first`,
-`metal_draw_target_zero`, `metal_draw_target_overflow`,
-`metal_surface_recreate`. Earlier 2026-05-03 work documented:
-diagnostic flags `XEMU_METAL_DIAG_CLEAR=1` and
-`XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`; counters
+Last updated: 2026-05-04 (PGR2 Metal surface/RTT canary is clean;
+Rainbow Six 3 loading-screen canary is clean; Crimson Skies remains the
+Metal visual blocker. Added diagnostic
+`XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`; front-fb fallback docs now
+reflect that it publishes the selected render-target binding. Existing
+diagnostics/counters from 2026-05-03 remain available:
+`XEMU_METAL_DIAG_CLEAR=1`, `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`,
 `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
-`METAL_IMAGE_BLITS`, `METAL_SURFACE_VRAM_DIRTY_HITS`, `_UPLOADS`,
-`_UPLOAD_BYTES`, `METAL_SCREENSHOTS_TAKEN`, plus input-latency
-counters `INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`,
-`INPUT_LAT_US_TOTAL`, `INPUT_LAT_US_MAX`. `run-benchmark.sh`
-extended with `sc2` and `halo` title keys.)
+`METAL_IMAGE_BLITS`, `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`,
+`METAL_SURFACE_VRAM_DIRTY_HITS`, `_UPLOADS`, `_UPLOAD_BYTES`,
+`METAL_SCREENSHOTS_TAKEN`, plus input-latency counters
+`INPUT_USB_POLLS`, `INPUT_BACKEND_UPDATES`, `INPUT_LAT_US_TOTAL`,
+`INPUT_LAT_US_MAX`. `run-benchmark.sh` includes `sc2` and `halo`
+title keys.)
 
 This fork has a small scripted-input harness for repeatable Apple Silicon
 benchmark runs. It is opt-in and does not affect normal xemu launches.
@@ -718,17 +714,12 @@ poll is skipped. Counters `METAL_SURFACE_DOWNLOADS` and
 line.
 
 **Why default off.** The infrastructure is correct (vk-pattern port)
-but does NOT yet bridge PGR2's specific back→front buffer-swap
-mechanism — the M5.9-followup-B+C diagnostic decisively ruled out
-all three CPU-mediated mechanisms (CPU memcpy, NV097_IMAGE_BLIT,
-pcrtc.start cycling); the actual mechanism is still under
-investigation (likely an NV2A engine class not yet implemented:
-NV3089 scaled-blit / NV0039 M2MF / a software post-process draw
-pass). Until that is identified and the path proven correct on
-≥ 2 distinct titles, the download path runs only with the flag
-on, and even then mostly serves as instrumented infrastructure
-for future investigation. Cold-boot perf cost when the flag is on:
-~4× slowdown vs flag-off on PGR2 (1.5 fps → 0.3 fps). Source files:
+but is not the current PGR2 canary path; PGR2 is now bridged by the
+host-side front-fb fallback plus the 2026-05-04 surface/RTT fixes.
+Until download is proven correct and useful on ≥ 2 distinct titles,
+it remains opt-in instrumented infrastructure. Historical cold-boot
+perf cost when the flag is on: ~4× slowdown vs flag-off on PGR2
+(1.5 fps → 0.3 fps in the 2026-05-03 run). Source files:
 `hw/xbox/nv2a/pgraph/mtl/surface.{h,mm}`,
 `hw/xbox/nv2a/pgraph/mtl/renderer.c`,
 `hw/xbox/nv2a/pgraph/mtl/draw.{h,mm}`,
@@ -743,23 +734,18 @@ slice M5.10.
   per-interval bytes copied through the download staging buffer
   (sum of guest 1× source sub-rect sizes for each download).
 
-`XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (**M5.10 experimental, 2026-05-03**)
+`XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (**M5.10 experimental, 2026-05-03;
+PGR2 canary PASS after 2026-05-04 surface/RTT fixes**)
 — additional opt-in publish path that does NOT depend on VRAM
 coherency. Default 0 (off). After the CRTC-strict publish in
 `pgraph_mtl_flip_stall`, when the flag is on, the renderer ALSO calls
 `pgraph_mtl_surface_publish_latest_draw_fallback()` which publishes
-`s_color_binding` (the most-recently-bound color RT) as the front-fb
-side-channel. Last write wins, so the fallback overwrites the
-CRTC-strict publish; the compositor sees whatever surface was last
-drawn into. Use case: titles like PGR2 whose CRTC-pointed surface
-receives only sporadic draws (likely HUD overlay) while the actual
-rendered scene goes to a back buffer at a different vram_addr; the
-M5.9-followup-B+C diagnostic decisively ruled out CPU memcpy,
-NV097_IMAGE_BLIT, and pcrtc.start cycling as the back→front
-mechanism, so a host-side direct publish of the back buffer is the
-cheapest possible bridge while the real mechanism is still under
-investigation. Does NOT require `XEMU_METAL_FRONT_FB_DOWNLOAD=1` —
-the two flags are independent and the fallback is purely host-side.
+the selected color render-target binding as the front-fb side-channel.
+Last write wins, so the fallback overwrites the CRTC-strict publish.
+Use case: titles like PGR2 whose CRTC-pointed surface receives only
+sporadic draws while the actual rendered scene goes to a different
+render target. Does NOT require `XEMU_METAL_FRONT_FB_DOWNLOAD=1` — the
+two flags are independent and the fallback is purely host-side.
 Emits `xemu-perf: metal_front_fb_publish ... reason=fallback-latest-draw`
 and bumps `METAL_FRONT_FB_PUBLISHES` per publish. **NOT
 correctness-faithful**: the back buffer may have a different aspect
@@ -768,10 +754,19 @@ scale=2), and titles that legitimately use both front and back
 surfaces (e.g. those with a real software composite step) will see
 the wrong content. The compositor's present pipeline scales whatever
 texture it gets to drawable extent regardless of input dims.
-Implementation: `pgraph_mtl_surface_publish_latest_draw_fallback` at
-`mtl/surface.mm:1202`, called from `pgraph_mtl_flip_stall` at
-`mtl/renderer.c:868`. Apple Silicon performance fork; slice M5.10
-experimental.
+Implementation: `pgraph_mtl_surface_publish_latest_draw_fallback` in
+`mtl/surface.mm`, called from `pgraph_mtl_flip_stall` in
+`mtl/renderer.c`. Apple Silicon performance fork; slice M5.10
+experimental plus 2026-05-04 follow-up.
+
+`XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS={0,1}` (**2026-05-04
+diagnostic**) — when set, disables direct render-target-as-texture
+lookup by VRAM address and forces the CPU texture path. Useful for
+isolating surface texture aliasing and channel/alpha normalization
+issues. The default direct path now uses dimension-aware lookup and
+still forces A8R8G8B8 render targets sampled as linear A8R8G8B8-family
+texture views through the CPU path; that rule fixed PGR2's
+dotted/yellow text.
 
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal

@@ -40,11 +40,14 @@
 
 #include "shaders.h"
 #include "glsl.h"
+#include "hw/xbox/nv2a/nv2a_regs.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <limits.h>
 #include <glib.h>
 
 #import <Foundation/Foundation.h>
@@ -53,6 +56,63 @@
 #import <objc/message.h>
 
 extern "C" void *xemu_metal_get_device(void);
+
+static const MTLBlendFactor pgraph_blend_factor_mtl_map[] = {
+    MTLBlendFactorZero,
+    MTLBlendFactorOne,
+    MTLBlendFactorSourceColor,
+    MTLBlendFactorOneMinusSourceColor,
+    MTLBlendFactorSourceAlpha,
+    MTLBlendFactorOneMinusSourceAlpha,
+    MTLBlendFactorDestinationAlpha,
+    MTLBlendFactorOneMinusDestinationAlpha,
+    MTLBlendFactorDestinationColor,
+    MTLBlendFactorOneMinusDestinationColor,
+    MTLBlendFactorSourceAlphaSaturated,
+    MTLBlendFactorZero,
+    MTLBlendFactorBlendColor,
+    MTLBlendFactorOneMinusBlendColor,
+    MTLBlendFactorBlendAlpha,
+    MTLBlendFactorOneMinusBlendAlpha,
+};
+
+static const MTLBlendOperation pgraph_blend_equation_mtl_map[] = {
+    MTLBlendOperationSubtract,
+    MTLBlendOperationReverseSubtract,
+    MTLBlendOperationAdd,
+    MTLBlendOperationMin,
+    MTLBlendOperationMax,
+    MTLBlendOperationReverseSubtract,
+    MTLBlendOperationAdd,
+};
+
+static MTLColorWriteMask pgraph_mtl_color_write_mask(uint32_t control_0)
+{
+    const char *force_all = getenv("XEMU_METAL_DEBUG_FORCE_COLOR_WRITE");
+    if (force_all != NULL && force_all[0] != '\0' && force_all[0] != '0') {
+        return MTLColorWriteMaskAll;
+    }
+
+    MTLColorWriteMask mask = MTLColorWriteMaskNone;
+    if (control_0 & NV_PGRAPH_CONTROL_0_RED_WRITE_ENABLE) {
+        mask |= MTLColorWriteMaskRed;
+    }
+    if (control_0 & NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE) {
+        mask |= MTLColorWriteMaskGreen;
+    }
+    if (control_0 & NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE) {
+        mask |= MTLColorWriteMaskBlue;
+    }
+    if (control_0 & NV_PGRAPH_CONTROL_0_ALPHA_WRITE_ENABLE) {
+        mask |= MTLColorWriteMaskAlpha;
+    }
+    return mask;
+}
+
+static uint32_t mtl_get_mask(uint32_t value, uint32_t mask)
+{
+    return mask ? ((value & mask) >> __builtin_ctz(mask)) : 0;
+}
 
 /* The C side's completion callback. Runs on the dispatch worker thread
  * — it takes the cache lock internally. M9 adds `combined_msl` so the
@@ -218,6 +278,27 @@ static char *build_combined_msl(const char *vsh_msl, const char *psh_msl)
     return combined;
 }
 
+static void dump_combined_msl_if_requested(const char *combined)
+{
+    const char *dir = getenv("XEMU_METAL_DUMP_MSL_DIR");
+    if (dir == NULL || dir[0] == '\0' || combined == NULL) {
+        return;
+    }
+
+    mkdir(dir, 0755);
+    static _Atomic(uint64_t) s_dump_idx = 0;
+    uint64_t idx = atomic_fetch_add(&s_dump_idx, 1) + 1;
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/pipeline-%04llu.msl", dir,
+             (unsigned long long)idx);
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL) {
+        return;
+    }
+    fwrite(combined, 1, strlen(combined), fp);
+    fclose(fp);
+}
+
 /* -------- core build helper (shared sync + async) -------- */
 
 /* M9: build_pipeline_internal accepts an optional pre-translated combined
@@ -236,6 +317,8 @@ static bool build_pipeline_internal(const char *vsh_glsl,
                                     uint32_t color_format,
                                     uint32_t depth_format,
                                     uint32_t sample_count,
+                                    uint32_t blend_reg,
+                                    uint32_t control_0,
                                     unsigned n_attrs,
                                     const uint32_t *attr_format,
                                     const uint32_t *attr_offset,
@@ -308,6 +391,7 @@ static bool build_pipeline_internal(const char *vsh_glsl,
         *out_combined_msl = strdup(combined);
         /* If the dup fails, swallow it — disk-cache miss is non-fatal. */
     }
+    dump_combined_msl_if_requested(combined);
 
     @autoreleasepool {
         NSString *src = [NSString stringWithUTF8String:combined];
@@ -362,8 +446,39 @@ static bool build_pipeline_internal(const char *vsh_glsl,
 
         if (color_format != 0) {
             desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_format;
-            desc.colorAttachments[0].blendingEnabled = NO;
-            desc.colorAttachments[0].writeMask       = MTLColorWriteMaskAll;
+            desc.colorAttachments[0].writeMask =
+                pgraph_mtl_color_write_mask(control_0);
+            const char *disable_blend =
+                getenv("XEMU_METAL_DEBUG_DISABLE_BLEND");
+            if ((blend_reg & NV_PGRAPH_BLEND_EN) &&
+                !(disable_blend != NULL && disable_blend[0] != '\0' &&
+                  disable_blend[0] != '0')) {
+                uint32_t sfactor =
+                    mtl_get_mask(blend_reg, NV_PGRAPH_BLEND_SFACTOR);
+                uint32_t dfactor =
+                    mtl_get_mask(blend_reg, NV_PGRAPH_BLEND_DFACTOR);
+                uint32_t equation =
+                    mtl_get_mask(blend_reg, NV_PGRAPH_BLEND_EQN);
+                if (sfactor < G_N_ELEMENTS(pgraph_blend_factor_mtl_map) &&
+                    dfactor < G_N_ELEMENTS(pgraph_blend_factor_mtl_map) &&
+                    equation < G_N_ELEMENTS(pgraph_blend_equation_mtl_map)) {
+                    MTLRenderPipelineColorAttachmentDescriptor *ca =
+                        desc.colorAttachments[0];
+                    ca.blendingEnabled = YES;
+                    ca.sourceRGBBlendFactor =
+                        pgraph_blend_factor_mtl_map[sfactor];
+                    ca.destinationRGBBlendFactor =
+                        pgraph_blend_factor_mtl_map[dfactor];
+                    ca.sourceAlphaBlendFactor =
+                        pgraph_blend_factor_mtl_map[sfactor];
+                    ca.destinationAlphaBlendFactor =
+                        pgraph_blend_factor_mtl_map[dfactor];
+                    ca.rgbBlendOperation =
+                        pgraph_blend_equation_mtl_map[equation];
+                    ca.alphaBlendOperation =
+                        pgraph_blend_equation_mtl_map[equation];
+                }
+            }
         }
         if (depth_format != 0) {
             MTLPixelFormat dfmt = (MTLPixelFormat)depth_format;
@@ -457,6 +572,8 @@ pgraph_mtl_shaders_build_pipeline(const char *vsh_glsl,
                                   uint32_t color_format,
                                   uint32_t depth_format,
                                   uint32_t sample_count,
+                                  uint32_t blend_reg,
+                                  uint32_t control_0,
                                   unsigned n_attrs,
                                   const uint32_t *attr_format,
                                   const uint32_t *attr_offset,
@@ -471,6 +588,7 @@ pgraph_mtl_shaders_build_pipeline(const char *vsh_glsl,
 {
     return build_pipeline_internal(vsh_glsl, psh_glsl, pre_translated_msl,
                                    color_format, depth_format, sample_count,
+                                   blend_reg, control_0,
                                    n_attrs, attr_format, attr_offset,
                                    attr_buffer_index,
                                    n_bufs, buf_stride, buf_step_function,
@@ -577,6 +695,8 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
                                   uint32_t color_format,
                                   uint32_t depth_format,
                                   uint32_t sample_count,
+                                  uint32_t blend_reg,
+                                  uint32_t control_0,
                                   unsigned n_attrs,
                                   uint32_t *attr_format,
                                   uint32_t *attr_offset,
@@ -596,6 +716,7 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
         bool ok = build_pipeline_internal(
             vsh_glsl, psh_glsl, pre_translated_msl,
             color_format, depth_format, sample_count,
+            blend_reg, control_0,
             n_attrs, attr_format, attr_offset, attr_buffer_index,
             n_bufs, buf_stride, buf_step_function, buf_step_rate,
             &ps, &lib,
@@ -624,6 +745,8 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
         uint32_t  color_format;
         uint32_t  depth_format;
         uint32_t  sample_count;
+        uint32_t  blend_reg;
+        uint32_t  control_0;
         unsigned  n_attrs;
         uint32_t *attr_format;
         uint32_t *attr_offset;
@@ -642,6 +765,7 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
         bool ok = build_pipeline_internal(
             vsh_glsl, psh_glsl, pre_translated_msl,
             color_format, depth_format, sample_count,
+            blend_reg, control_0,
             n_attrs, attr_format, attr_offset, attr_buffer_index,
             n_bufs, buf_stride, buf_step_function, buf_step_rate,
             &ps, &lib,
@@ -665,6 +789,8 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
     job->color_format = color_format;
     job->depth_format = depth_format;
     job->sample_count = sample_count;
+    job->blend_reg = blend_reg;
+    job->control_0 = control_0;
     job->n_attrs = n_attrs;
     job->attr_format = attr_format;
     job->attr_offset = attr_offset;
@@ -680,6 +806,7 @@ pgraph_mtl_shaders_dispatch_build(void *ctx,
         bool ok = build_pipeline_internal(
             job->vsh_glsl, job->psh_glsl, job->pre_translated_msl,
             job->color_format, job->depth_format, job->sample_count,
+            job->blend_reg, job->control_0,
             job->n_attrs, job->attr_format, job->attr_offset,
             job->attr_buffer_index,
             job->n_bufs, job->buf_stride, job->buf_step_function,

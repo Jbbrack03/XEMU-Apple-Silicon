@@ -1,14 +1,14 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-03 (multi-title MSAA + 1080p validation across
-PGR2, Crimson, Rainbow, SC2, Halo CE; per-title FPS table in
-`benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`. GL
-renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` is the production
-configuration meeting the user's stated 30/60 FPS at 1080p goals.
-Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
-`INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
-`XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
-backend.)
+Last updated: 2026-05-04 (PGR2 Metal surface/RTT validation added in
+`benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`. GL
+renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` remains the
+production configuration meeting the user's stated 30/60 FPS at 1080p
+goals. Metal visual canaries: PGR2 PASS, Rainbow Six 3 loading screen
+PASS, Crimson Skies FAIL and blocks M15. Input-latency counters
+`INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` / `INPUT_LAT_US_TOTAL` /
+`INPUT_LAT_US_MAX` always-on; `XEMU_MACOS_NATIVE_INPUT=1` opt-in for
+the GameController.framework backend.)
 
 ## Benchmarking Rules
 
@@ -111,6 +111,14 @@ Known emulator files:
 | V4-sweep | Broader-title library sweep | OpenGL | Burnout 3, Halo CE, Splinter Cell, NGB, OutRun 2 | 240s each | PASS — library-wide viable | `benchmarks/2026-05-02-broader-title-sweep.md` |
 | D2 | TCG 30 FPS cap + worst-frame attribution | OpenGL | Crimson 300s, 1ms spike threshold | 300s | Attributed 422ms / 1386ms; 963ms unattributed | `benchmarks/2026-05-02-tcg-30fps-cap-attribution.md` |
 | I5 | `XEMU_APU_LOCK_RELEASE` validation | OpenGL | Crimson 300s + PGR2 / Rainbow snapshot | 300s + 30s + 30s | PARTIAL (steady-state PASS; headline FAIL) | `benchmarks/2026-05-02-apu-lock-release-validation.md` |
+
+### 2026-05-04 Metal visual canary entries
+
+| ID | Slice / target | Renderer | Game / scene | Duration | Verdict | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| M5.11-PGR2 | Surface/RTT + A8 linear texture-view fix | Metal | PGR2 menu/logo/text canary | frame 900 screenshot | PASS | `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md` |
+| M5.11-R6 | Surface/RTT regression canary | Metal | Rainbow Six 3 loading screen | frame 600 screenshot | PASS | `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md` |
+| M5.11-CS | Remaining Metal visual blocker | Metal | Crimson Skies smoke | frame 300 screenshot | FAIL | untextured green aircraft / black scene; same benchmark note |
 
 
 ## Retail Gameplay Targets

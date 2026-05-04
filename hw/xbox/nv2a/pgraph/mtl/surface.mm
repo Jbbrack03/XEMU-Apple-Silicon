@@ -25,10 +25,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include "qemu/osdep.h"
 #include "surface.h"
 #include "heap.h"
 
 #include <stdatomic.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -175,23 +177,24 @@ typedef struct MtlSurfaceBinding {
      * guest VRAM. Mirrors `vk/renderer.h::SurfaceBinding.draw_dirty`. */
     _Atomic(uint32_t) draw_dirty;
 
+    /* Counts color-writing draws since the previous fallback publish.
+     * Used by the experimental front-fb fallback to publish the target
+     * that received actual scene work instead of whichever RT happened
+     * to be bound last before flip_stall. Depth/stencil-only draws are
+     * intentionally excluded because they can dominate early frame work
+     * while leaving the color target at its clear color. */
+    uint32_t frame_draw_count;
+
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
 
-/* Cap to avoid runaway. The vk renderer uses
- * num_invalid_surfaces_to_keep=10 as the soft cap on stale entries.
- * Apple Silicon GPUs have plenty of VRAM but heap_color_rts has a
- * fixed budget at heap_init; cap aggressively. */
-/* 2026-05-03 magenta-RT fix: raised from 16 to 32 because PGR2 has at
- * least 11 distinct color render targets + ~4 depth surfaces + the
- * synthetic vram_addr=0 ensure-by-shape entries — at 16 the cap is
- * always reached and LRU eviction kicks out infrequently-bound entries
- * (notably the published front-fb) while the back-buffer + aux RTs hog
- * the cache. 32 gives PGR2 (and similar AAA Xbox titles) margin to
- * avoid eviction during steady-state gameplay. Each entry is small
- * (struct + MTLTexture + maybe an MSAA companion) — 32 entries is on
- * the order of tens of MB on Apple Silicon UMA, well within budget. */
-static const unsigned int kMaxCacheEntries = 32;
+/* Cap to avoid runaway. PGR2 and other late-era titles reuse the same
+ * VRAM address for several distinct render-target shapes; the cache must
+ * retain those siblings instead of destroying one shape when another is
+ * rebound. 64 entries is still comfortably inside the 256 MiB RT heap for
+ * the observed 1080p-class scale-2 working sets, while leaving enough
+ * room for color/depth shape aliases and stale RTTs. */
+static const unsigned int kMaxCacheEntries = 64;
 
 static MtlSurfaceBinding *s_cache_head = NULL;
 static unsigned int       s_cache_size = 0;
@@ -201,6 +204,8 @@ static uint64_t           s_use_seq    = 0;
  * frames or while the cache is empty. */
 static MtlSurfaceBinding *s_color_binding = NULL;
 static MtlSurfaceBinding *s_depth_binding = NULL;
+static MtlSurfaceBinding *s_fallback_draw_candidate = NULL;
+static uint32_t           s_fallback_draw_candidate_count = 0;
 
 /* M11: effective MSAA sample count (1 = off). */
 static uint32_t s_msaa_sample_count = 1;
@@ -211,6 +216,47 @@ static _Atomic(uint64_t) s_msaa_resolve_us_total = 0;
 
 /* The "front" framebuffer texture published to the compositor. */
 static _Atomic(void *) s_front_framebuffer_texture = nullptr;
+static id<MTLTexture> s_front_snapshot_texture = nil;
+static pthread_mutex_t s_front_framebuffer_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static id<MTLTexture> s_display_textures[3] = { nil, nil, nil };
+static uint32_t        s_display_texture_index = 0;
+static id<MTLRenderPipelineState> s_display_pipeline = nil;
+static id<MTLSamplerState>        s_display_sampler = nil;
+
+typedef struct MtlDisplayUniforms {
+    float display_size[2];
+    float line_offset;
+    float _pad;
+} MtlDisplayUniforms;
+
+static NSString *const k_display_msl =
+    @"#include <metal_stdlib>\n"
+    @"using namespace metal;\n"
+    @"struct VOut {\n"
+    @"    float4 pos [[position]];\n"
+    @"};\n"
+    @"struct DisplayUniforms {\n"
+    @"    float2 display_size;\n"
+    @"    float line_offset;\n"
+    @"    float _pad;\n"
+    @"};\n"
+    @"vertex VOut xemu_display_vs(uint vid [[vertex_id]]) {\n"
+    @"    float2 p = float2((vid == 2) ? 3.0 : -1.0,\n"
+    @"                      (vid == 0) ? -3.0 :  1.0);\n"
+    @"    VOut o;\n"
+    @"    o.pos = float4(p, 0.0, 1.0);\n"
+    @"    return o;\n"
+    @"}\n"
+    @"fragment float4 xemu_display_fs(VOut in [[stage_in]],\n"
+    @"                                texture2d<float> tex [[texture(0)]],\n"
+    @"                                sampler samp [[sampler(0)]],\n"
+    @"                                constant DisplayUniforms &u [[buffer(0)]]) {\n"
+    @"    float2 tex_coord = in.pos.xy / u.display_size;\n"
+    @"    float rel = u.display_size.y / float(tex.get_height()) / u.line_offset;\n"
+    @"    tex_coord.y = rel * (1.0 - tex_coord.y);\n"
+    @"    return tex.sample(samp, tex_coord);\n"
+    @"}\n";
 
 /* Diagnostic counters. */
 static _Atomic(uint64_t) s_clear_count          = 0;
@@ -231,6 +277,236 @@ static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
 static bool s_initialized = false;
 
 /* ---------------------------------------------------------------- */
+
+static bool present_snapshot_enabled(void)
+{
+    const char *e = getenv("XEMU_METAL_PRESENT_SNAPSHOT");
+    return !(e && e[0] == '0');
+}
+
+static void release_display_textures(void)
+{
+    for (unsigned int i = 0; i < 3; i++) {
+        s_display_textures[i] = nil;
+    }
+    s_display_texture_index = 0;
+}
+
+static bool build_display_pipeline_if_needed(void)
+{
+    if (s_display_pipeline != nil && s_display_sampler != nil) {
+        return true;
+    }
+
+    id<MTLDevice> device = (__bridge id<MTLDevice>)xemu_metal_get_device();
+    if (device == nil) {
+        return false;
+    }
+
+    NSError *err = nil;
+    id<MTLLibrary> lib =
+        [device newLibraryWithSource:k_display_msl options:nil error:&err];
+    if (lib == nil) {
+        fprintf(stderr,
+                "xemu-metal: display-pipeline MSL compile failed: %s\n",
+                [[err localizedDescription] UTF8String] ?: "(unknown)");
+        return false;
+    }
+
+    id<MTLFunction> vs = [lib newFunctionWithName:@"xemu_display_vs"];
+    id<MTLFunction> fs = [lib newFunctionWithName:@"xemu_display_fs"];
+
+    MTLRenderPipelineDescriptor *desc =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    desc.label = @"xemu.metal.display";
+    desc.vertexFunction = vs;
+    desc.fragmentFunction = fs;
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    desc.colorAttachments[0].blendingEnabled = NO;
+
+    s_display_pipeline =
+        [device newRenderPipelineStateWithDescriptor:desc error:&err];
+    if (s_display_pipeline == nil) {
+        fprintf(stderr,
+                "xemu-metal: display-pipeline build failed: %s\n",
+                [[err localizedDescription] UTF8String] ?: "(unknown)");
+        return false;
+    }
+
+    MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
+    sd.minFilter = MTLSamplerMinMagFilterNearest;
+    sd.magFilter = MTLSamplerMinMagFilterNearest;
+    sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+    sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    sd.label = @"xemu.metal.display_sampler";
+    s_display_sampler = [device newSamplerStateWithDescriptor:sd];
+
+    return s_display_sampler != nil;
+}
+
+static id<MTLTexture> ensure_display_texture(uint32_t width,
+                                             uint32_t height)
+{
+    if (width == 0 || height == 0) {
+        return nil;
+    }
+
+    id<MTLDevice> device = (__bridge id<MTLDevice>)xemu_metal_get_device();
+    if (device == nil) {
+        return nil;
+    }
+
+    s_display_texture_index = (s_display_texture_index + 1) % 3;
+    id<MTLTexture> tex = s_display_textures[s_display_texture_index];
+    if (tex != nil &&
+        tex.width == width &&
+        tex.height == height &&
+        tex.pixelFormat == MTLPixelFormatBGRA8Unorm) {
+        return tex;
+    }
+
+    MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    desc.storageMode = MTLStorageModePrivate;
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    tex = [device newTextureWithDescriptor:desc];
+    if (tex != nil) {
+        tex.label = @"xemu.metal.display";
+    }
+    s_display_textures[s_display_texture_index] = tex;
+    return tex;
+}
+
+static bool front_snapshot_matches(id<MTLTexture> src)
+{
+    return s_front_snapshot_texture != nil &&
+           s_front_snapshot_texture.width == src.width &&
+           s_front_snapshot_texture.height == src.height &&
+           s_front_snapshot_texture.pixelFormat == src.pixelFormat;
+}
+
+static bool ensure_front_snapshot_texture(id<MTLTexture> src)
+{
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    if (front_snapshot_matches(src)) {
+        pthread_mutex_unlock(&s_front_framebuffer_lock);
+        return true;
+    }
+
+    void *old_snapshot = (__bridge void *)s_front_snapshot_texture;
+    if (old_snapshot != NULL &&
+        atomic_load(&s_front_framebuffer_texture) == old_snapshot) {
+        atomic_store(&s_front_framebuffer_texture, (void *)NULL);
+    }
+    s_front_snapshot_texture = nil;
+
+    id<MTLDevice> device = (__bridge id<MTLDevice>)xemu_metal_get_device();
+    if (device == nil || src == nil || src.width == 0 || src.height == 0) {
+        pthread_mutex_unlock(&s_front_framebuffer_lock);
+        return false;
+    }
+
+    MTLTextureDescriptor *desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:src.pixelFormat
+                                                           width:src.width
+                                                          height:src.height
+                                                       mipmapped:NO];
+    desc.storageMode = MTLStorageModePrivate;
+    desc.usage = MTLTextureUsageShaderRead;
+    s_front_snapshot_texture = [device newTextureWithDescriptor:desc];
+    if (s_front_snapshot_texture != nil) {
+        s_front_snapshot_texture.label = @"xemu.metal.front_snapshot";
+    }
+    bool ok = s_front_snapshot_texture != nil;
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    return ok;
+}
+
+static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
+{
+    if (e == NULL || e->texture == NULL) {
+        return false;
+    }
+
+    e->last_use_seq = ++s_use_seq;
+
+    if (!present_snapshot_enabled()) {
+        pthread_mutex_lock(&s_front_framebuffer_lock);
+        void *prev = atomic_load(&s_front_framebuffer_texture);
+        if (prev == e->texture) {
+            pthread_mutex_unlock(&s_front_framebuffer_lock);
+            return true;
+        }
+        atomic_store(&s_front_framebuffer_texture, e->texture);
+        pthread_mutex_unlock(&s_front_framebuffer_lock);
+        atomic_fetch_add(&s_front_fb_publishes, 1);
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
+                "width=%u height=%u format=%u reason=%s\n",
+                (unsigned)e->vram_addr, e->width, e->height,
+                e->nv097_format, reason ? reason : "?");
+        return true;
+    }
+
+    pgraph_mtl_draw_flush_open_pass();
+
+    bool copied = false;
+    @autoreleasepool {
+        id<MTLTexture> src = (__bridge id<MTLTexture>)e->texture;
+        if (!ensure_front_snapshot_texture(src)) {
+            return false;
+        }
+
+        void     *event_handle = NULL;
+        uint64_t  event_value  = 0;
+        pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.front_snapshot_copy";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.front_snapshot_blit";
+        [blit copyFromTexture:src
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(src.width, src.height, 1)
+                    toTexture:s_front_snapshot_texture
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        copied = (cmd.status == MTLCommandBufferStatusCompleted);
+    }
+
+    if (!copied) {
+        return false;
+    }
+
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    atomic_store(&s_front_framebuffer_texture,
+                 (__bridge void *)s_front_snapshot_texture);
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    atomic_fetch_add(&s_front_fb_publishes, 1);
+    if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
+                "width=%u height=%u format=%u reason=%s snapshot=1\n",
+                (unsigned)e->vram_addr, e->width, e->height,
+                e->nv097_format, reason ? reason : "?");
+    }
+    return true;
+}
 
 static void msaa_release(MtlSurfaceBinding *b)
 {
@@ -266,8 +542,21 @@ static void msaa_ensure(MtlSurfaceBinding *b)
     }
 }
 
+static void fallback_draw_reset(void)
+{
+    s_fallback_draw_candidate = NULL;
+    s_fallback_draw_candidate_count = 0;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        e->frame_draw_count = 0;
+    }
+}
+
 static void binding_destroy(MtlSurfaceBinding *b)
 {
+    if (b == s_fallback_draw_candidate) {
+        s_fallback_draw_candidate = NULL;
+        s_fallback_draw_candidate_count = 0;
+    }
     msaa_release(b);
     if (b->texture) {
         pgraph_mtl_heap_release_texture(b->texture);
@@ -299,6 +588,11 @@ static MtlSurfaceBinding *cache_get_at(uint32_t vram_addr)
  * shape change of the SAME aspect, never a color-vs-depth confusion. */
 static MtlSurfaceBinding *cache_get_at_color(uint32_t vram_addr)
 {
+    if (s_color_binding != NULL &&
+        s_color_binding->is_color &&
+        s_color_binding->vram_addr == vram_addr) {
+        return s_color_binding;
+    }
     for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
         if (e->vram_addr == vram_addr && e->is_color) {
             return e;
@@ -309,8 +603,94 @@ static MtlSurfaceBinding *cache_get_at_color(uint32_t vram_addr)
 
 static MtlSurfaceBinding *cache_get_at_depth(uint32_t vram_addr)
 {
+    if (s_depth_binding != NULL &&
+        !s_depth_binding->is_color &&
+        s_depth_binding->vram_addr == vram_addr) {
+        return s_depth_binding;
+    }
     for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
         if (e->vram_addr == vram_addr && !e->is_color) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+static bool binding_shape_compatible(MtlSurfaceBinding *e, bool is_color,
+                                     uint32_t vram_addr,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t pitch, uint32_t format)
+{
+    if (e == NULL || e->is_color != is_color ||
+        e->vram_addr != vram_addr ||
+        e->pitch != pitch ||
+        e->nv097_format != format ||
+        e->width < width || e->height < height) {
+        return false;
+    }
+    return (e->width - width) <= 4 && (e->height - height) <= 4;
+}
+
+static MtlSurfaceBinding *
+cache_get_shape(bool is_color, uint32_t vram_addr,
+                uint32_t width, uint32_t height,
+                uint32_t pitch, uint32_t format)
+{
+    MtlSurfaceBinding *best = NULL;
+    uint64_t best_extra_area = UINT64_MAX;
+
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (!binding_shape_compatible(e, is_color, vram_addr,
+                                      width, height, pitch, format)) {
+            continue;
+        }
+        if (e->width == width && e->height == height) {
+            return e;
+        }
+        uint64_t area = (uint64_t)e->width * e->height;
+        uint64_t want = (uint64_t)width * height;
+        uint64_t extra = area > want ? area - want : 0;
+        if (best == NULL || extra < best_extra_area ||
+            (extra == best_extra_area && e->last_use_seq > best->last_use_seq)) {
+            best = e;
+            best_extra_area = extra;
+        }
+    }
+    return best;
+}
+
+static MtlSurfaceBinding *
+cache_get_color_for_guest(uint32_t vram_addr,
+                          uint32_t guest_width, uint32_t guest_height,
+                          uint32_t pitch)
+{
+    MtlSurfaceBinding *best = NULL;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (!e->is_color || e->vram_addr != vram_addr) {
+            continue;
+        }
+        uint32_t ew = e->guest_width ? e->guest_width : e->width;
+        uint32_t eh = e->guest_height ? e->guest_height : e->height;
+        if (ew != guest_width || eh != guest_height) {
+            continue;
+        }
+        if (pitch != 0 && e->pitch != pitch) {
+            continue;
+        }
+        if (best == NULL || e->last_use_seq > best->last_use_seq) {
+            best = e;
+        }
+    }
+    return best;
+}
+
+static MtlSurfaceBinding *cache_get_by_texture(void *texture)
+{
+    if (texture == NULL) {
+        return NULL;
+    }
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e->is_color && e->texture == texture) {
             return e;
         }
     }
@@ -429,6 +809,7 @@ static void cache_evict_lru(void)
  * the cache. */
 static void cache_drop_all(void)
 {
+    fallback_draw_reset();
     s_color_binding = NULL;
     s_depth_binding = NULL;
     while (s_cache_head) {
@@ -475,14 +856,16 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
     /* Source rectangle is GUEST 1× dimensions. */
     uint32_t guest_w = b->guest_width  ? b->guest_width  : b->width;
     uint32_t guest_h = b->guest_height ? b->guest_height : b->height;
-    /* Clamp the destination rect to the host MTLTexture extent — for
-     * surface_scale_factor=2 the texture is 2× the VRAM, so a 1×
-     * upload fits with room to spare. If somehow the texture is
-     * smaller than the guest source, clamp. */
-    uint32_t dst_w = guest_w;
-    uint32_t dst_h = guest_h;
-    if (dst_w > b->width)  dst_w = b->width;
-    if (dst_h > b->height) dst_h = b->height;
+    if (guest_w > b->width)  guest_w = b->width;
+    if (guest_h > b->height) guest_h = b->height;
+    /* Fill the whole host texture. Earlier M5.9 upload code copied only
+     * the 1× guest rectangle into the upper-left of a scaled render
+     * target; the present path samples the full texture, so the untouched
+     * region stayed heap-default magenta. Expanding here mirrors how the
+     * draw path renders into scaled surfaces and keeps CPU-updated front
+     * buffers presentable at surface_scale > 1. */
+    uint32_t dst_w = b->width;
+    uint32_t dst_h = b->height;
     if (dst_w == 0 || dst_h == 0) {
         return;
     }
@@ -506,15 +889,52 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
             return;
         }
         const uint8_t *src = vram_ptr + b->vram_addr;
-        size_t src_pitch = b->pitch != 0 ? (size_t)b->pitch : row_bytes;
-        if (src_pitch == row_bytes) {
-            memcpy(stage.contents, src, copy_size);
-        } else {
-            uint8_t *dst = (uint8_t *)stage.contents;
+        size_t guest_row_bytes = (size_t)guest_w * bpp;
+        size_t src_pitch =
+            b->pitch != 0 ? (size_t)b->pitch : guest_row_bytes;
+        uint8_t *dst = (uint8_t *)stage.contents;
+        if (dst_w == guest_w && dst_h == guest_h &&
+            src_pitch == row_bytes) {
+            memcpy(dst, src, copy_size);
+        } else if (dst_w == guest_w && dst_h == guest_h) {
             for (uint32_t y = 0; y < dst_h; y++) {
-                memcpy(dst + y * row_bytes,
-                       src + y * src_pitch,
+                memcpy(dst + (size_t)y * row_bytes,
+                       src + (size_t)y * src_pitch,
                        row_bytes);
+            }
+        } else if (dst_w % guest_w == 0 && dst_h % guest_h == 0) {
+            uint32_t scale_x = dst_w / guest_w;
+            uint32_t scale_y = dst_h / guest_h;
+            for (uint32_t sy = 0; sy < guest_h; sy++) {
+                const uint8_t *src_row = src + (size_t)sy * src_pitch;
+                uint8_t *first_dst_row =
+                    dst + (size_t)sy * scale_y * row_bytes;
+                for (uint32_t sx = 0; sx < guest_w; sx++) {
+                    const uint8_t *src_px = src_row + (size_t)sx * bpp;
+                    uint8_t *dst_px =
+                        first_dst_row + (size_t)sx * scale_x * bpp;
+                    for (uint32_t rx = 0; rx < scale_x; rx++) {
+                        memcpy(dst_px + (size_t)rx * bpp, src_px, bpp);
+                    }
+                }
+                for (uint32_t ry = 1; ry < scale_y; ry++) {
+                    memcpy(first_dst_row + (size_t)ry * row_bytes,
+                           first_dst_row,
+                           row_bytes);
+                }
+            }
+        } else {
+            for (uint32_t y = 0; y < dst_h; y++) {
+                uint32_t sy = (uint32_t)(((uint64_t)y * guest_h) / dst_h);
+                const uint8_t *src_row = src + (size_t)sy * src_pitch;
+                uint8_t *dst_row = dst + (size_t)y * row_bytes;
+                for (uint32_t x = 0; x < dst_w; x++) {
+                    uint32_t sx =
+                        (uint32_t)(((uint64_t)x * guest_w) / dst_w);
+                    memcpy(dst_row + (size_t)x * bpp,
+                           src_row + (size_t)sx * bpp,
+                           bpp);
+                }
             }
         }
 
@@ -601,49 +1021,28 @@ static bool download_surface_to_vram(MtlSurfaceBinding *b,
 
     uint32_t guest_w = b->guest_width  ? b->guest_width  : b->width;
     uint32_t guest_h = b->guest_height ? b->guest_height : b->height;
-    /* M5.10 codex finding (HIGH severity, 2026-05-03):
-     *
-     * The MTLTexture is allocated at host-scaled dims (surface_scale=2
-     * gives a 2× texture). A `copyFromTexture:sourceOrigin:sourceSize:`
-     * blit reads PIXELS at the requested rect — it cannot downsample.
-     * If we naively read `(guest_w, guest_h)` from `(0, 0)` the
-     * destination buffer ends up holding the upper-left guest-sized
-     * crop of the host-scaled image, not the visible-frame content
-     * scaled to guest dims. Writing that cropped buffer to VRAM at
-     * `b->vram_addr` would corrupt downstream consumers (CRTC scan-out
-     * in particular).
-     *
-     * The proper fix is a downsample render pass (vk does this with
-     * `vkCmdBlitImage` + `VK_FILTER_LINEAR` against an `image_scratch`
-     * 1× target). Out of scope for the M5.10 MVP.
-     *
-     * Defensive behavior here: skip the download whenever the texture
-     * is host-scaled (`b->width != guest_w` or `b->height != guest_h`),
-     * leave `draw_dirty` set, and return false. Callers see the entry
-     * remains dirty; downstream consumers that need pixel-coherent
-     * VRAM at this address will still see stale guest VRAM, but that
-     * is preferable to writing a corrupted crop.
-     *
-     * The Apple Silicon default `surface_scale = 2` triggers this skip
-     * universally on PGR2 / Rainbow / Crimson / SC2. To exercise the
-     * download path for development, set
-     * `XEMU_DISPLAY_SCALE=1 XEMU_METAL_FRONT_FB_DOWNLOAD=1`; otherwise
-     * the path is structurally inert until the downsample slice lands. */
-    if (b->width != guest_w || b->height != guest_h) {
-        return false;
-    }
-    uint32_t src_w = guest_w;
-    uint32_t src_h = guest_h;
-    if (src_w > b->width)  src_w = b->width;
-    if (src_h > b->height) src_h = b->height;
-    if (src_w == 0 || src_h == 0) {
+    if (guest_w == 0 || guest_h == 0 || guest_w > b->width ||
+        guest_h > b->height) {
         return false;
     }
 
-    size_t row_bytes = (size_t)src_w * bpp;
-    size_t copy_size = row_bytes * src_h;
+    uint32_t scale_x = b->width / guest_w;
+    uint32_t scale_y = b->height / guest_h;
+    bool scaled = (b->width != guest_w || b->height != guest_h);
+    if (scaled && (scale_x == 0 || scale_y == 0 ||
+                   scale_x * guest_w != b->width ||
+                   scale_y * guest_h != b->height)) {
+        return false;
+    }
+
+    uint32_t src_w = scaled ? b->width : guest_w;
+    uint32_t src_h = scaled ? b->height : guest_h;
+    size_t src_row_bytes = (size_t)src_w * bpp;
+    size_t src_copy_size = src_row_bytes * src_h;
+    size_t row_bytes = (size_t)guest_w * bpp;
+    size_t copy_size = row_bytes * guest_h;
     if (copy_size == 0) {
-        return;
+        return false;
     }
 
     /* The render-queue blit-encoder reads from a draw-target texture
@@ -667,7 +1066,7 @@ static bool download_surface_to_vram(MtlSurfaceBinding *b,
             return false;
         }
         id<MTLBuffer> stage = [device
-            newBufferWithLength:copy_size
+            newBufferWithLength:src_copy_size
                         options:MTLResourceStorageModeShared];
         if (stage == nil) {
             return false;
@@ -689,8 +1088,8 @@ static bool download_surface_to_vram(MtlSurfaceBinding *b,
                    sourceSize:MTLSizeMake(src_w, src_h, 1)
                      toBuffer:stage
             destinationOffset:0
-       destinationBytesPerRow:row_bytes
-     destinationBytesPerImage:copy_size];
+       destinationBytesPerRow:src_row_bytes
+     destinationBytesPerImage:src_copy_size];
         [blit endEncoding];
         [cmd commit];
         [cmd waitUntilCompleted];
@@ -700,10 +1099,20 @@ static bool download_surface_to_vram(MtlSurfaceBinding *b,
         uint8_t       *dst       = vram_ptr_base + b->vram_addr;
         size_t         dst_pitch = b->pitch != 0 ? (size_t)b->pitch : row_bytes;
         const uint8_t *src       = (const uint8_t *)stage.contents;
-        if (dst_pitch == row_bytes) {
+        if (!scaled && dst_pitch == row_bytes) {
             memcpy(dst, src, copy_size);
+        } else if (scaled) {
+            for (uint32_t y = 0; y < guest_h; y++) {
+                const uint8_t *src_row = src + (size_t)y * scale_y * src_row_bytes;
+                uint8_t *dst_row = dst + (size_t)y * dst_pitch;
+                for (uint32_t x = 0; x < guest_w; x++) {
+                    memcpy(dst_row + (size_t)x * bpp,
+                           src_row + (size_t)x * scale_x * bpp,
+                           bpp);
+                }
+            }
         } else {
-            for (uint32_t y = 0; y < src_h; y++) {
+            for (uint32_t y = 0; y < guest_h; y++) {
                 memcpy(dst + y * dst_pitch,
                        src + y * row_bytes,
                        row_bytes);
@@ -754,7 +1163,13 @@ bool pgraph_mtl_surface_init(void)
     s_cache_size = 0;
     s_color_binding = NULL;
     s_depth_binding = NULL;
+    s_fallback_draw_candidate = NULL;
+    s_fallback_draw_candidate_count = 0;
     s_use_seq = 0;
+    s_front_snapshot_texture = nil;
+    release_display_textures();
+    s_display_pipeline = nil;
+    s_display_sampler = nil;
     atomic_store(&s_front_framebuffer_texture, (void *)NULL);
     atomic_store(&s_clear_count, (uint64_t)0);
     atomic_store(&s_front_fb_publishes, (uint64_t)0);
@@ -775,7 +1190,13 @@ void pgraph_mtl_surface_finalize(void)
         return;
     }
 
+    pthread_mutex_lock(&s_front_framebuffer_lock);
     atomic_store(&s_front_framebuffer_texture, (void *)NULL);
+    s_front_snapshot_texture = nil;
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    release_display_textures();
+    s_display_pipeline = nil;
+    s_display_sampler = nil;
     cache_drop_all();
     s_render_queue = nil;
     s_initialized = false;
@@ -786,7 +1207,11 @@ void pgraph_mtl_surface_cache_flush(void)
     if (!s_initialized) {
         return;
     }
+    pthread_mutex_lock(&s_front_framebuffer_lock);
     atomic_store(&s_front_framebuffer_texture, (void *)NULL);
+    s_front_snapshot_texture = nil;
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    release_display_textures();
     cache_drop_all();
 }
 
@@ -803,67 +1228,21 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
 
-    /* 2026-05-03 magenta-RT fix: color-only lookup so a same-vram_addr
-     * depth binding doesn't trigger a destroy-and-recreate of this
-     * color slot. */
-    MtlSurfaceBinding *e = cache_get_at_color(vram_addr);
-    if (e != NULL &&
-        e->width == width && e->height == height &&
-        e->nv097_format == nv097_color_format) {
-        /* Cache hit — keep guest dims fresh in case the caller resized. */
-        if (guest_width  != 0) e->guest_width  = guest_width;
-        if (guest_height != 0) e->guest_height = guest_height;
+    MtlSurfaceBinding *e = cache_get_shape(true, vram_addr, width, height,
+                                           pitch, nv097_color_format);
+    if (e != NULL) {
+        /* Cache hit. Match GL/Vulkan's non-strict compatibility rule only
+         * for barely-larger same-format shapes. Substantially different
+         * shapes at the same VRAM address remain separate siblings so
+         * render-to-texture sampling and fallback publish do not alias the
+         * wrong texture. */
+        if (e->width == width && e->height == height) {
+            if (guest_width  != 0) e->guest_width  = guest_width;
+            if (guest_height != 0) e->guest_height = guest_height;
+            if (size > e->size) e->size = size;
+        }
         e->last_use_seq = ++s_use_seq;
         return e;
-    }
-    /* Existing entry but shape changed — release and recreate.
-     *
-     * 2026-05-03 magenta-RT diagnostic: bump a counter and emit a bounded
-     * log line whenever we recreate due to shape mismatch. PGR2 may bind
-     * the same vram_addr at multiple distinct shapes (e.g. a 1280×480
-     * supersampled back-buffer reconfigured as 640×480 mid-frame). Each
-     * recreate destroys all previously rendered content for that
-     * vram_addr — explaining "draws hit but screenshots show fresh
-     * texture content".
-     *
-     * Counter accumulates monotonically; xemu-metal-perf.c reads it as
-     * METAL_SURFACE_RECREATE_SHAPE_MISMATCH per interval. Diagnostic log
-     * line is rate-limited to first 16 events. */
-    if (e != NULL) {
-        atomic_fetch_add(&s_recreate_shape_mismatch, 1);
-        static _Atomic uint32_t s_recreate_log_count = 0;
-        if (atomic_load(&s_recreate_log_count) < 16) {
-            atomic_fetch_add(&s_recreate_log_count, 1);
-            fprintf(stderr,
-                    "xemu-perf: metal_surface_recreate vram_addr=0x%x "
-                    "old=%ux%u/fmt%u new=%ux%u/fmt%u (color)\n",
-                    (unsigned)vram_addr,
-                    e->width, e->height, e->nv097_format,
-                    width, height, nv097_color_format);
-        }
-        /* 2026-05-03 magenta-RT fix (codex-validate finding): if the
-         * entry being destroyed is the currently-published front-fb,
-         * clear the publish pointer first so the compositor doesn't
-         * dereference a freed MTLTexture. Symmetric with the LRU
-         * front-fb pin in cache_evict_lru — that pin protects against
-         * eviction; this clear protects against shape-change destroy.
-         * Without this, a guest-side surface reconfiguration of the
-         * displayed buffer would reproduce the heap-default magenta
-         * class artifact via a different mechanism. */
-        if (atomic_load(&s_front_framebuffer_texture) == e->texture) {
-            atomic_store(&s_front_framebuffer_texture, (void *)NULL);
-        }
-        /* M5.10: if the open render pass currently references this
-         * texture, drain it before binding_destroy releases the
-         * MTLTexture out from under the encoder. */
-        void *open_color_tex = NULL, *open_depth_tex = NULL;
-        pgraph_mtl_draw_get_open_pass_textures(&open_color_tex,
-                                               &open_depth_tex);
-        if (e->texture == open_color_tex || e->texture == open_depth_tex) {
-            pgraph_mtl_draw_flush_open_pass();
-        }
-        cache_unlink(e);
-        binding_destroy(e);
     }
 
     cache_evict_lru();
@@ -881,7 +1260,9 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
     e->vram_addr        = vram_addr;
-    e->size             = size > 0 ? size : ((uint32_t)pitch * height);
+    e->size             = size > 0 ? size :
+                          ((uint32_t)pitch *
+                           (guest_height ? guest_height : height));
     e->pitch            = pitch;
     e->is_color         = true;
     e->width            = width;
@@ -913,38 +1294,16 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
 
-    /* 2026-05-03 magenta-RT fix: depth-only lookup. Symmetric with the
-     * color-only filter above. */
-    MtlSurfaceBinding *e = cache_get_at_depth(vram_addr);
-    if (e != NULL &&
-        e->width == width && e->height == height &&
-        e->nv097_format == nv097_zeta_format) {
-        if (guest_width  != 0) e->guest_width  = guest_width;
-        if (guest_height != 0) e->guest_height = guest_height;
+    MtlSurfaceBinding *e = cache_get_shape(false, vram_addr, width, height,
+                                           pitch, nv097_zeta_format);
+    if (e != NULL) {
+        if (e->width == width && e->height == height) {
+            if (guest_width  != 0) e->guest_width  = guest_width;
+            if (guest_height != 0) e->guest_height = guest_height;
+            if (size > e->size) e->size = size;
+        }
         e->last_use_seq = ++s_use_seq;
         return e;
-    }
-    if (e != NULL) {
-        atomic_fetch_add(&s_recreate_shape_mismatch, 1);
-        static _Atomic uint32_t s_recreate_log_count_d = 0;
-        if (atomic_load(&s_recreate_log_count_d) < 16) {
-            atomic_fetch_add(&s_recreate_log_count_d, 1);
-            fprintf(stderr,
-                    "xemu-perf: metal_surface_recreate vram_addr=0x%x "
-                    "old=%ux%u/fmt%u new=%ux%u/fmt%u (depth)\n",
-                    (unsigned)vram_addr,
-                    e->width, e->height, e->nv097_format,
-                    width, height, nv097_zeta_format);
-        }
-        /* M5.10: open-pass drain symmetric with the color path. */
-        void *open_color_tex = NULL, *open_depth_tex = NULL;
-        pgraph_mtl_draw_get_open_pass_textures(&open_color_tex,
-                                               &open_depth_tex);
-        if (e->texture == open_color_tex || e->texture == open_depth_tex) {
-            pgraph_mtl_draw_flush_open_pass();
-        }
-        cache_unlink(e);
-        binding_destroy(e);
     }
 
     cache_evict_lru();
@@ -962,7 +1321,9 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
         return NULL;
     }
     e->vram_addr        = vram_addr;
-    e->size             = size > 0 ? size : ((uint32_t)pitch * height);
+    e->size             = size > 0 ? size :
+                          ((uint32_t)pitch *
+                           (guest_height ? guest_height : height));
     e->pitch            = pitch;
     e->is_color         = false;
     e->width            = width;
@@ -1090,6 +1451,92 @@ void *pgraph_mtl_surface_get_metal_texture_within(uint32_t vram_addr,
     return e->texture;
 }
 
+bool pgraph_mtl_surface_get_color_surface_info_at(uint32_t vram_addr,
+                                                  void **out_texture,
+                                                  uint32_t *out_width,
+                                                  uint32_t *out_height,
+                                                  uint32_t *out_guest_width,
+                                                  uint32_t *out_guest_height,
+                                                  uint32_t *out_pitch,
+                                                  uint32_t *out_format)
+{
+    if (!s_initialized) {
+        return false;
+    }
+    MtlSurfaceBinding *e = cache_get_at_color(vram_addr);
+    if (e == NULL || e->texture == NULL) {
+        return false;
+    }
+    if (out_texture) {
+        *out_texture = e->texture;
+    }
+    if (out_width) {
+        *out_width = e->width;
+    }
+    if (out_height) {
+        *out_height = e->height;
+    }
+    if (out_guest_width) {
+        *out_guest_width = e->guest_width ? e->guest_width : e->width;
+    }
+    if (out_guest_height) {
+        *out_guest_height = e->guest_height ? e->guest_height : e->height;
+    }
+    if (out_pitch) {
+        *out_pitch = e->pitch;
+    }
+    if (out_format) {
+        *out_format = e->nv097_format;
+    }
+    return true;
+}
+
+bool pgraph_mtl_surface_get_color_surface_info_for(uint32_t vram_addr,
+                                                   uint32_t guest_width,
+                                                   uint32_t guest_height,
+                                                   uint32_t pitch,
+                                                   void **out_texture,
+                                                   uint32_t *out_width,
+                                                   uint32_t *out_height,
+                                                   uint32_t *out_guest_width,
+                                                   uint32_t *out_guest_height,
+                                                   uint32_t *out_pitch,
+                                                   uint32_t *out_format)
+{
+    if (!s_initialized || guest_width == 0 || guest_height == 0) {
+        return false;
+    }
+    MtlSurfaceBinding *e =
+        cache_get_color_for_guest(vram_addr, guest_width, guest_height,
+                                  pitch);
+    if (e == NULL || e->texture == NULL) {
+        return false;
+    }
+    if (out_texture) {
+        *out_texture = e->texture;
+    }
+    if (out_width) {
+        *out_width = e->width;
+    }
+    if (out_height) {
+        *out_height = e->height;
+    }
+    if (out_guest_width) {
+        *out_guest_width = e->guest_width ? e->guest_width : e->width;
+    }
+    if (out_guest_height) {
+        *out_guest_height = e->guest_height ? e->guest_height : e->height;
+    }
+    if (out_pitch) {
+        *out_pitch = e->pitch;
+    }
+    if (out_format) {
+        *out_format = e->nv097_format;
+    }
+    e->last_use_seq = ++s_use_seq;
+    return true;
+}
+
 /* ---------------------------------------------------------------- */
 /* Legacy ensure-color/-depth wrappers. Used by the M2-era clear path
  * that does NOT have a vram_addr (e.g. when no NV097_SET_SURFACE_OFFSET
@@ -1158,36 +1605,149 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
         return false;
     }
 
-    /* 2026-05-03 magenta-RT fix: bump last_use_seq before the dedupe
-     * check so a stably-published front-fb keeps a fresh LRU score and
-     * is never picked as the eviction victim while the compositor is
-     * actively reading it. The front-fb-pin guard in cache_evict_lru is
-     * the primary protection; this is a belt-and-suspenders refresh. */
-    e->last_use_seq = ++s_use_seq;
-    void *prev = atomic_load(&s_front_framebuffer_texture);
-    if (prev == e->texture) {
-        return true;
+    return publish_front_texture(e, reason);
+}
+
+static bool publish_display_binding_front_fb(MtlSurfaceBinding *e,
+                                             uint32_t display_width,
+                                             uint32_t display_height,
+                                             uint32_t vga_line_offset,
+                                             const char *reason)
+{
+    if (!s_initialized || e == NULL || e->texture == NULL || !e->is_color ||
+        display_width == 0 || display_height == 0) {
+        return false;
     }
-    atomic_store(&s_front_framebuffer_texture, e->texture);
+
+    if (!build_display_pipeline_if_needed()) {
+        return publish_front_texture(e, reason);
+    }
+
+    id<MTLTexture> dst = ensure_display_texture(display_width, display_height);
+    if (dst == nil) {
+        return publish_front_texture(e, reason);
+    }
+
+    float line_offset = 1.0f;
+    if (vga_line_offset != 0) {
+        line_offset = (float)e->pitch / (float)vga_line_offset;
+        if (line_offset <= 0.0f) {
+            line_offset = 1.0f;
+        }
+    }
+
+    pgraph_mtl_draw_flush_open_pass();
+    void     *event_handle = NULL;
+    uint64_t  event_value  = 0;
+    pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+    bool rendered = false;
+    @autoreleasepool {
+        MTLRenderPassDescriptor *desc =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        desc.colorAttachments[0].texture = dst;
+        desc.colorAttachments[0].loadAction = MTLLoadActionClear;
+        desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+        desc.colorAttachments[0].clearColor =
+            MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.display_compose";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:desc];
+        enc.label = @"xemu.metal.display_compose_enc";
+        MTLViewport vp = {
+            0.0, 0.0,
+            (double)display_width, (double)display_height,
+            0.0, 1.0
+        };
+        [enc setViewport:vp];
+        MTLScissorRect sc = { 0, 0, display_width, display_height };
+        [enc setScissorRect:sc];
+        [enc setRenderPipelineState:s_display_pipeline];
+        [enc setFragmentTexture:(__bridge id<MTLTexture>)e->texture atIndex:0];
+        [enc setFragmentSamplerState:s_display_sampler atIndex:0];
+        MtlDisplayUniforms u = {
+            { (float)display_width, (float)display_height },
+            line_offset,
+            0.0f
+        };
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+        rendered = (cmd.status == MTLCommandBufferStatusCompleted);
+    }
+
+    if (!rendered) {
+        return false;
+    }
+
+    e->last_use_seq = ++s_use_seq;
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    atomic_store(&s_front_framebuffer_texture, (__bridge void *)dst);
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
     atomic_fetch_add(&s_front_fb_publishes, 1);
-    fprintf(stderr,
-            "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-            "width=%u height=%u format=%u reason=%s\n",
-            (unsigned)e->vram_addr, e->width, e->height, e->nv097_format,
-            reason ? reason : "?");
+    if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
+                "width=%u height=%u source_width=%u source_height=%u "
+                "format=%u line_offset=%.3f reason=%s display=1\n",
+                (unsigned)e->vram_addr, display_width, display_height,
+                e->width, e->height, e->nv097_format, line_offset,
+                reason ? reason : "?");
+    }
     return true;
 }
 
-/* M5.10 experimental fallback (2026-05-03): publish the
- * most-recently-bound color RT (s_color_binding) as the front-fb,
- * regardless of CRTC address. Use case: titles like PGR2 where the
- * CRTC-pointed surface gets ~1 draw / interval (presumably HUD) while
- * the actual rendered scene goes to a back buffer at a different
- * VRAM address. The 2026-05-03 followup-B+C diagnostic established
- * that no observable mechanism propagates back→front in VRAM (no CPU
- * memcpy via dirty_vram, no NV097_IMAGE_BLIT, no pcrtc.start cycling),
- * so a host-side direct publish of the back buffer is the cheapest
- * possible bridge.
+bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
+                                                 uint32_t display_width,
+                                                 uint32_t display_height,
+                                                 uint32_t vga_line_offset,
+                                                 const char *reason)
+{
+    if (!s_initialized) {
+        return false;
+    }
+    MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    return publish_display_binding_front_fb(e, display_width, display_height,
+                                            vga_line_offset, reason);
+}
+
+void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
+{
+    if (!s_initialized || texture == NULL || !color_write) {
+        return;
+    }
+    MtlSurfaceBinding *e = cache_get_by_texture(texture);
+    if (e == NULL) {
+        return;
+    }
+
+    uint32_t n = ++e->frame_draw_count;
+    if (s_fallback_draw_candidate == NULL ||
+        n > s_fallback_draw_candidate_count ||
+        (n == s_fallback_draw_candidate_count && e == s_color_binding)) {
+        s_fallback_draw_candidate = e;
+        s_fallback_draw_candidate_count = n;
+    }
+}
+
+/* M5.10 experimental fallback (2026-05-03): publish the dominant
+ * per-frame color draw target as the front-fb, regardless of CRTC
+ * address. Use case: titles like PGR2 where the CRTC-pointed surface
+ * gets only a few draws while the actual rendered scene goes to a back
+ * buffer at a different VRAM address. The fallback now tracks actual
+ * draw destinations instead of using s_color_binding, since the last
+ * bound target before flip_stall may be a black front/CRTC surface.
  *
  * This is NOT correctness-faithful (the back buffer may have a
  * different aspect ratio than the front, and if the title uses
@@ -1198,26 +1758,36 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
  * regardless of input dims).
  *
  * Returns true if a publish landed. Bumps METAL_FRONT_FB_PUBLISHES
- * with reason="fallback-latest-draw". */
+ * with reason="fallback-dominant-draw". */
 bool pgraph_mtl_surface_publish_latest_draw_fallback(void)
 {
-    if (!s_initialized || s_color_binding == NULL ||
-        s_color_binding->texture == NULL) {
+    if (!s_initialized) {
         return false;
     }
-    MtlSurfaceBinding *e = s_color_binding;
-    e->last_use_seq = ++s_use_seq;
-    void *prev = atomic_load(&s_front_framebuffer_texture);
-    if (prev == e->texture) {
-        return true;
+    MtlSurfaceBinding *e = s_fallback_draw_candidate;
+    if (e == NULL || e->texture == NULL) {
+        e = s_color_binding;
     }
-    atomic_store(&s_front_framebuffer_texture, e->texture);
-    atomic_fetch_add(&s_front_fb_publishes, 1);
-    fprintf(stderr,
-            "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-            "width=%u height=%u format=%u reason=fallback-latest-draw\n",
-            (unsigned)e->vram_addr, e->width, e->height, e->nv097_format);
-    return true;
+    if (e == NULL || e->texture == NULL) {
+        fallback_draw_reset();
+        return false;
+    }
+    uint32_t selected_count = s_fallback_draw_candidate_count;
+    if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_fallback_candidate "
+                "vram_addr=0x%x width=%u height=%u format=%u "
+                "color_draws=%u%s\n",
+                (unsigned)e->vram_addr, e->width, e->height,
+                e->nv097_format, (unsigned)selected_count,
+                (e == s_color_binding && s_fallback_draw_candidate == NULL)
+                    ? " source=current-binding" : "");
+    }
+    bool ok = publish_display_binding_front_fb(e, e->width, e->height,
+                                               e->pitch,
+                                               "fallback-dominant-draw");
+    fallback_draw_reset();
+    return ok;
 }
 
 /* M5.9-followup-A (2026-05-03): the M5.9-era publish_color_binding()
@@ -1382,12 +1952,28 @@ int pgraph_mtl_surface_has_front_framebuffer(void)
 
 void *pgraph_mtl_get_framebuffer_metal_texture(void)
 {
-    return atomic_load(&s_front_framebuffer_texture);
+    if (!s_initialized) {
+        return NULL;
+    }
+
+    void *retained = NULL;
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    void *raw = atomic_load(&s_front_framebuffer_texture);
+    if (raw != NULL) {
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)raw;
+        retained = (__bridge_retained void *)tex;
+    }
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    return retained;
 }
 
-void pgraph_mtl_release_framebuffer_metal_texture(void)
+void pgraph_mtl_release_framebuffer_metal_texture(void *texture)
 {
-    /* No per-frame release needed; the cache owns texture lifetime. */
+    if (texture == NULL) {
+        return;
+    }
+    id<MTLTexture> tex = (__bridge_transfer id<MTLTexture>)texture;
+    (void)tex;
 }
 
 uint64_t pgraph_mtl_surface_clear_count(void)
@@ -1610,8 +2196,10 @@ void pgraph_mtl_surface_register_access_cb_for(uint32_t vram_addr, void *cb)
     if (!s_initialized) {
         return;
     }
-    MtlSurfaceBinding *e = cache_get_at(vram_addr);
-    if (e != NULL) {
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e->vram_addr != vram_addr) {
+            continue;
+        }
         e->access_cb = cb;
     }
 }
@@ -1625,9 +2213,11 @@ void pgraph_mtl_surface_unregister_access_cb_for(uint32_t vram_addr,
     if (!s_initialized) {
         return;
     }
-    MtlSurfaceBinding *e = cache_get_at(vram_addr);
-    if (e != NULL) {
-        if (out_cb) {
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e->vram_addr != vram_addr) {
+            continue;
+        }
+        if (out_cb && *out_cb == NULL) {
             *out_cb = e->access_cb;
         }
         e->access_cb = NULL;
@@ -1655,14 +2245,17 @@ void pgraph_mtl_surface_upload_if_dirty_at(uint32_t vram_addr,
     if (!s_initialized || vram_ptr == NULL) {
         return;
     }
-    /* Use the within-range lookup so a CRTC publish at a non-zero
-     * line_offset still resolves to the surface that contains it. */
-    MtlSurfaceBinding *e = cache_get_within(vram_addr);
-    if (e == NULL) {
-        return;
-    }
-    if (atomic_load(&e->dirty_vram)) {
-        upload_vram_to_texture(e, vram_ptr);
+    /* Upload every dirty sibling that contains this address. Multiple
+     * cached shapes may share one VRAM range; the caller may subsequently
+     * use any exact guest-size match for render-to-texture sampling. */
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (vram_addr < e->vram_addr ||
+            vram_addr >= e->vram_addr + e->size) {
+            continue;
+        }
+        if (atomic_load(&e->dirty_vram)) {
+            upload_vram_to_texture(e, vram_ptr);
+        }
     }
 }
 
@@ -1912,9 +2505,11 @@ bool pgraph_mtl_surface_blit_copy(uint32_t src_vram_addr,
             if (dst == s_color_binding) s_color_binding = NULL;
             if (dst == s_depth_binding) s_depth_binding = NULL;
             /* Also clear the front-fb pointer if it referenced this dst. */
+            pthread_mutex_lock(&s_front_framebuffer_lock);
             if (atomic_load(&s_front_framebuffer_texture) == dst->texture) {
                 atomic_store(&s_front_framebuffer_texture, (void *)NULL);
             }
+            pthread_mutex_unlock(&s_front_framebuffer_lock);
             binding_destroy(dst);
         }
         return false;

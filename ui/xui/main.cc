@@ -263,7 +263,9 @@ void xemu_hud_update(void)
         // Acquires the next CAMetalDrawable, builds the render pass
         // descriptor, opens a command buffer, and calls
         // ImGui_ImplMetal_NewFrame + ImGui_ImplSDL3_NewFrame.
-        xemu_metal_begin_imgui_frame();
+        if (!xemu_metal_imgui_frame_active()) {
+            xemu_metal_begin_imgui_frame();
+        }
     } else
 #endif
     {

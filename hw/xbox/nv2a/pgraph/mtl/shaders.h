@@ -15,15 +15,17 @@
  * shader has uniform buffers + texture bindings the M5 draw machinery
  * does not yet supply. Cache exists; production wiring lands with M6.
  *
- * M8 (2026-05-02) adds an async build path. On lookup miss the cache
- * inserts a placeholder entry, dispatches the GLSL → SPIR-V → MSL +
- * MTLLibrary + MTLRenderPipelineState build to a private serial
- * dispatch queue, and returns immediately with state PENDING. The
- * draw layer treats PENDING as "skip the draw this frame"
- * (RPCS3 PR #4876 fallback pattern). Subsequent lookups return PENDING
- * until the build completes; on completion the entry transitions to
- * READY and the next lookup returns the pipeline state. On
- * translator/build failure the entry transitions to FAILED and the
+ * M8 (2026-05-02) adds an opt-in async build path. On lookup miss with
+ * XEMU_METAL_ASYNC_PIPELINE_COMPILE=1 the cache inserts a placeholder
+ * entry, dispatches the GLSL → SPIR-V → MSL + MTLLibrary +
+ * MTLRenderPipelineState build to a private serial dispatch queue, and
+ * returns immediately with state PENDING. The draw layer treats PENDING
+ * as "skip the draw this frame" (RPCS3 PR #4876 fallback pattern).
+ * Because skipped first-use draws break render-to-texture/postprocess
+ * correctness, the default path builds synchronously when
+ * XEMU_METAL_TRANSLATED_PIPELINE=1. Passthrough mode keeps async warmup
+ * because those translated pipelines are not used for the current draw.
+ * On translator/build failure the entry transitions to FAILED and the
  * draw layer falls back to the M3/M4 hand-coded passthrough.
  *
  * Counters:
@@ -34,9 +36,9 @@
  *   METAL_SHADER_COMPILE_COMPLETED_TOTAL — async build completions (ok).
  *   METAL_SHADER_COMPILE_FAILED_TOTAL    — async build completions (fail).
  *
- * The async path is gated by env var XEMU_METAL_ASYNC_PIPELINE_COMPILE
- * (default 1 on Apple Silicon). Setting it to 0 reverts to the M5–M7
- * synchronous path (block the renderer thread during build).
+ * The async path is gated by env var XEMU_METAL_ASYNC_PIPELINE_COMPILE.
+ * When unset, async is disabled for translated drawing and enabled for
+ * passthrough warmup. Setting it explicitly overrides that default.
  *
  * Copyright (c) 2026 XEMU MacOS Apple Silicon performance fork
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -71,7 +73,7 @@ void pgraph_mtl_shaders_finalize(void);
 /* Per-entry state machine result for the M8 async-compile path. */
 typedef enum PgraphMtlPipelineLookupState {
     PGRAPH_MTL_PIPELINE_READY   = 0, /* Pipeline state valid; encode draw. */
-    PGRAPH_MTL_PIPELINE_PENDING = 1, /* Compile in flight; skip the draw. */
+    PGRAPH_MTL_PIPELINE_PENDING = 1, /* Compile in flight; caller decides. */
     PGRAPH_MTL_PIPELINE_FAILED  = 2, /* Build failed; fall back to passthrough. */
 } PgraphMtlPipelineLookupState;
 

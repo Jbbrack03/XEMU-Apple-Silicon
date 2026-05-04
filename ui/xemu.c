@@ -89,6 +89,9 @@
 
 uint64_t vblank_interval_ns = 16666666LL;
 bool use_vblank_timer_thread = true;
+#if defined(__APPLE__)
+static bool defer_metal_host_present;
+#endif
 
 struct xemu_console {
     DisplayChangeListener dcl;
@@ -737,6 +740,8 @@ static float update_avg(float avg, float ms, float r) {
 
 static float fps = 1.0;
 
+static void gl_render_frame(struct xemu_console *scon);
+
 static void update_fps(void)
 {
     static float avg = 1.0;
@@ -752,9 +757,11 @@ static void update_fps(void)
     fps = 1000.0/avg;
 }
 
-static void process_vblank(struct xemu_console *scon)
+static void process_vblank(struct xemu_console *scon, bool require_bql)
 {
-    assert(bql_locked());
+    if (require_bql) {
+        assert(bql_locked());
+    }
 
     update_fps();
 
@@ -774,7 +781,7 @@ static void vblank_timer_callback(void *opaque)
     struct xemu_console *scon = (struct xemu_console *)opaque;
 
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    process_vblank(scon);
+    process_vblank(scon, true);
     timer_mod_ns(vblank_timer, now + vblank_interval_ns);
 }
 
@@ -798,8 +805,26 @@ static void *vblank_timer_thread(void *opaque)
         }
 
         if (!qatomic_read(&qemu_exiting)) {
+#if defined(__APPLE__)
+            if (xemu_metal_is_active()) {
+                /* graphic_hw_update() must run under BQL because it can
+                 * deliver guest vblank interrupts. The Metal host-present
+                 * path must not: acquiring a CAMetalDrawable and committing
+                 * the present command buffer while BQL is held starves vCPU,
+                 * IDE, and PFIFO progress. Suppress the render callback for
+                 * the locked vblank delivery, then present immediately after
+                 * releasing BQL. */
+                qatomic_set(&defer_metal_host_present, true);
+                xemu_main_loop_lock();
+                process_vblank(scon, true);
+                xemu_main_loop_unlock();
+                qatomic_set(&defer_metal_host_present, false);
+                gl_render_frame(scon);
+                continue;
+            }
+#endif
             xemu_main_loop_lock();
-            process_vblank(scon);
+            process_vblank(scon, true);
             xemu_main_loop_unlock();
         }
     }
@@ -845,6 +870,10 @@ static void gl_render_frame(struct xemu_console *scon)
      * ImGui HUD overlaid. M2 introduces the surface manager and the
      * NV2A framebuffer compositor. */
     if (xemu_metal_is_active()) {
+        if (qatomic_read(&defer_metal_host_present)) {
+            qatomic_set(&rendering, false);
+            return;
+        }
         xemu_metal_render_frame();
         qatomic_set(&rendering, false);
         return;

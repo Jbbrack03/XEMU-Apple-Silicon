@@ -88,6 +88,8 @@ extern bool pgraph_mtl_shaders_build_pipeline(
     uint32_t color_format,
     uint32_t depth_format,
     uint32_t sample_count,
+    uint32_t blend_reg,
+    uint32_t control_0,
     unsigned n_attrs,
     const uint32_t *attr_format,
     const uint32_t *attr_offset,
@@ -118,6 +120,8 @@ extern void pgraph_mtl_shaders_dispatch_build(
     uint32_t color_format,
     uint32_t depth_format,
     uint32_t sample_count,
+    uint32_t blend_reg,
+    uint32_t control_0,
     unsigned n_attrs,
     uint32_t *attr_format,
     uint32_t *attr_offset,
@@ -147,11 +151,24 @@ char *pgraph_mtl_shadergen_vsh(const ShaderState *state)
     if (state == NULL) {
         return NULL;
     }
+    const char *force_passthrough =
+        getenv("XEMU_METAL_DEBUG_PASSTHROUGH_VERTEX");
+    if (force_passthrough != NULL && force_passthrough[0] != '\0' &&
+        force_passthrough[0] != '0') {
+        return g_strdup(
+            "#version 450\n"
+            "layout(location = 0) in vec4 v0;\n"
+            "void main() {\n"
+            "    gl_Position = v0;\n"
+            "}\n");
+    }
+
     GenVshGlslOptions opts;
     memset(&opts, 0, sizeof(opts));
     opts.vulkan = true;
     opts.prefix_outputs = false;
     opts.use_push_constants_for_uniform_attrs = false;
+    opts.force_uniform_block_full_layout = true;
     opts.ubo_binding = MTL_VSH_UBO_BINDING;
     MString *m = pgraph_glsl_gen_vsh(&state->vsh, opts);
     return mstring_take_cstr(m);
@@ -161,6 +178,227 @@ char *pgraph_mtl_shadergen_psh(const ShaderState *state)
 {
     if (state == NULL) {
         return NULL;
+    }
+    const char *force_color = getenv("XEMU_METAL_DEBUG_FORCE_FRAGMENT_COLOR");
+    if (force_color != NULL && force_color[0] != '\0' &&
+        force_color[0] != '0') {
+        return g_strdup(
+            "#version 450\n"
+            "layout(location = 0) out vec4 fragColor;\n"
+            "void main() {\n"
+            "    fragColor = vec4(1.0, 0.0, 1.0, 1.0);\n"
+            "}\n");
+    }
+    const char *force_tex0 = getenv("XEMU_METAL_DEBUG_FORCE_TEXTURE0");
+    if (force_tex0 != NULL && force_tex0[0] != '\0' &&
+        force_tex0[0] != '0') {
+        if (strcmp(force_tex0, "coords") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 5) in vec4 vtxT0;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT0.xy / max(abs(vtxT0.w), 0.00001);\n"
+                "    fragColor = vec4(fract(uv.x), fract(uv.y), 0.0, 1.0);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "diffuse") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 0) in vec4 vtxD0;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = vec4(vtxD0.rgb, 1.0);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "specular") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 1) in vec4 vtxD1;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = vec4(vtxD1.rgb, 1.0);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "raw") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 5) in vec4 vtxT0;\n"
+                "layout(binding = 2) uniform sampler2D texSamp0;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT0.xy / max(abs(vtxT0.w), 0.00001);\n"
+                "    fragColor = texture(texSamp0, uv);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "center") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(binding = 2) uniform sampler2D texSamp0;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = texture(texSamp0, vec2(0.5, 0.5));\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "center1") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(binding = 3) uniform sampler2D texSamp1;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = texture(texSamp1, vec2(0.5, 0.5));\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "center2") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(binding = 4) uniform sampler2D texSamp2;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = texture(texSamp2, vec2(0.5, 0.5));\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "center3") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(binding = 5) uniform sampler2D texSamp3;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    fragColor = texture(texSamp3, vec2(0.5, 0.5));\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "raw1") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 6) in vec4 vtxT1;\n"
+                "layout(binding = 3) uniform sampler2D texSamp1;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT1.xy / max(abs(vtxT1.w), 0.00001);\n"
+                "    fragColor = texture(texSamp1, uv);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "raw2") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 7) in vec4 vtxT2;\n"
+                "layout(binding = 4) uniform sampler2D texSamp2;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT2.xy / max(abs(vtxT2.w), 0.00001);\n"
+                "    fragColor = texture(texSamp2, uv);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "raw3") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 8) in vec4 vtxT3;\n"
+                "layout(binding = 5) uniform sampler2D texSamp3;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT3.xy / max(abs(vtxT3.w), 0.00001);\n"
+                "    fragColor = texture(texSamp3, uv);\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "scaled") == 0) {
+            return g_strdup(
+                "#version 450\n"
+                "layout(location = 5) in vec4 vtxT0;\n"
+                "layout(binding = 1, std140) uniform PshUniforms {\n"
+                "int alphaRef;\n"
+                "mat2 bumpMat[4];\n"
+                "float bumpOffset[4];\n"
+                "float bumpScale[4];\n"
+                "vec4 clipRange;\n"
+                "ivec4 clipRegion[8];\n"
+                "uint colorKey[4];\n"
+                "uint colorKeyMask[4];\n"
+                "vec4 consts[18];\n"
+                "float depthFactor;\n"
+                "float depthOffset;\n"
+                "vec4 fogColor;\n"
+                "ivec2 surfaceScale;\n"
+                "float texScale[4];\n"
+                "};\n"
+                "layout(binding = 2) uniform sampler2D texSamp0;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 uv = vtxT0.xy / max(abs(vtxT0.w), 0.00001);\n"
+                "    vec2 denom = vec2(textureSize(texSamp0, 0)) / "
+                "max(texScale[0], 0.00001);\n"
+                "    fragColor = texture(texSamp0, uv / max(denom, vec2(1.0)));\n"
+                "}\n");
+        }
+        if (strcmp(force_tex0, "const2") == 0 ||
+            strcmp(force_tex0, "const4") == 0 ||
+            strcmp(force_tex0, "mask") == 0 ||
+            strcmp(force_tex0, "lit") == 0) {
+            const char *body = NULL;
+            if (strcmp(force_tex0, "const2") == 0) {
+                body = "    fragColor = vec4(consts[4].rgb, 1.0);\n";
+            } else if (strcmp(force_tex0, "const4") == 0) {
+                body = "    fragColor = vec4(consts[8].rgb, 1.0);\n";
+            } else if (strcmp(force_tex0, "mask") == 0) {
+                body =
+                    "    float m = texture(texSamp1, t1uv).a + "
+                    "texture(texSamp2, t2uv).a + "
+                    "texture(texSamp3, t3uv).a;\n"
+                    "    fragColor = vec4(vec3(m), 1.0);\n";
+            } else {
+                body =
+                    "    vec4 t0 = texture(texSamp0, t0uv / "
+                    "max(vec2(textureSize(texSamp0, 0)) / "
+                    "max(texScale[0], 0.00001), vec2(1.0)));\n"
+                    "    float m = texture(texSamp1, t1uv).a + "
+                    "texture(texSamp2, t2uv).a + "
+                    "texture(texSamp3, t3uv).a;\n"
+                    "    fragColor = vec4(t0.rgb * vec3(m), 1.0);\n";
+            }
+            return g_strdup_printf(
+                "#version 450\n"
+                "layout(location = 5) in vec4 vtxT0;\n"
+                "layout(location = 6) in vec4 vtxT1;\n"
+                "layout(location = 7) in vec4 vtxT2;\n"
+                "layout(location = 8) in vec4 vtxT3;\n"
+                "layout(binding = 1, std140) uniform PshUniforms {\n"
+                "int alphaRef;\n"
+                "mat2 bumpMat[4];\n"
+                "float bumpOffset[4];\n"
+                "float bumpScale[4];\n"
+                "vec4 clipRange;\n"
+                "ivec4 clipRegion[8];\n"
+                "uint colorKey[4];\n"
+                "uint colorKeyMask[4];\n"
+                "vec4 consts[18];\n"
+                "float depthFactor;\n"
+                "float depthOffset;\n"
+                "vec4 fogColor;\n"
+                "ivec2 surfaceScale;\n"
+                "float texScale[4];\n"
+                "};\n"
+                "layout(binding = 2) uniform sampler2D texSamp0;\n"
+                "layout(binding = 3) uniform sampler2D texSamp1;\n"
+                "layout(binding = 4) uniform sampler2D texSamp2;\n"
+                "layout(binding = 5) uniform sampler2D texSamp3;\n"
+                "layout(location = 0) out vec4 fragColor;\n"
+                "void main() {\n"
+                "    vec2 t0uv = vtxT0.xy / max(abs(vtxT0.w), 0.00001);\n"
+                "    vec2 t1uv = vtxT1.xy / max(abs(vtxT1.w), 0.00001);\n"
+                "    vec2 t2uv = vtxT2.xy / max(abs(vtxT2.w), 0.00001);\n"
+                "    vec2 t3uv = vtxT3.xy / max(abs(vtxT3.w), 0.00001);\n"
+                "%s"
+                "}\n", body);
+        }
+        return g_strdup(
+            "#version 450\n"
+            "layout(location = 5) in vec4 vtxT0;\n"
+            "layout(binding = 2) uniform sampler2D texSamp0;\n"
+            "layout(location = 0) out vec4 fragColor;\n"
+            "void main() {\n"
+            "    vec2 uv = vtxT0.xy / max(abs(vtxT0.w), 0.00001);\n"
+            "    vec2 size = vec2(textureSize(texSamp0, 0));\n"
+            "    fragColor = texture(texSamp0, uv / max(size, vec2(1.0)));\n"
+            "}\n");
     }
     GenPshGlslOptions opts;
     memset(&opts, 0, sizeof(opts));
@@ -205,10 +443,12 @@ static PipelineCacheEntry *s_entries  = NULL;
 static bool                s_init     = false;
 static QemuMutex           s_lock;
 
-/* M8: env var XEMU_METAL_ASYNC_PIPELINE_COMPILE = {0,1}. Default ON
- * on Apple Silicon — synchronous compile blocks the renderer thread
- * for 5–50 ms per fresh shader pair, which is the cold-launch stall
- * we are explicitly targeting. */
+/* M8: env var XEMU_METAL_ASYNC_PIPELINE_COMPILE = {0,1}. By default,
+ * keep async warmup for passthrough mode, but switch to synchronous
+ * misses when translated drawing is requested. The async path skips
+ * draws while a translated pipeline is pending; that is useful as a
+ * profiling experiment but not correct enough for render-to-texture and
+ * postprocess-heavy games. */
 static bool s_async_enabled_cached = false;
 static int  s_async_enabled        = -1;
 
@@ -217,7 +457,10 @@ static bool async_enabled(void)
     if (!s_async_enabled_cached) {
         const char *e = getenv("XEMU_METAL_ASYNC_PIPELINE_COMPILE");
         if (e == NULL || e[0] == '\0') {
-            s_async_enabled = 1;  /* Default ON. */
+            const char *tp = getenv("XEMU_METAL_TRANSLATED_PIPELINE");
+            bool translated =
+                (tp != NULL && tp[0] != '\0' && tp[0] != '0');
+            s_async_enabled = translated ? 0 : 1;
         } else {
             s_async_enabled = (e[0] != '0') ? 1 : 0;
         }
@@ -591,6 +834,7 @@ void *pgraph_mtl_shaders_get_pipeline_ex(const PgraphMtlPipelineKey *key,
         pgraph_mtl_shaders_dispatch_build(
             pc, vsh_glsl, psh_glsl, cached_msl,
             color_fmt, depth_fmt, sample_cnt,
+            key->regs[0], key->regs[2],
             NV2A_VERTEXSHADER_ATTRIBUTES,
             attr_fmt, attr_off, attr_buf,
             NV2A_VERTEXSHADER_ATTRIBUTES,
@@ -606,6 +850,7 @@ void *pgraph_mtl_shaders_get_pipeline_ex(const PgraphMtlPipelineKey *key,
         bool ok = pgraph_mtl_shaders_build_pipeline(
             vsh_glsl, psh_glsl, cached_msl,
             color_fmt, depth_fmt, sample_cnt,
+            key->regs[0], key->regs[2],
             NV2A_VERTEXSHADER_ATTRIBUTES,
             attr_fmt, attr_off, attr_buf,
             NV2A_VERTEXSHADER_ATTRIBUTES,

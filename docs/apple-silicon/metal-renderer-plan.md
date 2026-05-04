@@ -1,15 +1,13 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 / M5.8 / M5.9 + followup-A
-+ followup-B+C all SHIPPED; pipeline counters 100% green
-TRANSLATED_FAILED=0 / FALLBACKS=0 / DRAW_TRANSLATED == DRAW_COUNT;
-visual gate UNMET — front buffer at `0x32a4000` shows white-on-magenta,
-back buffer at `0x3628000` is pure black, aux RT at `0x2c06000` is
-pure red (cleared color). Three buffer-swap mechanisms ruled out
-empirically (CPU memcpy, NV097_IMAGE_BLIT, pcrtc.start alternation).
-Next session needs a per-vram_addr `metal_draw_target` counter to
-isolate which cached SurfaceBinding receives the rendered scene.
-M15 default-on stays BLOCKED.)
+Last updated: 2026-05-04 (M5.x surface/RTT correctness follow-up.
+PGR2 now passes the Metal visual canary with clean menu/logo/textures
+and colors; Rainbow Six 3 loading-screen output is also clean. The old
+white/magenta front-buffer failure is closed. Crimson Skies remains the
+active Metal visual blocker: translated counters are clean, but the
+smoke capture shows an untextured green aircraft over a black scene and
+the passthrough diagnostic is all-white. M15 default-on stays BLOCKED
+until Crimson plus the broader Metal-vs-GL visual-diff gate pass.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon
@@ -1741,9 +1739,10 @@ surface-cache color/depth split + front-fb pin + cap raise" for the
 full investigation, the per-vram_addr draw distribution measurements
 on PGR2, and the codex-validate review notes.
 
-### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **INFRASTRUCTURE SHIPPED 2026-05-03 (default-off; visual gate still BLOCKED on a pre-existing cold-boot perf regression)**
+### M5.10 / M5.11 — VRAM-coherent surface download + PGR2 surface/RTT follow-up — **SHIPPED 2026-05-04 (PGR2 PASS; Crimson BLOCKED)**
 
-**Status (2026-05-03): SHIPPED, default-off (two commits).**
+**Status (2026-05-04): SHIPPED for the PGR2/Rainbow canaries; Metal
+default-on remains blocked by Crimson visual correctness.**
 
 - **Commit `b283abcb27`** — M5.10 base infrastructure. Public download
   API (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
@@ -1762,47 +1761,61 @@ on PGR2, and the codex-validate review notes.
   Bridges PGR2's back→front gap host-side. NOT correctness-faithful
   (aspect mismatch on many titles).
 
-**Visual gate STILL FAILS, but the framing has shifted.** This
-session's testing surfaced two pre-existing regressions independent
-of M5.10:
+**2026-05-04 follow-up result.** The old PGR2 white/magenta/front-fb
+failure is closed by a set of targeted surface/RTT fixes:
 
-- **Metal cold-boot perf has regressed since M5.7.** M5.7 era
-  reported `post_load_avg_fps = 37.09` on PGR2 from profile-prep HDD;
-  current HEAD with M5.10 default-off produces 7-16 perf intervals in
-  60 s wall-clock with `fps ≈ 1-2` and never reaches BIOS animation.
-  Verified independent of M5.10 by stash-and-rebuild bisection. The
-  introducing commit is in {M5.8, M5.9, followup-A, followup-B+C,
-  followup-E}.
-- **Metal+snapshot path doesn't progress the guest.** `pgr2_gameplay_b4`
-  loads but yields `NV2A_FLIP_STALL_WRITES=1-3` in 60 s under Metal
-  (vs ~7-8 per 2 s under GL). Also a regression along with cold-boot.
+- Scaled VRAM upload now fills the full host-scaled texture instead of
+  only the 1x guest sub-rect, avoiding uninitialized regions.
+- The display-compose fallback is upright and can publish the selected
+  render target directly.
+- The surface cache can retain multiple shapes for the same VRAM
+  address, uses exact/near shape lookup, caps at 64 entries, and walks
+  all same-VRAM siblings for access-callback registration and dirty
+  upload. PGR2 no longer churns shapes:
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
+- Texture lookup for render-target-as-texture is dimension-aware, so
+  same-address surfaces with different shapes do not alias silently.
+- A8R8G8B8 render targets sampled as linear A8R8G8B8-family texture
+  views take the CPU texture path instead of the direct surface fast
+  path. This fixes PGR2's dotted/yellow text and channel/alpha
+  normalization mismatch. Diagnostic env:
+  `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`.
 
-These two together prevent any in-gameplay visual capture, so the
-M5.10 + fallback paths cannot be validated against actual rendered
-content until the regressions are resolved.
+**Validation (2026-05-04).**
 
-**Highest-priority next-session action (revised).** Bisect the Metal
-cold-boot regression starting from `6b37b02d28` (M5.5/M5.6/M5.7 ship)
-and walking forward through M5.8 / M5.9 / followups / M5.10 to
-identify the introducing commit(s). Once restored, re-run the
-M5.10 visual test with `XEMU_METAL_FRONT_FB_DOWNLOAD=1
-XEMU_DISPLAY_SCALE=1` and the fallback test with
-`XEMU_METAL_FRONT_FB_FALLBACK=1`. If neither closes the gate,
-escalate to identifying PGR2's actual back→front mechanism (likely
-an unimplemented NV2A engine class).
+- PGR2 PASS: `benchmark-runs/20260504-024441-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-final-f900.png`.
+  `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`,
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`; late FPS mostly ~32-59.
+- Rainbow Six 3 PASS for the loading-screen canary:
+  `benchmark-runs/20260504-024617-rainbow-six-3`,
+  `benchmark-runs/visual-checks/rainbow-final-f600.png`.
+- Crimson Skies FAIL: `benchmark-runs/visual-checks/crimson-smoke-f300.png`
+  shows an untextured green aircraft / black scene; passthrough
+  `benchmark-runs/visual-checks/crimson-passthrough-f300.png` is
+  all-white. Because counters are clean, the next work is shader or
+  texture semantics rather than PGR2-style surface churn.
+
+**Highest-priority next-session action.** Fix Crimson Skies visual
+correctness under Metal. Start with the smoke frame-300 capture, compare
+translated vs passthrough, and enable `XEMU_METAL_DIAG_TEX_BIND=1`,
+`XEMU_METAL_DIAG_SURFACE_TEX=1`, and
+`XEMU_METAL_DUMP_TARGET_SHADER=all` as needed. If evidence is still
+ambiguous, create a small nxdk/pbkit XBE to isolate texture-combiner,
+alpha/channel, render-target-as-texture, or vertex-color behavior
+without relying on proprietary/leaked XDK assets.
 
 M15 default-on stays BLOCKED on:
-1. Cold-boot regression bisect + fix.
-2. Snapshot+Metal regression bisect + fix.
-3. Visual gate: ≤ 1 % per-pixel diff vs GL on ≥ 2 distinct titles.
-4. (Stretch) GPU-side downsample render pass for `surface_scale > 1`
-   so the M5.10 download path is not structurally inert at the
-   Apple Silicon system default scale.
+1. Crimson Skies Metal visual correctness.
+2. Paired Metal-vs-GL visual diff on PGR2, Rainbow, Crimson, SC2, and
+   one broader-sweep title.
+3. Console-native FPS plus p99 jitter validation on the same set.
+4. Cold-launch shader compile time < 5 s on a fresh shader cache.
 
-See decision-log "2026-05-03: Metal slice M5.10 experimental —
-front-fb publish fallback to latest draw" (which also documents the
-cold-boot/snapshot regression findings), the M5.10 base entry below,
-and `docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`.
+See decision-log "2026-05-04: Metal PGR2 surface/RTT visual canary
+passes; Crimson remains blocker", plus
+`docs/apple-silicon/benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`.
 The original "PENDING" description below is preserved for the audit
 trail; the planned tasks are partially-complete (Path A primitives
 shipped; Path B compositor rework deferred; codex MEDIUM/LOW from
@@ -2001,7 +2014,7 @@ the full per-VRAM surface cache because the M2 banner placed it as
 date) is the trigger for promoting that deferral to its own
 named slice.
 
-### M15 — Default-on selection + GL fallback policy — **PENDING (gated on user-driven validation; gated on M5.9)**
+### M15 — Default-on selection + GL fallback policy — **BLOCKED (gated on Crimson and broader visual validation)**
 
 **Scope.** Decide whether Metal becomes the default on Apple Silicon.
 Decision rule: Metal becomes default-on when:

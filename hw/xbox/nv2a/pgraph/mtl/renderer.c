@@ -50,6 +50,8 @@
 #include "uniform.h"
 #include "vertex.h"
 
+#include "hw/xbox/nv2a/pgraph/glsl/vsh.h"
+
 /* Shared eligibility helpers for native_tri_depth / native_quad.
  * Defined in glsl/geom.c; declared via glsl/shaders.h which the GL
  * renderer also uses (gl/renderer.h:36). The Metal renderer uses
@@ -57,11 +59,94 @@
  * same input, same answer. */
 #include "hw/xbox/nv2a/pgraph/glsl/shaders.h"
 
+char *pgraph_mtl_shadergen_vsh(const ShaderState *state);
+char *pgraph_mtl_shadergen_psh(const ShaderState *state);
+
 /* M7 env-var flags (latched once at first use). */
 static bool s_force_passthrough_cached = false;
 static int  s_force_passthrough        = -1;
 static bool s_use_translated_cached    = false;
 static int  s_use_translated           = -1;
+static _Atomic uint64_t s_vsh_diag_lines = 0;
+
+static bool mtl_vsh_diag_enabled(void)
+{
+    const char *e = getenv("XEMU_METAL_DIAG_VSH");
+    return e != NULL && e[0] != '\0' && e[0] != '0';
+}
+
+static void mtl_dump_target_shader_once(uint32_t color_target,
+                                        const PgraphMtlPipelineKey *key)
+{
+    static _Atomic uint32_t s_dumped = 0;
+    const char *env = getenv("XEMU_METAL_DUMP_TARGET_SHADER");
+    if (env == NULL || env[0] == '\0' || key == NULL ||
+        g_ascii_strcasecmp(env, "0") == 0) {
+        return;
+    }
+
+    bool dump_all = g_ascii_strcasecmp(env, "all") == 0;
+    if (!dump_all) {
+        char *endp = NULL;
+        unsigned long target = strtoul(env, &endp, 0);
+        if (endp == env || *endp != '\0' || (uint32_t)target != color_target) {
+            return;
+        }
+    }
+
+    uint32_t dump_index = 0;
+    if (dump_all) {
+        dump_index = atomic_fetch_add(&s_dumped, 1);
+        if (dump_index >= 64) {
+            return;
+        }
+    } else {
+        uint32_t expected = 0;
+        if (!atomic_compare_exchange_strong(&s_dumped, &expected, 1)) {
+            return;
+        }
+    }
+
+    char *vsh = pgraph_mtl_shadergen_vsh(&key->shader_state);
+    char *psh = pgraph_mtl_shadergen_psh(&key->shader_state);
+    const char *dir = getenv("XEMU_METAL_DUMP_TARGET_SHADER_DIR");
+    if (dir == NULL || dir[0] == '\0') {
+        dir = "/tmp";
+    }
+
+    char path[PATH_MAX];
+    if (dump_all) {
+        snprintf(path, sizeof(path),
+                 "%s/xemu-metal-target-%04u-0x%08x-prim%u.glsl",
+                 dir, dump_index, color_target,
+                 (unsigned)key->shader_state.geom.primitive_mode);
+    } else {
+        snprintf(path, sizeof(path), "%s/xemu-metal-target-0x%08x.glsl",
+                 dir, color_target);
+    }
+    FILE *f = fopen(path, "w");
+    if (f != NULL) {
+        fprintf(f, "/* color_target=0x%08x */\n", color_target);
+        fprintf(f, "/* regs: ");
+        for (unsigned int i = 0; i < ARRAY_SIZE(key->regs); i++) {
+            fprintf(f, "%s0x%08x", i ? " " : "", key->regs[i]);
+        }
+        fprintf(f, " */\n\n");
+        fprintf(f, "/* VSH */\n%s\n\n/* PSH */\n%s\n",
+                vsh ? vsh : "(null)", psh ? psh : "(null)");
+        fclose(f);
+        fprintf(stderr,
+                "xemu-perf: metal_target_shader_dump target=0x%x path=%s\n",
+                color_target, path);
+    } else {
+        fprintf(stderr,
+                "xemu-metal: failed to write target shader dump %s\n",
+                path);
+    }
+
+    g_free(vsh);
+    g_free(psh);
+}
 
 /* 2026-05-03 magenta-RT diagnostic: per-vram_addr "draw target" table.
  *
@@ -268,6 +353,28 @@ static bool mtl_front_fb_fallback_enabled(void)
     return s_front_fb_fallback != 0;
 }
 
+static void mtl_get_display_dimensions(NV2AState *d,
+                                       unsigned int *out_width,
+                                       unsigned int *out_height)
+{
+    PGRAPHState *pg = &d->pgraph;
+    unsigned int width = 0, height = 0;
+
+    d->vga.get_resolution(&d->vga, (int *)&width, (int *)&height);
+    if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] !=
+        NV_PRMCIO_INTERLACE_MODE_DISABLED) {
+        height *= 2;
+    }
+    pgraph_apply_scaling_factor(pg, &width, &height);
+
+    if (out_width) {
+        *out_width = width;
+    }
+    if (out_height) {
+        *out_height = height;
+    }
+}
+
 static bool mtl_use_translated_pipeline(void)
 {
     if (!s_use_translated_cached) {
@@ -415,8 +522,8 @@ static void mtl_disarm_all_access_callbacks(NV2AState *d)
     }
     /* Iterate cache addresses; for each, pull the stored cb pointer
      * and tell QEMU to remove it. */
-    uint32_t addrs[32];
-    unsigned int n = pgraph_mtl_surface_iter_addresses(addrs, 32);
+    uint32_t addrs[128];
+    unsigned int n = pgraph_mtl_surface_iter_addresses(addrs, 128);
     for (unsigned int i = 0; i < n; i++) {
         void *cb = NULL;
         pgraph_mtl_surface_unregister_access_cb_for(addrs[i], &cb);
@@ -536,6 +643,18 @@ static unsigned int mtl_zeta_bpp(uint32_t nv097)
     }
 }
 
+static void mtl_update_surface_binding_dim(PGRAPHState *pg,
+                                           unsigned int width,
+                                           unsigned int height)
+{
+    pg->surface_binding_dim.width = width;
+    pg->surface_binding_dim.clip_x = pg->surface_shape.clip_x;
+    pg->surface_binding_dim.clip_width = pg->surface_shape.clip_width;
+    pg->surface_binding_dim.height = height;
+    pg->surface_binding_dim.clip_y = pg->surface_shape.clip_y;
+    pg->surface_binding_dim.clip_height = pg->surface_shape.clip_height;
+}
+
 /* M5.9: bind the NV2A's currently-configured color/depth surfaces into
  * the per-VRAM cache. This replaces the M2-era pgraph_mtl_surface_ensure_*
  * call sites where we know the vram_addr (cleared paths and draws that
@@ -560,6 +679,10 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
     unsigned int width = 0, height = 0;
     mtl_get_surface_dimensions(pg, &width, &height);
     pgraph_apply_anti_aliasing_factor(pg, &width, &height);
+    if (pg->surface_type != NV097_SET_SURFACE_FORMAT_TYPE_SWIZZLE) {
+        width += pg->surface_shape.clip_x;
+        height += pg->surface_shape.clip_y;
+    }
     /* Width/height here are the GUEST 1× dimensions (post-AA). The
      * texture is allocated at the host-scaled dimensions. */
     unsigned int scaled_w = width, scaled_h = height;
@@ -620,6 +743,24 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                             pitch,
                             pg->surface_shape.color_format,
                             d->vram_ptr)) {
+                        uint32_t bound_guest_w = width;
+                        uint32_t bound_guest_h = height;
+                        uint32_t bound_pitch = pitch;
+                        if (pgraph_mtl_surface_get_color_surface_info_at(
+                                (uint32_t)vram_addr, NULL, NULL, NULL,
+                                &bound_guest_w, &bound_guest_h,
+                                &bound_pitch, NULL)) {
+                            width = bound_guest_w;
+                            height = bound_guest_h;
+                            scaled_w = width;
+                            scaled_h = height;
+                            pgraph_apply_scaling_factor(pg, &scaled_w,
+                                                        &scaled_h);
+                            pitch = bound_pitch;
+                            natural = (uint32_t)(width * bpp);
+                            row = pitch > natural ? pitch : natural;
+                            size = (uint32_t)(row * height);
+                        }
                         /* M5.9-followup-B (2026-05-03): arm a CPU-write
                          * access callback for the surface's VRAM
                          * range so guest CPU writes (e.g. back→front
@@ -628,6 +769,7 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                         mtl_arm_access_callback(d, (uint32_t)vram_addr,
                                                 size);
                         bound_any = true;
+                        mtl_update_surface_binding_dim(pg, width, height);
                     }
                 }
             }
@@ -636,6 +778,7 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
             pgraph_mtl_surface_ensure_color(scaled_w, scaled_h,
                                             pg->surface_shape.color_format);
             bound_any = true;
+            mtl_update_surface_binding_dim(pg, width, height);
         }
     }
     if (zeta && pg->surface_shape.zeta_format && width > 0 && height > 0) {
@@ -668,6 +811,7 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                                                 size);
                         bound_z = true;
                         bound_any = true;
+                        mtl_update_surface_binding_dim(pg, width, height);
                     }
                 }
             }
@@ -676,6 +820,7 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
             pgraph_mtl_surface_ensure_depth(scaled_w, scaled_h,
                                             pg->surface_shape.zeta_format);
             bound_any = true;
+            mtl_update_surface_binding_dim(pg, width, height);
         }
     }
     return bound_any;
@@ -853,8 +998,15 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
                                               d->vram_ptr);
     }
 
-    bool published = pgraph_mtl_surface_publish_front_fb(
-        (uint32_t)crtc_addr, "crtc");
+    bool use_front_fb_fallback = mtl_front_fb_fallback_enabled();
+    bool published = false;
+    if (!use_front_fb_fallback) {
+        unsigned int display_w = 0, display_h = 0;
+        mtl_get_display_dimensions(d, &display_w, &display_h);
+        published = pgraph_mtl_surface_publish_display_front_fb(
+            (uint32_t)crtc_addr, display_w, display_h,
+            (uint32_t)vga_display_params.line_offset, "crtc-display");
+    }
 
     /* M5.10 experimental fallback (2026-05-03): if the CRTC-pointed
      * surface didn't resolve OR was just published but the title's
@@ -866,7 +1018,7 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
      * default (off) preserves the CRTC-strict behavior; opt-in lets
      * users see actual scene content for titles that need it. */
     (void)published;
-    if (mtl_front_fb_fallback_enabled()) {
+    if (use_front_fb_fallback) {
         pgraph_mtl_surface_publish_latest_draw_fallback();
     }
 }
@@ -1047,6 +1199,7 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                       void *color_tex, void *depth_tex,
                                       uint32_t color_fmt, uint32_t depth_fmt,
                                       uint32_t vp_w, uint32_t vp_h,
+                                      uint32_t draw_target_vram_addr,
                                       const MtlAttributeStream *streams,
                                       unsigned int vcount,
                                       const uint32_t *indices,
@@ -1085,10 +1238,19 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
      * inline_buffer flow). */
     void *translated_pipeline = NULL;
     bool  translated_pending  = false;
+    PgraphMtlPipelineKey translated_key;
+    bool have_translated_key = false;
     if (!mtl_force_passthrough()) {
+        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
+            (void)pgraph_mtl_texture_bind_from_pg(pg, t);
+        }
         PgraphMtlPipelineKey key;
         if (pgraph_mtl_build_pipeline_key(d, color_fmt, depth_fmt,
                                           s_metal_msaa_sample_count, &key)) {
+            translated_key = key;
+            have_translated_key = true;
+            mtl_dump_target_shader_once(
+                draw_target_vram_addr, &key);
             atomic_fetch_add(&s_pipeline_key_built, 1);
             PgraphMtlPipelineLookupState st;
             void *ps = pgraph_mtl_shaders_get_pipeline_ex(&key, &st);
@@ -1139,11 +1301,29 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     }
 
     if (use_translated_path) {
-        for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
-            (void)pgraph_mtl_texture_bind_from_pg(pg, t);
-        }
-
         ShaderState ss = pgraph_glsl_get_shader_state(pg);
+        if (mtl_vsh_diag_enabled() &&
+            atomic_fetch_add(&s_vsh_diag_lines, 1) < 96) {
+            const float *p0 = streams[NV2A_VERTEX_ATTR_POSITION].data;
+            uint32_t mode = GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CSV0_D),
+                                     NV_PGRAPH_CSV0_D_MODE);
+            fprintf(stderr,
+                    "xemu-perf: metal_vsh_diag prim=%u vcount=%u icount=%u "
+                    "uniform=0x%04x compressed=0x%04x swizzle=0x%04x "
+                    "mode=%u fixed=%d prog_len=%d surface_dim=%ux%u "
+                    "binding_dim=%ux%u scale=%u v0={%.6g,%.6g,%.6g,%.6g}\n",
+                    (unsigned)pg->primitive_mode, vcount, icount,
+                    ss.vsh.uniform_attrs, ss.vsh.compressed_attrs,
+                    ss.vsh.swizzle_attrs, mode, ss.vsh.is_fixed_function,
+                    ss.vsh.programmable.program_length,
+                    pg->surface_shape.clip_width,
+                    pg->surface_shape.clip_height,
+                    pg->surface_binding_dim.width,
+                    pg->surface_binding_dim.height,
+                    pg->surface_scale_factor,
+                    p0 ? p0[0] : 0.0f, p0 ? p0[1] : 0.0f,
+                    p0 ? p0[2] : 0.0f, p0 ? p0[3] : 0.0f);
+        }
         pgraph_mtl_uniform_begin_frame();
 
         void *vsh_ubo = NULL, *psh_ubo = NULL;
@@ -1155,6 +1335,19 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
 
         void *stage_tex[4] = { NULL, NULL, NULL, NULL };
         void *stage_smp[4] = { NULL, NULL, NULL, NULL };
+        uint32_t blend_color = pgraph_reg_r(pg, NV_PGRAPH_BLENDCOLOR);
+        uint32_t control_0 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_0);
+        uint32_t control_1 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_1);
+        uint32_t control_2 = pgraph_reg_r(pg, NV_PGRAPH_CONTROL_2);
+        uint32_t setup_raster = pgraph_reg_r(pg, NV_PGRAPH_SETUPRASTER);
+        unsigned int scissor_x = pg->surface_shape.clip_x;
+        unsigned int scissor_y = pg->surface_shape.clip_y;
+        unsigned int scissor_w = pg->surface_shape.clip_width;
+        unsigned int scissor_h = pg->surface_shape.clip_height;
+        pgraph_apply_anti_aliasing_factor(pg, &scissor_x, &scissor_y);
+        pgraph_apply_anti_aliasing_factor(pg, &scissor_w, &scissor_h);
+        pgraph_apply_scaling_factor(pg, &scissor_x, &scissor_y);
+        pgraph_apply_scaling_factor(pg, &scissor_w, &scissor_h);
         void *default_smp = pgraph_mtl_texture_get_default_sampler();
         for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
             stage_tex[t] = pgraph_mtl_texture_get_metal_texture(t);
@@ -1162,6 +1355,10 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
             if (stage_smp[t] == NULL) {
                 stage_smp[t] = default_smp;
             }
+        }
+        if (have_translated_key) {
+            mtl_dump_target_shader_once(draw_target_vram_addr,
+                                        &translated_key);
         }
 
         uint32_t mtl_prim = mtl_translate_primitive(pg->primitive_mode);
@@ -1179,6 +1376,11 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                            prim, vp_w, vp_h,
                                            color_tex, depth_tex,
                                            depth_fmt,
+                                           blend_color,
+                                           control_0, control_1, control_2,
+                                           setup_raster,
+                                           scissor_x, scissor_y,
+                                           scissor_w, scissor_h,
                                            vsh_ubo, vsh_off, vsh_size,
                                            psh_ubo, psh_off, psh_size,
                                            stage_tex, stage_smp);
@@ -1193,6 +1395,11 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                        mtl_prim,
                                        vp_w, vp_h, color_tex, depth_tex,
                                        depth_fmt,
+                                       blend_color,
+                                       control_0, control_1, control_2,
+                                       setup_raster,
+                                       scissor_x, scissor_y,
+                                       scissor_w, scissor_h,
                                        vsh_ubo, vsh_off, vsh_size,
                                        psh_ubo, psh_off, psh_size,
                                        stage_tex, stage_smp);
@@ -1217,6 +1424,11 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
                                                    expanded_prim, vp_w, vp_h,
                                                    color_tex, depth_tex,
                                                    depth_fmt,
+                                                   blend_color,
+                                                   control_0, control_1,
+                                                   control_2, setup_raster,
+                                                   scissor_x, scissor_y,
+                                                   scissor_w, scissor_h,
                                                    vsh_ubo, vsh_off, vsh_size,
                                                    psh_ubo, psh_off, psh_size,
                                                    stage_tex, stage_smp);
@@ -1301,18 +1513,13 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         if (color_tex) pg->surface_color.draw_dirty = true;
         if (depth_tex) pg->surface_zeta.draw_dirty = true;
         /* M5.10 (2026-05-03): also mark the per-VRAM cache binding
-         * draw-dirty so the next download_dirty_all (typically at
-         * flip_stall) picks it up. The pg->surface_*.draw_dirty
-         * fields above track NV2A-state-side bookkeeping; the
-         * cache draw_dirty bit gates the GPU→VRAM blit. Mirrors
-         * vk/draw.c:1830-1860::pgraph_vk_set_surface_dirty.
-         * Gated on the M5.10 feature flag because the atomic stores
-         * fire per-draw and the downstream download_dirty_all path
-         * is opt-in. */
-        if (mtl_front_fb_download_enabled()) {
-            if (color_tex) pgraph_mtl_surface_set_draw_dirty_color();
-            if (depth_tex) pgraph_mtl_surface_set_draw_dirty_depth();
-        }
+         * draw-dirty. This is required not only by the optional
+         * front-framebuffer download path, but by texture binds that
+         * overlap a render target and must read back the latest GPU
+         * contents before CPU-side texture decode. Mirrors
+         * vk/draw.c:1830-1860::pgraph_vk_set_surface_dirty. */
+        if (color_tex) pgraph_mtl_surface_set_draw_dirty_color();
+        if (depth_tex) pgraph_mtl_surface_set_draw_dirty_depth();
     }
 
     /* M5.8: restore previous masks. The encode-time use of
@@ -1350,15 +1557,8 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
      * target after any cache-resolution logic, not the raw DMA-derived
      * address (the two should match in steady state but the counter
      * also catches ensure-by-shape fallbacks where vram_addr=0). */
-    mtl_draw_target_bump(pgraph_mtl_surface_get_color_vram_addr());
-
-    /* M5.9-followup-C (2026-05-03): upload any cached surface whose
-     * VRAM range was dirtied by guest CPU writes since the last
-     * upload. The check is per-entry-cheap (atomic_load); the upload
-     * itself only runs on entries whose dirty_vram bit is set. */
-    if (d->vram_ptr != NULL) {
-        pgraph_mtl_surface_upload_dirty(d->vram_ptr);
-    }
+    uint32_t draw_target_vram_addr = pgraph_mtl_surface_get_color_vram_addr();
+    mtl_draw_target_bump(draw_target_vram_addr);
 
     void *color_tex = pgraph_mtl_surface_get_color_texture();
     void *depth_tex = pgraph_mtl_surface_get_depth_texture();
@@ -1369,6 +1569,14 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
     if (color_tex == NULL && depth_tex == NULL) {
         return;
+    }
+    /* Upload only the bound draw target before rendering. Uploading every
+     * dirty cached surface here makes unrelated CPU-written front buffers
+     * pay a full scaled upload on each draw; texture consumers upload their
+     * own compatible surface on demand in texture_pg.c. */
+    if (d->vram_ptr != NULL && draw_target_vram_addr != 0) {
+        pgraph_mtl_surface_upload_if_dirty_at(draw_target_vram_addr,
+                                              d->vram_ptr);
     }
     if (color_tex == NULL) {
         color_fmt = 0;
@@ -1404,6 +1612,7 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
         mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                   color_fmt, depth_fmt, vp_w, vp_h,
+                                  draw_target_vram_addr,
                                   streams, span,
                                   idx, pg->inline_elements_length,
                                   native_tri, native_quad);
@@ -1429,6 +1638,7 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
             mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                       color_fmt, depth_fmt, vp_w, vp_h,
+                                      draw_target_vram_addr,
                                       streams, count,
                                       NULL, 0,
                                       native_tri, native_quad);
@@ -1456,6 +1666,7 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
         mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                                   color_fmt, depth_fmt, vp_w, vp_h,
+                                  draw_target_vram_addr,
                                   streams, vcount,
                                   NULL, 0,
                                   native_tri, native_quad);
@@ -1506,6 +1717,7 @@ static void pgraph_mtl_flush_draw(NV2AState *d)
 
     mtl_dispatch_decoded_draw(d, color_tex, depth_tex,
                               color_fmt, depth_fmt, vp_w, vp_h,
+                              draw_target_vram_addr,
                               streams, vcount,
                               NULL, 0,
                               native_tri, native_quad);
@@ -1673,8 +1885,11 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
 
     /* Try to publish the surface that contains `crtc_addr`. */
-    bool published = pgraph_mtl_surface_publish_front_fb(
-        (uint32_t)crtc_addr, "crtc");
+    unsigned int display_w = 0, display_h = 0;
+    mtl_get_display_dimensions(d, &display_w, &display_h);
+    bool published = pgraph_mtl_surface_publish_display_front_fb(
+        (uint32_t)crtc_addr, display_w, display_h,
+        (uint32_t)vga_display_params.line_offset, "crtc-display");
     (void)published;
 
     return pgraph_mtl_surface_has_front_framebuffer();
@@ -1882,4 +2097,3 @@ uint64_t pgraph_mtl_draws_skipped_pending_count(void)
 {
     return atomic_load(&s_draws_skipped_pending);
 }
-

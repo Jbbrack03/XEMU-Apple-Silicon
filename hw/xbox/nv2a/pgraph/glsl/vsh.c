@@ -164,6 +164,7 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
         const UniformInfo *info = &VshUniformInfo[i];
         const char *type_str = uniform_element_type_to_str[info->type];
         if (i == VshUniform_inlineValue &&
+            !opts.force_uniform_block_full_layout &&
             (!state->uniform_attrs ||
              opts.use_push_constants_for_uniform_attrs)) {
             continue;
@@ -283,6 +284,22 @@ MString *pgraph_glsl_gen_vsh(const VshState *state, GenVshGlslOptions opts)
     mstring_append(header, "\n");
 
     MString *body = mstring_from_str("void main() {\n");
+
+    if (opts.force_uniform_block_full_layout) {
+        mstring_append(body,
+            "  if (surfaceSize.x < 0.0) {\n"
+            "    vec4 mtl_keepalive = c[0] + clipRange +\n"
+            "        vec4(fogParam, 0.0, 0.0) + inlineValue[0] +\n"
+            "        vec4(lightInfiniteDirection[0], 0.0) +\n"
+            "        vec4(lightInfiniteHalfVector[0], 0.0) +\n"
+            "        vec4(lightLocalAttenuation[0], 0.0) +\n"
+            "        vec4(lightLocalPosition[0], 0.0) +\n"
+            "        ltc1[0] + ltctxa[0] + ltctxb[0] +\n"
+            "        vec4(material_alpha + pointParams[0] + specularPower,\n"
+            "             surfaceSize.x, surfaceSize.y, 0.0);\n"
+            "    oPos += mtl_keepalive;\n"
+            "  }\n");
+    }
 
     for (int i = 0; i < NV2A_VERTEXSHADER_ATTRIBUTES; i++) {
         if (state->compressed_attrs & (1 << i)) {

@@ -1,6 +1,16 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-03 (M5.5 / M5.6 / M5.7 / M5.8 / M5.9 / followup-A / followup-B+C all ship on the Metal track. **Metal pipeline counters are 100% green** (TRANSLATED_FAILED=0, FALLBACKS=0, DRAW_TRANSLATED == DRAW_COUNT) but **visual output is incorrect** — published front-fb shows magenta-on-white instead of the rendered scene. Front, back, and aux render targets all empirically captured and none contain scene content; root cause requires per-vram_addr draw-target instrumentation in next session. **The user's stated 30/60 FPS at 1080p / high-quality AA / correct-colors goals are MET TODAY via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2` (PGR2 47 fps, Crimson 30, SC2 58, Halo 30, Rainbow 27 bimodal). Input slices N1+N2 also shipped (opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend, sub-millisecond input latency). Metal renderer remains opt-in / experimental until the magenta artifact is resolved.)
+Last updated: 2026-05-04 (Metal surface/RTT follow-up. PGR2 now has
+clean Metal menu/logo/text/color output with the translated pipeline and
+front-fb fallback; Rainbow Six 3 loading-screen output is also clean.
+Crimson Skies remains the active Metal visual blocker: the current smoke
+capture shows an untextured green aircraft over a black scene while
+pipeline/surface counters are otherwise clean. **The user's stated
+30/60 FPS at 1080p / high-quality AA / correct-colors goals remain met
+today via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2`;
+Metal remains opt-in / experimental until Crimson and the wider visual
+diff gate pass. Input slices N1+N2 also shipped via opt-in
+`XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run
@@ -166,10 +176,10 @@ visible regressions point first at the renderer.
 - `benchmarks/`: dated benchmark session notes and run templates.
 - `decision-log.md`: dated decisions and rationale.
 - `handoff.md`: current state and next-session checklist.
-- `metal-renderer-plan.md`: **(2026-05-02)** staged Metal renderer
+- `metal-renderer-plan.md`: **(2026-05-04)** staged Metal renderer
   implementation plan, slices M0–M15, validation gates, risk register,
-  open questions. Read after `handoff.md` when working on the Metal
-  port.
+  open questions, and current M5.x follow-up / M15 blocker status.
+  Read after `handoff.md` when working on the Metal port.
 - `metal-api-reference.md`: **(2026-05-02)** Apple Metal API surface
   reference for Phase 4 implementation — device/queue, render pipelines,
   MSL specifics, buffers/textures, MSAA, frame timing, sync, MetalFX,
@@ -185,13 +195,12 @@ visible regressions point first at the renderer.
 
 ## Next Session Start
 
-**Read `handoff.md` first.** Its top section ("Update — 2026-05-02
-Metal slice M14 — M-cycle complete; ready for user testing") is the
+**Read `handoff.md` first.** Its top 2026-05-04 section is the
 authoritative current-state briefing and lists the next-action
 priority. The summary below is for orientation only — `handoff.md`
 wins when the two diverge.
 
-**Current state (2026-05-02, post V9 + V10 + Metal slices M0–M14).**
+**Current state (2026-05-04, post PGR2 Metal surface/RTT fix).**
 
 - **Eight default-on Apple Silicon flags ship**: `XEMU_NATIVE_TRI_DEPTH`,
   `XEMU_NATIVE_QUAD`, `XEMU_PGRAPH_FAST_READ`, `XEMU_TCG_SPLITWX`,
@@ -204,14 +213,17 @@ wins when the two diverge.
   `XEMU_PGRAPH_ASYNC_SHADER_COMPILE=1` (default off; correct &
   shipped, does NOT fix headline judder),
   `XEMU_GL_RATE_SLEW`/`XEMU_RATE_SLEW` (M10 prerequisite, default off).
-- **Metal renderer slices M0–M14 SHIPPED 2026-05-02.** The Metal
+- **Metal renderer slices M0–M14 SHIPPED 2026-05-02, with M5.x
+  correctness follow-ups continuing through 2026-05-04.** The Metal
   renderer is opt-in via `XEMU_RENDERER=METAL` (or
   `display.renderer = METAL` in `xemu.toml`). 13 `XEMU_METAL_*` flags
   + the `XEMU_RENDERER` env-var bridge (14 total Metal-track flags),
   50 `METAL_*` performance counters, plus the 2 graphics-API-agnostic
   `RATE_SLEW_*` counters surface on the `xemu-perf:` interval line.
-  Default renderer remains OpenGL; M15 (default-on flip) is PENDING,
-  gated on user-driven validation.
+  PGR2 and Rainbow Six 3 visual canaries are now clean; Crimson Skies
+  remains visually incorrect. Default renderer remains OpenGL; M15
+  (default-on flip) is BLOCKED on Crimson plus the broader visual-diff
+  gate.
 - **Judder pillar declared "best effort complete" (2026-05-02 after
   V9 + V10).** All xemu-side cost classes < 100 ms (~7 %) of the
   Crimson 1.3 s worst-frame interval; remaining ~93 % is raw JIT'd
@@ -224,21 +236,23 @@ wins when the two diverge.
   (SC2 sanity test sustains 60.57 FPS on same build). The literal
   "60 FPS on PGR2/Rainbow/Crimson" goal is technically impossible.
 
-**Next-action priority — pick one of two user-driven tracks; the
-implementation cycle is closed and the next state transition (M15)
-is gated on these.**
+**Next-action priority.**
 
-1. **Track A (Metal user-driven validation, newly highest priority):**
-   Boot xemu with `XEMU_RENDERER=METAL` plus
-   `XEMU_METAL_TRANSLATED_PIPELINE=1` (M7.1 translated encode path);
-   run PGR2, Rainbow, Crimson, SC2, plus one further title;
-   confirm visual correctness (≤ 1 % per-pixel diff vs GL) and
-   capture a `.gputrace` via `XEMU_METAL_CAPTURE=/tmp/test.gputrace
-   XEMU_METAL_CAPTURE_FRAMES=60` for the M13 plan-text exit gate.
-   Run paired baselines vs GL with `XEMU_METAL_FX_SCALE` /
-   `XEMU_METAL_MSAA` toggles to compare jitter and per-stage GPU
-   timing counters. Outcome feeds the M15 default-on decision.
-2. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
+1. **Fix Crimson Skies Metal visual correctness.** Current smoke
+   capture `benchmark-runs/visual-checks/crimson-smoke-f300.png`
+   shows an untextured green aircraft / black scene; passthrough is
+   all-white. Use Metal texture/shader diagnostics and, if needed,
+   a small nxdk/pbkit custom XBE to isolate the texture-combiner or
+   channel/alpha behavior.
+2. **Re-run green canaries after every Crimson fix.** PGR2:
+   `benchmark-runs/20260504-024441-pgr2` /
+   `benchmark-runs/visual-checks/pgr2-final-f900.png`. Rainbow:
+   `benchmark-runs/20260504-024617-rainbow-six-3` /
+   `benchmark-runs/visual-checks/rainbow-final-f600.png`.
+3. **Only then revisit M15 default-on.** Run PGR2, Rainbow, Crimson,
+   SC2, plus one further title through paired Metal-vs-GL visual diff
+   and FPS/jitter validation. Outcome feeds the M15 decision.
+4. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
    UNBLOCKED, GL-side, orthogonal to Metal):** A human listener
    plays Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice
    on. If clean: declare I5 fully shipped. If glitches: revert or

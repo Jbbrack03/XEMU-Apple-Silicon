@@ -106,6 +106,15 @@ bool xemu_metal_is_active(void);
 bool xemu_metal_begin_imgui_frame(void);
 
 /*
+ * True after xemu_metal_begin_imgui_frame() has successfully acquired a
+ * drawable and prepared the ImGui Metal backend for the current frame.
+ * The HUD update path uses this to avoid acquiring the drawable a second
+ * time when xemu_metal_render_frame() has already done the blocking work
+ * outside BQL.
+ */
+bool xemu_metal_imgui_frame_active(void);
+
+/*
  * Encode the ImGui draw data into the active command buffer's render
  * encoder, present the drawable, and commit. Called from
  * xemu_hud_render() on the Metal path.

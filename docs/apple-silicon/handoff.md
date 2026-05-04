@@ -1,86 +1,76 @@
 # Handoff
 
-Last updated: 2026-05-03 (post-M5.10 + experimental fallback +
-**Metal cold-boot / snapshot regression discovered**). Two commits
-shipped this session:
+Last updated: 2026-05-04 (post-PGR2 Metal surface/RTT correctness
+follow-up). Current branch: `apple-silicon-performance`.
 
-1. **`b283abcb27`** — M5.10 base infrastructure (default-off behind
-   `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}`): public download API
-   (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
-   `_in_range_if_dirty`) mirroring vk's
-   `pgraph_vk_surface_download_if_dirty` field-for-field
-   (MTLBlitCommandEncoder copyFromTexture:toBuffer: + waitUntilCompleted
-   + memcpy_image), cross-queue `MTLSharedEvent` fence
-   (`s_draw_done_event` in `mtl/draw.mm`), KVM/HVF parity polling in
-   `pgraph_mtl_surface_update` (TCG-gated, full-size `_iter_address_size`),
-   open-pass pin in `cache_evict_lru`. Codex-validate ran; 4 findings
-   (2 HIGH, 2 MEDIUM) all addressed in-slice (scaled-surface readback
-   corruption → defensive skip; KVM/HVF 4 KB polling → per-entry
-   full size; depth callback spurious mark → bool return with gated
-   callback; CLAUDE.md flag doc gap → added). New counters
-   `METAL_SURFACE_DOWNLOADS` / `_BYTES`.
-2. **`5154cb599b`** — M5.10 experimental fallback path (default-off
-   behind `XEMU_METAL_FRONT_FB_FALLBACK={0,1}`): when on, publishes
-   `s_color_binding` (the most-recently-bound color RT) as the
-   front-fb after the CRTC-strict publish; last write wins. Cheap
-   host-side bridge for titles like PGR2 whose CRTC-pointed surface
-   receives only sporadic draws while the actual scene goes to a
-   different back buffer. NOT correctness-faithful (aspect mismatch
-   risk; legitimate dual-surface titles will misframe), but enables
-   visual content for the bridge-needed cases without VRAM coherency.
+**Current Metal status.** PGR2 and Rainbow Six 3 are now useful green
+canaries; Crimson Skies remains the visual blocker for the Metal
+default-on decision.
 
-**Visual gate STILL FAILS, but now for a different reason than the
-prior M5.9-followup-E framing**: this session uncovered two
-pre-existing regressions independent of M5.10 that block visual
-validation:
+- **PGR2 PASS (visual canary).** With
+  `XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1
+  XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1
+  XEMU_METAL_FRONT_FB_FALLBACK=1`, the menu/logo/textures/colors are
+  clean. Run: `benchmark-runs/20260504-024441-pgr2`; screenshot:
+  `benchmark-runs/visual-checks/pgr2-final-f900.png`.
+- **PGR2 counters clean.** Late intervals show
+  `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`. Late FPS mostly ranges
+  from ~32 to 59, and input max is ~2.1-2.5 ms.
+- **Rainbow Six 3 PASS (loading-screen visual canary).** Logo/loading
+  screen colors and textures are clean. Run:
+  `benchmark-runs/20260504-024617-rainbow-six-3`; screenshot:
+  `benchmark-runs/visual-checks/rainbow-final-f600.png`. Counters are
+  clean, but loading-screen FPS is still bimodal/low and needs a real
+  gameplay pass after Crimson is fixed.
+- **Crimson Skies FAIL (remaining blocker).** Smoke capture:
+  `benchmark-runs/visual-checks/crimson-smoke-f300.png` shows an
+  untextured green aircraft over a black scene; the translated
+  pipeline counters are clean. Passthrough diagnostic capture
+  `benchmark-runs/visual-checks/crimson-passthrough-f300.png` is
+  all-white, so passthrough is not a better oracle. Next work should
+  focus on Crimson shader/texture semantics, not the old PGR2
+  surface-churn problem.
 
-- **Metal cold-boot perf has regressed since M5.7.** The 2026-05-03
-  M5.7 render-pass-coalescing benchmark reported
-  `post_load_avg_fps = 37.09` on PGR2 starting from the profile-prep
-  HDD. Re-running the same setup on HEAD (with M5.10 default-off, so
-  the regression is independent of M5.10) produces 7-16 perf-log
-  intervals over 60 s wall-clock with `fps ≈ 1-2` — the renderer
-  never progresses past the BIOS animation. Verified by
-  stash-and-rebuild bisection in this session: M5.10 default-off ≈
-  pre-M5.10 baseline ≈ 14-16 intervals, both far below M5.7-era. The
-  introducing slice is in {M5.8, M5.9, followup-A, followup-B+C,
-  followup-E}.
-- **Metal+snapshot path doesn't progress the guest.** Loading
-  `pgr2_gameplay_b4` under Metal yields `NV2A_FLIP_STALL_WRITES=1-3`
-  in 60 s; same snapshot loads cleanly under GL with ~7-8 flips per
-  2-second interval. Also a regression along with the cold-boot
-  freeze.
+**What changed this session.**
 
-These together prevent any visual capture of M5.10 / fallback in a
-gameplay-rendering state. M15 default-on stays **BLOCKED**.
+1. Full scaled VRAM upload for host-scaled surfaces, plus an upright
+   Metal display-compose fallback.
+2. Multi-shape surface cache per VRAM address with cap 64, exact/near
+   shape lookup, direct fallback publish by selected binding,
+   dimension-aware render-target texture lookup, access callbacks over
+   all same-VRAM siblings, and dirty upload of every dirty sibling.
+3. A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
+   texture views now take the CPU texture path instead of the direct
+   surface fast path. This fixes PGR2's dotted/yellow menu text and
+   channel/alpha normalization mismatch. Diagnostic env:
+   `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`.
 
-User-stated runtime goals (1080p, 30/60 fps, AA, correct colors,
-no jitter, no input-latency) **MET TODAY** via GL +
-`XEMU_GL_MSAA=4` + `surface_scale=2` + `XEMU_MACOS_NATIVE_INPUT=1`.
+**Validation already run.**
 
-**Highest-priority next-session action (revised)**: bisect the
-Metal cold-boot regression. Start from `6b37b02d28` (M5.5/M5.6/M5.7
-ship, where 37 fps was achievable) and walk forward through
-`14b012f9f4` (M5.8/M5.6-PartB), `45664d9426` (M5.9), `21e3a4bedc`
-(followup-A), `f8f0e9d134` (followup-B+C), `aa114443bf`
-(followup-E), `b283abcb27` (M5.10), `5154cb599b` (M5.10 fallback)
-to identify which commit(s) introduced the freeze. Use the
-profile-prep HDD source for fast iteration. Once cold-boot is
-restored:
+- Preflight before emulator/debugger runs:
+  `pgrep -fl "Contents/MacOS/xemu|qemu-system-i386|lldb" || true`.
+- Build: `./build.sh -a arm64` PASS.
+- Bundle signing: `codesign --verify --deep --strict --verbose=2
+  dist/xemu.app` PASS.
+- Visual canaries: PGR2 PASS, Rainbow Six 3 PASS, Crimson Skies FAIL
+  as described above.
 
-- Re-run the queued `XEMU_METAL_FRONT_FB_DOWNLOAD=1 XEMU_DISPLAY_SCALE=1`
-  PGR2 visual test from M5.10 base.
-- If still empty/magenta, escalate to investigating PGR2's actual
-  back→front mechanism (likely an unimplemented NV2A engine class:
-  NV3089 / NV0039 / 2D blit subchannel) — that is a separate slice.
-- Try `XEMU_METAL_FRONT_FB_FALLBACK=1` as a host-side bridge while
-  the proper mechanism remains unidentified; document per-title
-  visual caveats.
+**Highest-priority next-session action.** Fix Crimson Skies Metal
+visual correctness. Start with the smoke route at frame 300; compare
+translated and passthrough captures; enable
+`XEMU_METAL_DIAG_TEX_BIND=1`, `XEMU_METAL_DIAG_SURFACE_TEX=1`, and
+`XEMU_METAL_DUMP_TARGET_SHADER=all` as needed. If the issue is still
+ambiguous, build a small nxdk/pbkit custom XBE that isolates the
+suspected texture-combiner, alpha/channel, render-target-as-texture,
+or vertex-color behavior. Avoid proprietary/leaked XDK dependencies.
 
-See decision-log "2026-05-03: Metal slice M5.10 experimental — front-fb
-publish fallback" and the M5.10 base entry, plus benchmark note
-`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`
-(includes the fallback addendum + the cold-boot regression measurement).
+After any Crimson shader/texture change, re-run the PGR2 and Rainbow
+canaries above. **M15 default-on remains BLOCKED** until PGR2,
+Rainbow, Crimson, and the broader visual-diff gate are all correct.
+
+The older banners below are preserved for the empirical audit trail.
 
 (Earlier banner — post-followup-E surface-cache fixes —
 **three real bugs in the Metal surface cache shipped + one decisive

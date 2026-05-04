@@ -117,12 +117,17 @@ bool pgraph_mtl_texture_bind_slot(int stage,
 /* Mark a stage as "no texture bound". Subsequent draws will not bind a
  * texture/sampler to that fragment slot. */
 void pgraph_mtl_texture_unbind_slot(int stage);
+void pgraph_mtl_texture_invalidate_addr(uint64_t vram_phys_addr);
+void pgraph_mtl_texture_invalidate_range(uint64_t vram_phys_addr,
+                                         uint64_t byte_length);
 
 /* Accessors used by the .mm draw layer to encode bindings. Return
  * void* casts of id<MTLTexture> / id<MTLSamplerState>; the cache
  * retains them so the caller MUST NOT release. */
 void *pgraph_mtl_texture_get_metal_texture(int stage);
 void *pgraph_mtl_texture_get_sampler_state(int stage);
+float pgraph_mtl_texture_get_stage_scale(int stage);
+bool pgraph_mtl_texture_stage_uses_external_surface(int stage);
 
 /* Default sampler used for stages that need an MSL sampler binding
  * (some translated PSH variants reference all 4 sampler slots even when
@@ -157,12 +162,18 @@ typedef struct PgraphMtlTextureLevel {
 
 bool pgraph_mtl_texture_bind_slot_full(int stage,
                                        uint64_t vram_phys_addr,
+                                       uint64_t source_byte_length,
                                        uint32_t mtl_pixel_format,
                                        bool is_cubemap,
                                        uint32_t num_faces,
                                        uint32_t levels,
                                        const PgraphMtlTextureLevel *per_level,
                                        const PgraphMtlSamplerDesc *sampler);
+
+bool pgraph_mtl_texture_bind_slot_external(int stage,
+                                           void *texture,
+                                           float scale,
+                                           const PgraphMtlSamplerDesc *sampler);
 
 /*
  * Convenience: walk the current PGRAPHState texture stage `stage`
