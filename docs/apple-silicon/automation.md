@@ -2332,6 +2332,76 @@ snapshot thumbnail capture, because one Rainbow Six 3 snapshot launch crashed
 Apple's OpenGL-on-Metal worker path while a thumbnail-bearing snapshot was
 present on the scratch HDD.
 
+## Paired Metal-vs-GL Diff Harness (W2, 2026-05-04)
+
+`scripts/apple-silicon/metal-gl-compare.sh` drives two
+`run-benchmark.sh` invocations of the same game/input — one with
+`XEMU_RENDERER=GL` (baseline) and one with `XEMU_RENDERER=METAL`
+(candidate) — captures matched screenshots from each, runs
+`compare-screenshots.py` per requested frame, runs `compare-runs.sh` for
+the perf-summary delta, and emits `report.md` + `summary.json` with a
+PASS/FAIL verdict against a per-pixel-changed threshold. It is the
+mechanical enforcement of the M15 visual gate from
+`docs/apple-silicon/metal-renderer-plan.md` §4 M15 ("≤ 1 % per-pixel
+diff vs GL on the validation title set"); slice W3 wires it into a
+canary regression gate.
+
+The GL leg uses the existing `macos`-screencapture backend with
+`XEMU_BENCH_SCREENSHOT_INTERVAL=1` so PNGs land at one-second cadence
+in `<gl_run>/screenshots/`. The Metal leg uses `--metal-screenshot
+<base>` plus `XEMU_METAL_SCREENSHOT_INTERVAL=60` so the in-renderer
+post-HUD-pre-present capture path writes a sequence of
+`<base>.0001.png` / `.0002.png` / ... files (byte-identical to the
+user-visible drawable, no Screen-Recording dialog, no window
+occlusion). Frame ordinals in `--frames N,M,K` index into the sorted
+sequence on each side (1-indexed); the default `mid,end` heuristic
+picks the middle and last entry of the captured set's intersection.
+
+Usage:
+
+```sh
+scripts/apple-silicon/metal-gl-compare.sh <game> [--input <csv>]
+    [--frames N,M,K] [--crop x,y,w,h] [--threshold pct]
+    [--duration seconds] [--out-dir <path>] [--help]
+```
+
+Worked example — paired PGR2 visual + perf check, default 30 s per
+renderer, 1 % changed-pixels threshold on two ordinals:
+
+```sh
+scripts/apple-silicon/metal-gl-compare.sh pgr2 --duration 30
+```
+
+Output directory layout (default
+`benchmark-runs/<TS>-metal-gl-compare-<game>/`):
+
+```
+<out>/
+  harness.log                 — script-level log
+  gl-launcher.log             — full stdout/stderr of the GL run-benchmark
+  metal-launcher.log          — full stdout/stderr of the Metal run-benchmark
+  gl/run-dir.txt              — path to <gl_run> directory
+  metal/run-dir.txt           — path to <metal_run> directory
+  metal/screenshot.NNNN.png   — Metal-rendered drawable PNGs
+  diffs/frame-<N>/            — compare-screenshots.py outputs per ordinal
+    baseline-crop.png
+    candidate-crop.png
+    diff-amplified.png
+    compare-stdout.txt
+  diffs/frames.tsv            — tab-separated machine-readable per-frame stats
+  perf-diff.txt               — compare-runs.sh markdown table
+  report.md                   — top-level PASS/FAIL report
+  summary.json                — machine-readable verdict + per-frame stats
+```
+
+Exit codes: `0` PASS (every compared frame ≤ `--threshold`), `1` FAIL
+(at least one frame exceeded), `2` infrastructure failure (binary
+missing, screenshots missing, sub-script error). The script does NOT
+modify `run-benchmark.sh`, `compare-screenshots.py`, or
+`compare-runs.sh` — it wraps them. `XEMU_METAL_VALIDATION=1` is
+exported on the Metal leg so any Metal-API misuse is logged whether or
+not slice W1's auto-on landed.
+
 ## Current Limitations
 
 - The Crimson Skies route reaches pilot registration, accepts a generated name,

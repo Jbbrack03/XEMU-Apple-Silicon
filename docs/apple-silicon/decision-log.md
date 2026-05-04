@@ -1,5 +1,59 @@
 # Decision Log
 
+## 2026-05-04: Add metal-gl-compare.sh paired diff harness (W2)
+
+**Context.** Slice M14's renderer-port plan and the M15 default-on gate
+both require a mechanically-enforceable "≤ 1 % per-pixel diff vs GL on
+the validation title set" check (`metal-renderer-plan.md` §4 M15).
+Up to this point each Metal canary (PGR2, Rainbow, Halo, Crimson, SC2)
+has been validated by hand: open the GL screenshot, open the Metal
+screenshot, eyeball them, and write a sentence in the handoff.
+That workflow does not scale to the five-title M15 gate, does not
+produce a machine-readable artifact for slice W3's regression gate,
+and gives no perf delta alongside the visual delta.
+
+**Decision.** Land a new wrapper script
+`scripts/apple-silicon/metal-gl-compare.sh` that drives two
+back-to-back `run-benchmark.sh` invocations of the same game/input —
+one under `XEMU_RENDERER=GL` (baseline) and one under
+`XEMU_RENDERER=METAL` (candidate) — captures matched screenshots from
+each (GL via the existing `macos`-screencapture backend; Metal via the
+2026-05-03 `XEMU_METAL_SCREENSHOT_PATH` in-renderer post-HUD-pre-present
+capture path), runs `compare-screenshots.py` per-frame, runs
+`compare-runs.sh` for the perf-summary delta, and emits `report.md` +
+`summary.json` with a PASS/FAIL verdict against a `--threshold`
+percentage of changed pixels per frame (default 1.0 %).
+
+The script is purely additive: it does not modify
+`run-benchmark.sh`, `compare-screenshots.py`, or `compare-runs.sh`.
+`XEMU_METAL_VALIDATION=1` is exported on the Metal leg so any
+Metal-API misuse is logged independently of slice W1 (auto-on of the
+same flag in dev runs); the two slices compose without ordering
+constraints.
+
+**Rationale.** (a) Mechanical enforcement of the M15 visual gate
+removes the "did the operator squint hard enough" risk that today's
+hand-eyeball flow has; (b) the JSON output is the contract slice W3's
+regression gate consumes; (c) wrapping the existing helpers (vs forking
+them) keeps the per-screenshot diff math, the perf-summary table
+format, and the run-benchmark spawn semantics aligned with the rest of
+the harness — a future change to any of those tools propagates
+automatically; (d) a single dated `benchmark-runs/<TS>-metal-gl-compare-<game>/`
+output dir mirrors every other harness output and slots into the
+existing `benchmark-runs/` retention model.
+
+**Cross-cut updates.** `xemu-fork/docs/apple-silicon/automation.md`
+gains a "Paired Metal-vs-GL Diff Harness" subsection with usage,
+worked example, and output-dir layout; the workspace `CLAUDE.md`
+script roster lists the new entrypoint pointing to that subsection.
+
+**Validation.** `bash -n` syntax-clean; `--help` prints the full usage
+block; bad game-alias / non-numeric `--duration` / malformed `--crop`
+all fail at pre-flight with exit 2 and a clear message. A full PGR2
+paired smoke run is left to the orchestrator's baseline lock-in step
+(per project rule #11 the closed Apple Silicon defaults are not
+re-validated when only a wrapper script lands).
+
 ## 2026-05-03: Metal slice M5.10 experimental — front-fb publish fallback to latest draw (additional default-off path; pre-existing Metal cold-boot + snapshot regressions surfaced)
 
 **Context.** M5.10's CRTC-strict download path (decision-log entry
