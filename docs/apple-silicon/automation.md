@@ -1,16 +1,18 @@
 # Benchmark Automation
 
-Last updated: 2026-05-04 (PGR2 Metal surface/RTT canary is clean;
-Rainbow Six 3 loading-screen canary is clean; Xbox boot/flubber canary
-is clean after the front-face fix. The earlier green/wireframe report
-was the boot animation, not in-game Crimson Skies. Crimson gameplay
-automation now completes without aborting after the texture-DMA bounds
-and invalid-stage shader fixes, but its current screenshot lands on a
-black transition/loading frame and is not a visual canary. Added
-diagnostics `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1` and
-`metal_tex_oob`; front-fb fallback docs now reflect that it publishes
-the selected render-target binding. Existing diagnostics/counters from
-2026-05-03 remain available:
+Last updated: 2026-05-04 (Visual Flight Recorder added and wired into
+`run-benchmark.sh` behind `XEMU_BENCH_VISUAL_ANALYSIS=1`; PGR2 Metal
+surface/RTT canary is clean; Rainbow Six 3 loading-screen canary is
+clean; Xbox boot/flubber canary is clean after the front-face fix. The
+earlier green/wireframe report was the boot animation, not in-game
+Crimson Skies. Crimson gameplay automation now completes without
+aborting after the texture-DMA bounds and invalid-stage shader fixes,
+but its current screenshot lands on a black transition/loading frame
+and is not a visual canary. Added diagnostics
+`XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1` and `metal_tex_oob`;
+front-fb fallback docs now reflect that it publishes the selected
+render-target binding. Existing diagnostics/counters from 2026-05-03
+remain available:
 `XEMU_METAL_DIAG_CLEAR=1`, `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`,
 `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,
 `METAL_IMAGE_BLITS`, `METAL_SURFACE_RECREATE_SHAPE_MISMATCH`,
@@ -90,6 +92,63 @@ Each run creates a directory under `benchmark-runs/` containing:
 
 The launcher intentionally uses a scratch HDD copy so benchmark navigation does
 not mutate the source HDD image.
+
+## Visual Flight Recorder
+
+For renderer correctness work, do not rely on one still image when the route
+could be in a transition, animated scene, loading screen, or flickering failure
+state. Use a bounded visual timeline and summarize it into compact artifacts:
+
+```sh
+XEMU_RENDERER=METAL \
+XEMU_METAL_TRANSLATED_PIPELINE=1 \
+XEMU_NATIVE_TRI_DEPTH=1 \
+XEMU_NATIVE_QUAD=1 \
+XEMU_PGRAPH_FAST_READ=1 \
+XEMU_METAL_FRONT_FB_FALLBACK=1 \
+XEMU_METAL_MSAA=4 \
+XEMU_METAL_SCREENSHOT_INTERVAL=120 \
+XEMU_BENCH_VISUAL_ANALYSIS=1 \
+scripts/apple-silicon/run-benchmark.sh \
+  --metal-screenshot benchmark-runs/visual-checks/crimson-route.png \
+  --metal-screenshot-at-frame 300 \
+  crimson scripts/apple-silicon/input-scripts/crimson-gameplay.csv 90
+```
+
+With `XEMU_BENCH_VISUAL_ANALYSIS=1`, `run-benchmark.sh` writes the compact
+report to `RUN_DIR/visual-analysis/` and logs analyzer output to
+`RUN_DIR/visual-analysis.log`. To summarize an existing PNG sequence manually:
+
+```sh
+scripts/apple-silicon/visual-flight-recorder.py \
+  --frames-dir benchmark-runs/visual-checks \
+  --glob 'crimson-route*.png' \
+  --out-dir /tmp/xemu-crimson-visual
+```
+
+For a run directory that already contains periodic `screenshots/`, the default
+output location is `RUN_DIR/visual-analysis`:
+
+```sh
+scripts/apple-silicon/visual-flight-recorder.py \
+  --run-dir benchmark-runs/20260504-100815-crimson-skies
+```
+
+The report contains:
+
+- `visual-summary.json`: black-frame percentage, longest black/static runs,
+  motion/change metrics, selected keyframes, and a small perf-log summary when
+  `xemu.log` is available.
+- `timeline.csv`: per-frame luma, nonblack percentage, entropy, perceptual
+  hashes, and motion-vs-previous-frame metrics.
+- `storyboard.jpg`: compact contact sheet of the selected frames.
+- `keyframes/`: only the selected representative frames.
+
+If a short screen recording is more useful than sampled PNGs, pass
+`--video path.mov`. The analyzer extracts frames with `ffmpeg` into a temporary
+directory and deletes them automatically at exit. Use `--keep-temp` only for a
+one-off debugging session; do not keep extracted video frames under
+`benchmark-runs/`.
 
 The per-run config writes `[display.quality] surface_scale = N`, where
 `N` defaults to **2** (matching the Apple Silicon system build's

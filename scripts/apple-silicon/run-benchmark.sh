@@ -190,6 +190,7 @@ SNAPSHOT_LOG="${RUN_DIR}/snapshot.log"
 SCREENSHOT_INTERVAL="${XEMU_BENCH_SCREENSHOT_INTERVAL:-10}"
 SCREENSHOT_START_DELAY="${XEMU_BENCH_SCREENSHOT_START_DELAY:-5}"
 SCREENSHOT_BACKEND="${XEMU_BENCH_SCREENSHOT_BACKEND:-macos}"
+VISUAL_ANALYSIS="${XEMU_BENCH_VISUAL_ANALYSIS:-0}"
 PERF_LOG_INTERVAL_MS="${XEMU_PERF_LOG_INTERVAL_MS:-1000}"
 SAVEVM_AT="${XEMU_BENCH_SAVEVM_AT:-}"
 SAVEVM_TAG="${XEMU_BENCH_SAVEVM_TAG:-${GAME_NAME}-scene}"
@@ -284,6 +285,7 @@ EOF
     echo "screenshot_interval_seconds: $SCREENSHOT_INTERVAL"
     echo "screenshot_start_delay_seconds: $SCREENSHOT_START_DELAY"
     echo "screenshot_backend: $SCREENSHOT_BACKEND"
+    echo "visual_analysis: $VISUAL_ANALYSIS"
     echo "perf_log: XEMU_PERF_LOG=1"
     echo "perf_log_interval_ms: $PERF_LOG_INTERVAL_MS"
     echo "savevm_at_seconds: ${SAVEVM_AT:-none}"
@@ -533,6 +535,40 @@ if [[ -n "${SAVEVM_PID:-}" ]]; then
 fi
 cleanup
 trap - EXIT INT TERM
+
+if [[ "$VISUAL_ANALYSIS" == "1" ]]; then
+    VISUAL_ANALYSIS_LOG="${RUN_DIR}/visual-analysis.log"
+    VISUAL_ANALYSIS_OUT="${RUN_DIR}/visual-analysis"
+    VISUAL_FRAMES_DIR=""
+    VISUAL_GLOB="*.png"
+
+    if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
+        VISUAL_FRAMES_DIR="$(dirname "$METAL_SCREENSHOT_PATH")"
+        VISUAL_SHOT_NAME="$(basename "$METAL_SCREENSHOT_PATH")"
+        if [[ "$VISUAL_SHOT_NAME" == *.png ]]; then
+            VISUAL_GLOB="${VISUAL_SHOT_NAME%.png}*.png"
+        else
+            VISUAL_GLOB="${VISUAL_SHOT_NAME}*"
+        fi
+    elif [[ -d "$SCREENSHOT_DIR" ]]; then
+        VISUAL_FRAMES_DIR="$SCREENSHOT_DIR"
+    fi
+
+    if [[ -n "$VISUAL_FRAMES_DIR" && -d "$VISUAL_FRAMES_DIR" ]]; then
+        echo "Running visual analysis: $VISUAL_ANALYSIS_OUT"
+        if ! python3 "${ROOT_DIR}/scripts/apple-silicon/visual-flight-recorder.py" \
+            --run-dir "$RUN_DIR" \
+            --frames-dir "$VISUAL_FRAMES_DIR" \
+            --glob "$VISUAL_GLOB" \
+            --out-dir "$VISUAL_ANALYSIS_OUT" \
+            > "$VISUAL_ANALYSIS_LOG" 2>&1; then
+            echo "visual analysis failed; see $VISUAL_ANALYSIS_LOG" >&2
+        fi
+    else
+        echo "visual analysis requested but no screenshot frames were found" \
+            > "$VISUAL_ANALYSIS_LOG"
+    fi
+fi
 
 echo "Finished. Metadata: $META_FILE"
 echo "Log: $LOG_FILE"

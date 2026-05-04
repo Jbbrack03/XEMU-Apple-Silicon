@@ -6526,3 +6526,59 @@ Next-session priority:
    policy before revisiting M15.
 4. Run the paired Metal-vs-GL visual/perf gate only after those visual
    routes are valid.
+
+## 2026-05-04: Add Visual Flight Recorder for route-aware Metal validation
+
+Decision:
+
+- Treat route-aware visual timelines as required evidence for Crimson and
+  SC2 Metal correctness work. Single still screenshots are insufficient
+  when a route can move through boot, transition, animation, and black-frame
+  states.
+- Keep raw extracted video frames temporary by default. The durable artifacts
+  are compact: JSON summary, CSV timeline, storyboard, and selected keyframes.
+- Keep the new workflow opt-in via `XEMU_BENCH_VISUAL_ANALYSIS=1` so normal
+  benchmark runs stay lean.
+
+What landed:
+
+- `scripts/apple-silicon/visual-flight-recorder.py` analyzes PNG sequences
+  or short videos. It reports black-frame percentage, longest black/static
+  runs, luma/nonblack/entropy/colorfulness metrics, perceptual hashes,
+  motion-vs-previous-frame metrics, selected keyframes, and a storyboard.
+- `scripts/apple-silicon/run-benchmark.sh` now runs that analyzer after a
+  benchmark when `XEMU_BENCH_VISUAL_ANALYSIS=1` and screenshot frames are
+  available. The report lands in `RUN_DIR/visual-analysis/`; analyzer stdout
+  lands in `RUN_DIR/visual-analysis.log`.
+- `docs/apple-silicon/automation.md` documents the recommended sampled-PNG
+  route-debug recipe and the cleanup policy for video frame extraction.
+
+Validation:
+
+- `bash -n scripts/apple-silicon/run-benchmark.sh` PASS.
+- `python3 -m py_compile scripts/apple-silicon/visual-flight-recorder.py`
+  PASS.
+- Existing Crimson failed sequence:
+  `benchmark-runs/visual-checks/crimson-gameplay-gate-msaa4-after-msaa-store*.png`
+  summarizes as 13 frames, 92.31 % black, longest black run starting at
+  frame index 1 for 12 frames.
+- Existing SC2 failed sequence:
+  `benchmark-runs/visual-checks/sc2-gate-metal-msaa4-interval-after-msaa-store*.png`
+  summarizes as 8 frames, 87.50 % black, longest black run starting at
+  frame index 1 for 7 frames.
+- Video input path PASS with a temporary MP4 fixture; no stale
+  `xemu-visual-frames-*` temp directories remained.
+- End-to-end `XEMU_BENCH_VISUAL_ANALYSIS=1` hook PASS:
+  `benchmark-runs/20260504-113305-soul-calibur-2` produced
+  `visual-analysis/storyboard.jpg` and `visual-analysis/visual-summary.json`.
+
+Next-session priority:
+
+1. Re-run Crimson gameplay and SC2 route investigations with
+   `XEMU_BENCH_VISUAL_ANALYSIS=1` plus a useful
+   `XEMU_METAL_SCREENSHOT_INTERVAL`.
+2. Make Crimson produce a rendered gameplay timeline rather than one
+   patterned frame followed by black.
+3. Add an SC2 routed input script or known-good snapshot.
+4. Only after those visual timelines are valid, run the paired Metal-vs-GL
+   visual/perf gate for M15.

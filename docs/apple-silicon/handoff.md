@@ -1,7 +1,7 @@
 # Handoff
 
-Last updated: 2026-05-04 (Metal MSAA store/resolve fix + MSAA4 gate
-follow-up). Current branch: `apple-silicon-performance`.
+Last updated: 2026-05-04 (Visual Flight Recorder tooling + Metal MSAA4
+gate state). Current branch: `apple-silicon-performance`.
 
 **Current Metal status.** PGR2, Rainbow Six 3, Halo CE menu, and the
 Xbox boot/flubber animation are useful Metal canaries with 4x MSAA
@@ -61,8 +61,40 @@ fallback dependency.
   `post_load_avg_fps=57.63`), but the no-input route captures only
   boot/flubber then black frames. Add a routed input script or load a
   known-good snapshot before using SC2 for paired visual diff.
+- **Visual Flight Recorder tooling is available for next-session route
+  work.** `scripts/apple-silicon/visual-flight-recorder.py` consumes a
+  PNG sequence or short video and writes a compact `visual-summary.json`,
+  `timeline.csv`, `storyboard.jpg`, and selected `keyframes/`.
+  `run-benchmark.sh` can run it automatically when
+  `XEMU_BENCH_VISUAL_ANALYSIS=1` is set. Temporary extracted video
+  frames are deleted automatically unless `--keep-temp` is explicitly
+  used. Existing failed sequences now quantify as Crimson 92.31 % black
+  frames after one patterned frame and SC2 87.50 % black frames after
+  boot/flubber. End-to-end hook validation:
+  `benchmark-runs/20260504-113305-soul-calibur-2/visual-analysis/storyboard.jpg`.
 
 **What changed this session.**
+
+Visual feedback tooling follow-up:
+
+1. Added `scripts/apple-silicon/visual-flight-recorder.py`, a bounded
+   visual timeline analyzer for PNG sequences and short videos. It
+   produces black/static/motion metrics, perceptual hashes, a CSV
+   timeline, selected keyframes, and a storyboard contact sheet.
+2. Added `XEMU_BENCH_VISUAL_ANALYSIS=1` support to
+   `scripts/apple-silicon/run-benchmark.sh`; it writes
+   `RUN_DIR/visual-analysis/` and `RUN_DIR/visual-analysis.log` after
+   the run when screenshot frames are available.
+3. Updated `docs/apple-silicon/automation.md` with the recommended
+   route-debug recipe and cleanup policy: sampled PNG timelines for
+   normal work; short videos only when motion/animation demands it; no
+   raw extracted video frames under `benchmark-runs/`.
+4. Validation: `bash -n scripts/apple-silicon/run-benchmark.sh`,
+   `python3 -m py_compile scripts/apple-silicon/visual-flight-recorder.py`,
+   manual analysis of existing Crimson/SC2 failed sequences, and one
+   20 s SC2 Metal end-to-end visual-analysis run.
+
+Previous Metal renderer follow-up:
 
 1. Metal MSAA color passes now use
    `MTLStoreActionStoreAndMultisampleResolve` and MSAA depth/stencil
@@ -102,14 +134,23 @@ fallback dependency.
   no-input captures.
 - Shader validation: `scripts/apple-silicon/metal-shader-validation/run-validation.sh`
   PASS, 7/7 fixtures passed.
+- Visual Flight Recorder validation:
+  `scripts/apple-silicon/visual-flight-recorder.py` PASS on existing
+  Crimson/SC2 PNG sequences; video input path PASS with a temporary
+  ffmpeg extraction test and no stale `xemu-visual-frames-*` temp dirs.
+  End-to-end run with `XEMU_BENCH_VISUAL_ANALYSIS=1` PASS:
+  `benchmark-runs/20260504-113305-soul-calibur-2`.
 
 **Highest-priority next-session action.** Run the broader Metal-vs-GL
-gameplay gate only after fixing the visual routes: make Crimson capture
-a rendered gameplay frame, add an SC2 routed input script or known-good
+gameplay gate only after fixing the visual routes. First run Crimson and
+SC2 with `XEMU_BENCH_VISUAL_ANALYSIS=1` and a useful
+`XEMU_METAL_SCREENSHOT_INTERVAL` so the next investigation gets a
+storyboard/timeline, not isolated stills. Make Crimson capture a
+rendered gameplay frame, add an SC2 routed input script or known-good
 snapshot, and decide whether to make the front-fb fallback faithful or
 keep it explicit. Re-run PGR2, Rainbow, Halo, and boot/flubber after
-any Metal renderer change. **M15 default-on remains BLOCKED** until
-the paired visual-diff/perf gate is correct.
+any Metal renderer change. **M15 default-on remains BLOCKED** until the
+paired visual-diff/perf gate is correct.
 
 The older banners below are preserved for the empirical audit trail.
 
