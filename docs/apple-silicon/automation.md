@@ -2470,6 +2470,124 @@ modify `run-benchmark.sh`, `compare-screenshots.py`, or
 `compare-runs.sh` — it wraps them. `XEMU_METAL_VALIDATION=1` is
 exported on the Metal leg so any Metal-API misuse is logged whether or
 not slice W1's auto-on landed.
+## Triangulation backend status: BLOCKED — MoltenVK + pgraph/vk
+
+**Status (2026-05-04, slice W5).** Enabling the existing
+`hw/xbox/nv2a/pgraph/vk/` Vulkan renderer through MoltenVK as a third
+runnable backend on Apple Silicon (alongside GL and Metal) for
+triangulating Metal correctness bugs is **BLOCKED** at the device-
+feature level. No build / meson / runtime changes were made for this
+slice; the Apple Silicon arm64 build remains Metal + GL only.
+
+**Specific blocker.** MoltenVK 1.4.1 (current Homebrew bottle,
+`brew --prefix molten-vk` → `/opt/homebrew/Cellar/molten-vk/1.4.1`) on
+the M3 Ultra reports the Vulkan core feature `geometryShader = 0`
+(false). The xemu Vulkan renderer hard-requires that feature at
+`hw/xbox/nv2a/pgraph/vk/instance.c:492` (`F(geometryShader, true)` in
+the `desired_features[]` table; `required = true`) and aborts device
+creation with `Error: Device does not support required feature
+geometryShader` if it is missing.
+
+This was confirmed by direct programmatic probe rather than by
+documentation reading. The probe (transient, not committed) linked
+against `/opt/homebrew/Cellar/molten-vk/1.4.1/lib/libMoltenVK.dylib`,
+called `vkCreateInstance` + `vkGetPhysicalDeviceFeatures` against the
+M3 Ultra:
+
+```
+Device 0: Apple M3 Ultra (apiVersion=1.2.334)
+  geometryShader = 0
+  shaderTessellationAndGeometryPointSize = 1
+  fillModeNonSolid = 1
+  depthClamp = 1
+  occlusionQueryPrecise = 1
+  shaderClipDistance = 1
+```
+
+The root cause is structural: Apple's Metal API has no native
+geometry-shader stage, and MoltenVK does not implement geometry-shader
+emulation (e.g. via compute shaders or transform-feedback-style passes).
+This is the same constraint that drove xemu's native Metal renderer
+design to avoid GS entirely (see
+`docs/apple-silicon/metal-renderer-plan.md`,
+`docs/apple-silicon/emulator-metal-survey.md` §D, and the Metal-side
+work that derives per-triangle depth in the fragment shader instead of
+in a GS).
+
+**Where xemu vk hard-depends on geometry shaders** (not exhaustive,
+established for this slice):
+
+- `pgraph/vk/instance.c:492` — required-feature gate.
+- `pgraph/vk/gpuprops.c:62-602` — boot-time GPU-properties
+  calibration `render_geom_shader_triangles` runs three GS-driven
+  pipelines to detect the host's triangle / triangle-strip /
+  triangle-fan rotation winding. Without GS support the renderer
+  cannot complete its initialization probe.
+- `pgraph/vk/draw.c:750-755` — every primary draw with
+  `r->shader_binding->geom.module_info` non-NULL plugs a GS module
+  into the pipeline shader-stages array.
+- `pgraph/vk/shaders.c:267-282` — `pgraph_glsl_need_geom()` drives
+  shader-binding cache key generation; fork PR #2240 work
+  (`XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`) bypasses GS in the GL
+  path but the vk path still uses GS for non-bypass cases and for the
+  flat-shaded quad branch.
+
+Removing GS as a hard requirement would mean rewriting the entire
+boot-time gpuprops calibration path, the `glsl/geom.c` shader-
+generation path, and the per-draw GS plumbing — multi-week renderer
+rework explicitly outside this slice's scope.
+
+**What was NOT done (so the existing build path is unchanged).**
+
+- `meson.build` is unchanged. `vulkan = not_found` on darwin remains.
+- `build.sh` is unchanged. No MoltenVK env exports.
+- `hw/xbox/nv2a/pgraph/vk/meson.build` is unchanged. The vk
+  source-set is still `if vulkan.found()` (i.e. never built on
+  darwin).
+- No `XEMU_RENDERER=VULKAN` plumbing was added on darwin.
+- No source modifications under `hw/xbox/nv2a/pgraph/vk/`.
+
+`./build.sh -a arm64` still produces a Metal + GL build with no vk
+renderer, identical to the pre-slice baseline.
+
+**Prerequisite if a future attempt tries again.** `brew install
+molten-vk` is the supported install (1.4.1 confirmed bottled). The
+ICD JSON lives at
+`/opt/homebrew/Cellar/molten-vk/1.4.1/etc/vulkan/icd.d/MoltenVK_icd.json`
+and the dylib at
+`/opt/homebrew/Cellar/molten-vk/1.4.1/lib/libMoltenVK.dylib`. xemu
+should not bundle MoltenVK as a runtime dep — require user install.
+
+**Recommended alternative triangulation paths.**
+
+1. **Per-draw color render-target dump (slice W4 in flight).** A
+   parallel slice dumps each draw's bound color RT to disk for both
+   the Metal and the GL renderer; running the same scripted-input
+   route through both renderers produces directly comparable
+   per-draw PNG sequences. This is the highest-value triangulation
+   tool that does **not** require a third backend. Reinforce W4's
+   importance — it now carries the full triangulation load.
+2. **GS emulation in MoltenVK via compute shaders.** Could be
+   prototyped upstream in MoltenVK using compute-shader vertex
+   transform with output to a buffer, then re-fed as a vertex stream
+   for the fragment pass. This is a multi-month MoltenVK upstream
+   effort, not a project for this fork.
+3. **Wait for GS support in MoltenVK.** As of MoltenVK 1.4.1 there
+   is no published roadmap commitment; not a near-term path.
+4. **LunarG VulkanSDK on macOS.** Same constraint — VulkanSDK on
+   macOS uses MoltenVK underneath. Adds the validation layer and
+   tooling but does not add geometry-shader feature support.
+5. **Native Vulkan via Vulkan-Direct-on-Metal (KosmicKrisp,
+   nicely-private projects).** Same constraint at the Metal layer —
+   no native GS stage in Metal.
+
+**Bottom line.** A pgraph/vk + MoltenVK triangulation backend on
+Apple Silicon would need an upstream MoltenVK GS-emulation feature
+(does not exist) **or** an in-fork rework of the entire vk
+renderer's geometry-shader dependency (multi-week, far outside the
+diagnostic scope of "triangulation backend"). The W4 per-draw color
+RT dump remains the recommended triangulation path. See decision-log
+"2026-05-04: MoltenVK W5 BLOCKED" for the full investigation record.
 
 ## Current Limitations
 
