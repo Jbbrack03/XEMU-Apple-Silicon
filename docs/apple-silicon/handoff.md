@@ -1,63 +1,88 @@
 # Handoff
 
-Last updated: 2026-05-04 (post-boot/flubber + Crimson stability +
-PGR2/Rainbow Metal correctness follow-up). Current branch:
-`apple-silicon-performance`.
+Last updated: 2026-05-04 (Metal MSAA store/resolve fix + MSAA4 gate
+follow-up). Current branch: `apple-silicon-performance`.
 
-**Current Metal status.** PGR2, Rainbow Six 3, and the Xbox
-boot/flubber animation are now useful green canaries. The user's
-reported green/wireframe failure was the Xbox boot animation, not
-in-game Crimson Skies. Metal default-on remains blocked by the broader
-Metal-vs-GL visual-diff/gameplay gate, not by that specific
-boot-animation failure.
+**Current Metal status.** PGR2, Rainbow Six 3, Halo CE menu, and the
+Xbox boot/flubber animation are useful Metal canaries with 4x MSAA
+active after the 2026-05-04 store/resolve fix. Metal default-on remains
+blocked by the broader Metal-vs-GL visual-diff/gameplay gate, the
+Crimson/SC2 routed visual gaps, and the still-explicit front-fb
+fallback dependency.
 
 - **PGR2 PASS (visual canary).** With
   `XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1
   XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1
-  XEMU_METAL_FRONT_FB_FALLBACK=1`, the menu/logo/textures/colors are
-  clean. Latest run: `benchmark-runs/20260504-092708-pgr2`;
+  XEMU_METAL_FRONT_FB_FALLBACK=1 XEMU_METAL_MSAA=4`, the
+  menu/logo/textures/colors are clean. Latest MSAA4 run:
+  `benchmark-runs/20260504-100458-pgr2`;
   screenshot:
-  `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`.
+  `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`.
 - **PGR2 counters clean.** Late intervals show
   `METAL_PIPELINE_TRANSLATED_FAILED=0`,
   `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
-  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`. Late FPS mostly ranges
-  from ~32 to 59, and input max is ~2.1-2.5 ms.
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`. Latest MSAA4 run:
+  `post_load_avg_fps=42.12`, `post_load_avg_mspf=16.19`,
+  `METAL_MSAA_RESOLVE_COUNT=952`, and `INPUT_LAT_US_MAX=2494`.
+- **PGR2 direct CRTC publish is still wrong without the fallback.**
+  `benchmark-runs/20260504-101416-pgr2` with
+  `XEMU_METAL_FRONT_FB_FALLBACK=0` produced an upside-down/wrong
+  frame at
+  `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-no-front-fb-f900-after-msaa-store.png`.
+  Keep the fallback explicit until the CRTC/front-buffer path is made
+  faithful or a default-on policy decision accepts the fallback risk.
 - **Rainbow Six 3 PASS (loading-screen visual canary).** Logo/loading
-  screen colors and textures are clean. Latest run:
-  `benchmark-runs/20260504-092750-rainbow-six-3`; screenshot:
-  `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
+  screen colors and textures are clean with 4x MSAA. Latest run:
+  `benchmark-runs/20260504-100546-rainbow-six-3`; screenshot:
+  `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`.
   Counters are clean, but loading-screen FPS is still bimodal/low and
   needs a real gameplay pass in the broader gate.
-- **Xbox boot/flubber PASS (visual canary).** The previous green
-  blob/wireframe failure is fixed. Latest run:
-  `benchmark-runs/20260504-092824-crimson-skies`; screenshot:
-  `benchmark-runs/visual-checks/boot-post-oob-f300.png`. Counters
-  are clean: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+- **Xbox boot/flubber PASS (visual canary).** Latest MSAA4 run:
+  `benchmark-runs/20260504-100747-crimson-skies`; screenshot:
+  `benchmark-runs/visual-checks/boot-gate-metal-msaa4-f300-after-msaa-store.png`.
+  Counters are clean: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
   `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
-  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
-- **Crimson Skies gameplay stability PASS, visual route still needs a
-  better capture point.** `crimson-gameplay.csv` now completes without
-  aborting after the texture-DMA bounds and invalid-stage shader fixes.
-  Latest run: `benchmark-runs/20260504-092403-crimson-skies`;
-  screenshot `benchmark-runs/visual-checks/crimson-gameplay-metal-f1800.png`
-  is a black transition/loading frame, so it is useful for stability
-  and FPS/input counters but not yet a visual canary.
+  `METAL_PIPELINE_FALLBACKS=0`.
+- **Halo CE PASS (broader-title visual canary).** Latest MSAA4 run:
+  `benchmark-runs/20260504-101125-halo-ce`; screenshot:
+  `benchmark-runs/visual-checks/halo-gate-metal-msaa4-f1200-after-msaa-store.png`.
+  Menu textures/colors are clean, `post_load_avg_fps=30.51`, and
+  `INPUT_LAT_US_MAX=2498`.
+- **Crimson Skies gameplay stability PASS, visual route BLOCKED.**
+  `crimson-gameplay.csv` still completes without aborting and counters
+  stay clean, but a 75 s interval capture
+  (`benchmark-runs/20260504-100815-crimson-skies`) produced one
+  patterned frame followed by black drawable screenshots
+  (`crimson-gameplay-gate-msaa4-after-msaa-store.0001.png` through
+  `.0013.png`). This route is not a visual canary yet.
+- **SC2 route BLOCKED as a visual canary.** The hidden `sc2` benchmark
+  alias runs and reports strong MSAA4 counters
+  (`benchmark-runs/20260504-101242-soul-calibur-2`,
+  `post_load_avg_fps=57.63`), but the no-input route captures only
+  boot/flubber then black frames. Add a routed input script or load a
+  known-good snapshot before using SC2 for paired visual diff.
 
 **What changed this session.**
 
-1. Full scaled VRAM upload for host-scaled surfaces, plus an upright
+1. Metal MSAA color passes now use
+   `MTLStoreActionStoreAndMultisampleResolve` and MSAA depth/stencil
+   passes use `MTLStoreActionStore` in both draw and clear paths. This
+   fixes the PGR2 MSAA4 black-frame regression where later pass breaks
+   loaded discarded/stale MSAA contents.
+2. The benchmark helper usage text now documents the already-supported
+   `sc2` and `halo` aliases.
+3. Full scaled VRAM upload for host-scaled surfaces, plus an upright
    Metal display-compose fallback.
-2. Multi-shape surface cache per VRAM address with cap 64, exact/near
+4. Multi-shape surface cache per VRAM address with cap 64, exact/near
    shape lookup, direct fallback publish by selected binding,
    dimension-aware render-target texture lookup, access callbacks over
    all same-VRAM siblings, and dirty upload of every dirty sibling.
-3. A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
+5. A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
    texture views now take the CPU texture path instead of the direct
    surface fast path. This fixes PGR2's dotted/yellow menu text and
    channel/alpha normalization mismatch. Diagnostic env:
    `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`.
-4. Metal now handles out-of-bounds enabled texture stages without
+6. Metal now handles out-of-bounds enabled texture stages without
    aborting: `pgraph_try_get_texture_phys_addr()` reports invalid DMA
    texture offsets, Metal unbinds/logs them as `metal_tex_oob`, and the
    GLSL/Metal shader state masks those invalid stages before sampler
@@ -70,19 +95,21 @@ boot-animation failure.
 - Build: `./build.sh -a arm64` PASS.
 - Bundle signing: `codesign --verify --deep --strict --verbose=2
   dist/xemu.app` PASS.
-- Visual canaries: PGR2 PASS, Rainbow Six 3 PASS, Xbox boot/flubber
-  PASS. Crimson gameplay stability route PASS; its current automated
-  screenshot lands on black transition/loading output.
+- Visual canaries: PGR2 MSAA4 PASS, Rainbow Six 3 MSAA4 PASS, Halo CE
+  MSAA4 PASS, Xbox boot/flubber MSAA4 PASS. Crimson gameplay stability
+  route PASS but visual route BLOCKED by black drawable captures. SC2
+  perf/stability route PASS but visual route BLOCKED by boot/black
+  no-input captures.
 - Shader validation: `scripts/apple-silicon/metal-shader-validation/run-validation.sh`
   PASS, 7/7 fixtures passed.
 
 **Highest-priority next-session action.** Run the broader Metal-vs-GL
-gameplay gate: PGR2, Rainbow Six 3, Crimson Skies after the boot
-animation, SC2, plus one further title with paired screenshots,
-FPS/jitter counters, and input-latency counters. Re-run the PGR2,
-Rainbow, and boot/flubber canaries after any Metal renderer change.
-**M15 default-on remains BLOCKED** until that broader visual-diff gate
-is correct.
+gameplay gate only after fixing the visual routes: make Crimson capture
+a rendered gameplay frame, add an SC2 routed input script or known-good
+snapshot, and decide whether to make the front-fb fallback faithful or
+keep it explicit. Re-run PGR2, Rainbow, Halo, and boot/flubber after
+any Metal renderer change. **M15 default-on remains BLOCKED** until
+the paired visual-diff/perf gate is correct.
 
 The older banners below are preserved for the empirical audit trail.
 

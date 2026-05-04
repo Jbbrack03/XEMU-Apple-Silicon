@@ -476,16 +476,13 @@ build_render_pass_descriptor(void *surface_color, void *surface_depth,
         [MTLRenderPassDescriptor renderPassDescriptor];
 
     /* M11: query the MSAA state once. When the surface manager has a
-     * memoryless multisample companion bound for the active color/
-     * depth target, the render pass's `texture` becomes the
-     * multisample companion and the single-sample target becomes the
-     * `resolveTexture`. The store action becomes
-     * MTLStoreActionMultisampleResolve for color (so the resolved
-     * single-sample copy is what subsequent passes / the present
-     * compositor read). For depth we use MTLStoreActionDontCare on
-     * the multisample target — Apple Silicon's TBDR keeps it in
-     * tile memory and the post-resolve depth is not consumed by the
-     * compositor. */
+     * multisample companion bound for the active color/depth target,
+     * the render pass's `texture` becomes the multisample companion and
+     * the single-sample target becomes the `resolveTexture`. Color uses
+     * StoreAndMultisampleResolve so the MSAA contents survive pass
+     * breaks while the resolved single-sample copy stays current for
+     * subsequent passes, RTT sampling, and present. Depth/stencil must
+     * also be stored because later passes load the same MSAA attachment. */
     uint32_t samples = pgraph_mtl_surface_get_msaa_sample_count();
     void *msaa_color_handle = NULL;
     void *msaa_depth_handle = NULL;
@@ -507,14 +504,14 @@ build_render_pass_descriptor(void *surface_color, void *surface_depth,
                 (__bridge id<MTLTexture>)msaa_color_handle;
             desc.colorAttachments[0].texture        = ms;
             desc.colorAttachments[0].resolveTexture = tex;
-            /* Load existing single-sample contents into the
-             * multisample target. Metal expands the single-sample
-             * source across all samples for the load. The
-             * MultisampleResolve store action then collapses it back
-             * to the single-sample resolveTexture. */
+            /* Keep the multisample attachment alive across coalesced-pass
+             * breaks and also update the single-sample resolve target for
+             * present / RTT sampling. MTLStoreActionMultisampleResolve only
+             * guarantees the resolveTexture is written; the MSAA texture may
+             * be discarded, so a later MTLLoadActionLoad can see stale black. */
             desc.colorAttachments[0].loadAction  = MTLLoadActionLoad;
             desc.colorAttachments[0].storeAction =
-                MTLStoreActionMultisampleResolve;
+                MTLStoreActionStoreAndMultisampleResolve;
         } else {
             desc.colorAttachments[0].texture     = tex;
             /* Load existing contents — the prior clear / draw is the
@@ -532,13 +529,13 @@ build_render_pass_descriptor(void *surface_color, void *surface_depth,
                 (__bridge id<MTLTexture>)msaa_depth_handle;
             desc.depthAttachment.texture     = ms;
             desc.depthAttachment.loadAction  = MTLLoadActionLoad;
-            desc.depthAttachment.storeAction = MTLStoreActionDontCare;
+            desc.depthAttachment.storeAction = MTLStoreActionStore;
             if (dfmt == MTLPixelFormatDepth32Float_Stencil8 ||
                 dfmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
                 dfmt == MTLPixelFormatStencil8) {
                 desc.stencilAttachment.texture     = ms;
                 desc.stencilAttachment.loadAction  = MTLLoadActionLoad;
-                desc.stencilAttachment.storeAction = MTLStoreActionDontCare;
+                desc.stencilAttachment.storeAction = MTLStoreActionStore;
             }
         } else {
             desc.depthAttachment.texture     = dtex;

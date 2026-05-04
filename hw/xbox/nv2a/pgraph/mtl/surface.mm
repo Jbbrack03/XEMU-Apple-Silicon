@@ -1855,7 +1855,7 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                 desc.colorAttachments[0].resolveTexture = tex;
                 desc.colorAttachments[0].loadAction     = MTLLoadActionClear;
                 desc.colorAttachments[0].storeAction    =
-                    MTLStoreActionMultisampleResolve;
+                    MTLStoreActionStoreAndMultisampleResolve;
                 resolved = true;
             } else {
                 desc.colorAttachments[0].texture     = tex;
@@ -1874,7 +1874,7 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                     (__bridge id<MTLTexture>)s_depth_binding->msaa_texture;
                 desc.depthAttachment.texture     = ms;
                 desc.depthAttachment.loadAction  = MTLLoadActionClear;
-                desc.depthAttachment.storeAction = MTLStoreActionDontCare;
+                desc.depthAttachment.storeAction = MTLStoreActionStore;
             } else {
                 desc.depthAttachment.texture     = tex;
                 desc.depthAttachment.loadAction  = MTLLoadActionClear;
@@ -1891,7 +1891,7 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                     desc.stencilAttachment.texture     =
                         desc.depthAttachment.texture;
                     desc.stencilAttachment.loadAction  = MTLLoadActionClear;
-                    desc.stencilAttachment.storeAction = MTLStoreActionDontCare;
+                    desc.stencilAttachment.storeAction = MTLStoreActionStore;
                 } else {
                     desc.stencilAttachment.texture     = tex;
                     desc.stencilAttachment.loadAction  = MTLLoadActionClear;

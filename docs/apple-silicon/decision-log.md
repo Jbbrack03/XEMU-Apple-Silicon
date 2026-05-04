@@ -6457,15 +6457,72 @@ Same-day superseding follow-up:
   aborting. Its frame-1800 screenshot is black transition/loading output,
   so the route still needs a better visual capture point.
 
+Superseded same-day next-session priority:
+
+The MSAA store/resolve entry below supersedes this priority list. The
+next session should first route Crimson gameplay to a rendered frame,
+add an SC2 routed input script or known-good snapshot, and settle the
+front-fb fallback policy before running the broad paired gate.
+
+## 2026-05-04: Metal MSAA store/resolve bug fixed; M15 still blocked by visual routes and front-fb policy
+
+Decision:
+
+- Treat the previous MSAA4 black-frame behavior as a real Metal render
+  pass store-policy bug, now fixed in the draw and clear paths.
+- Keep `XEMU_METAL_MSAA=4` as an opt-in validation mode for now; do not
+  make it default until the full visual/perf gate passes.
+- Keep Metal opt-in. The current PGR2 canary still depends on
+  `XEMU_METAL_FRONT_FB_FALLBACK=1`, and the fallback-off A/B produces a
+  wrong/upside-down frame.
+
+What landed:
+
+- `draw.mm`: MSAA color draw passes use
+  `MTLStoreActionStoreAndMultisampleResolve`; MSAA depth/stencil draw
+  passes use `MTLStoreActionStore`.
+- `surface.mm`: MSAA color clear passes use
+  `MTLStoreActionStoreAndMultisampleResolve`; MSAA depth/stencil clear
+  passes use `MTLStoreActionStore`.
+- `run-benchmark.sh`: usage text now exposes the already-supported
+  `sc2` and `halo` aliases.
+
+Validation:
+
+- Reproduced failure before fix:
+  `benchmark-runs/20260504-100203-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900.png`
+  showed mostly black output with no pipeline failures or skipped draws.
+- PGR2 MSAA4 PASS after fix:
+  `benchmark-runs/20260504-100458-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`,
+  `post_load_avg_fps=42.12`, `INPUT_LAT_US_MAX=2494`.
+- Rainbow Six 3 MSAA4 PASS:
+  `benchmark-runs/20260504-100546-rainbow-six-3`,
+  `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`.
+- Xbox boot/flubber MSAA4 PASS:
+  `benchmark-runs/20260504-100747-crimson-skies`,
+  `benchmark-runs/visual-checks/boot-gate-metal-msaa4-f300-after-msaa-store.png`.
+- Halo CE MSAA4 PASS:
+  `benchmark-runs/20260504-101125-halo-ce`,
+  `benchmark-runs/visual-checks/halo-gate-metal-msaa4-f1200-after-msaa-store.png`.
+- Crimson gameplay route remains visual-BLOCKED:
+  `benchmark-runs/20260504-100815-crimson-skies` produced one patterned
+  frame followed by black drawable interval captures.
+- SC2 route remains visual-BLOCKED:
+  `benchmark-runs/20260504-101242-soul-calibur-2` reported
+  `post_load_avg_fps=57.63`, but no-input screenshots captured
+  boot/flubber and then black.
+- PGR2 fallback-off A/B remains FAIL:
+  `benchmark-runs/20260504-101416-pgr2` produced the wrong/upside-down
+  frame, so the fallback dependency is still a default-on blocker.
+
 Next-session priority:
 
-1. Run the broader Metal-vs-GL gameplay gate: PGR2, Rainbow Six 3,
-   Crimson Skies after the boot animation, SC2, and one broader-sweep
-   title with paired screenshots, FPS/jitter counters, and input-latency
-   counters.
-2. Add or retune the Crimson gameplay automation so it captures a
-   rendered gameplay frame instead of black transition/loading output.
-3. Re-run PGR2, Rainbow, boot/flubber, and Crimson stability canaries
-   after every Metal renderer change.
-4. Revisit M15 only after the paired visual diff and performance gate
-   passes.
+1. Route Crimson gameplay to a rendered frame and use it as a real
+   visual canary.
+2. Add a Soul Calibur 2 routed input script or known-good snapshot.
+3. Make the front-fb fallback faithful or document an accepted default
+   policy before revisiting M15.
+4. Run the paired Metal-vs-GL visual/perf gate only after those visual
+   routes are valid.

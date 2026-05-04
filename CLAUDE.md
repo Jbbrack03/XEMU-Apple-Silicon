@@ -36,7 +36,8 @@ the task touches the Metal port):
   R1–R8, open questions Q1–Q6 (all resolved as of M14).
   **Slices M0–M14 SHIPPED 2026-05-02; M5.x correctness follow-ups
   continue through 2026-05-04; M15 (default-on selection) BLOCKED
-  on Crimson Skies visual correctness plus broader visual diff.**
+  on the front-fb fallback policy, Crimson/SC2 routed visual
+  correctness, and the broader paired visual/perf gate.**
   Read this when the
   task touches the Metal port; per-slice "Status (2026-05-02):
   SHIPPED" annotations document the landed implementation.
@@ -223,9 +224,11 @@ The fork-specific source-code changes are concentrated in:
       register a Metal `get_framebuffer_surface` ops callback) is
       the next blocker for M15 default-on. See decision-log
       "2026-05-03: Metal slice M5.9-followup-E".
-      **(M5.10/M5.11 follow-up, 2026-05-04 — PGR2 visual canary
-      PASS; Crimson BLOCKED)** PGR2's old white/magenta/front-fb
-      failure is closed. Surface cache now retains multiple shapes per
+      **(M5.10/M5.11 + MSAA follow-up, 2026-05-04 — PGR2/Rainbow/Halo/boot
+      MSAA4 canaries PASS; Crimson/SC2 visual routes BLOCKED)** PGR2's
+      old white/magenta/front-fb failure is closed, and the later PGR2
+      MSAA4 black-frame regression is fixed by storing MSAA attachments
+      across pass breaks. Surface cache now retains multiple shapes per
       VRAM address, uses exact/near shape lookup, caps at 64 entries,
       publishes the selected fallback binding directly, performs
       dimension-aware render-target texture lookup, registers access
@@ -233,13 +236,13 @@ The fork-specific source-code changes are concentrated in:
       sibling. Scaled VRAM upload fills the full host-scaled texture.
       A8R8G8B8-family render targets sampled as linear A8R8G8B8-family
       texture views use the CPU texture path; diagnostic env
-      `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`. PGR2 screenshot
-      `benchmark-runs/visual-checks/pgr2-final-f900.png` and Rainbow
-      `benchmark-runs/visual-checks/rainbow-final-f600.png` are clean;
-      Crimson `benchmark-runs/visual-checks/crimson-smoke-f300.png`
-      shows an untextured green aircraft / black scene. Next Metal
-      work should target Crimson shader/texture semantics, then re-run
-      PGR2 and Rainbow before revisiting M15.
+      `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1`. Latest green screenshots:
+      PGR2 `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`,
+      Rainbow `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`,
+      Halo `benchmark-runs/visual-checks/halo-gate-metal-msaa4-f1200-after-msaa-store.png`.
+      Next Metal work should route Crimson gameplay and SC2 to real
+      rendered visual canaries and resolve the front-fb fallback policy
+      before revisiting M15.
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and
@@ -537,10 +540,10 @@ Stable opt-in:
   per-frame draws into one render pass — see
   `hw/xbox/nv2a/pgraph/mtl/heap.h` "storage-mode note"). Render
   passes use the multisample companion as `texture` and the
-  single-sample binding as `resolveTexture`; color storeAction
-  becomes `MTLStoreActionMultisampleResolve`, depth storeAction
-  becomes `MTLStoreActionDontCare` (the post-resolve depth is not
-  consumed). Pipeline `rasterSampleCount` is matched on both the
+  single-sample binding as `resolveTexture`; color storeAction is
+  `MTLStoreActionStoreAndMultisampleResolve`, and depth/stencil
+  storeAction is `MTLStoreActionStore`, because later pass breaks load
+  the same MSAA attachments. Pipeline `rasterSampleCount` is matched on both the
   M3/M4 hand-coded passthrough cache (keyed on (color_fmt, depth_fmt,
   variant, sample_count)) and the M5/M7.1 translated pipeline cache
   (sample_count is already a field of `PgraphMtlPipelineKey`'s

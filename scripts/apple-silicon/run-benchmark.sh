@@ -25,7 +25,7 @@ find_test_disc() {
 
 usage() {
     cat <<EOF
-usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] crimson|rainbow|pgr2|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] crimson|rainbow|pgr2|sc2|halo|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.

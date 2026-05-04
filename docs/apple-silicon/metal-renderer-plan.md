@@ -1,14 +1,13 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-04 (M5.x boot/flubber + surface/RTT correctness
-follow-up. PGR2 passes the Metal visual canary with clean
-menu/logo/textures and colors; Rainbow Six 3 loading-screen output is
-also clean. The old white/magenta front-buffer failure is closed. The
-green/wireframe capture was the Xbox boot/flubber animation, not
-in-game Crimson Skies, and that boot canary now renders shaded geometry
-and glow without texture blobs after the Metal front-face fix. M15
-default-on stays BLOCKED until the broader Metal-vs-GL visual-diff and
-gameplay gate pass.)
+Last updated: 2026-05-04 (Metal MSAA store/resolve correctness
+follow-up. PGR2, Rainbow Six 3, Halo CE menu, and Xbox boot/flubber
+now pass useful MSAA4 visual canaries. The old white/magenta
+front-buffer failure is closed, and the MSAA4 black-frame regression
+is fixed by StoreAndMultisampleResolve plus stored depth/stencil
+MSAA attachments. M15 default-on stays BLOCKED until the broader
+Metal-vs-GL visual-diff/gameplay gate, front-fb fallback policy, and
+Crimson/SC2 visual routes are resolved.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon
@@ -273,13 +272,15 @@ shows they win only at much higher draw counts than NV2A produces.
 
 ### 3.7 MSAA + resolve
 
-**Decision.** Memoryless multisample texture + `MTLStoreActionMultisampleResolve`
-to a Private single-sample resolve target. Tile-based deferred
-rendering keeps multisample data in tile memory only — zero off-chip
-MSAA bandwidth. `XEMU_GL_MSAA` opt-in becomes `XEMU_METAL_MSAA={0,2,4,8}`
-on the Metal path; `0` is default for now to keep the cold-launch
-pipeline cache small. **Lift MSAA to default 4× once cache persistence
-ships and warm-launch compile cost is empirically below 200 ms total.**
+**Decision.** Private multisample color/depth companions plus a Private
+single-sample color resolve target. Color uses
+`MTLStoreActionStoreAndMultisampleResolve` so later pass breaks can load
+valid MSAA contents while the resolved texture stays current for present
+and RTT sampling; depth/stencil use `MTLStoreActionStore` for the same
+reason. `XEMU_GL_MSAA` opt-in becomes `XEMU_METAL_MSAA={0,2,4,8}` on
+the Metal path; `0` is default for now to keep the cold-launch pipeline
+cache small. **Lift MSAA to default 4× only after the full visual/perf
+gate passes with the same store policy.**
 
 ### 3.8 Geometry expansion (no geometry shaders)
 
@@ -1321,18 +1322,20 @@ maxima.
 
 ### M11 — MSAA + resolve (advances 4i) — **SHIPPED 2026-05-02 (Private storage; Memoryless deferred to M11.1)**
 
-**Status (2026-05-02): SHIPPED v1.** Implementation present;
-default 0 (off); user-driven visual smoke-test + paired benchmark
+**Status (2026-05-04): SHIPPED v2.** Implementation present; default
+0 (off). The original v1 store policy was corrected after PGR2 exposed
+an MSAA4 black-frame bug. User-driven paired visual/perf gate is still
 pending before lifting to default 4×. See decision-log
-"2026-05-02: Metal slice M11 — MSAA + resolve" for the full
-landed-state record.
+"2026-05-02: Metal slice M11 — MSAA + resolve" and
+"2026-05-04: Metal MSAA store/resolve bug fixed" for the landed-state
+record.
 
-**Scope.** Memoryless multisample texture +
-`MTLStoreActionMultisampleResolve`. Pipeline `rasterSampleCount` matches
-attachment. `XEMU_GL_MSAA` becomes `XEMU_METAL_MSAA={0,2,4,8}` on the
-Metal path. Initial default 0 (off) until M9 cache persistence stabilizes
-the cold-launch cost; lift to 4× default once warm-launch shader-compile
-cost is empirically below 200 ms total.
+**Scope.** Private multisample texture + single-sample resolve target.
+Pipeline `rasterSampleCount` matches attachment. Color draw/clear passes
+use `MTLStoreActionStoreAndMultisampleResolve`; depth/stencil draw/clear
+passes use `MTLStoreActionStore`. `XEMU_GL_MSAA` becomes
+`XEMU_METAL_MSAA={0,2,4,8}` on the Metal path. Initial default 0 (off)
+until the visual/perf gate proves default 4× is safe.
 
 Optionally: programmable sample positions on Apple7+ via
 `[passDesc setSamplePositions:count:]`. NV2A never used custom positions,
@@ -1340,9 +1343,9 @@ so default `MTLDefaultSamplePositions` are correct.
 
 **Entry**: M10 complete.
 
-**Exit**: `XEMU_METAL_MSAA=4` on PGR2 + Rainbow + Crimson at scale=2
-visibly reduces aliasing without measurable FPS loss
-(`MSAA_RESOLVE_US_TOTAL` < 200 µs / frame).
+**Exit**: `XEMU_METAL_MSAA=4` on PGR2 + Rainbow + Crimson + SC2 +
+one broader title at scale=2 visibly reduces aliasing without
+measurable FPS loss and without visual regressions.
 
 **Gate**: visual smoke (zoomed screenshot of edges) + counter check
 (`METAL_MSAA_RESOLVE_US_TOTAL`). Performance: ≤ 5 % FPS regression
@@ -1361,6 +1364,13 @@ in tile memory regardless of storage class); the storage cost is
 ~16 MiB extra of unified memory at MSAA 4× / surface_scale=2.
 Memoryless returns when a future slice (candidate M11.1) coalesces
 per-frame draws into a single render pass.
+
+**v2 store-policy correction (2026-05-04).** Do not use
+`MTLStoreActionMultisampleResolve` when a later render pass will load
+the same MSAA texture; Metal only guarantees the single-sample
+`resolveTexture` is written. PGR2 reproduced this as a mostly black
+MSAA4 frame before the fix. Validated after the fix in
+`docs/apple-silicon/benchmarks/2026-05-04-metal-msaa-store-validation.md`.
 
 **v1 counter caveat.** `METAL_MSAA_RESOLVE_US_TOTAL` is a
 placeholder (1 µs per resolve) until M13's counter sample buffers
@@ -1740,11 +1750,12 @@ surface-cache color/depth split + front-fb pin + cap raise" for the
 full investigation, the per-vram_addr draw distribution measurements
 on PGR2, and the codex-validate review notes.
 
-### M5.10 / M5.11 — VRAM-coherent surface download + PGR2 surface/RTT follow-up — **SHIPPED 2026-05-04 (PGR2/Rainbow/boot PASS; Crimson stability PASS)**
+### M5.10 / M5.11 — VRAM-coherent surface download + PGR2 surface/RTT follow-up — **SHIPPED 2026-05-04 (PGR2/Rainbow/Halo/boot MSAA4 PASS; Crimson/SC2 visual routes blocked)**
 
-**Status (2026-05-04): SHIPPED for the PGR2/Rainbow canaries; Metal
-default-on remains blocked by the broader Metal-vs-GL gameplay and
-visual-diff gate.**
+**Status (2026-05-04): SHIPPED for the PGR2/Rainbow/Halo/boot canaries;
+Metal default-on remains blocked by the broader Metal-vs-GL gameplay
+and visual-diff gate, the front-fb fallback policy, and Crimson/SC2
+routed visual capture gaps.**
 
 - **Commit `b283abcb27`** — M5.10 base infrastructure. Public download
   API (`pgraph_mtl_surface_download_if_dirty_at` / `_dirty_all` /
@@ -1785,32 +1796,39 @@ failure is closed by a set of targeted surface/RTT fixes:
 
 **Validation (2026-05-04).**
 
-- PGR2 PASS: `benchmark-runs/20260504-092708-pgr2`,
-  `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`.
+- PGR2 MSAA4 PASS after store/resolve fix:
+  `benchmark-runs/20260504-100458-pgr2`,
+  `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`.
   `METAL_PIPELINE_TRANSLATED_FAILED=0`,
   `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`,
-  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`; late FPS mostly ~32-59.
-- Rainbow Six 3 PASS for the loading-screen canary:
-  `benchmark-runs/20260504-092750-rainbow-six-3`,
-  `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
-- Xbox boot/flubber PASS: `benchmark-runs/20260504-092824-crimson-skies`,
-  `benchmark-runs/visual-checks/boot-post-oob-f300.png`. This is
-  the capture the user identified as the broken green/wireframe boot
-  animation rather than in-game Crimson Skies. It now renders shaded
-  geometry and glow with `METAL_PIPELINE_TRANSLATED_FAILED=0`,
-  `METAL_DRAWS_SKIPPED_PENDING_TOTAL=0`, and
-  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`.
-- Crimson Skies gameplay stability PASS:
-  `benchmark-runs/20260504-092403-crimson-skies` completes without
-  aborting after the texture-DMA bounds and invalid-stage shader fixes.
-  The current frame-1800 screenshot is black transition/loading output,
-  so the route is not yet a visual canary.
+  `METAL_SURFACE_RECREATE_SHAPE_MISMATCH=0`; `post_load_avg_fps=42.12`.
+- PGR2 without `XEMU_METAL_FRONT_FB_FALLBACK=1` still produces a wrong
+  upside-down frame (`benchmark-runs/20260504-101416-pgr2`), so the
+  fallback dependency remains explicit.
+- Rainbow Six 3 MSAA4 PASS for the loading-screen canary:
+  `benchmark-runs/20260504-100546-rainbow-six-3`,
+  `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`.
+- Xbox boot/flubber MSAA4 PASS:
+  `benchmark-runs/20260504-100747-crimson-skies`,
+  `benchmark-runs/visual-checks/boot-gate-metal-msaa4-f300-after-msaa-store.png`.
+- Halo CE MSAA4 PASS:
+  `benchmark-runs/20260504-101125-halo-ce`,
+  `benchmark-runs/visual-checks/halo-gate-metal-msaa4-f1200-after-msaa-store.png`.
+- Crimson Skies gameplay stability PASS, visual route BLOCKED:
+  `benchmark-runs/20260504-100815-crimson-skies` completes without
+  aborting, but interval screenshots are one patterned frame followed
+  by black drawable captures.
+- SC2 perf/stability route PASS, visual route BLOCKED:
+  `benchmark-runs/20260504-101242-soul-calibur-2` reaches
+  `post_load_avg_fps=57.63`, but the no-input route captures
+  boot/flubber and then black frames.
 
-**Highest-priority next-session action.** Run the broader Metal-vs-GL
-gameplay gate: PGR2, Rainbow Six 3, Crimson Skies after the boot
-animation, SC2, plus one further title with paired screenshots,
-FPS/jitter counters, and input-latency counters. Keep the PGR2,
-Rainbow, and boot/flubber canaries above green after each Metal change.
+**Highest-priority next-session action.** Fix the remaining visual
+routes before claiming the broad gate: route Crimson to a rendered
+gameplay frame, add an SC2 routed input script or known-good snapshot,
+and make an explicit front-fb fallback policy/faithfulness decision.
+Keep the PGR2, Rainbow, Halo, and boot/flubber canaries above green
+after each Metal change.
 
 M15 default-on stays BLOCKED on:
 1. Broader Metal-vs-GL visual correctness across the gameplay gate.
@@ -1818,10 +1836,15 @@ M15 default-on stays BLOCKED on:
    one broader-sweep title.
 3. Console-native FPS plus p99 jitter validation on the same set.
 4. Cold-launch shader compile time < 5 s on a fresh shader cache.
+5. Faithful front-fb/default presentation path or an accepted fallback
+   policy.
 
 See decision-log "2026-05-04: Metal PGR2 surface/RTT visual canary
-passes; Crimson remains blocker", plus
-`docs/apple-silicon/benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`.
+passes; later boot/flubber correction supersedes Crimson blocker
+framing" and "2026-05-04: Metal MSAA store/resolve bug fixed; M15
+still blocked by visual routes and front-fb policy", plus
+`docs/apple-silicon/benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`
+and `docs/apple-silicon/benchmarks/2026-05-04-metal-msaa-store-validation.md`.
 The original "PENDING" description below is preserved for the audit
 trail; the planned tasks are partially-complete (Path A primitives
 shipped; Path B compositor rework deferred; codex MEDIUM/LOW from
@@ -2020,7 +2043,7 @@ the full per-VRAM surface cache because the M2 banner placed it as
 date) is the trigger for promoting that deferral to its own
 named slice.
 
-### M15 — Default-on selection + GL fallback policy — **BLOCKED (gated on Crimson and broader visual validation)**
+### M15 — Default-on selection + GL fallback policy — **BLOCKED (gated on front-fb policy, Crimson/SC2 routes, and broader visual validation)**
 
 **Scope.** Decide whether Metal becomes the default on Apple Silicon.
 Decision rule: Metal becomes default-on when:
@@ -2030,6 +2053,9 @@ Decision rule: Metal becomes default-on when:
   with visual diffs ≤ 1 % per-pixel from GL.
 - Cold-launch shader compile time < 5 s total on a fresh shader cache.
 - p99 mspf jitter reduced by ≥ 20 % vs GL on PGR2 + Rainbow + Crimson.
+- The presentation/front-fb path is faithful enough for default-on, or
+  the experimental fallback has an explicit accepted policy with title
+  coverage evidence.
 - No correctness-affecting bugs open against Metal renderer for ≥ 30
   days of continuous bench use.
 
