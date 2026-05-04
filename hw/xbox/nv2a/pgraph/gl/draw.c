@@ -20,6 +20,7 @@
  */
 
 #include "qemu/fast-hash.h"
+#include "qemu/atomic.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "qemu/timer.h"
 #include "debug.h"
@@ -828,6 +829,13 @@ void pgraph_gl_draw_end(NV2AState *d)
     }
 
     pgraph_gl_set_surface_dirty(pg, color_write, depth_test || stencil_test);
+
+    /* W4 (2026-05-04): per-draw color RT dump. Cheap when off (one
+     * global load + branch). Synchronous-but-isolated when in range
+     * (glReadPixels blocks the renderer thread for the duration of the
+     * readback). */
+    pgraph_gl_draw_dump_rt_after_draw_end(d);
+
     NV2A_GL_DGROUP_END();
 }
 
@@ -1063,4 +1071,231 @@ void pgraph_gl_flush_draw(NV2AState *d)
     nv2a_profile_add_counter(NV2A_PROF_FLUSH_DRAW_US_TOTAL,
                              (int)flush_draw_us);
     nv2a_profile_spike("flush_draw", flush_draw_us);
+}
+
+/* W4 (2026-05-04): per-draw color RT dump (XEMU_GL_DUMP_DRAW_RT). See
+ * gl/renderer.h for env-var semantics. The dump is gated on
+ * `s_dump_enabled` (loaded once at init); when off the entire
+ * after-draw_end helper short-circuits to one global load + branch.
+ *
+ * The cumulative draw index is bumped UNCONDITIONALLY when init parsed
+ * a valid config; this matches Mesa/RADV debug-dump semantics where
+ * the draw index is the cumulative-per-RUN count irrespective of
+ * whether the current draw is in range. */
+static bool     s_gl_dump_enabled = false;
+static uint64_t s_gl_dump_start = 0;
+static uint64_t s_gl_dump_end = 0;
+static char    *s_gl_dump_prefix = NULL;
+static uint64_t s_gl_dump_draw_index = 0;
+static uint64_t s_gl_dump_log_emitted = 0;
+static uint64_t s_gl_dump_count = 0;
+
+void pgraph_gl_draw_dump_rt_init(void)
+{
+    s_gl_dump_enabled = false;
+    if (s_gl_dump_prefix != NULL) {
+        free(s_gl_dump_prefix);
+        s_gl_dump_prefix = NULL;
+    }
+    s_gl_dump_draw_index = 0;
+    s_gl_dump_log_emitted = 0;
+
+    const char *env = getenv("XEMU_GL_DUMP_DRAW_RT");
+    if (env == NULL || env[0] == '\0') {
+        return;
+    }
+    const char *first_colon = strchr(env, ':');
+    if (first_colon == NULL || first_colon == env) {
+        fprintf(stderr,
+                "xemu-perf: gl_dump_draw_rt malformed (missing first ':') "
+                "value=%s\n",
+                env);
+        return;
+    }
+    const char *second_colon = strchr(first_colon + 1, ':');
+    if (second_colon == NULL || second_colon == first_colon + 1 ||
+        second_colon[1] == '\0') {
+        fprintf(stderr,
+                "xemu-perf: gl_dump_draw_rt malformed (missing second "
+                "':' or empty prefix) value=%s\n",
+                env);
+        return;
+    }
+
+    char *endp = NULL;
+    unsigned long long start = strtoull(env, &endp, 10);
+    if (endp != first_colon) {
+        fprintf(stderr,
+                "xemu-perf: gl_dump_draw_rt START is not a number value=%s\n",
+                env);
+        return;
+    }
+    unsigned long long end = strtoull(first_colon + 1, &endp, 10);
+    if (endp != second_colon) {
+        fprintf(stderr,
+                "xemu-perf: gl_dump_draw_rt END is not a number value=%s\n",
+                env);
+        return;
+    }
+    if (end < start) {
+        fprintf(stderr,
+                "xemu-perf: gl_dump_draw_rt END(%llu) < START(%llu); disabled\n",
+                end, start);
+        return;
+    }
+    s_gl_dump_start = (uint64_t)start;
+    s_gl_dump_end = (uint64_t)end;
+    s_gl_dump_prefix = strdup(second_colon + 1);
+    if (s_gl_dump_prefix == NULL) {
+        return;
+    }
+    s_gl_dump_enabled = true;
+    fprintf(stderr,
+            "xemu-perf: gl_dump_draw_rt enabled start=%llu end=%llu "
+            "prefix=%s\n",
+            (unsigned long long)s_gl_dump_start,
+            (unsigned long long)s_gl_dump_end,
+            s_gl_dump_prefix);
+}
+
+uint64_t pgraph_gl_draw_rt_dumps_count(void)
+{
+    return s_gl_dump_count;
+}
+
+/* W4 (2026-05-04): glReadPixels-based dump of the active color RT.
+ *
+ * Runs AFTER pgraph_gl_draw_end's pgraph_gl_flush_draw, so the bound
+ * color RT contains the just-finished draw's output. We resolve any
+ * MSAA contents (the GL renderer's existing helper makes this cheap
+ * and idempotent), then bind the SINGLE-SAMPLE texture as the color
+ * attachment of the resolve FBO and pull pixels via glReadPixels in
+ * GL_RGBA / GL_UNSIGNED_BYTE. This matches xemu-thumbnail.cc's pattern
+ * and avoids depending on the surface's native internal format.
+ *
+ * glReadPixels is synchronous — the renderer thread blocks until the
+ * driver finishes draining the prior commands. That's intentional for
+ * a debug-only dump path; the caller has opted in via env var.
+ *
+ * The draw FBO is restored to the renderer's main FBO on exit. The
+ * scissor test is saved + disabled around the readback to avoid the
+ * per-draw scissor rectangle interfering. */
+void pgraph_gl_draw_dump_rt_after_draw_end(NV2AState *d)
+{
+    if (!s_gl_dump_enabled) {
+        return;
+    }
+
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHGLState *r = pg->gl_renderer_state;
+
+    uint64_t idx = s_gl_dump_draw_index++;
+    if (idx < s_gl_dump_start || idx > s_gl_dump_end) {
+        return;
+    }
+    if (r == NULL || r->color_binding == NULL ||
+        r->color_binding->gl_buffer == 0) {
+        return;
+    }
+
+    SurfaceBinding *surface = r->color_binding;
+    /* Resolve MSAA into the single-sample texture if needed; idempotent
+     * when XEMU_GL_MSAA is off or already resolved. */
+    pgraph_gl_resolve_surface_msaa(d, surface);
+
+    unsigned int w = surface->width, h = surface->height;
+    pgraph_apply_scaling_factor(pg, &w, &h);
+    if (w == 0 || h == 0) {
+        return;
+    }
+
+    /* Bind the resolve FBO with the single-sample texture as the color
+     * attachment, read back GL_RGBA / GL_UNSIGNED_BYTE, then restore
+     * the renderer's main FBO. The texture path matches xemu-thumbnail's
+     * RenderFramebufferToPng; the resolve FBO is a sibling of the main
+     * draw FBO so the main FBO's color/zeta multisample renderbuffers
+     * are untouched.
+     *
+     * Drain any pre-existing GL error so the per-renderer
+     * `assert(glGetError() == GL_NO_ERROR)` in shaders.c stays clean
+     * after this debug-only readback. The drain is benign — we don't
+     * care about prior errors. */
+    while (glGetError() != GL_NO_ERROR) {
+    }
+    GLint prev_read_fbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->gl_resolve_framebuffer);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, surface->gl_buffer, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+    GLboolean prev_scissor = glIsEnabled(GL_SCISSOR_TEST);
+    if (prev_scissor) {
+        glDisable(GL_SCISSOR_TEST);
+    }
+    GLint prev_pack_alignment = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &prev_pack_alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+    size_t bytes = (size_t)w * (size_t)h * 4u;
+    uint8_t *rgba = (uint8_t *)g_malloc(bytes);
+    glReadPixels(0, 0, (GLsizei)w, (GLsizei)h,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+    /* Detach + restore. */
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, 0, 0);
+    glPixelStorei(GL_PACK_ALIGNMENT, prev_pack_alignment);
+    if (prev_scissor) {
+        glEnable(GL_SCISSOR_TEST);
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
+
+    /* Drain any errors raised by the readback. The renderer's later
+     * assert(glGetError() == GL_NO_ERROR) must observe a clean state. */
+    while (glGetError() != GL_NO_ERROR) {
+    }
+
+    /* GL pixels are bottom-up by spec; flip vertically so the PNG matches
+     * what the renderer would present. Per-row swap; cheap relative to
+     * the readback. */
+    size_t row_bytes = (size_t)w * 4u;
+    uint8_t *tmp = (uint8_t *)g_malloc(row_bytes);
+    for (unsigned int y = 0; y < h / 2; y++) {
+        uint8_t *top = rgba + (size_t)y * row_bytes;
+        uint8_t *bot = rgba + (size_t)(h - 1 - y) * row_bytes;
+        memcpy(tmp, top, row_bytes);
+        memcpy(top, bot, row_bytes);
+        memcpy(bot, tmp, row_bytes);
+    }
+    g_free(tmp);
+
+    /* Build "<prefix>.<idx_padded6>.png". */
+    size_t plen = strlen(s_gl_dump_prefix);
+    size_t fname_len = plen + 32;
+    char *fname = (char *)g_malloc(fname_len);
+    snprintf(fname, fname_len, "%s.%06llu.png",
+             s_gl_dump_prefix, (unsigned long long)idx);
+
+    bool ok = pgraph_gl_dump_rgba8_png_to_file(fname, rgba, w, h);
+    if (ok) {
+        s_gl_dump_count++;
+        nv2a_profile_inc_counter(NV2A_PROF_GL_DRAW_RT_DUMPS);
+        uint64_t n = ++s_gl_dump_log_emitted;
+        if (n <= 5) {
+            fprintf(stderr,
+                    "xemu-perf: gl_draw_rt_dump idx=%llu path=%s w=%u h=%u\n",
+                    (unsigned long long)idx, fname,
+                    (unsigned)w, (unsigned)h);
+        }
+    } else {
+        fprintf(stderr,
+                "xemu-perf: gl_draw_rt_dump fpng_encode failed idx=%llu "
+                "path=%s\n",
+                (unsigned long long)idx, fname);
+    }
+
+    g_free(fname);
+    g_free(rgba);
 }

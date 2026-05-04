@@ -104,6 +104,8 @@ static uint64_t s_baseline_recreate_shape_mismatch;
 /* M5.10 (2026-05-03) — VRAM-coherent surface download counters. */
 static uint64_t s_baseline_surface_downloads;
 static uint64_t s_baseline_surface_download_bytes;
+/* W4 (2026-05-04) — per-draw color RT dump (XEMU_METAL_DUMP_DRAW_RT). */
+static uint64_t s_baseline_draw_rt_dumps;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -457,6 +459,14 @@ __attribute__((weak)) void pgraph_mtl_draw_target_emit_interval(FILE *out)
     (void)out;
 }
 
+/* W4 (2026-05-04) — per-draw color RT dump counter. Strong symbol in
+ * mtl/draw.mm; weak fallback (returns zero) for non-Apple-Silicon
+ * builds. */
+__attribute__((weak)) uint64_t pgraph_mtl_draw_rt_dumps_count(void)
+{
+    return 0;
+}
+
 void xemu_metal_perf_emit_and_reset(FILE *out)
 {
     if (out == NULL) {
@@ -542,6 +552,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t surface_download_bytes_total = pgraph_mtl_surface_download_bytes();
     uint64_t surface_download_us_total =
         pgraph_mtl_surface_download_us_total();
+    /* W4 — per-draw color RT dump counter. */
+    uint64_t draw_rt_dumps_total = pgraph_mtl_draw_rt_dumps_count();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -678,6 +690,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                             s_baseline_surface_download_bytes;
     uint64_t surface_download_us_delta = surface_download_us_total -
                                          s_baseline_surface_download_us_total;
+    /* W4 — per-draw color RT dump delta. */
+    uint64_t draw_rt_dumps_delta = draw_rt_dumps_total -
+                                   s_baseline_draw_rt_dumps;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -742,6 +757,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_surface_downloads        = surface_downloads_total;
     s_baseline_surface_download_bytes   = surface_download_bytes_total;
     s_baseline_surface_download_us_total = surface_download_us_total;
+    s_baseline_draw_rt_dumps             = draw_rt_dumps_total;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -781,7 +797,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            recreate_mismatch_delta |
                            surface_downloads_delta |
                            surface_download_bytes_delta |
-                           surface_download_us_delta;
+                           surface_download_us_delta |
+                           draw_rt_dumps_delta;
     if (total_delta == 0) {
         return;
     }
@@ -849,7 +866,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_SURFACE_RECREATE_SHAPE_MISMATCH=%llu"
             " METAL_SURFACE_DOWNLOADS=%llu"
             " METAL_SURFACE_DOWNLOAD_BYTES=%llu"
-            " METAL_SURFACE_DOWNLOAD_US_TOTAL=%llu",
+            " METAL_SURFACE_DOWNLOAD_US_TOTAL=%llu"
+            " METAL_DRAW_RT_DUMPS=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -918,5 +936,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)recreate_mismatch_delta,
             (unsigned long long)surface_downloads_delta,
             (unsigned long long)surface_download_bytes_delta,
-            (unsigned long long)surface_download_us_delta);
+            (unsigned long long)surface_download_us_delta,
+            (unsigned long long)draw_rt_dumps_delta);
 }

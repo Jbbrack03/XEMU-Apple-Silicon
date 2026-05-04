@@ -6870,3 +6870,78 @@ runtime changes; doc-only slice.
 - `metal-renderer-plan.md` remains the slice-level implementation
   plan; the workflow doc references it for the M15 acceptance
   criteria but does not duplicate them.
+## 2026-05-04: Per-draw color RT dump for Metal+GL (W4)
+
+Per-draw color render-target dump path implemented in both renderers
+behind a separate flag pair (user-confirmed design choice; the two
+renderers emit independent counters and use independent dump
+infrastructure):
+
+- `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` — Metal-side; dumps the
+  post-MSAA-resolve color RT after every `pgraph_mtl_flush_draw` whose
+  cumulative-per-RUN draw index is in `[START, END]`. Asynchronous via
+  the existing `addCompletedHandler` pattern that
+  `XEMU_METAL_SCREENSHOT_PATH` already uses; no renderer-thread block.
+  Counter `METAL_DRAW_RT_DUMPS`.
+- `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` — GL-side; dumps the
+  post-MSAA-resolve color RT after every `pgraph_gl_draw_end`.
+  Synchronous via `glReadPixels` (intentional for a debug-only path).
+  Counter `GL_DRAW_RT_DUMPS` via `NV2A_PROF_GL_DRAW_RT_DUMPS`.
+
+**Rationale.** The "first divergent draw" investigation between the
+Metal and GL renderers is currently a manual loop: run the same input
+script through each renderer, compare overall framebuffer screenshots,
+guess at where the divergence began, capture more screenshots,
+repeat. With per-draw RTs available on both sides, the hunt collapses
+to a single `cmp -s` over a sequence of paired PNGs. This composes
+directly with W2's `metal-gl-compare.sh` paired-run harness — same
+session, two flag prefixes added to the existing invocations.
+
+**Why a separate flag pair (not a unified `XEMU_RENDERER_DUMP_DRAW_RT`).**
+The two renderers' dump paths share zero code: Metal goes through a
+blit-encoder + cmdbuf completion handler + FPNG; GL goes through an
+FBO rebind + `glReadPixels` + FPNG. Coupling them under one env-var
+would require either (a) a single dispatch on the active renderer
+(adds a runtime dependency between the renderer-selection logic and
+the dump entry point), or (b) per-renderer subkeys that callers would
+have to remember to set differently — both worse than two flags.
+Independent flags also let the user dump from one renderer without
+bringing the other up.
+
+**Indexing semantics.** Both flags use 0-indexed inclusive
+**cumulative-per-RUN** counters. NOT per-frame — that would have been
+ambiguous because flush_draw cadence varies wildly across frames
+(PGR2 hits ~22k draws/s vs Crimson at ~4k). The cumulative-per-run
+choice matches Mesa/RADV `RADV_DEBUG=allbos`-style debug dumps and
+removes any "what counts as frame N" question.
+
+**Performance impact.** Off-by-default; one global load + branch per
+flush_draw / draw_end when the env is unset. When in range:
+- Metal: a host-shared MTLBuffer alloc + blit encoder commit + a
+  PNG write off the renderer thread. Renderer thread does not block;
+  the only cost is the blit-encoder enqueue.
+- GL: a synchronous `glReadPixels` (drains the GL command queue) +
+  PNG write on the renderer thread. Expect a noticeable per-draw
+  cost while in range; this is intentional for a debug-only path.
+
+**Validation.** Smoke runs against PGR2 with the
+`pgr2-smoke.csv` input script:
+- Metal: `XEMU_METAL_DUMP_DRAW_RT=10:12:/tmp/w4_metal_test
+  ./scripts/apple-silicon/run-benchmark.sh pgr2 ... 10` produced 3
+  PNGs (idx 10..12, 512×512), `METAL_DRAW_RT_DUMPS=3` in the first
+  interval line.
+- GL: `XEMU_GL_DUMP_DRAW_RT=10:12:/tmp/w4_gl_test
+  ./scripts/apple-silicon/run-benchmark.sh pgr2 ... 10` produced 3
+  PNGs (idx 10..12, 512×512), `GL_DRAW_RT_DUMPS=3` in the first
+  interval line. Initial run hit the renderer's
+  `assert(glGetError() == GL_NO_ERROR)` because `glReadPixels` /
+  `glFramebufferTexture2D` left a residual error in the GL state;
+  fixed by draining `glGetError()` before AND after the readback in
+  the dump path.
+
+**Documentation.** `automation.md` "Diagnostic toggles" section gets a
+worked first-divergent-draw triage example using both flags.
+`CLAUDE.md` adds entries under "Diagnostic toggles".
+`extract-perf-summary.sh` parses both `METAL_DRAW_RT_DUMPS` and
+`GL_DRAW_RT_DUMPS`.
+

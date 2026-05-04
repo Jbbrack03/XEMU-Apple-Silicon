@@ -349,4 +349,31 @@ int pgraph_gl_get_framebuffer_surface(NV2AState *d);
 void pgraph_gl_determine_gpu_properties(void);
 GPUProperties *pgraph_gl_get_gpu_properties(void);
 
+/* W4 (2026-05-04) — per-draw color RT dump (XEMU_GL_DUMP_DRAW_RT).
+ *
+ * Parses XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX exactly once at GL
+ * renderer init time. When set, every per-draw_end invocation whose
+ * 0-indexed cumulative-per-RUN counter falls within [START,END] has
+ * its bound color render target snapshotted as a PNG at
+ * `<PREFIX>.<index_padded_6>.png`.
+ *
+ * Synchronous-but-isolated: glReadPixels blocks the renderer thread,
+ * which is the spec for a debug-only dump path. The dump is an
+ * extra glReadPixels + an FPNG write per in-range draw; expect a
+ * substantial perf hit while in range. Empty / unset / malformed
+ * values disable the dump (zero hot-path cost).
+ *
+ * Counter: GL_DRAW_RT_DUMPS (per-interval delta).
+ *
+ * Implementation in pgraph/gl/draw.c (parse + readback) +
+ * pgraph/gl/dump.cc (fpng PNG encode shim).
+ */
+void pgraph_gl_draw_dump_rt_init(void);
+void pgraph_gl_draw_dump_rt_after_draw_end(NV2AState *d);
+uint64_t pgraph_gl_draw_rt_dumps_count(void);
+bool pgraph_gl_dump_rgba8_png_to_file(const char *filename,
+                                      const uint8_t *rgba,
+                                      uint32_t w,
+                                      uint32_t h);
+
 #endif

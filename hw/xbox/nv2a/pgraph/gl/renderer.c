@@ -98,6 +98,10 @@ static void pgraph_gl_init(NV2AState *d, Error **errp)
 
     r->supported_extensions.texture_filter_anisotropic =
         glo_check_extension("GL_EXT_texture_filter_anisotropic");
+
+    /* W4 (2026-05-04): parse XEMU_GL_DUMP_DRAW_RT once. Off by default;
+     * zero hot-path cost when unset. */
+    pgraph_gl_draw_dump_rt_init();
 }
 
 static void pgraph_gl_finalize(NV2AState *d)

@@ -807,6 +807,31 @@ Stable opt-in:
 
 Diagnostic toggles (intentionally not correctness paths):
 
+- `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (W4, 2026-05-04) — per-draw
+  color render-target dump on the Metal renderer. `START` and `END` are
+  0-indexed inclusive **cumulative-per-RUN** flush_draw indices (NOT
+  per-frame; matches Mesa/RADV debug-dump semantics). `PREFIX` is a
+  filesystem prefix (absolute or relative); outputs are written to
+  `<PREFIX>.<draw_index_zero_padded_6>.png`, e.g.
+  `/tmp/wd_test.000010.png`. Empty / unset / malformed → disabled with
+  zero hot-path cost (one global load + branch). Asynchronous: at the
+  end of every `pgraph_mtl_flush_draw` the open coalesced render pass
+  is closed (so the post-MSAA-resolve color texture is the source),
+  the bound color binding texture is blit-copied into a host-shared
+  MTLBuffer, and the cmdbuf's `addCompletedHandler` BGRA→RGBA swaps
+  and writes the PNG via FPNG. Renderer thread does not block. First
+  five dumps emit a `xemu-perf: metal_draw_rt_dump idx=N path=...`
+  rate-limited line; further dumps are silent (counter still ticks).
+  Counter `METAL_DRAW_RT_DUMPS` (per-interval delta) surfaces on the
+  `xemu-perf:` interval line. Implementation in `mtl/draw.mm`.
+- `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` (W4, 2026-05-04) — GL-side
+  equivalent. Synchronous-but-isolated: `glReadPixels` blocks the
+  renderer thread for the duration of the readback (intentional for a
+  debug-only path). Post-MSAA-resolve via the existing
+  `pgraph_gl_resolve_surface_msaa` helper. Counter `GL_DRAW_RT_DUMPS`
+  surfaces on the `xemu-perf:` interval line. Implementation in
+  `pgraph/gl/draw.c` + `pgraph/gl/dump.cc` (FPNG shim).
+
 - `XEMU_METAL_DIAG_CLEAR={0,1}` (2026-05-03) — diagnostic logger for
   `pgraph_mtl_surface_clear`. When `=1`, emits up to 32 one-line
   `xemu-perf: metal_surface_clear vram_addr=0x.. rgba=(R,G,B,A)

@@ -670,6 +670,75 @@ and stack:
   `(1,0,0,1)` (PGR2's aux RTs at `0x2c06000` / `0x2e06000`).
   Default 0 (off; zero hot-path cost). Implementation in
   `mtl/surface.mm::pgraph_mtl_surface_clear`.
+- `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (**W4, 2026-05-04**) —
+  per-draw color render-target dump on the Metal renderer. `START`
+  and `END` are 0-indexed inclusive **cumulative-per-RUN**
+  flush_draw indices (NOT per-frame; matches Mesa/RADV debug-dump
+  semantics). `PREFIX` is a filesystem prefix; outputs are
+  `<PREFIX>.<draw_index_zero_padded_6>.png` (e.g.
+  `/tmp/wd_test.000010.png`). Empty / unset / malformed → disabled
+  with zero hot-path cost. The dump runs against the
+  **post-MSAA-resolve** color RT: at the end of every
+  `pgraph_mtl_flush_draw` the open coalesced render pass is closed
+  (so the resolveTexture is current), the bound color binding's
+  MTLTexture is blit-copied into a host-shared MTLBuffer, and the
+  cmdbuf's `addCompletedHandler` BGRA→RGBA-swaps and writes the PNG
+  via FPNG. The renderer thread does not block. First five dumps
+  emit a one-line `xemu-perf: metal_draw_rt_dump idx=N path=...`
+  rate-limited line. Counter `METAL_DRAW_RT_DUMPS` (per-interval
+  delta) surfaces on the `xemu-perf:` line and in
+  `extract-perf-summary.sh`. Implementation in
+  `mtl/draw.mm::pgraph_mtl_draw_dump_rt_*` + the
+  `pgraph_mtl_flush_draw` hook in `mtl/renderer.c`.
+- `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` (**W4, 2026-05-04**) —
+  GL-side equivalent. Synchronous-but-isolated: `glReadPixels` blocks
+  the renderer thread for the duration of the readback (intentional
+  for a debug-only path; expect a noticeable per-draw cost while in
+  range). The active color RT is resolved through the existing
+  `pgraph_gl_resolve_surface_msaa` helper (no-op when
+  `XEMU_GL_MSAA=0`), bound to the renderer's resolve FBO, and read
+  back as `GL_RGBA` / `GL_UNSIGNED_BYTE`. The result is flipped
+  vertically (GL pixels are bottom-up) before PNG encode so the
+  output orientation matches the Metal-side dump. Counter
+  `GL_DRAW_RT_DUMPS` (per-interval delta; tracked via
+  `NV2A_PROF_GL_DRAW_RT_DUMPS`) surfaces on the `xemu-perf:` line
+  and in `extract-perf-summary.sh`. Implementation in
+  `pgraph/gl/draw.c::pgraph_gl_draw_dump_rt_*` (called from
+  `pgraph_gl_draw_end`) + `pgraph/gl/dump.cc` (FPNG shim).
+
+  **Worked first-divergent-draw triage example.** Pair this with
+  W2's `metal-gl-compare.sh` to bisect a Metal-vs-GL visual
+  regression.
+
+  ```sh
+  # 1. Initial wide sweep — dump draws 0..199 from both renderers.
+  XEMU_METAL_DUMP_DRAW_RT=0:199:/tmp/pgr2_metal \
+  XEMU_RENDERER=METAL \
+  ./scripts/apple-silicon/run-benchmark.sh pgr2 \
+    scripts/apple-silicon/input-scripts/pgr2-smoke.csv 30
+
+  XEMU_GL_DUMP_DRAW_RT=0:199:/tmp/pgr2_gl \
+  XEMU_RENDERER=GL \
+  ./scripts/apple-silicon/run-benchmark.sh pgr2 \
+    scripts/apple-silicon/input-scripts/pgr2-smoke.csv 30
+
+  # 2. Diff each pair to find the first divergent draw.
+  for i in $(seq -f "%06g" 0 199); do
+    if ! cmp -s /tmp/pgr2_metal.${i}.png /tmp/pgr2_gl.${i}.png; then
+      echo "first divergent draw: ${i}"
+      break
+    fi
+  done
+
+  # 3. Narrow with a tight per-draw range around the divergence.
+  XEMU_METAL_DUMP_DRAW_RT=42:46:/tmp/pgr2_div_metal \
+  XEMU_RENDERER=METAL ...
+  ```
+
+  The dump always runs against the post-resolve color RT. If you
+  need pre-resolve MSAA contents, use the `XEMU_METAL_CAPTURE`
+  `.gputrace` capture path instead — that's M13's job, not this
+  flag's.
 - `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03**): per-interval
   count of front-fb texture pointer **changes** in the Metal
   renderer's surface cache. Always-on atomic. Bumped whenever the
