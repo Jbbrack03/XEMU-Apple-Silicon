@@ -27,6 +27,13 @@ Every Apple Silicon-specific decision, benchmark, and handoff lives under
 - `docs/apple-silicon/benchmarks/<date>-<name>.md` — dated session notes,
   one per benchmark session. Add a new file for each meaningful run; do not
   edit older notes.
+- `docs/apple-silicon/metal-porting-workflow.md` — **(added 2026-05-04)**
+  canonical operating playbook for the Metal renderer port. Five-phase
+  model (build & boot → translation correctness → visual parity → perf
+  parity → default-on), daily loop for the active phase, tools index,
+  triage flowchart, phase exit-gate procedures, triangulation appendix.
+  Meta-doc that sits one level above the Metal track sub-list below;
+  read after `handoff.md` at the start of any Metal-track session.
 
 Metal renderer track (added 2026-05-02; read after `handoff.md` when
 the task touches the Metal port):
@@ -717,19 +724,44 @@ Stable opt-in:
   path now uses dimension-aware lookup and still forces A8R8G8B8 render
   targets sampled as linear A8R8G8B8-family texture views through the
   CPU path; that rule fixed PGR2's dotted/yellow text.
-- `XEMU_METAL_VALIDATION={0,1}` (M14, 2026-05-02) — opt-in Metal
-  API validation layer for development. When set, `xemu_metal_init`
-  promotes `MTL_DEBUG_LAYER=1` into the process environment **before**
-  the first `MTLCreateSystemDefaultDevice()` call; Apple's Metal
-  framework reads `MTL_DEBUG_LAYER` exactly once at first device
-  creation, so the env-var must be in place by that point or
-  validation never activates for the process. If the user has already
-  pinned `MTL_DEBUG_LAYER` themselves the value is preserved
-  (the M14 promotion uses `setenv(..., overwrite=0)`). Surfaced once
-  at startup as `xemu-perf: metal_validation requested=R promoted=P
-  mtl_debug_layer_active=A`. Default 0 (validation off; matches
-  M14's "MTL_DEBUG_LAYER=0 in shipped builds" rule). Apple Silicon
-  performance fork; slice M14. Implementation in `ui/xemu-metal.mm`.
+- `XEMU_METAL_VALIDATION={0,1}` (M14, 2026-05-02; W1 2026-05-04
+  also promotes `MTL_SHADER_VALIDATION`) — opt-in Metal API + shader
+  validation layer for development. When set, `xemu_metal_init`
+  promotes both `MTL_DEBUG_LAYER=1` AND `MTL_SHADER_VALIDATION=1`
+  into the process environment **before** the first
+  `MTLCreateSystemDefaultDevice()` call; Apple's Metal framework
+  reads each env exactly once at first device creation, so the
+  env-vars must be in place by that point or validation never
+  activates for the process. If the user has already pinned either
+  env themselves the value is preserved (overwrite=0). The
+  shader-validation promotion catches a class of shader-side bugs
+  (out-of-bounds buffer reads, malformed bindings) that the API-layer
+  `MTL_DEBUG_LAYER` cannot see. Surfaced once at startup as
+  `xemu-perf: metal_validation requested=R promoted=P
+  mtl_debug_layer_active=A mtl_shader_validation_active=A`. Default
+  0 (validation off; matches M14's "MTL_DEBUG_LAYER=0 in shipped
+  builds" rule). W1 (2026-05-04) auto-on policy:
+  `scripts/apple-silicon/run-benchmark.sh` exports
+  `XEMU_METAL_VALIDATION=1` whenever `XEMU_RENDERER=METAL` is in the
+  launching environment, unless `--metal-no-validate` is passed or
+  the user already pinned the env. Apple Silicon performance fork;
+  slice M14 + W1. Implementation in `ui/xemu-metal.mm`.
+- `XEMU_METAL_HUD={0,1}` (W1, 2026-05-04) — opt-in for Apple's Metal
+  Performance HUD overlay. When set to 1, `xemu_metal_init` promotes
+  `MTL_HUD_ENABLED=1` into the process environment **before** the
+  first `MTLCreateSystemDefaultDevice()` call (same overwrite=0
+  pattern as `XEMU_METAL_VALIDATION`); an explicit user
+  `MTL_HUD_ENABLED` wins. The HUD is a zero-perf-cost overlay with
+  frame time / GPU usage / memory stats, useful for development.
+  Turn it off for clean visual canary captures. Surfaced once at
+  startup as `xemu-perf: metal_hud requested=R promoted=P
+  mtl_hud_enabled_active=A` mirroring the format of the
+  `metal_validation` line. Default 0. W1 auto-on policy:
+  `scripts/apple-silicon/run-benchmark.sh` exports `XEMU_METAL_HUD=1`
+  whenever `XEMU_RENDERER=METAL` is in the launching environment,
+  unless `--metal-no-hud` is passed or the user already pinned the
+  env. Apple Silicon performance fork; slice W1. Implementation in
+  `ui/xemu-metal.mm`.
 - `XEMU_METAL_SCREENSHOT_PATH=/path/to/file.png` (2026-05-03) —
   programmatic PNG screenshot of the final composited drawable,
   encoded inside the Metal renderer (no `screencapture`, no

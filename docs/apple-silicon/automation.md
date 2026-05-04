@@ -350,25 +350,50 @@ and stack:
   `run-validation.sh` to avoid bringing up the GUI. Process exit
   code is 0 on full pass, 1 on any failure. Default off (validation
   runs but xemu continues). Apple Silicon performance fork; slice M5.
-- `XEMU_METAL_VALIDATION={0,1}` (**M14 2026-05-02**) — opt-in Metal
-  API validation layer for development. When set, `xemu_metal_init`
-  promotes `MTL_DEBUG_LAYER=1` into the process environment **before**
-  the first `MTLCreateSystemDefaultDevice()` call, which is the only
-  point at which Apple's Metal framework reads `MTL_DEBUG_LAYER`
-  (later `setenv` calls have no effect once a device exists). If the
-  user has already pinned `MTL_DEBUG_LAYER` themselves the value is
-  preserved (the `XEMU_METAL_VALIDATION=1` promotion uses
-  `setenv(..., overwrite=0)`). Surfaced once at startup as
+- `XEMU_METAL_VALIDATION={0,1}` (**M14 2026-05-02**; W1 2026-05-04
+  also promotes `MTL_SHADER_VALIDATION`) — opt-in Metal API + shader
+  validation layer for development. When set, `xemu_metal_init`
+  promotes `MTL_DEBUG_LAYER=1` AND `MTL_SHADER_VALIDATION=1` into the
+  process environment **before** the first
+  `MTLCreateSystemDefaultDevice()` call, which is the only point at
+  which Apple's Metal framework reads either env (later `setenv`
+  calls have no effect once a device exists). If the user has
+  already pinned either env themselves the value is preserved (the
+  promotion uses `setenv(..., overwrite=0)`). The shader-validation
+  promotion catches a class of shader-side bugs (out-of-bounds buffer
+  reads, malformed bindings) that the API-layer `MTL_DEBUG_LAYER`
+  cannot see. Surfaced once at startup as
   `xemu-perf: metal_validation requested=R promoted=P
-  mtl_debug_layer_active=A`, where `requested` follows
-  `XEMU_METAL_VALIDATION`, `promoted` is 1 only if xemu actually wrote
-  the env, and `mtl_debug_layer_active` reflects the live
-  `MTL_DEBUG_LAYER` value at device-creation time.
+  mtl_debug_layer_active=A mtl_shader_validation_active=A`, where
+  `requested` follows `XEMU_METAL_VALIDATION`, `promoted` is 1 only
+  if xemu actually wrote `MTL_DEBUG_LAYER`, and the two `_active`
+  fields reflect the live env at device-creation time.
   Production / shipped builds leave the variable unset and run with
   validation off; turn it on while debugging missing argument bindings,
-  unbalanced retain/release on Metal objects, or an unexpected
-  `MTLCommandBuffer` status. Default 0. Apple Silicon performance
-  fork; slice M14. Implementation in `ui/xemu-metal.mm`.
+  unbalanced retain/release on Metal objects, an unexpected
+  `MTLCommandBuffer` status, or a shader-side resource bug. Default 0.
+  W1 (2026-05-04) auto-on policy: `scripts/apple-silicon/run-benchmark.sh`
+  exports `XEMU_METAL_VALIDATION=1` whenever `XEMU_RENDERER=METAL`
+  is set in the launching environment, unless `--metal-no-validate`
+  is passed or the user already pinned the env. Renderer code itself
+  keeps its default-off opt-in behavior. Apple Silicon performance
+  fork; slice M14 + W1. Implementation in `ui/xemu-metal.mm`.
+- `XEMU_METAL_HUD={0,1}` (**W1 2026-05-04**) — opt-in for Apple's
+  Metal Performance HUD overlay. When set to 1, `xemu_metal_init`
+  promotes `MTL_HUD_ENABLED=1` into the process environment **before**
+  the first `MTLCreateSystemDefaultDevice()` call (same overwrite=0
+  pattern as `XEMU_METAL_VALIDATION`), so an explicit user value
+  wins. The Metal HUD is a zero-perf-cost observation tool that
+  renders a small overlay with frame time, GPU usage, and memory
+  stats. Useful for development; turn it off for clean visual canary
+  captures. Surfaced once at startup as
+  `xemu-perf: metal_hud requested=R promoted=P mtl_hud_enabled_active=A`,
+  mirroring the format of the `metal_validation` line. Default 0.
+  W1 auto-on policy: `scripts/apple-silicon/run-benchmark.sh` exports
+  `XEMU_METAL_HUD=1` whenever `XEMU_RENDERER=METAL` is set, unless
+  `--metal-no-hud` is passed or the user already pinned the env.
+  Apple Silicon performance fork; slice W1. Implementation in
+  `ui/xemu-metal.mm`.
 - `XEMU_METAL_DISABLE_FRAMEBUFFER_FETCH={0,1}` (M7) forces
   `pgraph_mtl_heap_supports_framebuffer_fetch()` to return false even
   on Apple Silicon — the framebuffer-fetch combiner path then falls
@@ -2072,6 +2097,66 @@ The harness also fires from `pgraph_mtl_init()` whenever
 renderer session under that env-var prints the same report on every
 machine boot — useful when triaging a production translation
 failure.
+
+### Post-build shader-validation gate (W1, 2026-05-04)
+
+`build.sh` runs `metal-shader-validation/run-validation.sh` as a final
+post-build step on Apple Silicon (`Darwin && arm64`). A non-zero rc
+from the runner aborts the build with the log tail printed to stderr,
+so a shipped `dist/xemu.app` always reflects a green M5 fixture pass.
+The gate's stdout is teed to `build/shader-validation-postbuild.log`
+for inspection.
+
+Pass `--skip-shader-validation` to `build.sh` to bypass the gate for
+hot-iteration loops where the harness has already been validated this
+session, e.g.:
+
+```sh
+./build.sh -a arm64 --skip-shader-validation
+```
+
+The gate is no-op on non-Darwin / non-arm64 builds (the runner expects
+the macOS xemu.app bundle).
+
+## Auto-on Metal validation in dev runs (W1, 2026-05-04)
+
+`scripts/apple-silicon/run-benchmark.sh` automatically promotes the
+Metal validation layer + Performance HUD whenever
+`XEMU_RENDERER=METAL` is set in the launching environment. The
+philosophy: the cost of a forgotten validation flag in a dev run is
+high (silent shader/API misuse hides until the GPU triggers a hard
+fault), the cost of an extra log line plus an HUD overlay is zero.
+
+Effective behavior:
+
+- `XEMU_METAL_VALIDATION=1` is exported unless `--metal-no-validate`
+  is passed, OR the user already exported a non-empty
+  `XEMU_METAL_VALIDATION`.
+- `XEMU_METAL_HUD=1` is exported unless `--metal-no-hud` is passed,
+  OR the user already exported a non-empty `XEMU_METAL_HUD`.
+- xemu's renderer code keeps its default-off opt-in behavior. The
+  auto-on lives entirely in the benchmark launcher; running
+  `dist/xemu.app/Contents/MacOS/xemu` directly without the launcher
+  preserves today's `XEMU_METAL_VALIDATION=0` default.
+
+Effective state is recorded in the run's `metadata.txt` under
+`metal_auto_validation` / `metal_auto_hud` (one of `auto-on`,
+`auto-off (--metal-no-*)`, `user-pinned (...)`,
+`not-applicable (renderer != METAL)`) and `env_XEMU_METAL_VALIDATION`
+/ `env_XEMU_METAL_HUD`. The xemu-side startup banner's
+`metal_validation` / `metal_hud` lines are surfaced by
+`extract-perf-summary.sh` as `metal_validation_requested`,
+`metal_validation_promoted`, `mtl_debug_layer_active`,
+`mtl_shader_validation_active`, `metal_hud_requested`,
+`metal_hud_promoted`, `mtl_hud_enabled_active`.
+
+Opt-out flags:
+
+- `--metal-no-validate` — pass when measuring Metal-renderer perf and
+  the validation overhead would skew the measurement.
+- `--metal-no-hud` — pass when capturing visual canaries
+  (PNG screenshots / Metal-vs-GL diffs) where the HUD overlay would
+  pollute the reference image.
 
 ## Metal Renderer Draw Paths (M5.5, 2026-05-03)
 

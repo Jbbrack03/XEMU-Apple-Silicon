@@ -6582,3 +6582,78 @@ Next-session priority:
 3. Add an SC2 routed input script or known-good snapshot.
 4. Only after those visual timelines are valid, run the paired Metal-vs-GL
    visual/perf gate for M15.
+
+## 2026-05-04: Auto-on Metal validation in dev runs (W1)
+
+Decision:
+
+- Auto-promote Metal validation (`XEMU_METAL_VALIDATION=1`) and the
+  Metal Performance HUD (`XEMU_METAL_HUD=1`) in
+  `scripts/apple-silicon/run-benchmark.sh` whenever the active
+  renderer is `XEMU_RENDERER=METAL`. Renderer code keeps its
+  default-off opt-in behavior; the auto-on lives in the benchmark
+  launcher.
+- Extend `XEMU_METAL_VALIDATION=1` to also promote
+  `MTL_SHADER_VALIDATION=1` (in addition to `MTL_DEBUG_LAYER=1`)
+  before the first `MTLCreateSystemDefaultDevice()` call.
+- Add a post-build shader-validation gate to `build.sh` that runs
+  `metal-shader-validation/run-validation.sh`; non-zero rc aborts
+  the build. Bypassable via `--skip-shader-validation`.
+
+Rationale:
+
+- The cost of a forgotten validation flag in a dev run is high — silent
+  shader/API misuse hides until a hard GPU fault on a future M15 visual
+  canary. The cost of an extra log line plus a Performance HUD overlay
+  in dev runs is zero.
+- Shader validation catches a class of bugs (out-of-bounds buffer
+  reads, malformed bindings) that the API-layer `MTL_DEBUG_LAYER`
+  cannot see. With M5 fixture validation already required at boot,
+  promoting `MTL_SHADER_VALIDATION` as part of the same opt-in is a
+  natural extension.
+- The post-build gate makes the M5 harness a hard-stop on shipped
+  `dist/xemu.app` builds (matching the project's "no doc drift,
+  no measurement drift" discipline) without requiring developers to
+  remember to run `run-validation.sh` manually.
+
+What landed:
+
+- `ui/xemu-metal.mm`: `xemu_metal_apply_validation_env` now also
+  promotes `MTL_SHADER_VALIDATION=1` (overwrite=0); a new branch
+  promotes `MTL_HUD_ENABLED=1` when `XEMU_METAL_HUD=1`. Startup
+  banner extended with `mtl_shader_validation_active` field on the
+  `metal_validation` line and a new `metal_hud requested=R
+  promoted=P mtl_hud_enabled_active=A` line.
+- `scripts/apple-silicon/run-benchmark.sh`: new `--metal-no-validate`
+  / `--metal-no-hud` opt-out flags; auto-export logic gated on
+  `XEMU_RENDERER=METAL` + opt-out + user-pinned-env precedence;
+  effective state recorded in `metadata.txt` under
+  `metal_auto_validation` / `metal_auto_hud`.
+- `build.sh`: new `--skip-shader-validation` flag; post-build hook
+  runs `metal-shader-validation/run-validation.sh` and aborts the
+  build on non-zero rc. Log teed to
+  `build/shader-validation-postbuild.log`.
+- `scripts/apple-silicon/extract-perf-summary.sh`: scrapes the
+  startup `metal_validation` and `metal_hud` banner lines and
+  emits `metal_validation_requested` /
+  `metal_validation_promoted` / `mtl_debug_layer_active` /
+  `mtl_shader_validation_active` / `metal_hud_requested` /
+  `metal_hud_promoted` / `mtl_hud_enabled_active` keys.
+- Docs: `docs/apple-silicon/automation.md`, both `CLAUDE.md` files
+  updated for the new flags + post-build gate.
+
+Validation:
+
+- `bash -n scripts/apple-silicon/run-benchmark.sh` PASS.
+- `bash -n build.sh` PASS.
+- `bash -n scripts/apple-silicon/extract-perf-summary.sh` PASS.
+- `./build.sh -a arm64` PASS including the new post-build M5
+  shader-validation gate (7/7 fixtures green).
+- `dist/xemu.app/Contents/MacOS/xemu --version` PASS.
+
+Next-session priority:
+
+- W2 — paired Metal-vs-GL diff harness now consumes the auto-on
+  Metal validation by default; no caller change required.
+- W3 — canary regression gate can build on the post-build hook by
+  appending its own gate after the shader-validation step.

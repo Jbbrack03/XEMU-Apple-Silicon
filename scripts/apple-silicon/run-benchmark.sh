@@ -25,7 +25,7 @@ find_test_disc() {
 
 usage() {
     cat <<EOF
-usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] crimson|rainbow|pgr2|sc2|halo|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] [--metal-no-validate] [--metal-no-hud] crimson|rainbow|pgr2|sc2|halo|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.
@@ -64,6 +64,27 @@ Options:
                            present) at which --metal-screenshot fires.
                            Default 60. Maps to
                            XEMU_METAL_SCREENSHOT_AT_FRAME=<N>.
+  --metal-no-validate      W1 (2026-05-04) — opt out of the auto-on
+                           XEMU_METAL_VALIDATION=1 export that
+                           run-benchmark.sh applies whenever
+                           XEMU_RENDERER=METAL. Default behavior auto-
+                           promotes Metal API + shader validation in
+                           dev runs (cost: an extra log line and the
+                           validation layer's checks); pass this flag
+                           when measuring perf and you do not want the
+                           validation overhead. An explicit user-set
+                           XEMU_METAL_VALIDATION (any non-empty value)
+                           in the calling environment also wins over
+                           the auto-export.
+  --metal-no-hud           W1 (2026-05-04) — opt out of the auto-on
+                           XEMU_METAL_HUD=1 export that run-benchmark.sh
+                           applies whenever XEMU_RENDERER=METAL. Default
+                           behavior shows Apple's Metal Performance HUD
+                           overlay (zero perf cost; pure observation).
+                           Pass this flag for clean visual canary
+                           captures. An explicit user-set XEMU_METAL_HUD
+                           in the calling environment wins over the
+                           auto-export.
 EOF
 }
 
@@ -72,6 +93,8 @@ EOF
 METAL_CAPTURE_PATH=""
 METAL_SCREENSHOT_PATH=""
 METAL_SCREENSHOT_AT_FRAME=""
+METAL_NO_VALIDATE=0
+METAL_NO_HUD=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --metal-capture)
@@ -108,6 +131,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --metal-screenshot-at-frame=*)
             METAL_SCREENSHOT_AT_FRAME="${1#--metal-screenshot-at-frame=}"
+            shift
+            ;;
+        --metal-no-validate)
+            METAL_NO_VALIDATE=1
+            shift
+            ;;
+        --metal-no-hud)
+            METAL_NO_HUD=1
             shift
             ;;
         --)
@@ -229,6 +260,39 @@ else
     cp -c "$HDD_SOURCE" "$SCRATCH_HDD" 2>/dev/null || cp "$HDD_SOURCE" "$SCRATCH_HDD"
 fi
 
+# W1 (2026-05-04) — auto-on Metal validation + HUD in dev runs. When the
+# Metal renderer is selected via XEMU_RENDERER=METAL, promote
+# XEMU_METAL_VALIDATION=1 and XEMU_METAL_HUD=1 unless the user passed
+# the corresponding --metal-no-* opt-out OR already pinned the env var
+# themselves. The cost of a forgotten validation flag in a dev run is
+# high (silent shader/API misuse); the cost of an extra log line + a
+# Performance HUD overlay is zero. xemu-side renderer code keeps its
+# default-off opt-in behavior — the auto-on lives here.
+#
+# Run before the metadata write below so env_XEMU_METAL_VALIDATION /
+# env_XEMU_METAL_HUD reflect the effective state.
+AUTO_METAL_VALIDATION="not-applicable (renderer != METAL)"
+AUTO_METAL_HUD="not-applicable (renderer != METAL)"
+if [[ "${XEMU_RENDERER:-}" == "METAL" ]]; then
+    if [[ "$METAL_NO_VALIDATE" -eq 1 ]]; then
+        AUTO_METAL_VALIDATION="auto-off (--metal-no-validate)"
+    elif [[ -n "${XEMU_METAL_VALIDATION:-}" ]]; then
+        AUTO_METAL_VALIDATION="user-pinned (XEMU_METAL_VALIDATION=${XEMU_METAL_VALIDATION})"
+    else
+        export XEMU_METAL_VALIDATION=1
+        AUTO_METAL_VALIDATION="auto-on"
+    fi
+    if [[ "$METAL_NO_HUD" -eq 1 ]]; then
+        AUTO_METAL_HUD="auto-off (--metal-no-hud)"
+    elif [[ -n "${XEMU_METAL_HUD:-}" ]]; then
+        AUTO_METAL_HUD="user-pinned (XEMU_METAL_HUD=${XEMU_METAL_HUD})"
+    else
+        export XEMU_METAL_HUD=1
+        AUTO_METAL_HUD="auto-on"
+    fi
+    echo "Metal auto-on: validation=${AUTO_METAL_VALIDATION} hud=${AUTO_METAL_HUD}"
+fi
+
 # Default to 2 so the per-run config matches the Apple Silicon system
 # build's first-run default (1080p-class, ~7 % renderer-cost growth on
 # PGR2 vs scale 1; see docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md).
@@ -313,6 +377,11 @@ EOF
     echo "env_XEMU_METAL_SCREENSHOT_PATH: ${XEMU_METAL_SCREENSHOT_PATH:-unset}"
     echo "env_XEMU_METAL_SCREENSHOT_AT_FRAME: ${XEMU_METAL_SCREENSHOT_AT_FRAME:-unset}"
     echo "env_XEMU_METAL_SCREENSHOT_INTERVAL: ${XEMU_METAL_SCREENSHOT_INTERVAL:-unset}"
+    echo "env_XEMU_RENDERER: ${XEMU_RENDERER:-unset}"
+    echo "metal_auto_validation: ${AUTO_METAL_VALIDATION}"
+    echo "metal_auto_hud: ${AUTO_METAL_HUD}"
+    echo "env_XEMU_METAL_VALIDATION: ${XEMU_METAL_VALIDATION:-unset}"
+    echo "env_XEMU_METAL_HUD: ${XEMU_METAL_HUD:-unset}"
     echo
     sw_vers || true
     uname -m || true

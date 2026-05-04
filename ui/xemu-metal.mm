@@ -923,41 +923,69 @@ static void build_counter_sample_buffer_if_supported(void)
 }
 
 /* M14 — XEMU_METAL_VALIDATION={0,1} opt-in for development. When set,
- * promotes MTL_DEBUG_LAYER=1 into the process env BEFORE the first
- * Metal device or layer call. Apple's Metal validation layer is
- * activated by reading MTL_DEBUG_LAYER at MTLCreateSystemDefaultDevice
- * time; later setenv has no effect (the framework caches the decision
- * once a device exists). Production builds leave the variable unset,
- * matching M14's "MTL_DEBUG_LAYER=0 in shipped builds" rule.
- *
- * If the user already has MTL_DEBUG_LAYER set in their env, we leave
- * it alone (overwrite=0 on the second setenv); XEMU_METAL_VALIDATION=1
- * only promotes when the user did not pin a value themselves. This
- * makes XEMU_METAL_VALIDATION a convenience knob without papering over
- * an explicit user setting.
+ * promotes MTL_DEBUG_LAYER=1 AND MTL_SHADER_VALIDATION=1 into the
+ * process env BEFORE the first Metal device or layer call. Apple's
+ * Metal validation layer is activated by reading MTL_DEBUG_LAYER at
+ * MTLCreateSystemDefaultDevice time; MTL_SHADER_VALIDATION is read at
+ * the same point and catches a class of shader-side bugs (out-of-bounds
+ * resource accesses, malformed buffer bindings) that the API-layer
+ * MTL_DEBUG_LAYER cannot see. Both setenv calls happen with overwrite=0
+ * so an explicit user value is preserved. Production builds leave the
+ * variable unset, matching M14's "MTL_DEBUG_LAYER=0 in shipped builds"
+ * rule.
  *
  * Logged once at the call site so the post-init startup banner can
- * note whether validation is active. */
+ * note whether validation is active.
+ *
+ * W1 (2026-05-04) — XEMU_METAL_HUD={0,1} opt-in for Apple's Metal
+ * Performance HUD overlay. Same setenv-with-overwrite=0 pattern as
+ * the validation promotion: pinned MTL_HUD_ENABLED wins, otherwise
+ * we set it to 1 when XEMU_METAL_HUD=1. Default off. */
 static bool s_metal_validation_requested;
 static bool s_metal_validation_promoted;
+static bool s_metal_shader_validation_promoted;
+static bool s_metal_hud_requested;
+static bool s_metal_hud_promoted;
 
 static void xemu_metal_apply_validation_env(void)
 {
     const char *v = getenv("XEMU_METAL_VALIDATION");
     s_metal_validation_requested =
         (v != NULL && v[0] != '\0' && v[0] != '0');
-    if (!s_metal_validation_requested) {
-        return;
+    if (s_metal_validation_requested) {
+        /* Only promote MTL_DEBUG_LAYER if the user has not pinned a value
+         * already. setenv with overwrite=0 returns 0 either way; we test
+         * the live env to know whether we actually changed anything. */
+        const char *prior = getenv("MTL_DEBUG_LAYER");
+        if (prior == NULL) {
+            setenv("MTL_DEBUG_LAYER", "1", 0);
+            s_metal_validation_promoted = true;
+        } else {
+            s_metal_validation_promoted = false;
+        }
+        /* Same pattern for MTL_SHADER_VALIDATION (W1, 2026-05-04). */
+        const char *prior_shader = getenv("MTL_SHADER_VALIDATION");
+        if (prior_shader == NULL) {
+            setenv("MTL_SHADER_VALIDATION", "1", 0);
+            s_metal_shader_validation_promoted = true;
+        } else {
+            s_metal_shader_validation_promoted = false;
+        }
     }
-    /* Only promote MTL_DEBUG_LAYER if the user has not pinned a value
-     * already. setenv with overwrite=0 returns 0 either way; we test
-     * the live env to know whether we actually changed anything. */
-    const char *prior = getenv("MTL_DEBUG_LAYER");
-    if (prior == NULL) {
-        setenv("MTL_DEBUG_LAYER", "1", 0);
-        s_metal_validation_promoted = true;
-    } else {
-        s_metal_validation_promoted = false;
+
+    /* W1 — XEMU_METAL_HUD={0,1}. Independent opt-in; does not require
+     * XEMU_METAL_VALIDATION. */
+    const char *hud = getenv("XEMU_METAL_HUD");
+    s_metal_hud_requested =
+        (hud != NULL && hud[0] != '\0' && hud[0] != '0');
+    if (s_metal_hud_requested) {
+        const char *prior_hud = getenv("MTL_HUD_ENABLED");
+        if (prior_hud == NULL) {
+            setenv("MTL_HUD_ENABLED", "1", 0);
+            s_metal_hud_promoted = true;
+        } else {
+            s_metal_hud_promoted = false;
+        }
     }
 }
 
@@ -1078,16 +1106,39 @@ bool xemu_metal_init(SDL_Window *window)
      * though XEMU_METAL_VALIDATION may be 0; if XEMU_METAL_VALIDATION=1
      * promoted it, both read =1. The promoted bit exposes "we set this
      * for you" so the user is not surprised by validation logs in a
-     * shell that did not export MTL_DEBUG_LAYER directly. */
+     * shell that did not export MTL_DEBUG_LAYER directly.
+     *
+     * W1 (2026-05-04) — also report mtl_shader_validation_active so the
+     * MTL_SHADER_VALIDATION promotion is visible in the same line. */
     {
         const char *live = getenv("MTL_DEBUG_LAYER");
         bool active = (live != NULL && live[0] != '\0' && live[0] != '0');
+        const char *live_shader = getenv("MTL_SHADER_VALIDATION");
+        bool shader_active =
+            (live_shader != NULL && live_shader[0] != '\0' &&
+             live_shader[0] != '0');
         fprintf(stderr,
                 "xemu-perf: metal_validation requested=%d promoted=%d "
-                "mtl_debug_layer_active=%d\n",
+                "mtl_debug_layer_active=%d mtl_shader_validation_active=%d\n",
                 (int)s_metal_validation_requested,
                 (int)s_metal_validation_promoted,
-                (int)active);
+                (int)active,
+                (int)shader_active);
+    }
+
+    /* W1 (2026-05-04) — XEMU_METAL_HUD={0,1} startup banner. Mirrors the
+     * format of the validation log line so the perf-summary script can
+     * surface it the same way. */
+    {
+        const char *live_hud = getenv("MTL_HUD_ENABLED");
+        bool hud_active =
+            (live_hud != NULL && live_hud[0] != '\0' && live_hud[0] != '0');
+        fprintf(stderr,
+                "xemu-perf: metal_hud requested=%d promoted=%d "
+                "mtl_hud_enabled_active=%d\n",
+                (int)s_metal_hud_requested,
+                (int)s_metal_hud_promoted,
+                (int)hud_active);
     }
 
     /* M13 — counter sample buffer + programmatic capture. Order matters:

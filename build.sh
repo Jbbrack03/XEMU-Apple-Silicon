@@ -140,6 +140,7 @@ job_count="${job_count:-${default_job_count}}"
 debug=""
 opts=""
 platform="$(uname -s)"
+skip_shader_validation=""
 
 while [ ! -z "${1}" ]
 do
@@ -159,6 +160,10 @@ do
     '-a'*)
         target_arch="${2}"
         shift 2
+        ;;
+    '--skip-shader-validation')
+        skip_shader_validation="y"
+        shift
         ;;
     *)
         break
@@ -282,3 +287,35 @@ set -x # Print commands from now on
 time make -j"${job_count}" ${target} 2>&1 | tee build.log
 
 "${postbuild}" # call post build functions
+
+# W1 (2026-05-04) — post-build M5 shader-validation gate. Apple Silicon
+# only; runs the standalone xemu binary in shader-validate-and-exit mode
+# so a shipped build always reflects a green M5 fixture pass. Skipped via
+# --skip-shader-validation for hot-iteration loops where the harness has
+# already been validated this session.
+set +x
+if [[ "$platform" == "Darwin" && "$target_arch" == "arm64" ]]; then
+    if [[ -n "$skip_shader_validation" ]]; then
+        echo "Skipping M5 shader-validation post-build gate (--skip-shader-validation)"
+    else
+        echo ""
+        echo "Running M5 shader-validation post-build gate..."
+        validation_runner="${project_source_dir}/scripts/apple-silicon/metal-shader-validation/run-validation.sh"
+        validation_log="${project_source_dir}/build/shader-validation-postbuild.log"
+        if [[ ! -x "$validation_runner" ]]; then
+            echo "ERROR: shader-validation runner not found or not executable: $validation_runner" >&2
+            exit 1
+        fi
+        if "$validation_runner" 2>&1 | tee "$validation_log"; then
+            echo "M5 shader-validation post-build gate: PASS"
+        else
+            rc=${PIPESTATUS[0]}
+            echo "" >&2
+            echo "ERROR: M5 shader-validation post-build gate FAILED (rc=${rc})" >&2
+            echo "Log tail:" >&2
+            tail -30 "$validation_log" >&2 || true
+            echo "Re-run with --skip-shader-validation to bypass after diagnosis." >&2
+            exit "$rc"
+        fi
+    fi
+fi

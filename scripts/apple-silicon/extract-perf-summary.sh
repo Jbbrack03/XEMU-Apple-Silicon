@@ -736,3 +736,48 @@ def emit(prefix, samples, dropped_sum):
 emit("", all_frames, dropped_total)
 emit("post_load_", post_frames, post_dropped_total)
 PY
+
+# W1 (2026-05-04) — surface the Metal validation + HUD startup banner
+# fields. These are emitted once at xemu_metal_init and live OUTSIDE
+# the per-interval `interval_ms=` lines the awk pass above consumes,
+# so they need a separate scrape. Lines look like:
+#   xemu-perf: metal_validation requested=R promoted=P mtl_debug_layer_active=A mtl_shader_validation_active=A
+#   xemu-perf: metal_hud requested=R promoted=P mtl_hud_enabled_active=A
+# Emit them as discrete keys so callers can grep them out of the
+# summary the same way they grep avg_fps / METAL_PRESENTS / etc.
+awk '
+/xemu-perf: metal_validation / {
+    for (i = 1; i <= NF; i++) {
+        split($i, kv, "=")
+        if (kv[1] == "requested") metal_validation_requested = kv[2]
+        else if (kv[1] == "promoted") metal_validation_promoted = kv[2]
+        else if (kv[1] == "mtl_debug_layer_active") mtl_debug_layer_active = kv[2]
+        else if (kv[1] == "mtl_shader_validation_active") mtl_shader_validation_active = kv[2]
+    }
+    have_validation = 1
+}
+/xemu-perf: metal_hud / {
+    for (i = 1; i <= NF; i++) {
+        split($i, kv, "=")
+        if (kv[1] == "requested") metal_hud_requested = kv[2]
+        else if (kv[1] == "promoted") metal_hud_promoted = kv[2]
+        else if (kv[1] == "mtl_hud_enabled_active") mtl_hud_enabled_active = kv[2]
+    }
+    have_hud = 1
+}
+END {
+    if (have_validation) {
+        printf("metal_validation_requested=%s\n", metal_validation_requested + 0)
+        printf("metal_validation_promoted=%s\n", metal_validation_promoted + 0)
+        printf("mtl_debug_layer_active=%s\n", mtl_debug_layer_active + 0)
+        if (mtl_shader_validation_active != "") {
+            printf("mtl_shader_validation_active=%s\n", mtl_shader_validation_active + 0)
+        }
+    }
+    if (have_hud) {
+        printf("metal_hud_requested=%s\n", metal_hud_requested + 0)
+        printf("metal_hud_promoted=%s\n", metal_hud_promoted + 0)
+        printf("mtl_hud_enabled_active=%s\n", mtl_hud_enabled_active + 0)
+    }
+}
+' "$LOG_FILE"
