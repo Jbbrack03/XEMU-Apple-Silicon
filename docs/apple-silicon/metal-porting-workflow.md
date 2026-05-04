@@ -367,18 +367,31 @@ When W5 is BLOCKED, fall back to:
 
 Phase 1 sessions that change Metal renderer code must:
 
-1. Re-run the green canary set to confirm no regression. The W3
-   slice (introduced 2026-05-04) ships
-   `metal-canary-regress.sh` as a single command:
+1. After every Metal renderer change, run
+   `scripts/apple-silicon/metal-canary-regress.sh` as the post-change
+   smoke. Expected outcome: all four canaries (PGR2 / Rainbow / Halo /
+   boot) PASS at the default 1 % per-pixel-changed threshold. This is
+   the post-change smoke tool the W3 slice (introduced 2026-05-04)
+   ships:
 
    ```sh
    scripts/apple-silicon/metal-canary-regress.sh
    ```
 
-   This runs PGR2 / Rainbow / Halo / boot through Metal at MSAA4 and
-   diffs each captured screenshot against the recorded baseline
-   under `benchmark-runs/visual-checks/`. Non-zero exit blocks the
-   commit.
+   This runs PGR2 / Rainbow / Halo / boot through Metal at MSAA4
+   under the established green-canary env recipe (verbatim from the
+   `handoff.md` "PGR2 PASS" bullet) and diffs each captured screenshot
+   against the recorded gold PNG under `benchmark-runs/visual-checks/`
+   via `compare-screenshots.py`. Per project rule #11 the script
+   ASSERTS the closed default-on Apple Silicon flags still produce
+   the gold PNG; it does NOT re-validate them. Non-zero exit blocks
+   the commit. Exit-code semantics match `metal-gl-compare.sh`: 0 PASS,
+   1 FAIL on the visual diff, 2 INFRA-FAIL.
+
+   For a focused re-run after a localized change, use
+   `--canary <name>` (`pgr2` | `rainbow` | `halo` | `boot`).
+   See `automation.md` "Canary regression gate (W3, 2026-05-04)" for
+   the embedded canary table and per-canary frame ordinals.
 
 2. Update `handoff.md` if the canary state changed, append a
    benchmark note under `docs/apple-silicon/benchmarks/<date>-*.md`,
