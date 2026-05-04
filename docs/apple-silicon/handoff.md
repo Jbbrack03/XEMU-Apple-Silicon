@@ -1,7 +1,8 @@
 # Handoff
 
-Last updated: 2026-05-04 (Visual Flight Recorder tooling + Metal MSAA4
-gate state). Current branch: `apple-silicon-performance`.
+Last updated: 2026-05-04 (Metal porting workflow rollout — six-slice
+agent batch + Codex-flagged fix-ups). Current branch:
+`apple-silicon-performance`.
 
 For the canonical Metal porting workflow, see metal-porting-workflow.md.
 
@@ -75,7 +76,132 @@ fallback dependency.
   boot/flubber. End-to-end hook validation:
   `benchmark-runs/20260504-113305-soul-calibur-2/visual-analysis/storyboard.jpg`.
 
-**What changed this session.**
+**What changed this session (2026-05-04 — Metal porting workflow rollout).**
+
+Adopted a formal five-phase Metal porting workflow modeled on
+commercial Mac/Metal game-porting practice (Phase 0 Build & Boot DONE
+→ Phase 1 Translation Correctness ACTIVE → Phase 2 Visual Parity Gate
+→ Phase 3 Performance Parity & Polish → Phase 4 Default-on / Shipping)
+and landed six parallel implementation slices via worktree-isolated
+agent team plus one Codex-driven fix-up slice. Project is now in
+Phase 1 (Translation Correctness, ACTIVE) with PGR2 / Rainbow / Halo /
+boot canaries PASS at MSAA4; Crimson gameplay + SC2 routed visual
+remain BLOCKED.
+
+1. **D1** — Added `docs/apple-silicon/metal-porting-workflow.md`
+   (~1000 lines) as the canonical operating playbook: phase model,
+   daily loop for the active phase, tools index by phase, triage
+   flowchart, exit-gate procedures, triangulation appendix. Cross-
+   references from `handoff.md`, `README.md`, `xemu-fork/CLAUDE.md`,
+   `metal-renderer-plan.md`. **Read this doc once at session start
+   after handoff.md** — it is the new operating reference.
+2. **W1** — Auto-on Metal validation in dev runs.
+   `scripts/apple-silicon/run-benchmark.sh` auto-exports
+   `XEMU_METAL_VALIDATION=1` and the new `XEMU_METAL_HUD=1` whenever
+   `XEMU_RENDERER=METAL` is the active renderer (opt-out via
+   `--metal-no-validate` / `--metal-no-hud`). `XEMU_METAL_VALIDATION=1`
+   now also promotes `MTL_SHADER_VALIDATION=1` (shader-side OOB / uninit
+   detection — distinct from the API debug layer). New
+   `XEMU_METAL_HUD={0,1}` promotes `MTL_HUD_ENABLED=1` for Apple's
+   Metal Performance HUD overlay. `build.sh` now runs
+   `metal-shader-validation/run-validation.sh` post-build; non-zero rc
+   fails the build (escape via `--skip-shader-validation`). 7/7
+   fixtures PASS on the merged tree.
+3. **W2** — New `scripts/apple-silicon/metal-gl-compare.sh` paired
+   Metal-vs-GL diff harness. Runs the same input.csv on both backends
+   at matched screenshot intervals, runs `compare-screenshots.py` per
+   pair, runs `compare-runs.sh` for the perf-summary delta, emits
+   `report.md` + `summary.json` + side-by-side PNGs with PASS/FAIL on
+   `--threshold` (default 1.0 % per-pixel). The mechanical enforcement
+   tool for the Phase 2 / M15 visual gate. Usage:
+   `metal-gl-compare.sh <game> [--input csv] [--frames N,M,K] [--crop x,y,w,h] [--threshold pct] [--duration N] [--out-dir path]`.
+4. **W3** — New `scripts/apple-silicon/metal-canary-regress.sh`
+   single-renderer regression gate. Runs the four established canaries
+   (PGR2, Rainbow, Halo, boot) under the closed Metal recipe and
+   compares each to its stored gold PNG in
+   `benchmark-runs/visual-checks/`. Per-canary tolerance via
+   `--threshold`; selectable canary via `--canary <name>`. Recommended
+   smoke after every Metal renderer change.
+5. **W4** — Per-draw color RT dump for both renderers. New env vars
+   `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (mtl/draw.mm) and
+   `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` (gl/draw.c) snapshot the
+   bound color RT to a PNG after each draw in the inclusive
+   `[START, END]` range. New counters `METAL_DRAW_RT_DUMPS` and
+   `GL_DRAW_RT_DUMPS` surfaced via `extract-perf-summary.sh`. Combined
+   with W2's paired diff: programmatic first-divergent-draw isolation
+   between Metal and GL.
+6. **W5** — `pgraph/vk` + MoltenVK on Apple Silicon as a
+   `XEMU_RENDERER=VULKAN` triangulation backend: **BLOCKED**. MoltenVK
+   1.4.1 reports `geometryShader = 0` on M3 Ultra; xemu's
+   `pgraph/vk/instance.c:482-517` hard-requires that feature.
+   Structural Metal-API limitation, not a build/wiring issue. No
+   source / build / meson changes; W5 is documentation-only with
+   reattempt criteria captured in the decision-log entry. Triangulation
+   strategy promoted in the workflow doc to per-draw RT dump (W4) +
+   Xcode `.gputrace` (M13) + paired Metal-vs-GL diff (W2) as the
+   primary path.
+7. **W6** — Codex-flagged Phase 2 gate fix-ups. After dispatching D1
+   through W5 a `/codex-validate plan` review surfaced seven concrete
+   issues; W6 fixed five and captured two as future slices:
+   - W2's GL-screencapture-vs-Metal-drawable size mismatch addressed
+     via dual approach: `macos-capture.sh` opt-in window-targeted
+     capture (`XEMU_CAPTURE_WINDOW_PATTERN` + Quartz lookup) and
+     `compare-screenshots.py --resize {none,smaller}` LANCZOS safety
+     net. Both engaged by `metal-gl-compare.sh`.
+   - W2 Metal leg now passes `--metal-no-hud` so the HUD overlay
+     does not pollute paired captures; effective HUD/validation state
+     recorded in `report.md` and `summary.json`. Same for
+     `metal-canary-regress.sh`.
+   - `metal-porting-workflow.md` flag references corrected (was
+     showing non-existent `--title` / `--route` / `--interval` /
+     `--tolerance`; now uses the real `<game>` / `--input` /
+     `--frames` / `--threshold` / `--duration` / `--crop` /
+     `--out-dir` signature).
+   - W4 range-semantics doc standardized to inclusive `[START, END]`
+     matching `pgraph/mtl/draw.mm:1289` and `pgraph/gl/draw.c:1193`.
+   - Workflow triangulation appendix demoted MoltenVK to
+     "BLOCKED — see decision-log 2026-05-04" cross-ref; per-draw RT
+     dump + `.gputrace` + paired diff promoted to primary.
+   - Two future slices captured in decision-log: **F1** deterministic
+     frame alignment for Phase 2 paired diff (QMP/HMP snapshot
+     restore + same capture trigger; the current ordinal pairing
+     across two cold launches has timing-drift false positives), and
+     **F2** canary gold-image artifact store (current
+     `benchmark-runs/visual-checks/` is gitignored, so a fresh
+     checkout INFRA-FAILs the regression gate).
+
+**Validation.** `./build.sh -a arm64` PASS on the merged tree with
+the new post-build M5 shader-validation gate at 7/7 PASS. All bash
+scripts pass `bash -n`; `compare-screenshots.py` passes `python3 -m
+py_compile`. 13 session commits (six implementation, six merge, one
+fix-up) representing ~4200 line diff vs the session base
+(`0f14ed8edf`). Codex plan-review verdict: MAJOR ISSUES → all
+HIGH/MEDIUM/LOW findings either fixed (5/7) or filed as future
+slices (2/7).
+
+**Highest-priority next-session actions (updated 2026-05-04 evening).**
+The Phase 1 daily loop in
+`docs/apple-silicon/metal-porting-workflow.md` is the canonical
+operating reference; the bullets below summarize the immediate work:
+
+1. Run `scripts/apple-silicon/metal-canary-regress.sh` once to lock
+   in baseline thresholds against the existing
+   `benchmark-runs/visual-checks/` gold PNGs (this was deferred from
+   this session's close-out — orchestrator did not run it).
+2. Crimson gameplay routed visual canary remains BLOCKED. The new
+   per-draw RT dump (`XEMU_METAL_DUMP_DRAW_RT`) plus
+   `metal-gl-compare.sh` should let a future session isolate the
+   first divergent draw between Metal and GL on the gameplay route
+   and target the actual NV2A semantics bug.
+3. SC2 routed input script or known-good snapshot still missing.
+4. Front-fb fallback faithfulness or accepted default policy still
+   pending (M15 default-on dependency).
+5. **Slice F1** (deterministic frame alignment for paired diff) is
+   the next workflow-tooling slice; **F2** (canary gold artifact
+   store) is the second. Both required for fresh-checkout reliability
+   of the Phase 2 visual gate.
+
+**What changed this session (2026-05-04 — Visual Flight Recorder tooling, earlier).**
 
 Visual feedback tooling follow-up:
 
