@@ -345,6 +345,13 @@ unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
                                                   uint32_t *out_sizes,
                                                   unsigned int cap);
 
+/* M5.10 experimental fallback (2026-05-03): publish the
+ * most-recently-bound color RT (s_color_binding) as the front-fb. See
+ * `surface.mm::pgraph_mtl_surface_publish_latest_draw_fallback` for
+ * the full rationale. Gated by `XEMU_METAL_FRONT_FB_FALLBACK=1` at
+ * the renderer level. */
+bool pgraph_mtl_surface_publish_latest_draw_fallback(void);
+
 /* M5.9-followup-B+C: counter accessors. Always-on atomics. */
 uint64_t pgraph_mtl_surface_vram_dirty_hits(void);
 uint64_t pgraph_mtl_surface_vram_uploads(void);

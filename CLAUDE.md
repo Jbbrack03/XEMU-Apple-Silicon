@@ -662,6 +662,26 @@ Stable opt-in:
   `pgraph_mtl_surface_update` is gated `!tcg_enabled()` and
   always-on when active; uses the cache entry's full size for
   `memory_region_test_and_clear_dirty`.
+- `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (M5.10 experimental, 2026-05-03) —
+  opt-in fallback that publishes the most-recently-bound color RT
+  (`s_color_binding`) as the front-fb after the CRTC publish. Default 0
+  (off). Use case: titles like PGR2 where the CRTC-pointed surface
+  receives ~1 draw per interval (likely HUD only) while the actual
+  rendered scene goes to a back buffer at a different vram_addr; the
+  M5.9-followup-B+C diagnostic decisively ruled out CPU memcpy,
+  NV097_IMAGE_BLIT, and pcrtc.start cycling as the back→front
+  mechanism, so a host-side direct publish of the back buffer is the
+  cheapest possible bridge while the actual mechanism is still under
+  investigation. NOT correctness-faithful — the back buffer may have a
+  different aspect ratio than the front (PGR2's 2560×960 back vs
+  1280×960 front at scale=2), and titles that legitimately use both
+  front and back surfaces will see the wrong content. Implementation:
+  `pgraph_mtl_surface_publish_latest_draw_fallback` in `mtl/surface.mm`,
+  invoked from `pgraph_mtl_flip_stall` AFTER the CRTC publish so the
+  fallback wins. Side-channel atomic `s_front_framebuffer_texture` is
+  the only path that's affected; the rest of the renderer is
+  unchanged. When OFF, behavior is exactly the current CRTC-strict
+  publish. Apple Silicon performance fork; slice M5.10 experimental.
 - `XEMU_METAL_VALIDATION={0,1}` (M14, 2026-05-02) — opt-in Metal
   API validation layer for development. When set, `xemu_metal_init`
   promotes `MTL_DEBUG_LAYER=1` into the process environment **before**

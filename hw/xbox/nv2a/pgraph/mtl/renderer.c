@@ -247,6 +247,27 @@ static bool mtl_front_fb_download_enabled(void)
     return s_front_fb_download != 0;
 }
 
+/* M5.10 experimental fallback (2026-05-03):
+ * `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` opts in to publishing the
+ * most-recently-bound color RT as the front-fb when the CRTC-pointed
+ * surface lookup hits a stale entry. Used to bridge titles whose
+ * CRTC-pointed surface is a HUD overlay (~1 draw / frame) while
+ * actual scene goes to a back buffer at a different vram_addr (PGR2
+ * is the canonical case). NOT correctness-faithful — see surface.mm
+ * for the full caveats — but is cheap and enables visual validation
+ * for titles that don't have an observable VRAM-mediated swap. */
+static int  s_front_fb_fallback = 0;
+static bool s_front_fb_fallback_cached = false;
+static bool mtl_front_fb_fallback_enabled(void)
+{
+    if (!s_front_fb_fallback_cached) {
+        const char *e = getenv("XEMU_METAL_FRONT_FB_FALLBACK");
+        s_front_fb_fallback = (e && e[0] && e[0] != '0') ? 1 : 0;
+        s_front_fb_fallback_cached = true;
+    }
+    return s_front_fb_fallback != 0;
+}
+
 static bool mtl_use_translated_pipeline(void)
 {
     if (!s_use_translated_cached) {
@@ -832,7 +853,22 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
                                               d->vram_ptr);
     }
 
-    pgraph_mtl_surface_publish_front_fb((uint32_t)crtc_addr, "crtc");
+    bool published = pgraph_mtl_surface_publish_front_fb(
+        (uint32_t)crtc_addr, "crtc");
+
+    /* M5.10 experimental fallback (2026-05-03): if the CRTC-pointed
+     * surface didn't resolve OR was just published but the title's
+     * actual rendered scene goes to a different back buffer (PGR2
+     * canonical case), publish the most-recently-bound color RT
+     * (s_color_binding). The fallback always publishes, overwriting
+     * the CRTC-resolved publish above — last write wins. Gated on the
+     * separate XEMU_METAL_FRONT_FB_FALLBACK feature flag so the
+     * default (off) preserves the CRTC-strict behavior; opt-in lets
+     * users see actual scene content for titles that need it. */
+    (void)published;
+    if (mtl_front_fb_fallback_enabled()) {
+        pgraph_mtl_surface_publish_latest_draw_fallback();
+    }
 }
 
 /* MTLPrimitiveType values, mirrored from <Metal/MTLRenderCommandEncoder.h>.

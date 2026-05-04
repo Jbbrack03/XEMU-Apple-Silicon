@@ -1178,6 +1178,48 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
     return true;
 }
 
+/* M5.10 experimental fallback (2026-05-03): publish the
+ * most-recently-bound color RT (s_color_binding) as the front-fb,
+ * regardless of CRTC address. Use case: titles like PGR2 where the
+ * CRTC-pointed surface gets ~1 draw / interval (presumably HUD) while
+ * the actual rendered scene goes to a back buffer at a different
+ * VRAM address. The 2026-05-03 followup-B+C diagnostic established
+ * that no observable mechanism propagates back→front in VRAM (no CPU
+ * memcpy via dirty_vram, no NV097_IMAGE_BLIT, no pcrtc.start cycling),
+ * so a host-side direct publish of the back buffer is the cheapest
+ * possible bridge.
+ *
+ * This is NOT correctness-faithful (the back buffer may have a
+ * different aspect ratio than the front, and if the title uses
+ * legitimate front/back surfaces they will be wrong), so the path is
+ * gated behind XEMU_METAL_FRONT_FB_FALLBACK=1. The compositor gets
+ * whatever was last bound for drawing. Aspect mismatch is preserved
+ * (the present pipeline scales the texture to drawable extent
+ * regardless of input dims).
+ *
+ * Returns true if a publish landed. Bumps METAL_FRONT_FB_PUBLISHES
+ * with reason="fallback-latest-draw". */
+bool pgraph_mtl_surface_publish_latest_draw_fallback(void)
+{
+    if (!s_initialized || s_color_binding == NULL ||
+        s_color_binding->texture == NULL) {
+        return false;
+    }
+    MtlSurfaceBinding *e = s_color_binding;
+    e->last_use_seq = ++s_use_seq;
+    void *prev = atomic_load(&s_front_framebuffer_texture);
+    if (prev == e->texture) {
+        return true;
+    }
+    atomic_store(&s_front_framebuffer_texture, e->texture);
+    atomic_fetch_add(&s_front_fb_publishes, 1);
+    fprintf(stderr,
+            "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
+            "width=%u height=%u format=%u reason=fallback-latest-draw\n",
+            (unsigned)e->vram_addr, e->width, e->height, e->nv097_format);
+    return true;
+}
+
 /* M5.9-followup-A (2026-05-03): the M5.9-era publish_color_binding()
  * helper used to be called from `pgraph_mtl_surface_clear` to publish
  * every cleared color surface as the front-fb. That stopgap is now
