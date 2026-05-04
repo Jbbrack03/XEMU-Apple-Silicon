@@ -240,6 +240,19 @@ The fork-specific source-code changes are concentrated in:
       PGR2 `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`,
       Rainbow `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`,
       Halo `benchmark-runs/visual-checks/halo-gate-metal-msaa4-f1200-after-msaa-store.png`.
+      **(PGR2 texture-bind attribution, 2026-05-04)** The subsequent
+      150s PGR2 Metal gameplay run
+      `benchmark-runs/20260504-132806-pgr2` proved shader translation
+      failures and pipeline fallbacks are now zero, but post-load FPS
+      was still 11.21 before the final rerun. New CPU wall counters
+      identified `pgraph_mtl_texture_bind_from_pg` as the bottleneck:
+      `METAL_TEX_BIND_US_TOTAL=105962660` vs
+      `METAL_DRAW_ENCODE_US_TOTAL=7159221`. Metal now has an early
+      cached-texture bind path (`pgraph_mtl_texture_bind_slot_cached_full`)
+      so clean cache hits bind resident textures before
+      `decode_face_levels()`. Next session should rerun the same 150s
+      PGR2 route and compare against
+      `docs/apple-silicon/benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`.
       Next Metal work should route Crimson gameplay and SC2 to real
       rendered visual canaries and resolve the front-fb fallback policy
       before revisiting M15.

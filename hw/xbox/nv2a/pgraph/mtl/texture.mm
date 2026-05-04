@@ -37,6 +37,7 @@
 #include "heap.h"
 
 #include <stdatomic.h>
+#include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,12 +71,13 @@ typedef struct {
     void                 *state;  /* id<MTLSamplerState> retained */
 } SamplerCacheEntry;
 
-#define MTL_TEX_CACHE_CAP     64
+#define MTL_TEX_CACHE_CAP     512
 #define MTL_SAMPLER_CACHE_CAP 256
 
 static TextureCacheEntry s_tex_cache[MTL_TEX_CACHE_CAP];
 static int               s_tex_cache_next_evict = 0;
 static int               s_tex_cache_size = 0;
+static int               s_tex_cache_limit = 0;
 
 static SamplerCacheEntry s_smp_cache[MTL_SAMPLER_CACHE_CAP];
 static int               s_smp_cache_size = 0;
@@ -110,8 +112,28 @@ static _Atomic uint64_t    s_upload_fence_value = 0;
 
 static _Atomic uint64_t s_uploads = 0;
 static _Atomic uint64_t s_upload_bytes = 0;
+static _Atomic uint64_t s_upload_us_total = 0;
 static _Atomic uint64_t s_cache_hits = 0;
 static _Atomic uint64_t s_cache_miss = 0;
+
+static inline int64_t mtl_now_us(void)
+{
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) {
+        mach_timebase_info(&tb);
+    }
+    __uint128_t ns = (__uint128_t)mach_absolute_time() * tb.numer / tb.denom;
+    return (int64_t)(ns / 1000);
+}
+
+static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
+                                      int64_t start_us)
+{
+    int64_t elapsed = mtl_now_us() - start_us;
+    if (elapsed > 0) {
+        atomic_fetch_add(counter, (uint64_t)elapsed);
+    }
+}
 
 /* -------- sampler cache -------- */
 
@@ -221,6 +243,31 @@ static void prewarm_sampler_cache(void)
 
 /* -------- texture cache -------- */
 
+static int texture_cache_limit(void)
+{
+    if (s_tex_cache_limit > 0) {
+        return s_tex_cache_limit;
+    }
+
+    int limit = 256;
+    const char *e = getenv("XEMU_METAL_TEX_CACHE_CAP");
+    if (e != NULL && e[0] != '\0') {
+        char *endp = NULL;
+        long parsed = strtol(e, &endp, 10);
+        if (endp != e && *endp == '\0') {
+            if (parsed < 16) {
+                parsed = 16;
+            } else if (parsed > MTL_TEX_CACHE_CAP) {
+                parsed = MTL_TEX_CACHE_CAP;
+            }
+            limit = (int)parsed;
+        }
+    }
+
+    s_tex_cache_limit = limit;
+    return limit;
+}
+
 static void release_tex_entry(TextureCacheEntry *e)
 {
     if (e->texture) {
@@ -247,7 +294,8 @@ static TextureCacheEntry *find_tex_entry(uint64_t vram_addr,
     if (vram_addr == 0) {
         return NULL;
     }
-    for (int i = 0; i < MTL_TEX_CACHE_CAP; i++) {
+    int limit = texture_cache_limit();
+    for (int i = 0; i < limit; i++) {
         TextureCacheEntry *e = &s_tex_cache[i];
         if (e->in_use &&
             e->vram_addr    == vram_addr &&
@@ -272,7 +320,8 @@ static TextureCacheEntry *insert_tex_entry(uint64_t vram_addr,
                                            void *texture)
 {
     /* Find a free slot first. */
-    for (int i = 0; i < MTL_TEX_CACHE_CAP; i++) {
+    int limit = texture_cache_limit();
+    for (int i = 0; i < limit; i++) {
         if (!s_tex_cache[i].in_use) {
             s_tex_cache[i].in_use       = true;
             s_tex_cache[i].vram_addr    = vram_addr;
@@ -283,15 +332,15 @@ static TextureCacheEntry *insert_tex_entry(uint64_t vram_addr,
             s_tex_cache[i].is_cubemap   = is_cubemap;
             s_tex_cache[i].levels       = levels;
             s_tex_cache[i].texture      = texture;
-            if (s_tex_cache_size < MTL_TEX_CACHE_CAP) {
+            if (s_tex_cache_size < limit) {
                 s_tex_cache_size++;
             }
             return &s_tex_cache[i];
         }
     }
     /* All slots in use — evict the next FIFO target. */
-    int idx = s_tex_cache_next_evict % MTL_TEX_CACHE_CAP;
-    s_tex_cache_next_evict = (s_tex_cache_next_evict + 1) % MTL_TEX_CACHE_CAP;
+    int idx = s_tex_cache_next_evict % limit;
+    s_tex_cache_next_evict = (s_tex_cache_next_evict + 1) % limit;
     release_tex_entry(&s_tex_cache[idx]);
     s_tex_cache[idx].in_use       = true;
     s_tex_cache[idx].vram_addr    = vram_addr;
@@ -401,6 +450,7 @@ bool pgraph_mtl_texture_init(void)
     }
     s_tex_cache_size = 0;
     s_tex_cache_next_evict = 0;
+    s_tex_cache_limit = 0;
     s_smp_cache_size = 0;
     s_upload_slot_idx = 0;
     s_upload_slot_off = 0;
@@ -409,6 +459,7 @@ bool pgraph_mtl_texture_init(void)
 
     atomic_store(&s_uploads, (uint64_t)0);
     atomic_store(&s_upload_bytes, (uint64_t)0);
+    atomic_store(&s_upload_us_total, (uint64_t)0);
     atomic_store(&s_cache_hits, (uint64_t)0);
     atomic_store(&s_cache_miss, (uint64_t)0);
     s_init = true;
@@ -420,7 +471,8 @@ void pgraph_mtl_texture_finalize(void)
     if (!s_init) {
         return;
     }
-    for (int i = 0; i < MTL_TEX_CACHE_CAP; i++) {
+    int limit = texture_cache_limit();
+    for (int i = 0; i < limit; i++) {
         release_tex_entry(&s_tex_cache[i]);
     }
     s_tex_cache_size = 0;
@@ -517,6 +569,7 @@ bool pgraph_mtl_texture_bind_slot(int stage,
     }
 
     /* Stage + blit-encode upload. */
+    int64_t upload_start_us = mtl_now_us();
     @autoreleasepool {
         id<MTLBuffer> stage_buf = nil;
         size_t stage_off = 0;
@@ -567,6 +620,7 @@ bool pgraph_mtl_texture_bind_slot(int stage,
 
     atomic_fetch_add(&s_uploads, 1);
     atomic_fetch_add(&s_upload_bytes, (uint64_t)size);
+    mtl_add_elapsed_us(&s_upload_us_total, upload_start_us);
     return true;
 }
 
@@ -586,7 +640,8 @@ void pgraph_mtl_texture_invalidate_addr(uint64_t vram_phys_addr)
     if (!s_init) {
         return;
     }
-    for (int i = 0; i < MTL_TEX_CACHE_CAP; i++) {
+    int limit = texture_cache_limit();
+    for (int i = 0; i < limit; i++) {
         TextureCacheEntry *e = &s_tex_cache[i];
         if (!e->in_use || e->vram_addr != vram_phys_addr) {
             continue;
@@ -616,7 +671,8 @@ void pgraph_mtl_texture_invalidate_range(uint64_t vram_phys_addr,
     if (end < vram_phys_addr) {
         end = UINT64_MAX;
     }
-    for (int i = 0; i < MTL_TEX_CACHE_CAP; i++) {
+    int limit = texture_cache_limit();
+    for (int i = 0; i < limit; i++) {
         TextureCacheEntry *e = &s_tex_cache[i];
         if (!e->in_use || e->vram_addr == 0) {
             continue;
@@ -735,6 +791,7 @@ bool pgraph_mtl_texture_bind_slot_full(int stage,
     }
 
     /* Stage all level data, then issue the blit. */
+    int64_t upload_start_us = mtl_now_us();
     @autoreleasepool {
         id<MTLTexture> dst = (__bridge id<MTLTexture>)dst_handle;
 
@@ -796,6 +853,7 @@ bool pgraph_mtl_texture_bind_slot_full(int stage,
         }
         atomic_fetch_add(&s_uploads, 1);
         atomic_fetch_add(&s_upload_bytes, (uint64_t)total_bytes);
+        mtl_add_elapsed_us(&s_upload_us_total, upload_start_us);
     }
 
     TextureCacheEntry *e = insert_tex_entry(vram_phys_addr,
@@ -805,6 +863,47 @@ bool pgraph_mtl_texture_bind_slot_full(int stage,
                                             is_cubemap, levels,
                                             dst_handle);
     s_stage_texture[stage] = e->texture;
+    return true;
+}
+
+bool pgraph_mtl_texture_bind_slot_cached_full(
+    int stage,
+    uint64_t vram_phys_addr,
+    uint64_t source_byte_length,
+    uint32_t mtl_pixel_format,
+    bool is_cubemap,
+    uint32_t levels,
+    uint32_t width,
+    uint32_t height,
+    const PgraphMtlSamplerDesc *sampler)
+{
+    if (!s_init || stage < 0 || stage >= MTL_TEX_MAX_STAGES ||
+        width == 0 || height == 0 || levels == 0) {
+        return false;
+    }
+
+    TextureCacheEntry *cached = find_tex_entry(vram_phys_addr,
+                                               source_byte_length,
+                                               width, height,
+                                               mtl_pixel_format,
+                                               is_cubemap, levels);
+    if (cached == NULL) {
+        return false;
+    }
+
+    void *smp_state = s_default_sampler;
+    if (sampler) {
+        smp_state = get_sampler(sampler);
+        if (smp_state == NULL) {
+            smp_state = s_default_sampler;
+        }
+    }
+    s_stage_sampler[stage] = smp_state;
+    s_stage_scale[stage] = 1.0f;
+    s_stage_external_surface[stage] = false;
+
+    atomic_fetch_add(&s_cache_hits, 1);
+    s_stage_texture[stage] = cached->texture;
     return true;
 }
 
@@ -853,6 +952,11 @@ uint64_t pgraph_mtl_texture_uploads_count(void)
 uint64_t pgraph_mtl_texture_upload_bytes(void)
 {
     return atomic_load(&s_upload_bytes);
+}
+
+extern "C" uint64_t pgraph_mtl_texture_upload_us_total(void)
+{
+    return atomic_load(&s_upload_us_total);
 }
 
 uint64_t pgraph_mtl_texture_cache_hits(void)

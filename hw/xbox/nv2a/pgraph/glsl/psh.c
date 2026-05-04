@@ -1144,6 +1144,10 @@ static MString* psh_convert(struct PixelShader *ps)
     mstring_append(vars, "vec4 ab;\n");
     mstring_append(vars, "vec4 cd;\n");
     mstring_append(vars, "vec4 mux_sum;\n");
+    mstring_append(vars, "float dot0 = 0.0;\n");
+    mstring_append(vars, "float dot1 = 0.0;\n");
+    mstring_append(vars, "float dot2 = 0.0;\n");
+    mstring_append(vars, "float dot3 = 0.0;\n");
 
     ps->code = mstring_new();
 
@@ -1298,7 +1302,7 @@ static MString* psh_convert(struct PixelShader *ps)
             assert(i >= 2);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_ST */\n");
             mstring_append_fmt(vars,
-               "float dot%d = dot(pT%d.xyz, %s(t%d));\n"
+               "dot%d = dot(pT%d.xyz, %s(t%d));\n"
                "vec2 dotST%d = vec2(dot%d, dot%d);\n",
                 i, i, dotmap_func, ps->input_tex[i], i, i-1, i);
 
@@ -1309,7 +1313,7 @@ static MString* psh_convert(struct PixelShader *ps)
         case PS_TEXTUREMODES_DOT_ZW:
             assert(i >= 2);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_ZW */\n");
-            mstring_append_fmt(vars, "float dot%d = dot(pT%d.xyz, %s(t%d));\n",
+            mstring_append_fmt(vars, "dot%d = dot(pT%d.xyz, %s(t%d));\n",
                 i, i, dotmap_func, ps->input_tex[i]);
             mstring_append_fmt(vars, "vec4 t%d = vec4(0.0);\n", i);
             // FIXME: mstring_append_fmt(vars, "gl_FragDepth = t%d.x;\n", i);
@@ -1317,7 +1321,7 @@ static MString* psh_convert(struct PixelShader *ps)
         case PS_TEXTUREMODES_DOT_RFLCT_DIFF:
             assert(i == 2);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_RFLCT_DIFF */\n");
-            mstring_append_fmt(vars, "float dot%d = dot(pT%d.xyz, %s(t%d));\n",
+            mstring_append_fmt(vars, "dot%d = dot(pT%d.xyz, %s(t%d));\n",
                 i, i, dotmap_func, ps->input_tex[i]);
             assert(ps->dot_map[i+1] < 8);
             mstring_append_fmt(vars, "float dot%d_n = dot(pT%d.xyz, %s(t%d));\n",
@@ -1336,7 +1340,7 @@ static MString* psh_convert(struct PixelShader *ps)
         case PS_TEXTUREMODES_DOT_RFLCT_SPEC:
             assert(i == 3);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_RFLCT_SPEC */\n");
-            mstring_append_fmt(vars, "float dot%d = dot(pT%d.xyz, %s(t%d));\n",
+            mstring_append_fmt(vars, "dot%d = dot(pT%d.xyz, %s(t%d));\n",
                 i, i, dotmap_func, ps->input_tex[i]);
             mstring_append_fmt(vars, "vec3 n_%d = vec3(dot%d, dot%d, dot%d);\n",
                 i, i-2, i-1, i);
@@ -1357,7 +1361,7 @@ static MString* psh_convert(struct PixelShader *ps)
             assert(i == 3);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_STR_3D */\n");
             mstring_append_fmt(vars,
-               "float dot%d = dot(pT%d.xyz, %s(t%d));\n"
+               "dot%d = dot(pT%d.xyz, %s(t%d));\n"
                "vec3 dotSTR%d = vec3(dot%d, dot%d, dot%d);\n",
                 i, i, dotmap_func, ps->input_tex[i],
                 i, i-2, i-1, i);
@@ -1370,7 +1374,7 @@ static MString* psh_convert(struct PixelShader *ps)
         case PS_TEXTUREMODES_DOT_STR_CUBE:
             assert(i == 3);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOT_STR_CUBE */\n");
-            mstring_append_fmt(vars, "float dot%d = dot(pT%d.xyz, %s(t%d));\n",
+            mstring_append_fmt(vars, "dot%d = dot(pT%d.xyz, %s(t%d));\n",
                 i, i, dotmap_func, ps->input_tex[i]);
             mstring_append_fmt(vars, "vec3 dotSTR%dCube = vec3(dot%d, dot%d, dot%d);\n",
                                i, i-2, i-1, i);
@@ -1403,7 +1407,7 @@ static MString* psh_convert(struct PixelShader *ps)
         case PS_TEXTUREMODES_DOTPRODUCT:
             assert(i == 1 || i == 2);
             mstring_append_fmt(vars, "/* PS_TEXTUREMODES_DOTPRODUCT */\n");
-            mstring_append_fmt(vars, "float dot%d = dot(pT%d.xyz, %s(t%d));\n",
+            mstring_append_fmt(vars, "dot%d = dot(pT%d.xyz, %s(t%d));\n",
                 i, i, dotmap_func, ps->input_tex[i]);
             mstring_append_fmt(vars, "vec4 t%d = vec4(0.0);\n", i);
             break;

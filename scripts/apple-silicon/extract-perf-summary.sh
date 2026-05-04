@@ -313,6 +313,14 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_PIPELINE_KEY_BUILT" ||
                    key == "METAL_PIPELINE_TRANSLATED_OK" ||
                    key == "METAL_PIPELINE_TRANSLATED_FAILED" ||
+                   key == "METAL_DISPATCH_US_TOTAL" ||
+                   key == "METAL_TEX_BIND_US_TOTAL" ||
+                   key == "METAL_DRAW_ENCODE_US_TOTAL" ||
+                   key == "METAL_DRAW_PASS_OPENS" ||
+                   key == "METAL_DRAW_PASS_COALESCED" ||
+                   key == "METAL_DRAW_PASS_FLUSHES" ||
+                   key == "METAL_OPEN_PASS_FLUSH_US_TOTAL" ||
+                   key == "METAL_TEX_UPLOAD_US_TOTAL" ||
                    key == "METAL_DRAW_TRANSLATED" ||
                    key == "METAL_PIPELINE_FALLBACKS" ||
                    key == "METAL_UNIFORM_PACK" ||
@@ -354,6 +362,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_SURFACE_RECREATE_SHAPE_MISMATCH" ||
                    key == "METAL_SURFACE_DOWNLOADS" ||
                    key == "METAL_SURFACE_DOWNLOAD_BYTES" ||
+                   key == "METAL_SURFACE_DOWNLOAD_US_TOTAL" ||
                    key == "INPUT_USB_POLLS" ||
                    key == "INPUT_BACKEND_UPDATES" ||
                    key == "INPUT_LAT_US_TOTAL") {
@@ -581,8 +590,17 @@ END {
     keys[167] = "METAL_SURFACE_VRAM_UPLOAD_BYTES"
     keys[168] = "METAL_SURFACE_DOWNLOADS"
     keys[169] = "METAL_SURFACE_DOWNLOAD_BYTES"
+    keys[170] = "METAL_DISPATCH_US_TOTAL"
+    keys[171] = "METAL_TEX_BIND_US_TOTAL"
+    keys[172] = "METAL_DRAW_ENCODE_US_TOTAL"
+    keys[173] = "METAL_DRAW_PASS_OPENS"
+    keys[174] = "METAL_DRAW_PASS_COALESCED"
+    keys[175] = "METAL_DRAW_PASS_FLUSHES"
+    keys[176] = "METAL_OPEN_PASS_FLUSH_US_TOTAL"
+    keys[177] = "METAL_TEX_UPLOAD_US_TOTAL"
+    keys[178] = "METAL_SURFACE_DOWNLOAD_US_TOTAL"
 
-    for (i = 1; i <= 169; i++) {
+    for (i = 1; i <= 178; i++) {
         printf("%s=%d\n", keys[i], counters[keys[i]])
     }
     # Per-interval-max counters: report the running max across intervals.

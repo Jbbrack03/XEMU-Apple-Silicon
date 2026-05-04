@@ -170,6 +170,21 @@ bool pgraph_mtl_texture_bind_slot_full(int stage,
                                        const PgraphMtlTextureLevel *per_level,
                                        const PgraphMtlSamplerDesc *sampler);
 
+/* Fast path for already-uploaded textures. This binds a matching cache
+ * entry and sampler without requiring the caller to decode CPU-side
+ * texture bytes first. Returns false if the cache has no matching
+ * resident texture. */
+bool pgraph_mtl_texture_bind_slot_cached_full(
+    int stage,
+    uint64_t vram_phys_addr,
+    uint64_t source_byte_length,
+    uint32_t mtl_pixel_format,
+    bool is_cubemap,
+    uint32_t levels,
+    uint32_t width,
+    uint32_t height,
+    const PgraphMtlSamplerDesc *sampler);
+
 bool pgraph_mtl_texture_bind_slot_external(int stage,
                                            void *texture,
                                            float scale,

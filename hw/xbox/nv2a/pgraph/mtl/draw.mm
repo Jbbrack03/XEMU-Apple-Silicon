@@ -34,6 +34,7 @@
 #include "hw/xbox/nv2a/nv2a_regs.h"
 
 #include <stdatomic.h>
+#include <mach/mach_time.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -94,6 +95,27 @@ static _Atomic(uint64_t)   s_draw_native_tri_depth_count = 0;
 static _Atomic(uint64_t)   s_draw_native_quad_count = 0;
 static _Atomic(uint64_t)   s_draw_translated_count = 0;
 static _Atomic(uint64_t)   s_draw_pipeline_fallback_count = 0;
+static _Atomic(uint64_t)   s_draw_encode_us_total = 0;
+static _Atomic(uint64_t)   s_open_pass_flush_us_total = 0;
+
+static inline int64_t mtl_now_us(void)
+{
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) {
+        mach_timebase_info(&tb);
+    }
+    __uint128_t ns = (__uint128_t)mach_absolute_time() * tb.numer / tb.denom;
+    return (int64_t)(ns / 1000);
+}
+
+static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
+                                      int64_t start_us)
+{
+    int64_t elapsed = mtl_now_us() - start_us;
+    if (elapsed > 0) {
+        atomic_fetch_add(counter, (uint64_t)elapsed);
+    }
+}
 
 typedef struct MtlDepthStencilCacheEntry {
     uint32_t control_0;
@@ -409,6 +431,11 @@ bool pgraph_mtl_draw_init(void)
     atomic_store(&s_draw_native_quad_count, (uint64_t)0);
     atomic_store(&s_draw_translated_count, (uint64_t)0);
     atomic_store(&s_draw_pipeline_fallback_count, (uint64_t)0);
+    atomic_store(&s_draw_encode_us_total, (uint64_t)0);
+    atomic_store(&s_open_pass_flush_us_total, (uint64_t)0);
+    atomic_store(&s_open_pass_opens, (uint64_t)0);
+    atomic_store(&s_open_pass_coalesced, (uint64_t)0);
+    atomic_store(&s_open_pass_flushes, (uint64_t)0);
     s_depth_stencil_cache_count = 0;
     s_initialized = true;
     return true;
@@ -673,11 +700,13 @@ open_pass_ensure(void *color_tex, void *depth_tex,
  * compositor reads the surface texture for present. */
 extern "C" void pgraph_mtl_draw_flush_open_pass(void)
 {
+    int64_t start_us = mtl_now_us();
     if (s_open_enc != nil || s_open_cmd != nil ||
         s_open_buffer_frame_active) {
         atomic_fetch_add(&s_open_pass_flushes, 1);
     }
     open_pass_close_locked();
+    mtl_add_elapsed_us(&s_open_pass_flush_us_total, start_us);
 }
 
 /* -------- non-indexed (M3) -------- */
@@ -909,6 +938,7 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
                                 void *const stage_textures[4],
                                 void *const stage_samplers[4])
 {
+    int64_t start_us = mtl_now_us();
     if (!s_initialized || pipeline_state == NULL ||
         vertex_count == 0 || attr_streams == NULL || n_attr_streams == 0) {
         return;
@@ -1074,6 +1104,7 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
         atomic_fetch_add(&s_draw_indexed_count, 1);
     }
     atomic_fetch_add(&s_draw_translated_count, 1);
+    mtl_add_elapsed_us(&s_draw_encode_us_total, start_us);
 }
 
 uint64_t pgraph_mtl_draw_translated_count(void)
@@ -1104,4 +1135,12 @@ extern "C" uint64_t pgraph_mtl_draw_pass_coalesced_count(void)
 extern "C" uint64_t pgraph_mtl_draw_pass_flushes_count(void)
 {
     return atomic_load(&s_open_pass_flushes);
+}
+extern "C" uint64_t pgraph_mtl_draw_encode_us_total(void)
+{
+    return atomic_load(&s_draw_encode_us_total);
+}
+extern "C" uint64_t pgraph_mtl_draw_open_pass_flush_us_total(void)
+{
+    return atomic_load(&s_open_pass_flush_us_total);
 }

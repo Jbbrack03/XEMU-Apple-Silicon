@@ -11,7 +11,14 @@ but its current screenshot lands on a black transition/loading frame
 and is not a visual canary. Added diagnostics
 `XEMU_METAL_DISABLE_SURFACE_TEX_ADDRS=1` and `metal_tex_oob`;
 front-fb fallback docs now reflect that it publishes the selected
-render-target binding. Existing diagnostics/counters from 2026-05-03
+render-target binding. The 2026-05-04 PGR2 attribution pass also added
+Metal CPU wall-time counters:
+`METAL_DISPATCH_US_TOTAL`, `METAL_TEX_BIND_US_TOTAL`,
+`METAL_DRAW_ENCODE_US_TOTAL`, `METAL_DRAW_PASS_OPENS`,
+`METAL_DRAW_PASS_COALESCED`, `METAL_DRAW_PASS_FLUSHES`,
+`METAL_OPEN_PASS_FLUSH_US_TOTAL`, `METAL_TEX_UPLOAD_US_TOTAL`, and
+`METAL_SURFACE_DOWNLOAD_US_TOTAL`; these are parsed by
+`extract-perf-summary.sh`. Existing diagnostics/counters from 2026-05-03
 remain available:
 `XEMU_METAL_DIAG_CLEAR=1`, `XEMU_METAL_SCREENSHOT_SOURCE=vram:0xADDR`,
 `METAL_FRONT_FB_PUBLISHES`, `METAL_SURFACE_CACHE_SIZE`,

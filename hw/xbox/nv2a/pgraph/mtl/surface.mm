@@ -30,6 +30,7 @@
 #include "heap.h"
 
 #include <stdatomic.h>
+#include <mach/mach_time.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -270,6 +271,26 @@ static _Atomic(uint64_t) s_vram_upload_bytes    = 0;
 /* M5.10 (2026-05-03): VRAM-coherent surface download (GPU → VRAM). */
 static _Atomic(uint64_t) s_surface_downloads    = 0;
 static _Atomic(uint64_t) s_surface_download_bytes = 0;
+static _Atomic(uint64_t) s_surface_download_us_total = 0;
+
+static inline int64_t mtl_now_us(void)
+{
+    static mach_timebase_info_data_t tb;
+    if (tb.denom == 0) {
+        mach_timebase_info(&tb);
+    }
+    __uint128_t ns = (__uint128_t)mach_absolute_time() * tb.numer / tb.denom;
+    return (int64_t)(ns / 1000);
+}
+
+static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
+                                      int64_t start_us)
+{
+    int64_t elapsed = mtl_now_us() - start_us;
+    if (elapsed > 0) {
+        atomic_fetch_add(counter, (uint64_t)elapsed);
+    }
+}
 /* 2026-05-03 magenta-RT diagnostic: count cache entries destroyed +
  * recreated due to shape mismatch on a same-vram_addr rebind. */
 static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
@@ -1000,6 +1021,7 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
 static bool download_surface_to_vram(MtlSurfaceBinding *b,
                                      uint8_t *vram_ptr_base)
 {
+    int64_t download_start_us = mtl_now_us();
     if (vram_ptr_base == NULL || b == NULL || b->texture == NULL) {
         return false;
     }
@@ -1120,6 +1142,7 @@ static bool download_surface_to_vram(MtlSurfaceBinding *b,
         }
         atomic_fetch_add(&s_surface_downloads, 1);
         atomic_fetch_add(&s_surface_download_bytes, (uint64_t)copy_size);
+        mtl_add_elapsed_us(&s_surface_download_us_total, download_start_us);
         succeeded = true;
     }
 
@@ -1179,6 +1202,7 @@ bool pgraph_mtl_surface_init(void)
     atomic_store(&s_vram_upload_bytes, (uint64_t)0);
     atomic_store(&s_surface_downloads, (uint64_t)0);
     atomic_store(&s_surface_download_bytes, (uint64_t)0);
+    atomic_store(&s_surface_download_us_total, (uint64_t)0);
 
     s_initialized = true;
     return true;
@@ -2416,6 +2440,11 @@ uint64_t pgraph_mtl_surface_downloads(void)
 uint64_t pgraph_mtl_surface_download_bytes(void)
 {
     return atomic_load(&s_surface_download_bytes);
+}
+
+extern "C" uint64_t pgraph_mtl_surface_download_us_total(void)
+{
+    return atomic_load(&s_surface_download_us_total);
 }
 
 /* Compute the effective host-space rectangle for a given guest-space

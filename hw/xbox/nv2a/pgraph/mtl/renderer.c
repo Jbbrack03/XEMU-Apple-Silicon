@@ -28,6 +28,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
+#include "qemu/timer.h"
 #include "hw/hw.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "ui/xemu-settings.h"
@@ -397,10 +398,21 @@ static bool mtl_use_translated_pipeline(void)
 static _Atomic uint64_t s_pipeline_key_built     = 0;
 static _Atomic uint64_t s_pipeline_translated_ok = 0;
 static _Atomic uint64_t s_pipeline_translated_fb = 0;
+static _Atomic uint64_t s_dispatch_us_total      = 0;
+static _Atomic uint64_t s_texture_bind_us_total  = 0;
 /* M8: counts draws skipped because the translated-pipeline build was
  * still in flight. Independent of s_pipeline_translated_fb (which
  * counts permanent build failures). */
 static _Atomic uint64_t s_draws_skipped_pending  = 0;
+
+static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
+                                      int64_t start_us)
+{
+    int64_t elapsed = qemu_clock_get_us(QEMU_CLOCK_REALTIME) - start_us;
+    if (elapsed > 0) {
+        atomic_fetch_add(counter, (uint64_t)elapsed);
+    }
+}
 
 /* M5.9-followup-B (2026-05-03): CPU-write access callback dispatch.
  *
@@ -1292,6 +1304,7 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     if (streams[NV2A_VERTEX_ATTR_POSITION].data == NULL) {
         return;
     }
+    int64_t dispatch_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
     uint32_t variant = (native_tri || native_quad)
                            ? MTL_DRAW_VARIANT_NATIVE_DEPTH
@@ -1317,7 +1330,9 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     bool have_translated_key = false;
     if (!mtl_force_passthrough()) {
         for (int t = 0; t < NV2A_MAX_TEXTURES; t++) {
+            int64_t bind_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
             (void)pgraph_mtl_texture_bind_from_pg(pg, t);
+            mtl_add_elapsed_us(&s_texture_bind_us_total, bind_start_us);
         }
         PgraphMtlPipelineKey key;
         if (pgraph_mtl_build_pipeline_key(d, color_fmt, depth_fmt,
@@ -1345,6 +1360,7 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         atomic_fetch_add(&s_draws_skipped_pending, 1);
         pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
                                       saved_swizzle);
+        mtl_add_elapsed_us(&s_dispatch_us_total, dispatch_start_us);
         return;
     }
 
@@ -1651,6 +1667,7 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
      * attribute. */
     pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
                                   saved_swizzle);
+    mtl_add_elapsed_us(&s_dispatch_us_total, dispatch_start_us);
 }
 
 static void pgraph_mtl_flush_draw(NV2AState *d)
@@ -2210,6 +2227,14 @@ uint64_t pgraph_mtl_pipeline_translated_ok_count(void)
 uint64_t pgraph_mtl_pipeline_translated_failed_count(void)
 {
     return atomic_load(&s_pipeline_translated_fb);
+}
+uint64_t pgraph_mtl_dispatch_us_total(void)
+{
+    return atomic_load(&s_dispatch_us_total);
+}
+uint64_t pgraph_mtl_texture_bind_us_total(void)
+{
+    return atomic_load(&s_texture_bind_us_total);
 }
 
 /* M8 counter — draws skipped because the translated pipeline was still

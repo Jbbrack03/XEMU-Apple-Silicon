@@ -2,14 +2,19 @@
 
 Last updated: 2026-05-04 (Metal boot/flubber + PGR2/Rainbow follow-up
 added in
-`benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`. GL
+`benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`; PGR2
+texture-bind attribution and early-cache fast-path handoff added in
+`benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`. GL
 renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` remains the
 production configuration meeting the user's stated 30/60 FPS at 1080p
 goals. Metal visual canaries: PGR2 PASS, Rainbow Six 3 loading screen
-PASS, Xbox boot/flubber PASS. Crimson gameplay automation completes
-without aborting, but the current screenshot lands on black
-transition/loading output and is not yet a visual canary. M15 remains
-blocked on the broader Metal-vs-GL gameplay/visual-diff gate.
+PASS, Xbox boot/flubber PASS. Metal PGR2 shader fallbacks are now zero,
+but the 150s gameplay run still averaged 11.21 post-load FPS before the
+final early-cache fast-path rerun; texture binding was the measured CPU
+bottleneck. Crimson gameplay automation completes without aborting, but
+the current screenshot lands on black transition/loading output and is
+not yet a visual canary. M15 remains blocked on the broader
+Metal-vs-GL gameplay/visual-diff gate.
 Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
 `INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
 `XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
@@ -125,6 +130,7 @@ Known emulator files:
 | M5.11-R6 | Surface/RTT regression canary | Metal | Rainbow Six 3 loading screen | frame 600 screenshot | PASS | `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md` |
 | M5.12-BOOT | Front-face + cubemap-border canary | Metal | Xbox boot/flubber animation | frame 300 screenshot | PASS | `benchmark-runs/20260504-092824-crimson-skies`, `benchmark-runs/visual-checks/boot-post-oob-f300.png` |
 | M5.12-CS-STAB | Texture-DMA OOB + invalid-stage shader hardening | Metal | Crimson Skies gameplay route | frame 1800 screenshot + 70s run | STABILITY PASS / VISUAL PENDING | `benchmark-runs/20260504-092403-crimson-skies`; screenshot lands on black transition/loading output |
+| M5.13-PGR2-TEX | Texture dirty semantics + shader-dot fix + Metal CPU wall counters | Metal | PGR2 gameplay route | 150s | ATTRIBUTED: shader fallbacks 0, texture bind CPU bottleneck | `benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`, `benchmark-runs/20260504-132806-pgr2` |
 
 
 ## Retail Gameplay Targets

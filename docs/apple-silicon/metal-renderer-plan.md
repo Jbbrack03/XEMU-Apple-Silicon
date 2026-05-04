@@ -1,13 +1,18 @@
 # Native Metal Renderer — Implementation Plan
 
 Last updated: 2026-05-04 (Metal MSAA store/resolve correctness
-follow-up. PGR2, Rainbow Six 3, Halo CE menu, and Xbox boot/flubber
-now pass useful MSAA4 visual canaries. The old white/magenta
-front-buffer failure is closed, and the MSAA4 black-frame regression
-is fixed by StoreAndMultisampleResolve plus stored depth/stencil
-MSAA attachments. M15 default-on stays BLOCKED until the broader
-Metal-vs-GL visual-diff/gameplay gate, front-fb fallback policy, and
-Crimson/SC2 visual routes are resolved.)
+follow-up plus PGR2 texture-bind attribution. PGR2, Rainbow Six 3,
+Halo CE menu, and Xbox boot/flubber now pass useful MSAA4 visual
+canaries. The old white/magenta front-buffer failure is closed, and
+the MSAA4 black-frame regression is fixed by
+StoreAndMultisampleResolve plus stored depth/stencil MSAA attachments.
+PGR2 no longer hits Metal shader translation failures or pipeline
+fallbacks after the shared GLSL dot-intermediate fix. The remaining
+measured Metal PGR2 gameplay bottleneck before the final fast-path
+rerun is CPU time in texture binding; Metal now has CPU wall-time
+counters and an early cached-texture bind path. M15 default-on stays
+BLOCKED until the broader Metal-vs-GL visual-diff/gameplay gate,
+front-fb fallback policy, and Crimson/SC2 visual routes are resolved.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon

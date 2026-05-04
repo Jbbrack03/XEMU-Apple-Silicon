@@ -44,6 +44,16 @@ static uint64_t s_baseline_tex_cache_misses;
 static uint64_t s_baseline_pipeline_key_built;
 static uint64_t s_baseline_pipeline_translated_ok;
 static uint64_t s_baseline_pipeline_translated_failed;
+/* 2026-05-04 — CPU wall-time counters for Metal hot paths. */
+static uint64_t s_baseline_dispatch_us_total;
+static uint64_t s_baseline_texture_bind_us_total;
+static uint64_t s_baseline_draw_encode_us_total;
+static uint64_t s_baseline_draw_pass_opens;
+static uint64_t s_baseline_draw_pass_coalesced;
+static uint64_t s_baseline_draw_pass_flushes;
+static uint64_t s_baseline_open_pass_flush_us_total;
+static uint64_t s_baseline_tex_upload_us_total;
+static uint64_t s_baseline_surface_download_us_total;
 /* M7.1 — translated-pipeline encode + uniform staging + fallback. */
 static uint64_t s_baseline_draw_translated;
 static uint64_t s_baseline_pipeline_fallbacks;
@@ -176,6 +186,26 @@ __attribute__((weak)) uint64_t pgraph_mtl_pipeline_translated_ok_count(void)
     return 0;
 }
 __attribute__((weak)) uint64_t pgraph_mtl_pipeline_translated_failed_count(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_dispatch_us_total(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_texture_bind_us_total(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_draw_encode_us_total(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_draw_open_pass_flush_us_total(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_texture_upload_us_total(void)
 {
     return 0;
 }
@@ -405,6 +435,10 @@ __attribute__((weak)) uint64_t pgraph_mtl_surface_download_bytes(void)
 {
     return 0;
 }
+__attribute__((weak)) uint64_t pgraph_mtl_surface_download_us_total(void)
+{
+    return 0;
+}
 
 /* 2026-05-03 magenta-RT diagnostic — cache shape-mismatch recreate. */
 __attribute__((weak)) uint64_t
@@ -448,6 +482,14 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t pkey_built       = pgraph_mtl_pipeline_key_built_count();
     uint64_t pkey_xlate_ok    = pgraph_mtl_pipeline_translated_ok_count();
     uint64_t pkey_xlate_fail  = pgraph_mtl_pipeline_translated_failed_count();
+    uint64_t dispatch_us      = pgraph_mtl_dispatch_us_total();
+    uint64_t tex_bind_us      = pgraph_mtl_texture_bind_us_total();
+    uint64_t draw_encode_us   = pgraph_mtl_draw_encode_us_total();
+    uint64_t pass_opens       = pgraph_mtl_draw_pass_opens_count();
+    uint64_t pass_coalesced   = pgraph_mtl_draw_pass_coalesced_count();
+    uint64_t pass_flushes     = pgraph_mtl_draw_pass_flushes_count();
+    uint64_t pass_flush_us    = pgraph_mtl_draw_open_pass_flush_us_total();
+    uint64_t tex_upload_us    = pgraph_mtl_texture_upload_us_total();
     uint64_t draw_translated  = pgraph_mtl_draw_translated_count();
     uint64_t pipe_fallback    = pgraph_mtl_draw_pipeline_fallback_count();
     uint64_t ubo_pack         = pgraph_mtl_uniform_pack_count();
@@ -498,6 +540,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     /* M5.10 — VRAM-coherent surface download counters. */
     uint64_t surface_downloads_total      = pgraph_mtl_surface_downloads();
     uint64_t surface_download_bytes_total = pgraph_mtl_surface_download_bytes();
+    uint64_t surface_download_us_total =
+        pgraph_mtl_surface_download_us_total();
 
     uint64_t draw_delta       = draw_total       - s_baseline_draw;
     uint64_t indexed_delta    = draw_indexed     - s_baseline_draw_indexed;
@@ -522,6 +566,22 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                     s_baseline_pipeline_translated_ok;
     uint64_t pkey_xlate_fail_delta = pkey_xlate_fail -
                                      s_baseline_pipeline_translated_failed;
+    uint64_t dispatch_us_delta = dispatch_us -
+                                 s_baseline_dispatch_us_total;
+    uint64_t tex_bind_us_delta = tex_bind_us -
+                                 s_baseline_texture_bind_us_total;
+    uint64_t draw_encode_us_delta = draw_encode_us -
+                                    s_baseline_draw_encode_us_total;
+    uint64_t pass_opens_delta = pass_opens -
+                                s_baseline_draw_pass_opens;
+    uint64_t pass_coalesced_delta = pass_coalesced -
+                                    s_baseline_draw_pass_coalesced;
+    uint64_t pass_flushes_delta = pass_flushes -
+                                  s_baseline_draw_pass_flushes;
+    uint64_t pass_flush_us_delta = pass_flush_us -
+                                   s_baseline_open_pass_flush_us_total;
+    uint64_t tex_upload_us_delta = tex_upload_us -
+                                   s_baseline_tex_upload_us_total;
     uint64_t draw_xlated_delta    = draw_translated -
                                     s_baseline_draw_translated;
     uint64_t pipe_fallback_delta  = pipe_fallback   -
@@ -616,6 +676,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                             s_baseline_surface_downloads;
     uint64_t surface_download_bytes_delta = surface_download_bytes_total -
                                             s_baseline_surface_download_bytes;
+    uint64_t surface_download_us_delta = surface_download_us_total -
+                                         s_baseline_surface_download_us_total;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -636,6 +698,14 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_pipeline_key_built       = pkey_built;
     s_baseline_pipeline_translated_ok   = pkey_xlate_ok;
     s_baseline_pipeline_translated_failed = pkey_xlate_fail;
+    s_baseline_dispatch_us_total        = dispatch_us;
+    s_baseline_texture_bind_us_total    = tex_bind_us;
+    s_baseline_draw_encode_us_total     = draw_encode_us;
+    s_baseline_draw_pass_opens          = pass_opens;
+    s_baseline_draw_pass_coalesced      = pass_coalesced;
+    s_baseline_draw_pass_flushes        = pass_flushes;
+    s_baseline_open_pass_flush_us_total = pass_flush_us;
+    s_baseline_tex_upload_us_total      = tex_upload_us;
     s_baseline_draw_translated          = draw_translated;
     s_baseline_pipeline_fallbacks       = pipe_fallback;
     s_baseline_uniform_pack             = ubo_pack;
@@ -671,6 +741,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_recreate_shape_mismatch  = recreate_mismatch;
     s_baseline_surface_downloads        = surface_downloads_total;
     s_baseline_surface_download_bytes   = surface_download_bytes_total;
+    s_baseline_surface_download_us_total = surface_download_us_total;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -683,6 +754,11 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            tex_hits_delta | tex_miss_delta |
                            pkey_built_delta | pkey_xlate_ok_delta |
                            pkey_xlate_fail_delta |
+                           dispatch_us_delta | tex_bind_us_delta |
+                           draw_encode_us_delta |
+                           pass_opens_delta | pass_coalesced_delta |
+                           pass_flushes_delta | pass_flush_us_delta |
+                           tex_upload_us_delta |
                            draw_xlated_delta | pipe_fallback_delta |
                            ubo_pack_delta | ubo_bytes_delta |
                            cc_queued_delta | cc_completed_delta |
@@ -704,7 +780,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            vram_upload_bytes_delta |
                            recreate_mismatch_delta |
                            surface_downloads_delta |
-                           surface_download_bytes_delta;
+                           surface_download_bytes_delta |
+                           surface_download_us_delta;
     if (total_delta == 0) {
         return;
     }
@@ -723,6 +800,14 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_PIPELINE_KEY_BUILT=%llu"
             " METAL_PIPELINE_TRANSLATED_OK=%llu"
             " METAL_PIPELINE_TRANSLATED_FAILED=%llu"
+            " METAL_DISPATCH_US_TOTAL=%llu"
+            " METAL_TEX_BIND_US_TOTAL=%llu"
+            " METAL_DRAW_ENCODE_US_TOTAL=%llu"
+            " METAL_DRAW_PASS_OPENS=%llu"
+            " METAL_DRAW_PASS_COALESCED=%llu"
+            " METAL_DRAW_PASS_FLUSHES=%llu"
+            " METAL_OPEN_PASS_FLUSH_US_TOTAL=%llu"
+            " METAL_TEX_UPLOAD_US_TOTAL=%llu"
             " METAL_DRAW_TRANSLATED=%llu"
             " METAL_PIPELINE_FALLBACKS=%llu"
             " METAL_UNIFORM_PACK=%llu"
@@ -763,7 +848,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_SURFACE_VRAM_UPLOAD_BYTES=%llu"
             " METAL_SURFACE_RECREATE_SHAPE_MISMATCH=%llu"
             " METAL_SURFACE_DOWNLOADS=%llu"
-            " METAL_SURFACE_DOWNLOAD_BYTES=%llu",
+            " METAL_SURFACE_DOWNLOAD_BYTES=%llu"
+            " METAL_SURFACE_DOWNLOAD_US_TOTAL=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -783,6 +869,14 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)pkey_built_delta,
             (unsigned long long)pkey_xlate_ok_delta,
             (unsigned long long)pkey_xlate_fail_delta,
+            (unsigned long long)dispatch_us_delta,
+            (unsigned long long)tex_bind_us_delta,
+            (unsigned long long)draw_encode_us_delta,
+            (unsigned long long)pass_opens_delta,
+            (unsigned long long)pass_coalesced_delta,
+            (unsigned long long)pass_flushes_delta,
+            (unsigned long long)pass_flush_us_delta,
+            (unsigned long long)tex_upload_us_delta,
             (unsigned long long)draw_xlated_delta,
             (unsigned long long)pipe_fallback_delta,
             (unsigned long long)ubo_pack_delta,
@@ -823,5 +917,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)vram_upload_bytes_delta,
             (unsigned long long)recreate_mismatch_delta,
             (unsigned long long)surface_downloads_delta,
-            (unsigned long long)surface_download_bytes_delta);
+            (unsigned long long)surface_download_bytes_delta,
+            (unsigned long long)surface_download_us_delta);
 }

@@ -120,6 +120,72 @@ static bool texture_range_dirty(NV2AState *d, hwaddr addr, size_t size)
                                               DIRTY_MEMORY_NV2A_TEX);
 }
 
+static bool mtl_try_get_texture_palette_phys_addr_length(PGRAPHState *pg,
+                                                         int texture_idx,
+                                                         hwaddr *phys_addr,
+                                                         size_t *length)
+{
+    if (pg == NULL || phys_addr == NULL || length == NULL) {
+        return false;
+    }
+
+    NV2AState *d = container_of(pg, NV2AState, pgraph);
+    uint32_t palette = pgraph_reg_r(pg, NV_PGRAPH_TEXPALETTE0 + texture_idx * 4);
+    unsigned int palette_length_index =
+        GET_MASK(palette, NV_PGRAPH_TEXPALETTE0_LENGTH);
+    unsigned int palette_offset = palette & NV_PGRAPH_TEXPALETTE0_OFFSET;
+
+    unsigned int palette_entries = 0;
+    switch (palette_length_index) {
+    case NV_PGRAPH_TEXPALETTE0_LENGTH_256:
+        palette_entries = 256;
+        break;
+    case NV_PGRAPH_TEXPALETTE0_LENGTH_128:
+        palette_entries = 128;
+        break;
+    case NV_PGRAPH_TEXPALETTE0_LENGTH_64:
+        palette_entries = 64;
+        break;
+    case NV_PGRAPH_TEXPALETTE0_LENGTH_32:
+        palette_entries = 32;
+        break;
+    default:
+        return false;
+    }
+
+    hwaddr palette_dma_len = 0;
+    uint8_t *palette_data = NULL;
+    bool palette_dma_select =
+        GET_MASK(palette, NV_PGRAPH_TEXPALETTE0_CONTEXT_DMA);
+    if (palette_dma_select) {
+        palette_data = (uint8_t *)nv_dma_map(d, pg->dma_b, &palette_dma_len);
+    } else {
+        palette_data = (uint8_t *)nv_dma_map(d, pg->dma_a, &palette_dma_len);
+    }
+
+    size_t byte_length = (size_t)palette_entries * 4;
+    if (palette_data == NULL || palette_offset >= palette_dma_len ||
+        byte_length > (size_t)(palette_dma_len - palette_offset)) {
+        return false;
+    }
+
+    uintptr_t palette_addr = (uintptr_t)(palette_data + palette_offset);
+    uintptr_t vram_addr = (uintptr_t)d->vram_ptr;
+    hwaddr vram_size = memory_region_size(d->vram);
+    if (palette_addr > UINTPTR_MAX - byte_length ||
+        vram_addr > UINTPTR_MAX - (uintptr_t)vram_size) {
+        return false;
+    }
+    if (palette_addr < vram_addr ||
+        palette_addr + byte_length > vram_addr + vram_size) {
+        return false;
+    }
+
+    *phys_addr = (hwaddr)(palette_addr - vram_addr);
+    *length = byte_length;
+    return true;
+}
+
 static bool mtl_disable_surface_texture_fastpath(void)
 {
     const char *e = getenv("XEMU_METAL_DISABLE_SURFACE_TEX");
@@ -854,6 +920,38 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
     return true;
 }
 
+static void build_sampler_desc_from_pg(PGRAPHState *pg, int stage,
+                                       unsigned int levels,
+                                       PgraphMtlSamplerDesc *sd)
+{
+    uint32_t filter = pgraph_reg_r(pg, NV_PGRAPH_TEXFILTER0 + stage * 4);
+    uint32_t address = pgraph_reg_r(pg, NV_PGRAPH_TEXADDRESS0 + stage * 4);
+    uint32_t border_argb =
+        pgraph_reg_r(pg, NV_PGRAPH_BORDERCOLOR0 + stage * 4);
+
+    memset(sd, 0, sizeof(*sd));
+
+    unsigned int min_f = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIN);
+    unsigned int mag_f = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MAG);
+    sd->min_filter = translate_min_filter(min_f);
+    sd->mag_filter = translate_min_filter(mag_f);
+    sd->mip_filter = translate_mip_filter(min_f, levels == 1);
+
+    sd->addr_u =
+        translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRU));
+    sd->addr_v =
+        translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRV));
+    sd->addr_w =
+        translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRP));
+
+    sd->max_anisotropy = 1;
+    sd->lod_bias = 0.0f;
+    sd->min_lod = 0.0f;
+    sd->max_lod = (levels > 1) ? (float)(levels - 1) : 0.0f;
+    sd->border_color = 0; /* TransparentBlack - custom border deferred. */
+    (void)border_argb;
+}
+
 bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
 {
     if (pg == NULL || stage < 0 || stage >= NV2A_MAX_TEXTURES) {
@@ -917,18 +1015,17 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     size_t palette_size = 0;
     hwaddr palette_offset = 0;
     if (is_indexed) {
-        palette_offset =
-            pgraph_get_texture_palette_phys_addr_length(pg, stage,
-                                                        &palette_size);
-        if (palette_size == 0) {
+        if (!mtl_try_get_texture_palette_phys_addr_length(
+                pg, stage, &palette_offset, &palette_size) ||
+            palette_size == 0) {
             pgraph_mtl_texture_unbind_slot(stage);
             return false;
         }
         palette_data = vram + palette_offset;
-        /* The current Metal texture cache key does not include the palette
-         * address/content hash. Refresh paletted uploads on bind so palette
-         * animation or reuse cannot silently hold stale colors. */
-        pgraph_mtl_texture_invalidate_addr((uint64_t)offset);
+        /* Palette changes are handled by the dirty-range probe below. Do
+         * not invalidate every paletted bind: PGR2 binds thousands of
+         * indexed textures per interval, and unconditional invalidation
+         * turns cache hits into a multi-GB upload storm. */
     }
 
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
@@ -1026,21 +1123,36 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
         }
     }
 
+    PgraphMtlSamplerDesc sd;
+    build_sampler_desc_from_pg(pg, stage, levels, &sd);
+
+    bool texture_possibly_dirty = false;
     if (!has_compatible_surface || self_sample) {
         pgraph_mtl_surface_download_in_range_if_dirty(
             (uint32_t)offset, (uint32_t)texture_length, d->vram_ptr,
             mtl_after_texture_surface_download, d);
 
-        bool possibly_dirty = pg->texture_dirty[stage] ||
-            texture_range_dirty(d, offset, texture_length);
+        /* `pg->texture_dirty[stage]` means the bind state/registers changed,
+         * not that guest VRAM changed. The cache key and sampler descriptor
+         * cover state; only QEMU's VRAM dirty bits should force re-upload. */
+        bool possibly_dirty = texture_range_dirty(d, offset, texture_length);
         if (palette_size != 0) {
             possibly_dirty |= texture_range_dirty(d, palette_offset,
                                                   palette_size);
         }
+        texture_possibly_dirty = possibly_dirty;
         if (possibly_dirty) {
             pgraph_mtl_texture_invalidate_range((uint64_t)offset,
                                                 (uint64_t)texture_length);
         }
+    }
+
+    if (!has_compatible_surface && !texture_possibly_dirty &&
+        pgraph_mtl_texture_bind_slot_cached_full(
+            stage, (uint64_t)offset, (uint64_t)texture_length,
+            mtl_fmt, s.cubemap, levels, s.width, s.height, &sd)) {
+        pg->texture_dirty[stage] = false;
+        return true;
     }
 
     PgraphMtlTextureLevel decoded[MTL_TEX_MAX_FACES * MTL_TEX_MAX_LEVELS];
@@ -1067,31 +1179,6 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
         pgraph_mtl_texture_unbind_slot(stage);
         return false;
     }
-
-    /* Build the sampler descriptor from NV2A regs. */
-    uint32_t filter   = pgraph_reg_r(pg, NV_PGRAPH_TEXFILTER0 + stage * 4);
-    uint32_t address  = pgraph_reg_r(pg, NV_PGRAPH_TEXADDRESS0 + stage * 4);
-    uint32_t border_argb = pgraph_reg_r(pg, NV_PGRAPH_BORDERCOLOR0 + stage * 4);
-
-    PgraphMtlSamplerDesc sd;
-    memset(&sd, 0, sizeof(sd));
-
-    unsigned int min_f = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIN);
-    unsigned int mag_f = GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MAG);
-    sd.min_filter = translate_min_filter(min_f);
-    sd.mag_filter = translate_min_filter(mag_f);
-    sd.mip_filter = translate_mip_filter(min_f, levels == 1);
-
-    sd.addr_u = translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRU));
-    sd.addr_v = translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRV));
-    sd.addr_w = translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRP));
-
-    sd.max_anisotropy = 1;
-    sd.lod_bias = 0.0f;
-    sd.min_lod = 0.0f;
-    sd.max_lod = (levels > 1) ? (float)(levels - 1) : 0.0f;
-    sd.border_color = 0; /* TransparentBlack — custom border deferred */
-    (void)border_argb;
 
     if (has_compatible_surface && !self_sample) {
         float scale = 1.0f;
