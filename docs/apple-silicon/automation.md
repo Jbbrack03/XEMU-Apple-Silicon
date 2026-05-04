@@ -1284,6 +1284,21 @@ XEMU_BENCH_SCREENSHOT_BACKEND=none scripts/apple-silicon/run-benchmark.sh crimso
 crashed Apple's OpenGL-on-Metal path during early testing and should not be the
 baseline capture method yet.
 
+**Window-targeted capture (W6, 2026-05-04).** Set
+`XEMU_CAPTURE_WINDOW_PATTERN=xemu` (or any case-insensitive substring
+matching the xemu window name or owner name) to make
+`scripts/apple-silicon/macos-capture.sh` resolve the on-screen
+window-id via Quartz `CGWindowListCopyWindowInfo` at each capture
+cycle and run `screencapture -l <wid>` instead of full-desktop
+`screencapture -x`. Falls back to full-desktop capture for any cycle
+where the matched window is not on-screen (e.g. xemu still loading,
+window minimized, or PyObjC's `Quartz` module not available — the
+fallback is logged once). Used by W2's `metal-gl-compare.sh` to
+bound the GL-leg capture to xemu's drawable region; pair with
+`compare-screenshots.py --resize smaller` to absorb residual
+retina-vs-drawable scaling. Unset by default; behavior with the env
+var unset is identical to the pre-W6 full-desktop path.
+
 Frame pacing and NV2A profile summaries are enabled by the launcher through
 `XEMU_PERF_LOG=1`. The summary interval defaults to one second and can be
 changed with:
@@ -2023,6 +2038,18 @@ diff image, and prints mean absolute error, RMS error, maximum channel error,
 and changed-pixel percentage. Use this only as a visual smoke check; it does
 not prove depth correctness.
 
+**Size-mismatch policy (W6, 2026-05-04).** By default
+`compare-screenshots.py` exits when `baseline.size != candidate.size`.
+Pass `--resize smaller` to make the comparator LANCZOS-resize the
+larger image down to the smaller's dimensions before crop and diff;
+the original raw sizes are echoed as `raw_baseline_size=` /
+`raw_candidate_size=` and `resized={no,smaller}` so callers can
+record what was normalized. The W2 paired Metal-vs-GL harness uses
+this mode because the GL macOS-screencapture path and the Metal
+in-renderer drawable path reliably produce different pixel
+dimensions even with window-targeted GL capture (retina vs.
+drawable scaling).
+
 Run a paired baseline/native snapshot comparison with:
 
 ```sh
@@ -2417,14 +2444,36 @@ canary regression gate.
 
 The GL leg uses the existing `macos`-screencapture backend with
 `XEMU_BENCH_SCREENSHOT_INTERVAL=1` so PNGs land at one-second cadence
-in `<gl_run>/screenshots/`. The Metal leg uses `--metal-screenshot
-<base>` plus `XEMU_METAL_SCREENSHOT_INTERVAL=60` so the in-renderer
-post-HUD-pre-present capture path writes a sequence of
-`<base>.0001.png` / `.0002.png` / ... files (byte-identical to the
-user-visible drawable, no Screen-Recording dialog, no window
-occlusion). Frame ordinals in `--frames N,M,K` index into the sorted
-sequence on each side (1-indexed); the default `mid,end` heuristic
-picks the middle and last entry of the captured set's intersection.
+in `<gl_run>/screenshots/`. **W6 (2026-05-04):** the GL leg also sets
+`XEMU_CAPTURE_WINDOW_PATTERN=xemu` so `macos-capture.sh` runs
+`screencapture -l <wid>` against the matched xemu window via
+Quartz's `CGWindowListCopyWindowInfo` instead of full-desktop
+`screencapture -x`; the GL capture is bounded to the same logical
+region the Metal in-renderer drawable PNG covers. Falls back to
+full-desktop capture for any cycle where the xemu window is not
+on-screen. The Metal leg uses `--metal-screenshot <base>` plus
+`XEMU_METAL_SCREENSHOT_INTERVAL=60` so the in-renderer post-HUD-
+pre-present capture path writes a sequence of `<base>.0001.png` /
+`.0002.png` / ... files (byte-identical to the user-visible
+drawable, no Screen-Recording dialog, no window occlusion). The
+Metal leg also passes `--metal-no-hud` (W6) so the Performance HUD
+overlay never bleeds into the captured PNGs versus the GL leg.
+Frame ordinals in `--frames N,M,K` index into the sorted sequence
+on each side (1-indexed); the default `mid,end` heuristic picks the
+middle and last entry of the captured set's intersection.
+
+**W6 size-mismatch normalization.** Even with window-targeted GL
+capture, retina vs. drawable scaling can leave the GL PNG at a
+different pixel resolution than the Metal PNG. `metal-gl-compare.sh`
+computes the auto-derived crop as `0,0,min(W_gl,W_metal),
+min(H_gl,H_metal)` and passes `--resize smaller` to
+`compare-screenshots.py`, which LANCZOS-resizes the larger image
+down to the smaller's dimensions before crop and diff. Each frame's
+`raw_baseline_size`, `raw_candidate_size`, and `resized` fields are
+captured in `frames.tsv`, the per-frame `compare-stdout.txt`, the
+`report.md` table, and the per-frame entries of `summary.json`.
+Pass an explicit `--crop x,y,w,h` to the wrapper to override (must
+fit inside the smaller-of-two dimensions).
 
 Usage:
 
@@ -2525,7 +2574,10 @@ The launcher's `--metal-no-hud` flag is passed so the Metal Performance
 HUD overlay never bleeds into the captured screenshot (the gold PNGs
 were recorded HUD-off). `XEMU_BENCH_SCREENSHOT_BACKEND=none` disables
 the macOS-screencapture cron so the only output PNG is the in-renderer
-single-shot capture.
+single-shot capture. The effective HUD/validation state is recorded
+in the per-run `report.md` and `summary.json` (`metal_hud=off`,
+`metal_validation=auto-on`) so a triage walks the artifact rather
+than re-deriving it from the launcher invocation.
 
 Usage:
 

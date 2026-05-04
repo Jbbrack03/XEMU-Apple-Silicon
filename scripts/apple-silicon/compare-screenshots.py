@@ -36,6 +36,15 @@ def main():
     parser.add_argument("--diff-scale", type=float, default=8.0)
     parser.add_argument("--threshold", type=int, default=8,
                         help="per-channel absolute difference threshold")
+    parser.add_argument("--resize", choices=("none", "smaller"),
+                        default="none",
+                        help=("size-mismatch policy. 'none' (default): exit "
+                              "with an error when baseline.size != "
+                              "candidate.size. 'smaller': resize the larger "
+                              "image down to the smaller's dimensions via "
+                              "LANCZOS before crop/diff. The crop rectangle "
+                              "is interpreted against the (possibly resized) "
+                              "common dimensions."))
     args = parser.parse_args()
 
     baseline_path = Path(args.baseline)
@@ -46,10 +55,36 @@ def main():
     baseline = Image.open(baseline_path).convert("RGB")
     candidate = Image.open(candidate_path).convert("RGB")
 
+    # W6 (2026-05-04): size-mismatch handling. The full-desktop GL
+    # capture vs the drawable-only Metal capture in W2's
+    # metal-gl-compare.sh reliably differ in resolution; the prior
+    # always-error policy made every paired run an INFRA-FAIL.
+    # `--resize smaller` resizes the larger image down to the smaller
+    # so the diff is computed over a real common region; the original
+    # raw sizes are echoed so the caller can record what was
+    # normalized.
+    raw_baseline_size = baseline.size
+    raw_candidate_size = candidate.size
+    resized = "no"
     if baseline.size != candidate.size:
-        raise SystemExit(
-            f"image sizes differ: {baseline.size} vs {candidate.size}"
-        )
+        if args.resize == "none":
+            raise SystemExit(
+                f"image sizes differ: {baseline.size} vs {candidate.size}"
+            )
+        # args.resize == "smaller"
+        target_w = min(baseline.size[0], candidate.size[0])
+        target_h = min(baseline.size[1], candidate.size[1])
+        if target_w <= 0 or target_h <= 0:
+            raise SystemExit(
+                f"resize-to-smaller produced a non-positive target size: "
+                f"baseline={baseline.size} candidate={candidate.size}"
+            )
+        target_size = (target_w, target_h)
+        if baseline.size != target_size:
+            baseline = baseline.resize(target_size, Image.LANCZOS)
+        if candidate.size != target_size:
+            candidate = candidate.resize(target_size, Image.LANCZOS)
+        resized = "smaller"
 
     baseline_crop = crop_image(baseline, args.crop)
     candidate_crop = crop_image(candidate, args.crop)
@@ -78,6 +113,9 @@ def main():
 
     print(f"baseline={baseline_path}")
     print(f"candidate={candidate_path}")
+    print(f"raw_baseline_size={raw_baseline_size[0]}x{raw_baseline_size[1]}")
+    print(f"raw_candidate_size={raw_candidate_size[0]}x{raw_candidate_size[1]}")
+    print(f"resized={resized}")
     print(f"crop={args.crop[0]},{args.crop[1]},{args.crop[2]},{args.crop[3]}")
     print(f"pixels={pixels}")
     print(f"mean_abs_error={mae:.4f}")

@@ -473,6 +473,8 @@ if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
     printf '- threshold: %s%% changed-pixels per canary\n' "$THRESHOLD"
     printf '- canary filter: %s\n' "${CANARY_FILTER:-<all four>}"
     printf '- env recipe: XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1 XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1 XEMU_METAL_FRONT_FB_FALLBACK=1 XEMU_METAL_MSAA=4\n'
+    printf '- metal_hud: off (--metal-no-hud passed; gold PNGs were recorded HUD-off, so the HUD overlay must be off here too)\n'
+    printf '- metal_validation: auto-on (W1 default for XEMU_RENDERER=METAL benchmark runs)\n'
     printf '- harness log: %s\n' "$LOG_FILE"
     printf '\n## Per-canary results\n\n'
     printf '| canary | verdict | changed_pct | mae | rms | max_abs | screenshot | gold | run_dir |\n'
@@ -500,6 +502,8 @@ if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
     printf '  "verdict": "%s",\n' "$verdict_total"
     printf '  "threshold": %s,\n' "$THRESHOLD"
     printf '  "canary_filter": "%s",\n' "${CANARY_FILTER:-all}"
+    printf '  "metal_hud": "off",\n'
+    printf '  "metal_validation": "auto-on",\n'
     printf '  "canaries": [\n'
     first=1
     while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
