@@ -3,6 +3,8 @@
 Last updated: 2026-05-04 (Visual Flight Recorder tooling + Metal MSAA4
 gate state). Current branch: `apple-silicon-performance`.
 
+For the canonical Metal porting workflow, see metal-porting-workflow.md.
+
 **Current Metal status.** PGR2, Rainbow Six 3, Halo CE menu, and the
 Xbox boot/flubber animation are useful Metal canaries with 4x MSAA
 active after the 2026-05-04 store/resolve fix. Metal default-on remains

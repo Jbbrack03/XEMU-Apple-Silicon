@@ -27,6 +27,13 @@ Every Apple Silicon-specific decision, benchmark, and handoff lives under
 - `docs/apple-silicon/benchmarks/<date>-<name>.md` — dated session notes,
   one per benchmark session. Add a new file for each meaningful run; do not
   edit older notes.
+- `docs/apple-silicon/metal-porting-workflow.md` — **(added 2026-05-04)**
+  canonical operating playbook for the Metal renderer port. Five-phase
+  model (build & boot → translation correctness → visual parity → perf
+  parity → default-on), daily loop for the active phase, tools index,
+  triage flowchart, phase exit-gate procedures, triangulation appendix.
+  Meta-doc that sits one level above the Metal track sub-list below;
+  read after `handoff.md` at the start of any Metal-track session.
 
 Metal renderer track (added 2026-05-02; read after `handoff.md` when
 the task touches the Metal port):

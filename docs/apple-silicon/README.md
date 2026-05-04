@@ -177,6 +177,13 @@ visible regressions point first at the renderer.
 - `benchmarks/`: dated benchmark session notes and run templates.
 - `decision-log.md`: dated decisions and rationale.
 - `handoff.md`: current state and next-session checklist.
+- `metal-porting-workflow.md`: **(2026-05-04)** canonical operating
+  playbook for the native Metal renderer port. Five-phase model
+  (build & boot → translation correctness → visual parity → perf
+  parity → default-on), daily loop for the active phase, tools index,
+  triage flowchart, phase exit-gate procedures, triangulation
+  appendix. Read after `handoff.md` when starting a Metal-track
+  session.
 - `metal-renderer-plan.md`: **(2026-05-04)** staged Metal renderer
   implementation plan, slices M0–M15, validation gates, risk register,
   open questions, and current M5.x follow-up / M15 blocker status.
