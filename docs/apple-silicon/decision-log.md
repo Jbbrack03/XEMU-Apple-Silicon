@@ -1,5 +1,80 @@
 # Decision Log
 
+## 2026-05-04: Canary regression gate (W3)
+
+**Context.** Metal renderer code changes routinely silently regress one
+or more of the four green visual canaries (PGR2 menu, Rainbow Six 3
+loading, Halo CE menu, Xbox boot/flubber). Today's verification flow
+is "open `benchmark-runs/visual-checks/` next to a fresh capture and
+eyeball it"; that does not scale across four canaries per change, does
+not produce a machine-readable artifact for an automated regression
+gate, and gives no fail-fast signal at commit time. The Phase 1 daily
+loop in `docs/apple-silicon/metal-porting-workflow.md` §3.5 already
+documents "re-run the green canary set" as a required step after every
+Metal change but lacked a single-command implementation; the
+post-change-smoke nudge stayed informational without one.
+
+**Decision.** Land
+`scripts/apple-silicon/metal-canary-regress.sh` as the single-renderer
+"post-change smoke" tool. The script drives the four canaries through
+`run-benchmark.sh` under the established green-canary env recipe (verbatim
+from the `handoff.md` "PGR2 PASS" bullet — `XEMU_RENDERER=METAL` +
+`XEMU_METAL_TRANSLATED_PIPELINE=1` + `XEMU_NATIVE_TRI_DEPTH=1` +
+`XEMU_NATIVE_QUAD=1` + `XEMU_PGRAPH_FAST_READ=1` +
+`XEMU_METAL_FRONT_FB_FALLBACK=1` + `XEMU_METAL_MSAA=4`), captures one
+screenshot per canary at the canary's frame ordinal via
+`XEMU_METAL_SCREENSHOT_PATH` / `XEMU_METAL_SCREENSHOT_AT_FRAME`, runs
+`compare-screenshots.py` against the stored gold PNG under
+`benchmark-runs/visual-checks/`, and emits `report.md` +
+`summary.json` with PASS/FAIL against a per-pixel-changed threshold
+(default 1.0 %). Sequential execution (Metal capture races on
+concurrent xemu instances are real and `run-benchmark.sh` refuses
+overlap by default). Distinct from W2's paired diff: this is single-
+renderer (Metal only) against a stored baseline; W2 is renderer-vs-
+renderer at the same scripted route.
+
+**Rationale.** (a) The "did I break PGR2/Rainbow/Halo/boot since the
+last green canary state" feedback loop is closed by a single command
+that exits non-zero on regression — the operator does not need to
+remember to look at four separate captures. (b) Per project rule #11
+the closed default-on Apple Silicon flags are not re-validated when
+their underlying code does not change; this script ASSERTS that the
+recipe still produces the recorded gold PNG, treating the gold
+literally as the contract. A failure means the renderer regressed
+against the recipe, not that the recipe needs changes. (c) The JSON
+output is the same shape as W2's `summary.json`, so any future CI
+runner consumes both with the same parser. (d) Does not modify
+`run-benchmark.sh`, `compare-screenshots.py`, or `metal-gl-compare.sh`
+— purely additive, the diff cost across slices is minimal. (e) Hooks
+cleanly into the metal-porting-workflow §3.5 step that already
+documents "re-run the green canary set" but lacked a single-command
+implementation.
+
+**Cross-cut updates.** `xemu-fork/docs/apple-silicon/automation.md`
+gains a "Canary regression gate (W3, 2026-05-04)" subsection with
+usage, the embedded canary table, the env recipe (pointing at
+`xemu-fork/CLAUDE.md` "Stable opt-in" entries rather than re-listing
+flag semantics), worked examples, and the output-dir layout. The
+workspace `CLAUDE.md` script roster lists the new entrypoint pointing
+to that subsection.
+`xemu-fork/docs/apple-silicon/metal-porting-workflow.md` already
+references `metal-canary-regress.sh` from its Phase 1 daily-loop §3.5
+(introduced in D1 ahead of this slice); the W3 wording is tightened
+to make the post-change-smoke step explicit at the default 1 %
+threshold.
+
+**Validation.** `bash -n` syntax-clean. `--help` prints the full usage
+block and the canary table. Pre-flight gates (xemu binary missing →
+exit 2; gold PNG missing → exit 2; input script missing → exit 2)
+were exercised on a synthetic tree by pointing the script at a `dist/`
+that contains a stub binary, then a `benchmark-runs/visual-checks/`
+that omits the gold PNG; both produced the expected exit-2 with a
+clear error and no partial state. `--canary` arg validation rejects
+unknown names with exit 2. `--threshold` regex-rejects non-numeric
+values. A full end-to-end canary smoke is left to the orchestrator's
+baseline lock-in step (per project rule #11 the closed Apple Silicon
+defaults are not re-validated when only a wrapper script lands).
+
 ## 2026-05-04: Add metal-gl-compare.sh paired diff harness (W2)
 
 **Context.** Slice M14's renderer-port plan and the M15 default-on gate

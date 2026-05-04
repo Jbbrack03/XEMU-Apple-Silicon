@@ -2470,6 +2470,114 @@ modify `run-benchmark.sh`, `compare-screenshots.py`, or
 `compare-runs.sh` — it wraps them. `XEMU_METAL_VALIDATION=1` is
 exported on the Metal leg so any Metal-API misuse is logged whether or
 not slice W1's auto-on landed.
+
+## Canary regression gate (W3, 2026-05-04)
+
+`scripts/apple-silicon/metal-canary-regress.sh` is the single-renderer
+"post-change smoke" tool from the Phase 1 daily loop in
+`docs/apple-silicon/metal-porting-workflow.md` §3.5. After every Metal
+renderer change it runs the four green Metal canaries (PGR2 menu,
+Rainbow Six 3 loading screen, Halo CE menu, Xbox boot/flubber) under
+the established green-canary env recipe, captures one screenshot per
+canary at the canary's frame ordinal via the in-renderer
+`XEMU_METAL_SCREENSHOT_PATH` / `XEMU_METAL_SCREENSHOT_AT_FRAME` path,
+and per-pixel-diffs each shot against the stored gold PNG under
+`benchmark-runs/visual-checks/`. Emits `report.md` + `summary.json`
+with PASS/FAIL.
+
+The script ASSERTS the eight closed default-on Apple Silicon flags
+still produce the recorded gold PNG; per project rule #11 it does NOT
+re-validate those flags. Failure to assert means a Metal-side
+regression on the asserted recipe, not a flag-design question. Unlike
+W2's paired diff harness, this is single-renderer: only Metal runs,
+the gold PNG is the baseline.
+
+Canary table (hard-coded in the script; source of truth =
+`docs/apple-silicon/handoff.md` "PASS (visual canary)" bullets):
+
+| Canary  | Launcher alias | Input script                              | Frame ordinal | Gold PNG (under `benchmark-runs/visual-checks/`)                |
+| ------- | -------------- | ----------------------------------------- | ------------- | --------------------------------------------------------------- |
+| pgr2    | `pgr2`         | `input-scripts/pgr2-smoke.csv`            | 900           | `pgr2-gate-metal-msaa4-f900-after-msaa-store.png`               |
+| rainbow | `rainbow`      | `input-scripts/rainbow-six-3-smoke.csv`   | 600           | `rainbow-gate-metal-msaa4-f600-after-msaa-store.png`            |
+| halo    | `halo`         | launcher default (`noop.csv`)             | 1200          | `halo-gate-metal-msaa4-f1200-after-msaa-store.png`              |
+| boot    | `crimson`      | launcher default (`noop.csv`)             | 300           | `boot-gate-metal-msaa4-f300-after-msaa-store.png`               |
+
+The `boot` row uses the `crimson` launcher alias because the Xbox
+boot+flubber gold was originally captured during a Crimson Skies
+launch that hit the boot animation before the title screen; the disc
+is irrelevant — frame 300 sits inside the dashboard boot sequence.
+
+Env recipe (verbatim from `handoff.md` "PGR2 PASS" bullet — see the
+"Stable opt-in" entries in `xemu-fork/CLAUDE.md` for each flag's full
+semantics; this script does not re-document them):
+
+```
+XEMU_RENDERER=METAL
+XEMU_METAL_TRANSLATED_PIPELINE=1
+XEMU_NATIVE_TRI_DEPTH=1
+XEMU_NATIVE_QUAD=1
+XEMU_PGRAPH_FAST_READ=1
+XEMU_METAL_FRONT_FB_FALLBACK=1
+XEMU_METAL_MSAA=4
+```
+
+The launcher's `--metal-no-hud` flag is passed so the Metal Performance
+HUD overlay never bleeds into the captured screenshot (the gold PNGs
+were recorded HUD-off). `XEMU_BENCH_SCREENSHOT_BACKEND=none` disables
+the macOS-screencapture cron so the only output PNG is the in-renderer
+single-shot capture.
+
+Usage:
+
+```sh
+scripts/apple-silicon/metal-canary-regress.sh [--canary <name>]
+    [--threshold pct] [--out-dir <path>] [--help]
+```
+
+Worked example — full canary set at the default 1 % threshold:
+
+```sh
+scripts/apple-silicon/metal-canary-regress.sh
+```
+
+Single-canary smoke after a localized renderer change:
+
+```sh
+scripts/apple-silicon/metal-canary-regress.sh --canary pgr2
+```
+
+Output directory layout (default
+`benchmark-runs/<TS>-canary-regress/`):
+
+```
+<out>/
+  harness.log                       — script-level log
+  results.tsv                       — tab-separated per-canary stats
+  report.md                         — top-level PASS/FAIL report
+  summary.json                      — machine-readable verdict + per-canary stats
+  <canary>/
+    launcher.log                    — full stdout/stderr of run-benchmark.sh
+    run-dir.txt                     — path to the spawned <run> directory
+    screenshot.png                  — Metal-rendered drawable PNG
+    diff/
+      baseline-crop.png             — gold (cropped to its full image)
+      candidate-crop.png            — captured screenshot
+      diff-amplified.png            — 8x-amplified per-pixel diff
+      compare-stdout.txt            — compare-screenshots.py output
+```
+
+Exit codes: `0` PASS (every canary ≤ `--threshold`), `1` FAIL (at
+least one canary regressed), `2` INFRA-FAIL (binary missing, gold or
+input asset missing, run-benchmark.sh failure, screenshot not
+produced, diff infrastructure failure). The script does NOT modify
+`run-benchmark.sh`, `compare-screenshots.py`, or `metal-gl-compare.sh`.
+
+Per-canary durations are tuned conservatively so the frame ordinal is
+reached even on a cold pipeline cache: 60 s for boot (f300), 75 s for
+rainbow (f600), 90 s for pgr2 (f900), 120 s for halo (f1200). Cold-
+launch shader compile front-loads the first ~10 s; the headroom
+prevents a false INFRA-FAIL when the host is under load.
+
 ## Triangulation backend status: BLOCKED — MoltenVK + pgraph/vk
 
 **Status (2026-05-04, slice W5).** Enabling the existing
