@@ -687,6 +687,62 @@ interval line is closed):**
   not fit in the 32-slot table (i.e. titles using >32 distinct
   surfaces). Non-zero overflow indicates the cap should be raised
   or the diagnostic widened.
+
+### M5.10 — VRAM-coherent surface download (default-off, opt-in)
+
+`XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` (**M5.10, 2026-05-03**) — opt-in
+for the Metal renderer's GPU→VRAM surface-download path. **Default 0
+(off).** Mirrors `vk/surface.c::pgraph_vk_surface_download_if_dirty`
+(vk/surface.c:939-944) with Apple Silicon UMA semantics: the bound
+color/depth cache entry is marked `draw_dirty=1` at end-of-`flush_draw`
+and end-of-`clear_surface`; subsequent `pgraph_mtl_flip_stall` and
+`pgraph_mtl_surface_flush` walk the cache and call
+`pgraph_mtl_surface_download_if_dirty_at(vram_addr, vram_ptr,
+mtl_after_surface_download, d)` on each dirty entry. The download
+opens a `MTLBlitCommandEncoder copyFromTexture:toBuffer:` against a
+Shared `MTLBuffer`, commits + waits, then memcpys the staging buffer
+into `d->vram_ptr + vram_addr` and bumps `DIRTY_MEMORY_VGA |
+DIRTY_MEMORY_NV2A_TEX` for the affected range so the next
+texture-bind / display-path read picks up the freshly downloaded
+pixels. A cross-queue `MTLSharedEvent` fence (`s_draw_done_event` in
+`mtl/draw.mm`, signaled monotonically at every draw-cmdbuf commit;
+consumed via `[cmd encodeWaitForEvent:value:]` at download time)
+guards against the render-queue blit reading a draw-target texture
+mid-render. A KVM/HVF-parity polling path in
+`pgraph_mtl_surface_update` calls
+`memory_region_test_and_clear_dirty(d->vram, addr, 0x1000,
+DIRTY_MEMORY_NV2A)` per cached entry when `!tcg_enabled()`; under
+TCG the per-CPU access-callback path is authoritative and the
+poll is skipped. Counters `METAL_SURFACE_DOWNLOADS` and
+`METAL_SURFACE_DOWNLOAD_BYTES` surface on the `xemu-perf:` interval
+line.
+
+**Why default off.** The infrastructure is correct (vk-pattern port)
+but does NOT yet bridge PGR2's specific back→front buffer-swap
+mechanism — the M5.9-followup-B+C diagnostic decisively ruled out
+all three CPU-mediated mechanisms (CPU memcpy, NV097_IMAGE_BLIT,
+pcrtc.start cycling); the actual mechanism is still under
+investigation (likely an NV2A engine class not yet implemented:
+NV3089 scaled-blit / NV0039 M2MF / a software post-process draw
+pass). Until that is identified and the path proven correct on
+≥ 2 distinct titles, the download path runs only with the flag
+on, and even then mostly serves as instrumented infrastructure
+for future investigation. Cold-boot perf cost when the flag is on:
+~4× slowdown vs flag-off on PGR2 (1.5 fps → 0.3 fps). Source files:
+`hw/xbox/nv2a/pgraph/mtl/surface.{h,mm}`,
+`hw/xbox/nv2a/pgraph/mtl/renderer.c`,
+`hw/xbox/nv2a/pgraph/mtl/draw.{h,mm}`,
+`hw/xbox/nv2a/pgraph/mtl/blit.c`. Apple Silicon performance fork;
+slice M5.10.
+
+- `METAL_SURFACE_DOWNLOADS` (**M5.10, 2026-05-03**): per-interval
+  count of completed GPU→VRAM downloads. Always reported (gated by
+  the M5.10 flag at the call sites; counter weak-symbol-falls-back
+  to 0 when the surface manager isn't loaded).
+- `METAL_SURFACE_DOWNLOAD_BYTES` (**M5.10, 2026-05-03**):
+  per-interval bytes copied through the download staging buffer
+  (sum of guest 1× source sub-rect sizes for each download).
+
 - `XEMU_METAL_FORCE_LEGACY_PRESENT={0,1}` (**M10 2026-05-02**)
   overrides the Metal frame-pacing path. Default 0: the Metal
   presenter calls `[cmdbuf presentDrawable:drawable atTime:t]` with

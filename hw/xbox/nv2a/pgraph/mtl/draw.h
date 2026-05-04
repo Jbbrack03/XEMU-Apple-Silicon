@@ -201,6 +201,32 @@ uint64_t pgraph_mtl_draw_pass_opens_count(void);
 uint64_t pgraph_mtl_draw_pass_coalesced_count(void);
 uint64_t pgraph_mtl_draw_pass_flushes_count(void);
 
+/*
+ * M5.10 (2026-05-03): expose the texture pointers currently captured
+ * inside the coalesced open render pass so the surface cache's eviction
+ * / destroy paths can pin them (avoid deallocating an MTLTexture that
+ * a queued render encoder still references). Returns NULL via the out
+ * parameters when no pass is open. Both out parameters are required;
+ * pass NULL for either to skip its read.
+ *
+ * Accessing the open-pass key is read-only; the underlying state is
+ * only mutated under the renderer-thread invariant. Callers under
+ * pgraph.lock are safe.
+ *
+ * M5.10 also adds a draw-queue completion fence: after every draw
+ * command-buffer commit, the draw queue signals s_draw_done_event with
+ * a monotonic value. Render-queue consumers (surface downloads, blit
+ * encoder reads of draw-target textures) call
+ * pgraph_mtl_draw_get_done_event_state(&event, &value) and then
+ * `[cmdbuf encodeWaitForEvent:event value:value]` on their own
+ * command-buffer to ensure prior draw-queue commits have committed
+ * before the cross-queue read fires.
+ */
+void pgraph_mtl_draw_get_open_pass_textures(void **out_color,
+                                            void **out_depth);
+void pgraph_mtl_draw_get_done_event_state(void **out_event,
+                                          uint64_t *out_value);
+
 #ifdef __cplusplus
 }
 #endif

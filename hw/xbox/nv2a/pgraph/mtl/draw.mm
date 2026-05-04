@@ -62,6 +62,29 @@ static inline void mtl_draw_wait_upload_fence(id<MTLCommandBuffer> cb)
 static id<MTLDevice>       s_device;
 static id<MTLCommandQueue> s_draw_queue;
 static bool                s_initialized = false;
+
+/* M5.10 (2026-05-03): cross-queue MTLSharedEvent fence.
+ *
+ * The Metal renderer uses two distinct command queues: `s_draw_queue`
+ * for render-encoder draws (this file) and `s_render_queue` in
+ * surface.mm for blit-encoder uploads / downloads / clears. Cross-queue
+ * `commit` ordering is NOT synchronous — a blit-encoder copy on
+ * `s_render_queue` that reads a draw-target texture written on
+ * `s_draw_queue` can race the still-pending draw commit unless an
+ * explicit fence forces wait-before-read ordering.
+ *
+ * `s_draw_done_event` is signaled with monotonically increasing values
+ * after every draw command-buffer commit (inside open_pass_close_locked).
+ * Cross-queue readers fetch the latest value via
+ * pgraph_mtl_draw_get_done_event_state and `encodeWaitForEvent:` on
+ * their own command buffer to ensure prior draws have completed
+ * before the cross-queue read fires.
+ *
+ * MTLSharedEvent (not MTLEvent) is required because cross-queue waits
+ * are implemented internally as cross-process signals; the Shared
+ * variant is the supported pattern per the Metal docs. */
+static id<MTLSharedEvent> s_draw_done_event = nil;
+static _Atomic(uint64_t)  s_draw_done_value = 0;
 static _Atomic(uint64_t)   s_draw_count = 0;
 static _Atomic(uint64_t)   s_draw_indexed_count = 0;
 static _Atomic(uint64_t)   s_draw_native_tri_depth_count = 0;
@@ -131,6 +154,20 @@ bool pgraph_mtl_draw_init(void)
     }
     s_draw_queue.label = @"xemu.metal.draw_queue";
 
+    /* M5.10: shared event for cross-queue draw-completion ordering.
+     * If event creation fails the fence becomes a no-op; the renderer
+     * still works but cross-queue reads of draw targets may race the
+     * pending draws. This is unlikely on modern Apple Silicon. */
+    s_draw_done_event = [s_device newSharedEvent];
+    if (s_draw_done_event == nil) {
+        fprintf(stderr,
+                "pgraph_mtl_draw_init: newSharedEvent failed; "
+                "cross-queue download fence is disabled\n");
+    } else {
+        s_draw_done_event.label = @"xemu.metal.draw_done";
+    }
+    atomic_store(&s_draw_done_value, (uint64_t)0);
+
     atomic_store(&s_draw_count, (uint64_t)0);
     atomic_store(&s_draw_indexed_count, (uint64_t)0);
     atomic_store(&s_draw_native_tri_depth_count, (uint64_t)0);
@@ -151,9 +188,40 @@ void pgraph_mtl_draw_finalize(void)
      * release would otherwise leak GPU work. */
     extern void pgraph_mtl_draw_flush_open_pass(void);
     pgraph_mtl_draw_flush_open_pass();
+    s_draw_done_event = nil;
     s_draw_queue = nil;
     s_device = nil;
     s_initialized = false;
+}
+
+/* M5.10: open-pass texture accessors. Used by the surface cache's
+ * eviction / shape-mismatch destroy paths to skip / drain when the
+ * candidate eviction texture is still referenced by the open render
+ * encoder. NULL out parameters mean "no pass open" (key is zeroed).
+ *
+ * Reads from s_open_pass_key are unsynchronized but the renderer-
+ * thread invariant (caller holds pgraph.lock during cache ops) is
+ * the same as the writer invariant — no race. */
+extern "C" void pgraph_mtl_draw_get_open_pass_textures(void **out_color,
+                                                       void **out_depth)
+{
+    if (out_color) {
+        *out_color = s_open_enc != nil ? s_open_pass_key.color_tex : NULL;
+    }
+    if (out_depth) {
+        *out_depth = s_open_enc != nil ? s_open_pass_key.depth_tex : NULL;
+    }
+}
+
+extern "C" void pgraph_mtl_draw_get_done_event_state(void **out_event,
+                                                     uint64_t *out_value)
+{
+    if (out_event) {
+        *out_event = (__bridge void *)s_draw_done_event;
+    }
+    if (out_value) {
+        *out_value = atomic_load(&s_draw_done_value);
+    }
 }
 
 /* -------- shared encode setup -------- */
@@ -285,6 +353,20 @@ static void open_pass_close_locked(void)
         s_open_enc = nil;
     }
     if (s_open_cmd != nil) {
+        /* M5.10: signal the cross-queue fence so render-queue blits
+         * (surface downloads, blit_copy reads of draw-target textures)
+         * can `encodeWaitForEvent:` on this monotonically increasing
+         * value to ensure the draw is queued for completion before
+         * their copy reads start.
+         *
+         * The signal is appended to the command buffer BEFORE commit;
+         * Metal guarantees the encoded signal fires in submission order
+         * after the prior render-encoder work for this command buffer.
+         */
+        if (s_draw_done_event != nil) {
+            uint64_t v = atomic_fetch_add(&s_draw_done_value, 1) + 1;
+            [s_open_cmd encodeSignalEvent:s_draw_done_event value:v];
+        }
         [s_open_cmd commit];
         s_open_cmd = nil;
     }

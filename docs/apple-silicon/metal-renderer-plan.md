@@ -1741,11 +1741,27 @@ surface-cache color/depth split + front-fb pin + cap raise" for the
 full investigation, the per-vram_addr draw distribution measurements
 on PGR2, and the codex-validate review notes.
 
-### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **PENDING**
+### M5.10 — VRAM-coherent surface download (or get_framebuffer_surface display flow) — **INFRASTRUCTURE SHIPPED 2026-05-03 (default-off; visual gate still BLOCKED)**
 
-**Status (2026-05-03): PENDING**, queued as the immediate next
-blocker for M15 default-on. Major slice; out of scope for the
-M5.9-followup-E session that surfaced the requirement.
+**Status (2026-05-03): SHIPPED, default-off.** The public download
+API and supporting cross-queue fence + KVM/HVF polling landed, gated
+behind `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` default 0. The path
+mirrors `vk/surface.c::pgraph_vk_surface_download_if_dirty`
+field-for-field. Codex-validate ran (rule #15); 4 findings (2 HIGH,
+2 MEDIUM) all addressed in-slice. **Visual gate STILL FAILS** —
+PGR2's specific back→front buffer-swap mechanism remains
+unidentified, and on its own M5.10 cannot bridge a download at
+`0x3628000` to an upload at `0x32a4000`. M15 default-on stays
+BLOCKED. See decision-log "2026-05-03: Metal slice M5.10" and
+`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`
+for the full implementation, codex findings + fixes, deferred items,
+and the next-session investigation plan. The original "PENDING"
+description below is preserved for the audit trail; the planned
+tasks are partially-complete (path A primitives shipped; Path B
+compositor rework deferred; codex MEDIUM/LOW from M5.9-followup-E
+still partially deferred).
+
+**Original PENDING text (preserved):**
 
 **Cause.** AAA Xbox titles like PGR2 render the final scene to a
 back-buffer at one VRAM address (e.g. PGR2's 1280×480 supersampled

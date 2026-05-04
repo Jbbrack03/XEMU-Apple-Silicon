@@ -104,14 +104,42 @@ void pgraph_mtl_image_blit(NV2AState *d)
      * arbitrary draws. */
     pgraph_mtl_draw_flush_open_pass();
 
-    /* The vk/gl renderers call surface_update at this point to download
-     * any dirty surface back to VRAM so the CPU memcpy below sees fresh
-     * pixels. For mtl, surface_update is a structural no-op (M5.9
-     * deferred VRAM download to followup-B) — but the M5.9 cache
-     * promotes the on-cache MTLTexture as the authoritative state. The
-     * GPU-side copy below propagates the texture-side rendered content
-     * directly to the destination texture, sidestepping the VRAM
-     * round-trip. */
+    /* M5.10 (2026-05-03): if the source surface is draw-dirty (GPU has
+     * rendered pixels not yet propagated to VRAM), download it before
+     * the CPU memcpy below reads guest VRAM. Without this, the memcpy
+     * picks up stale pre-render pixels and the dst surface is wrong.
+     * Mirrors `vk/blit.c::pgraph_vk_image_blit` lines 80-180 which
+     * call `pgraph_vk_surface_download_if_dirty` against both src and
+     * dst before reading. */
+    if (d->vram_ptr != NULL) {
+        /* We don't know the src surface's full vram_addr range yet
+         * (DMA mapping is computed below). Download against the DMA-
+         * mapped offset; the surface manager finds the entry that
+         * contains this address and downloads its full range. */
+        DMAObject src_dma_probe =
+            nv_dma_load(d, pg->context_surfaces_2d.dma_image_source);
+        DMAObject dst_dma_probe =
+            nv_dma_load(d, pg->context_surfaces_2d.dma_image_dest);
+        if (src_dma_probe.dma_class == NV_DMA_IN_MEMORY_CLASS) {
+            uint32_t src_vram = (uint32_t)(src_dma_probe.address +
+                                           pg->context_surfaces_2d.source_offset);
+            pgraph_mtl_surface_download_if_dirty_at(
+                src_vram, d->vram_ptr,
+                /* M5.10: the post-blit memcpy below already calls
+                 * memory_region_set_client_dirty, so we don't need a
+                 * second pair of dirty marks from the download
+                 * callback. Pass NULL here so the download leaves
+                 * the QEMU dirty bookkeeping to the existing
+                 * post-blit calls. */
+                NULL, NULL);
+        }
+        if (dst_dma_probe.dma_class == NV_DMA_IN_MEMORY_CLASS) {
+            uint32_t dst_vram = (uint32_t)(dst_dma_probe.address +
+                                           pg->context_surfaces_2d.dest_offset);
+            pgraph_mtl_surface_download_if_dirty_at(
+                dst_vram, d->vram_ptr, NULL, NULL);
+        }
+    }
 
     assert(context_surfaces->object_instance == image_blit->context_surfaces);
 

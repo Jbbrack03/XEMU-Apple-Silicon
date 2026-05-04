@@ -226,6 +226,27 @@ static bool mtl_force_passthrough(void)
     return s_force_passthrough != 0;
 }
 
+/* M5.10 (2026-05-03): VRAM-coherent surface download is opt-in via
+ * `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}`. Default OFF — the download
+ * infrastructure landed but does not yet bridge PGR2's specific
+ * back→front mechanism (still under investigation), and the GPU→VRAM
+ * blit + waitUntilCompleted in download_surface_to_vram has measurable
+ * cold-boot perf cost (~4× slowdown observed on PGR2 cold-boot).
+ * Setting XEMU_METAL_FRONT_FB_DOWNLOAD=1 enables the path for
+ * development / bisection. When OFF, all download_dirty_all calls and
+ * the cache-binding set_draw_dirty hot-path stores no-op. */
+static int  s_front_fb_download = 0;
+static bool s_front_fb_download_cached = false;
+static bool mtl_front_fb_download_enabled(void)
+{
+    if (!s_front_fb_download_cached) {
+        const char *e = getenv("XEMU_METAL_FRONT_FB_DOWNLOAD");
+        s_front_fb_download = (e && e[0] && e[0] != '0') ? 1 : 0;
+        s_front_fb_download_cached = true;
+    }
+    return s_front_fb_download != 0;
+}
+
 static bool mtl_use_translated_pipeline(void)
 {
     if (!s_use_translated_cached) {
@@ -383,6 +404,26 @@ static void mtl_disarm_all_access_callbacks(NV2AState *d)
                                               (MemAccessCallback *)cb);
         }
     }
+}
+
+/* M5.10 (2026-05-03): callback invoked from surface.mm after each
+ * GPU→VRAM download. Marks the affected VRAM range dirty for the VGA
+ * scan-out client and the NV2A texture cache so subsequent texture
+ * binds re-fetch fresh pixels. Mirrors `vk/surface.c::download_surface`
+ * lines 485-490. */
+static void mtl_after_surface_download(void *opaque, uint32_t vram_addr,
+                                       uint32_t byte_size)
+{
+    NV2AState *d = (NV2AState *)opaque;
+    if (d == NULL || d->vram == NULL || byte_size == 0) {
+        return;
+    }
+    memory_region_set_client_dirty(d->vram, (hwaddr)vram_addr,
+                                   (hwaddr)byte_size,
+                                   DIRTY_MEMORY_VGA);
+    memory_region_set_client_dirty(d->vram, (hwaddr)vram_addr,
+                                   (hwaddr)byte_size,
+                                   DIRTY_MEMORY_NV2A_TEX);
 }
 
 
@@ -667,6 +708,17 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
     pg->surface_color.draw_dirty |= write_color;
     pg->surface_zeta.draw_dirty  |= write_zeta;
 
+    /* M5.10 (2026-05-03): a clear is a draw — mark the cache binding
+     * draw-dirty so flip_stall's download_dirty_all writes the cleared
+     * pixels back to guest VRAM. Without this, subsequent guest reads
+     * of the cleared surface (e.g. as a sampled texture in a post-
+     * process pass) would see stale pre-clear pixels. Gated on the
+     * M5.10 feature flag (default off). */
+    if (mtl_front_fb_download_enabled()) {
+        if (write_color) pgraph_mtl_surface_set_draw_dirty_color();
+        if (write_zeta)  pgraph_mtl_surface_set_draw_dirty_depth();
+    }
+
     pg->clearing = false;
 }
 
@@ -737,13 +789,44 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
     d->vga.get_params(&d->vga, &vga_display_params);
     hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
 
+    /* M5.10 (2026-05-03): download every draw-dirty surface to guest
+     * VRAM so the guest's authoritative buffer-swap path (whatever
+     * mechanism it is — back→front memcpy, NV2A engine DMA, software
+     * post-process pass) can read the latest GPU-rendered pixels. The
+     * download path uses MTLBlitCommandEncoder copyFromTexture:toBuffer:
+     * + waitUntilCompleted; on Apple Silicon UMA this is a barrier-
+     * coherence sync rather than a real memory copy. The post-download
+     * VRAM bytes are also dirty-flagged (DIRTY_MEMORY_VGA |
+     * DIRTY_MEMORY_NV2A_TEX) via the callback so subsequent texture
+     * sampling refetches from VRAM. Mirrors vk's download_dirty pattern
+     * (vk/surface.c:524-535).
+     *
+     * The download is gated on the per-entry draw_dirty bit which is
+     * set by `pgraph_mtl_flush_draw` / `clear_surface` after each draw.
+     * The first time through the cache is empty of draw_dirty entries
+     * (no draws yet) and the call is a cheap walk.
+     *
+     * Wrapped in the M5.10 feature flag (default off): on PGR2 the
+     * download path is not yet sufficient to bridge the back→front gap
+     * (the guest's actual buffer-swap mechanism is still under
+     * investigation), and the GPU→VRAM blit + waitUntilCompleted has
+     * measurable per-flip cost that's not worth eating until the
+     * mechanism is identified and the path proven correct. */
+    if (mtl_front_fb_download_enabled() && d->vram_ptr != NULL) {
+        pgraph_mtl_surface_download_dirty_all(d->vram_ptr,
+                                              mtl_after_surface_download, d);
+    }
+
     /* M5.9-followup-C (2026-05-03): if the resolved front-fb surface
      * has dirty_vram set (guest CPU wrote to its VRAM range since the
      * last upload), upload from VRAM into the texture before the
      * compositor samples it. This is the path that handles guest
      * software-renderer / back→front memcpy buffer-swap mechanisms
      * where the guest's CPU writes are the authoritative pixel
-     * source. */
+     * source. With M5.10's download path landing first, this also
+     * picks up any back→front bytes the guest's swap mechanism just
+     * wrote (the download made them visible in VRAM, the upload
+     * propagates them into the published texture). */
     if (d->vram_ptr != NULL) {
         pgraph_mtl_surface_upload_if_dirty_at((uint32_t)crtc_addr,
                                               d->vram_ptr);
@@ -1181,6 +1264,19 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         }
         if (color_tex) pg->surface_color.draw_dirty = true;
         if (depth_tex) pg->surface_zeta.draw_dirty = true;
+        /* M5.10 (2026-05-03): also mark the per-VRAM cache binding
+         * draw-dirty so the next download_dirty_all (typically at
+         * flip_stall) picks it up. The pg->surface_*.draw_dirty
+         * fields above track NV2A-state-side bookkeeping; the
+         * cache draw_dirty bit gates the GPU→VRAM blit. Mirrors
+         * vk/draw.c:1830-1860::pgraph_vk_set_surface_dirty.
+         * Gated on the M5.10 feature flag because the atomic stores
+         * fire per-draw and the downstream download_dirty_all path
+         * is opt-in. */
+        if (mtl_front_fb_download_enabled()) {
+            if (color_tex) pgraph_mtl_surface_set_draw_dirty_color();
+            if (depth_tex) pgraph_mtl_surface_set_draw_dirty_depth();
+        }
     }
 
     /* M5.8: restore previous masks. The encode-time use of
@@ -1422,17 +1518,57 @@ static void pgraph_mtl_process_pending_reports(NV2AState *d)
 static void pgraph_mtl_surface_update(NV2AState *d, bool upload,
                                       bool color_write, bool zeta_write)
 {
-    /* M5.9: surface_update is called frequently (NV097_WAIT_FOR_IDLE,
-     * SET_FLIP_READ, blit hooks). The current cache wires in via
-     * `clear_surface` and `flush_draw` — those are the events that
-     * actually allocate / re-bind. surface_update remains a no-op
-     * structurally; the upload / download path will land in a future
-     * slice when CPU-write callbacks are wired. The bind keeps current
-     * because each clear / draw recomputes vram_addr → cache lookup. */
-    (void)d;
-    (void)upload;
+    /* M5.10 (2026-05-03): KVM/HVF parity polling. The TCG path uses the
+     * memory-region access callback registered in `mtl_arm_access_callback`
+     * to mark surfaces dirty on guest CPU writes. KVM/HVF lacks that
+     * machinery, so we mirror the GL renderer's
+     * `gl/surface.c:1385-1389` pattern: `memory_region_test_and_clear_dirty`
+     * polls the DIRTY_MEMORY_NV2A bit; if any tracked surface's range
+     * is dirty, mark its cache entry dirty_vram so the next bind /
+     * publish uploads from VRAM. The bit is cleared by the test-and-
+     * clear so we only re-mark on subsequent guest writes.
+     *
+     * Under TCG this loop is a no-op (the per-CPU access-callback path
+     * already handled it inline). M5.10 follow-up: gate on
+     * !tcg_enabled() because per-call polling cost is non-trivial when
+     * surface_update fires hundreds of times per second (NV097_WAIT_FOR_IDLE
+     * / flip / blit hooks); under KVM/HVF the access-callback path is
+     * unavailable so this is the authoritative trigger.
+     *
+     * Hooked into upload=true paths only; the no-upload variant
+     * (download direction) is handled by `pgraph_mtl_flip_stall`. */
     (void)color_write;
     (void)zeta_write;
+    if (!upload || d == NULL || d->vram == NULL) {
+        return;
+    }
+    /* Gate on !tcg_enabled() to skip the polling loop when the per-CPU
+     * access-callback path is already authoritative. PGR2 surface_update
+     * fires per-NV097_WAIT_FOR_IDLE / per-flip and we observed ~10x
+     * boot slowdown when the polling ran on every call regardless of
+     * acceleration mode. */
+    if (tcg_enabled()) {
+        return;
+    }
+    /* M5.10 codex finding (HIGH severity, 2026-05-03): poll the FULL
+     * surface byte range, not a fixed 4 KB. Real framebuffers are
+     * multi-MB (PGR2 back: 2.5 MB; front: 1.2 MB; aux RTs ~256 KB-1 MB);
+     * test-and-clear over only the first page silently dropped guest
+     * writes outside the first 4 KB. */
+    uint32_t addrs[32];
+    uint32_t sizes[32];
+    unsigned int n = pgraph_mtl_surface_iter_address_size(addrs, sizes, 32);
+    for (unsigned int i = 0; i < n; i++) {
+        if (sizes[i] == 0) {
+            continue;
+        }
+        bool dirty = memory_region_test_and_clear_dirty(
+            d->vram, (hwaddr)addrs[i], (hwaddr)sizes[i],
+            DIRTY_MEMORY_NV2A);
+        if (dirty) {
+            pgraph_mtl_surface_mark_dirty_overlapping(addrs[i], sizes[i]);
+        }
+    }
 }
 
 static void pgraph_mtl_surface_flush(NV2AState *d)
@@ -1445,6 +1581,16 @@ static void pgraph_mtl_surface_flush(NV2AState *d)
      * the cache is freed so we don't leave dangling MemAccessCallback
      * pointers in the per-CPU watch list. */
     pgraph_mtl_draw_flush_open_pass();
+    /* M5.10 (2026-05-03): download every draw-dirty surface to guest
+     * VRAM before dropping the cache so the post-flush bind picks up
+     * the rendered content from VRAM instead of starting from a
+     * cleared state. Mirrors `vk/surface.c:524-535::pgraph_vk_download_dirty_surfaces`
+     * which is called from the equivalent flush path. Gated on the
+     * M5.10 feature flag (default off). */
+    if (mtl_front_fb_download_enabled() && d != NULL && d->vram_ptr != NULL) {
+        pgraph_mtl_surface_download_dirty_all(d->vram_ptr,
+                                              mtl_after_surface_download, d);
+    }
     mtl_disarm_all_access_callbacks(d);
     pgraph_mtl_surface_cache_flush();
 }

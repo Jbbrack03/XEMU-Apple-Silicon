@@ -333,10 +333,92 @@ void pgraph_mtl_surface_force_upload_at(uint32_t vram_addr,
  */
 unsigned int pgraph_mtl_surface_iter_addresses(uint32_t *out, unsigned int cap);
 
+/* M5.10 codex finding (HIGH severity, 2026-05-03): companion of
+ * `_iter_addresses` that also yields each entry's `size` field. Used
+ * by the KVM/HVF parity polling in `pgraph_mtl_surface_update` so
+ * `memory_region_test_and_clear_dirty` covers the full surface range
+ * — a 4 KB conservative probe missed guest writes outside the first
+ * page on multi-MB framebuffers. Both `out_addrs` and `out_sizes` are
+ * required; pass parallel arrays of length `cap`. Returns the number
+ * of entries written. */
+unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
+                                                  uint32_t *out_sizes,
+                                                  unsigned int cap);
+
 /* M5.9-followup-B+C: counter accessors. Always-on atomics. */
 uint64_t pgraph_mtl_surface_vram_dirty_hits(void);
 uint64_t pgraph_mtl_surface_vram_uploads(void);
 uint64_t pgraph_mtl_surface_vram_upload_bytes(void);
+
+/*
+ * M5.10 (2026-05-03): VRAM-coherent surface download.
+ *
+ * Mirrors `vk/surface.c::pgraph_vk_surface_download_if_dirty` and the
+ * gl-side `pgraph_gl_surface_download_if_dirty`. The download path
+ * writes rendered MTLTexture pixels back to guest VRAM at the surface's
+ * `vram_addr`. The CRTC publish path then reads VRAM at
+ * `pcrtc.start + line_offset` and uploads from VRAM into the published
+ * texture — closing the back→front-buffer gap for AAA Xbox titles
+ * whose draw target differs from the displayed framebuffer.
+ *
+ * `pgraph_mtl_surface_set_draw_dirty_color/_depth(true)` is called at
+ * the end of each `flush_draw` / `clear_surface` to flag the bound
+ * surface as having GPU-side rendered pixels. The download paths
+ * gate on this bit; only dirty surfaces incur the GPU→VRAM copy.
+ *
+ * The `download_if_dirty_at(vram_addr, vram_ptr_base)` form looks up
+ * via `cache_get_within` so a CRTC publish at a non-zero line_offset
+ * still finds the surface that contains it; `download_dirty_all` walks
+ * every cache entry and calls `download_if_dirty` on each.
+ *
+ * `download_in_range_if_dirty(start, len, vram_ptr_base)` is the
+ * IMAGE_BLIT / texture-bind hook: any cached surface that overlaps the
+ * given VRAM range gets a GPU→VRAM download before the caller reads
+ * the affected guest memory.
+ *
+ * The downloads are SYNCHRONOUS — internally the path uses a
+ * MTLBlitCommandEncoder that copies texture pixels into a Shared
+ * MTLBuffer, waits for the blit's command-buffer to complete, then
+ * memcpy's the buffer contents into `vram_ptr + vram_addr`. On Apple
+ * Silicon UMA the GPU→Shared copy is a barrier+coherence sync rather
+ * than a real memory copy. Caller must hold `d->pgraph.lock` (or the
+ * renderer-thread invariant equivalent).
+ *
+ * Counters `METAL_SURFACE_DOWNLOADS` (per-interval delta) and
+ * `METAL_SURFACE_DOWNLOAD_BYTES` surface on the `xemu-perf:` interval
+ * line.
+ */
+void pgraph_mtl_surface_set_draw_dirty_color(void);
+void pgraph_mtl_surface_set_draw_dirty_depth(void);
+
+/* Callback type for "I just downloaded `byte_size` bytes starting at
+ * `vram_addr`". Used by the renderer.c wrapper to issue
+ * `memory_region_set_client_dirty(... DIRTY_MEMORY_VGA |
+ *  DIRTY_MEMORY_NV2A_TEX ...)` from inside the .c file (the .mm file
+ * cannot include the QEMU memory headers). `opaque` is whatever the
+ * caller passes in (typically NV2AState*).
+ *
+ * Called synchronously from inside the download path while the
+ * caller's stack is live; do not retain the pointer. */
+typedef void (*PgraphMtlSurfaceDownloadCb)(void *opaque,
+                                           uint32_t vram_addr,
+                                           uint32_t byte_size);
+
+void pgraph_mtl_surface_download_if_dirty_at(uint32_t vram_addr,
+                                             uint8_t *vram_ptr_base,
+                                             PgraphMtlSurfaceDownloadCb cb,
+                                             void *cb_opaque);
+void pgraph_mtl_surface_download_dirty_all(uint8_t *vram_ptr_base,
+                                           PgraphMtlSurfaceDownloadCb cb,
+                                           void *cb_opaque);
+void pgraph_mtl_surface_download_in_range_if_dirty(uint32_t start,
+                                                   uint32_t len,
+                                                   uint8_t *vram_ptr_base,
+                                                   PgraphMtlSurfaceDownloadCb cb,
+                                                   void *cb_opaque);
+
+uint64_t pgraph_mtl_surface_downloads(void);
+uint64_t pgraph_mtl_surface_download_bytes(void);
 
 #ifdef __cplusplus
 }

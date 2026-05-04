@@ -627,6 +627,41 @@ Stable opt-in:
   until shutdown" (large `.gputrace`; useful only for very short
   runs or single-frame regression triage). Ignored when
   `XEMU_METAL_CAPTURE` is unset.
+- `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` (M5.10, 2026-05-03) — opt-in
+  for the Metal renderer's GPU→VRAM surface-download path. Default 0
+  (off). Mirrors `vk/surface.c::pgraph_vk_surface_download_if_dirty`
+  (vk/surface.c:939-944) with Apple Silicon UMA semantics: at end of
+  every `flush_draw` / `clear_surface` the bound color/depth cache
+  entry is marked `draw_dirty=1`; subsequent `pgraph_mtl_flip_stall`
+  and `pgraph_mtl_surface_flush` walk the cache and call
+  `pgraph_mtl_surface_download_if_dirty_at(vram_addr, vram_ptr,
+  mtl_after_surface_download, d)` on each dirty entry. The download
+  opens a `MTLBlitCommandEncoder copyFromTexture:toBuffer:` against
+  a Shared `MTLBuffer`, commits + waits, then memcpys the staging
+  buffer into `d->vram_ptr + vram_addr` and bumps
+  `DIRTY_MEMORY_VGA | DIRTY_MEMORY_NV2A_TEX`. A cross-queue
+  `MTLSharedEvent` fence (`s_draw_done_event` in `mtl/draw.mm`,
+  signaled monotonically at every draw-cmdbuf commit; consumed via
+  `[cmd encodeWaitForEvent:value:]` at download time) guards
+  against the render-queue blit reading a draw-target texture
+  mid-render. Counters `METAL_SURFACE_DOWNLOADS` and
+  `METAL_SURFACE_DOWNLOAD_BYTES` surface on the `xemu-perf:`
+  interval line. **Default off because** (1) the path does NOT yet
+  bridge PGR2's specific back→front buffer-swap mechanism (still
+  under investigation post M5.9-followup-B+C), and (2) the
+  GPU→VRAM blit + waitUntilCompleted has measurable cold-boot
+  perf cost (~4× slowdown on PGR2 cold-boot per 2026-05-03
+  measurements). Enable with `XEMU_METAL_FRONT_FB_DOWNLOAD=1` for
+  development / bisection. Apple Silicon performance fork; slice
+  M5.10. Note: at the Apple Silicon system default
+  `surface_scale=2` the download path detects the host-scaled
+  texture mismatch and skips per-entry (the M5.10 MVP does not
+  include a GPU-side downsample pass — that is deferred). To
+  exercise the actual download blit, also set
+  `XEMU_DISPLAY_SCALE=1`. KVM/HVF parity polling in
+  `pgraph_mtl_surface_update` is gated `!tcg_enabled()` and
+  always-on when active; uses the cache entry's full size for
+  `memory_region_test_and_clear_dirty`.
 - `XEMU_METAL_VALIDATION={0,1}` (M14, 2026-05-02) — opt-in Metal
   API validation layer for development. When set, `xemu_metal_init`
   promotes `MTL_DEBUG_LAYER=1` into the process environment **before**

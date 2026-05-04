@@ -1,5 +1,158 @@
 # Decision Log
 
+## 2026-05-03: Metal slice M5.10 — VRAM-coherent surface download (default-off infrastructure shipped)
+
+**Context.** M5.9-followup-E closed the magenta heap-default artifact
+in the published front-fb, but the visual gate **still failed**
+because PGR2 renders to back buffer `0x3628000` while CRTC publishes
+`0x32a4000` and the Metal renderer had no mechanism to bridge them.
+The M5.10 plan in `docs/apple-silicon/metal-renderer-plan.md` queued
+this slice as the next blocker for M15 default-on, with two
+implementation paths: Path A (port vk's
+`pgraph_vk_surface_download_if_dirty`) or Path B (register
+`get_framebuffer_surface` ops callback mirroring gl).
+
+**Decision.** Land a Path-A-flavored implementation as **opt-in
+infrastructure (default off)** rather than try to flip M15 in this
+slice.
+
+**Why default off.**
+
+- **PGR2's actual back→front mechanism remains unidentified.** The
+  M5.9-followup-B+C diagnostic decisively ruled out CPU memcpy
+  (`METAL_SURFACE_VRAM_DIRTY_HITS=0` across every interval),
+  `NV097_IMAGE_BLIT` (`METAL_IMAGE_BLITS=0`), and `pcrtc.start`
+  cycling (publish-log stable for the entire run). M5.10's
+  download path is the correct generic infrastructure (matches
+  vk's pattern field-for-field), but on its own it does NOT
+  bridge PGR2's specific gap: downloading rendered pixels from
+  `0x3628000` writes them to VRAM at `0x3628000`, while the
+  upload at the publish target reads `0x32a4000`. The mechanism
+  that propagates between the two on real Xbox is still under
+  investigation — likely an unimplemented NV2A engine class
+  (NV3089 scaled-blit / NV0039 M2MF / an undocumented 2D blit
+  subchannel) or a software post-process draw pass that samples
+  the back-buffer as a texture.
+- **Performance cost.** The GPU→VRAM blit + `[cmdBuffer
+  waitUntilCompleted]` + `memcpy_image` per draw-dirty surface
+  per flip_stall has measurable cost. Pre-M5.10 cold-boot was
+  ~2 fps on PGR2 (already slow; gameplay-state runs are usable
+  thanks to the snapshot path). Initial M5.10 implementation
+  with the path always-on dropped cold-boot to ~0.3 fps (4-5×
+  slowdown). Default-off keeps Metal's pre-M5.10 baseline intact;
+  flag-ON enables the path for development / future investigation.
+- **Surface-scale > 1 not yet supported.** A blit-encoder
+  `copyFromTexture:sourceSize:toBuffer:` cannot downsample;
+  reading `(guest_w, guest_h)` pixels from a host-scaled texture
+  yields the upper-left 1× crop, not a downsampled guest-resolution
+  image. The codex-validate review (HIGH) flagged this; the
+  defensive fix is to skip the download per-entry when the
+  texture is host-scaled, leaving `draw_dirty` set so a future
+  downsample-aware slice picks it up. At the Apple Silicon
+  default `surface_scale=2` the path is structurally inert; to
+  exercise the actual blit during development set
+  `XEMU_DISPLAY_SCALE=1` together with
+  `XEMU_METAL_FRONT_FB_DOWNLOAD=1`.
+
+**What landed (full bullet inventory in
+`benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`):**
+
+- `XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` runtime flag, default 0,
+  cached at first read in `mtl_front_fb_download_enabled()`
+  (`mtl/renderer.c:240`).
+- `_Atomic(uint32_t) draw_dirty` field on `MtlSurfaceBinding`,
+  set by `pgraph_mtl_surface_set_draw_dirty_color/_depth` (called
+  from `flush_draw` + `clear_surface`, gated on the feature flag),
+  cleared inside the download path on real successful write only.
+- Public surface-download API: `_download_if_dirty_at`,
+  `_download_dirty_all`, `_download_in_range_if_dirty`, all taking
+  a `PgraphMtlSurfaceDownloadCb` callback so `mtl/renderer.c`
+  performs the QEMU-side `memory_region_set_client_dirty(...
+  DIRTY_MEMORY_VGA | DIRTY_MEMORY_NV2A_TEX)` from a static helper.
+- `download_surface_to_vram` (`mtl/surface.mm:580`):
+  `MTLBlitCommandEncoder copyFromTexture:toBuffer:` against a
+  Shared `MTLBuffer`, commit + `[cmdBuffer waitUntilCompleted]`,
+  `memcpy_image` to `vram_ptr + vram_addr`. Returns `bool`
+  (codex MEDIUM fix); only writes counters / clears `draw_dirty`
+  / invokes callback on success.
+- Cross-queue `MTLSharedEvent` fence (`s_draw_done_event` in
+  `mtl/draw.mm`): signaled monotonically at every draw-cmdbuf
+  commit; consumed via `[cmd encodeWaitForEvent:value:]` at
+  download time. Closes the latent correctness hazard the audit
+  identified between `s_draw_queue` and `s_render_queue`.
+- Open-pass pin in `cache_evict_lru` (codex 1C from
+  M5.9-followup-E, backfilled here): exposes the open pass's
+  color / depth texture handles via
+  `pgraph_mtl_draw_get_open_pass_textures`; the LRU pin and the
+  shape-mismatch destroy paths skip / drain when the candidate
+  matches.
+- KVM/HVF parity polling in `pgraph_mtl_surface_update`
+  (`mtl/renderer.c:1546`) — gated `!tcg_enabled()`. After a
+  perf regression where unconditional polling ran on every
+  call, the gate restricts it to non-TCG accelerators where the
+  per-CPU access-callback path is unavailable. **Codex HIGH**:
+  the polling now uses the cache entry's full `size` field (via
+  the new `pgraph_mtl_surface_iter_address_size` accessor)
+  instead of a fixed 4 KB probe; multi-MB framebuffers were
+  losing dirty bits set outside the first page.
+- Counters `METAL_SURFACE_DOWNLOADS` and
+  `METAL_SURFACE_DOWNLOAD_BYTES` wired in
+  `util/xemu-metal-perf.c` with weak-symbol fallbacks; surfaced
+  in `extract-perf-summary.sh` and documented in
+  `docs/apple-silicon/automation.md` and `xemu-fork/CLAUDE.md`.
+
+**Codex-validate (rule #15).** Verdict **MAJOR ISSUES**. 4 findings,
+all addressed in-slice:
+
+- HIGH: scaled-surface readback corruption — defensive skip when
+  `b->width != guest_w || b->height != guest_h`; documented
+  workaround `XEMU_DISPLAY_SCALE=1` for development; long-term fix
+  is a GPU-side downsample pass mirroring `vkCmdBlitImage`
+  (deferred).
+- HIGH: KVM/HVF polling fixed 4 KB range — replaced with
+  per-entry full size via the new `_iter_address_size` accessor.
+- MEDIUM: depth download spurious dirty mark — `download_surface_to_vram`
+  now returns `bool succeeded`; callback only fires on real write.
+- MEDIUM: flag missing from `xemu-fork/CLAUDE.md` — added a full
+  entry covering API, callers, default-off rationale, perf
+  trade-off, and the development workflow.
+
+**Validation.** Build PASS (`./build.sh -a arm64`). M5
+shader-validation harness 7/7 PASS. Pipeline-floor counters
+unchanged: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+`METAL_DRAW_TRANSLATED == METAL_DRAW_COUNT`,
+`METAL_PIPELINE_FALLBACKS=0` on a 30 s PGR2 cold-boot run with
+the flag ON. Cold-boot perf with the flag OFF: 7 intervals over
+30 s wall-clock — restored to pre-M5.10 baseline. Cold-boot perf
+with the flag ON: 1 interval, ~0.3 fps (the documented 4-5×
+slowdown — expected; not a regression for the default-off ship).
+
+GL renderer regression check: not run this session because all
+changes are `mtl/`-only or weak-symbol-gated; the GL path's last
+measurement (`docs/apple-silicon/benchmarks/2026-05-03-multi-title-msaa-1080p-validation.md`)
+remains the load-bearing reference for the user-facing goals.
+
+**Visual gate.** **STILL FAILS.** The visual content gate is the
+M5.10 exit gate per the metal-renderer-plan.md, and it is not
+closed by this slice. The infrastructure is correct (mirrors
+vk's `pgraph_vk_surface_download_if_dirty` field-for-field
+including the `download_pending` semantics, the QEMU
+`memory_region_set_client_dirty` handshake, and the cross-queue
+ordering). What's missing is the bridge between
+`download(0x3628000)` writing pixels to VRAM at `0x3628000` and
+something on the upload-side reading those pixels at
+`0x32a4000` (the CRTC-pointed front-fb's vram_addr). M15
+default-on stays BLOCKED.
+
+**Files touched (LOC delta ~ +900 / -25 across 9 source files +
+2 docs).** Full file-by-file delta in the benchmark note.
+
+**See also**: `docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`,
+`docs/apple-silicon/metal-renderer-plan.md` §M5.10,
+`docs/apple-silicon/benchmarks/2026-05-03-metal-followup-e-surface-cache.md`
+(prior slice + visual-gate-still-fails framing this slice
+addresses).
+
 ## 2026-05-03: Metal slice M5.9-followup-E — surface-cache color/depth split + front-fb pin + cap raise
 
 **Context.** After M5.9-followup-B+C and the diagnostic-capture entry

@@ -38,6 +38,16 @@
 
 extern "C" void *xemu_metal_get_device(void);
 
+/* M5.10: cross-module accessors for the open-pass + draw-done fence.
+ * Defined in mtl/draw.mm. Surface.mm cannot include draw.h because
+ * draw.h pulls in vertex.h which depends on per-target preprocessor
+ * flags this .mm file does not see. */
+extern "C" void pgraph_mtl_draw_get_open_pass_textures(void **out_color,
+                                                       void **out_depth);
+extern "C" void pgraph_mtl_draw_get_done_event_state(void **out_event,
+                                                     uint64_t *out_value);
+extern "C" void pgraph_mtl_draw_flush_open_pass(void);
+
 /* NV097 surface format constants (mirrored from nv2a_regs.h). We can't
  * include nv2a_int.h or nv2a_regs.h here because the .mm build does not
  * see the per-target preprocessor flags those headers transitively
@@ -159,6 +169,12 @@ typedef struct MtlSurfaceBinding {
     _Atomic(uint32_t) dirty_vram;
     void              *access_cb;
 
+    /* M5.10 (2026-05-03): GPU-side draw dirty tracking. Set after a
+     * flush_draw / clear_surface lands on this binding's MTLTexture;
+     * cleared by `download_*` once pixels have been written back to
+     * guest VRAM. Mirrors `vk/renderer.h::SurfaceBinding.draw_dirty`. */
+    _Atomic(uint32_t) draw_dirty;
+
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
 
@@ -205,6 +221,9 @@ static _Atomic(uint64_t) s_image_blits          = 0;
 static _Atomic(uint64_t) s_vram_dirty_hits      = 0;
 static _Atomic(uint64_t) s_vram_uploads         = 0;
 static _Atomic(uint64_t) s_vram_upload_bytes    = 0;
+/* M5.10 (2026-05-03): VRAM-coherent surface download (GPU → VRAM). */
+static _Atomic(uint64_t) s_surface_downloads    = 0;
+static _Atomic(uint64_t) s_surface_download_bytes = 0;
 /* 2026-05-03 magenta-RT diagnostic: count cache entries destroyed +
  * recreated due to shape mismatch on a same-vram_addr rebind. */
 static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
@@ -375,11 +394,22 @@ static void cache_evict_lru(void)
     while (s_cache_size >= kMaxCacheEntries) {
         MtlSurfaceBinding *oldest = NULL;
         void *front_tex = atomic_load(&s_front_framebuffer_texture);
+        /* M5.10: also pin the open-pass color/depth textures so a
+         * mid-pass eviction does not yank an attached MTLTexture out
+         * from under the still-encoding render command buffer. */
+        void *open_color = NULL, *open_depth = NULL;
+        pgraph_mtl_draw_get_open_pass_textures(&open_color, &open_depth);
         for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
             if (e == s_color_binding || e == s_depth_binding) {
                 continue;
             }
             if (front_tex != NULL && e->texture == front_tex) {
+                continue;
+            }
+            if (open_color != NULL && e->texture == open_color) {
+                continue;
+            }
+            if (open_depth != NULL && e->texture == open_depth) {
                 continue;
             }
             if (oldest == NULL || e->last_use_seq < oldest->last_use_seq) {
@@ -515,6 +545,188 @@ static void upload_vram_to_texture(MtlSurfaceBinding *b,
 }
 
 /* ---------------------------------------------------------------- */
+/* M5.10 (2026-05-03): GPU → VRAM surface download.
+ *
+ * The download path mirrors `vk/surface.c::download_surface_to_buffer`
+ * but uses Metal's MTLBlitCommandEncoder copyFromTexture:toBuffer:.
+ * The destination is a Shared MTLBuffer; on Apple Silicon UMA the
+ * post-`waitUntilCompleted` `[buffer contents]` view is coherent with
+ * the GPU writes (the blit encoder runs through the GPU's tile-store
+ * path back to system memory).
+ *
+ * Caveats:
+ *   - Color formats only for the M5.10 v1. Depth-stencil download is
+ *     more involved (D32S8 vs Xbox's D24S8 packing) and is deferred —
+ *     PGR2 / Crimson / Rainbow do NOT depend on depth readback for
+ *     normal display.
+ *   - Source rect is GUEST 1× dimensions (b->guest_width / _height).
+ *     The MTLTexture is allocated at host-scaled dimensions
+ *     (surface_scale_factor=2 → 2x); the upper-left 1× sub-rect is
+ *     where the guest VRAM layout maps.
+ *   - The blit + waitUntilCompleted is synchronous from the caller's
+ *     perspective: this matches vk's `pgraph_vk_finish` before the
+ *     download. Frequency is bounded — the download fires only when
+ *     the surface is `draw_dirty == 1` AND a consumer (publish path,
+ *     image_blit src read, eviction) requests it.
+ *
+ * Locking: the caller holds either pgraph.lock (during a renderer-ops
+ * dispatch) or the renderer-thread invariant. The download performs
+ * `[cmdBuffer waitUntilCompleted]` outside any other lock. */
+/* Returns true iff bytes were actually written to vram_ptr_base +
+ * vram_addr. Callers gate `memory_region_set_client_dirty` and the
+ * caller-side draw_dirty bookkeeping on the return value so unsupported
+ * cases (depth, scaled-non-1×, format unknown) don't spuriously mark
+ * VRAM dirty for downstream consumers. */
+static bool download_surface_to_vram(MtlSurfaceBinding *b,
+                                     uint8_t *vram_ptr_base)
+{
+    if (vram_ptr_base == NULL || b == NULL || b->texture == NULL) {
+        return false;
+    }
+    if (!b->is_color) {
+        /* Depth download deferred. Do NOT clear draw_dirty — leave it
+         * set so a future slice that adds depth-stencil download
+         * support picks up the still-pending download. Callers that
+         * walk the cache will keep skipping this entry until then. */
+        return false;
+    }
+    if (b->width == 0 || b->height == 0) {
+        return false;
+    }
+
+    unsigned int bpp = color_bytes_per_pixel(b->nv097_format);
+    if (bpp == 0) {
+        return false;
+    }
+
+    uint32_t guest_w = b->guest_width  ? b->guest_width  : b->width;
+    uint32_t guest_h = b->guest_height ? b->guest_height : b->height;
+    /* M5.10 codex finding (HIGH severity, 2026-05-03):
+     *
+     * The MTLTexture is allocated at host-scaled dims (surface_scale=2
+     * gives a 2× texture). A `copyFromTexture:sourceOrigin:sourceSize:`
+     * blit reads PIXELS at the requested rect — it cannot downsample.
+     * If we naively read `(guest_w, guest_h)` from `(0, 0)` the
+     * destination buffer ends up holding the upper-left guest-sized
+     * crop of the host-scaled image, not the visible-frame content
+     * scaled to guest dims. Writing that cropped buffer to VRAM at
+     * `b->vram_addr` would corrupt downstream consumers (CRTC scan-out
+     * in particular).
+     *
+     * The proper fix is a downsample render pass (vk does this with
+     * `vkCmdBlitImage` + `VK_FILTER_LINEAR` against an `image_scratch`
+     * 1× target). Out of scope for the M5.10 MVP.
+     *
+     * Defensive behavior here: skip the download whenever the texture
+     * is host-scaled (`b->width != guest_w` or `b->height != guest_h`),
+     * leave `draw_dirty` set, and return false. Callers see the entry
+     * remains dirty; downstream consumers that need pixel-coherent
+     * VRAM at this address will still see stale guest VRAM, but that
+     * is preferable to writing a corrupted crop.
+     *
+     * The Apple Silicon default `surface_scale = 2` triggers this skip
+     * universally on PGR2 / Rainbow / Crimson / SC2. To exercise the
+     * download path for development, set
+     * `XEMU_DISPLAY_SCALE=1 XEMU_METAL_FRONT_FB_DOWNLOAD=1`; otherwise
+     * the path is structurally inert until the downsample slice lands. */
+    if (b->width != guest_w || b->height != guest_h) {
+        return false;
+    }
+    uint32_t src_w = guest_w;
+    uint32_t src_h = guest_h;
+    if (src_w > b->width)  src_w = b->width;
+    if (src_h > b->height) src_h = b->height;
+    if (src_w == 0 || src_h == 0) {
+        return false;
+    }
+
+    size_t row_bytes = (size_t)src_w * bpp;
+    size_t copy_size = row_bytes * src_h;
+    if (copy_size == 0) {
+        return;
+    }
+
+    /* The render-queue blit-encoder reads from a draw-target texture
+     * that may be the destination of pending render-encoder work on
+     * s_draw_queue. Drain the open pass first — committing prior draws
+     * — and then `encodeWaitForEvent:` against the latest draw-done
+     * value so cross-queue ordering is enforced even when MoltenVK /
+     * future Metal versions weaken implicit ordering. The drain on
+     * the same thread is sufficient to preserve correctness; the
+     * fence is belt-and-suspenders. */
+    pgraph_mtl_draw_flush_open_pass();
+    void     *event_handle = NULL;
+    uint64_t  event_value  = 0;
+    pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+    bool succeeded = false;
+    @autoreleasepool {
+        id<MTLDevice> device =
+            (__bridge id<MTLDevice>)xemu_metal_get_device();
+        if (device == nil) {
+            return false;
+        }
+        id<MTLBuffer> stage = [device
+            newBufferWithLength:copy_size
+                        options:MTLResourceStorageModeShared];
+        if (stage == nil) {
+            return false;
+        }
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.surface_download";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLTexture> tex = (__bridge id<MTLTexture>)b->texture;
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.surface_download_blit";
+        [blit copyFromTexture:tex
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(src_w, src_h, 1)
+                     toBuffer:stage
+            destinationOffset:0
+       destinationBytesPerRow:row_bytes
+     destinationBytesPerImage:copy_size];
+        [blit endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        /* Copy the staging buffer into guest VRAM at the source pitch.
+         * If pitch != natural, mirror the pattern in the upload helper. */
+        uint8_t       *dst       = vram_ptr_base + b->vram_addr;
+        size_t         dst_pitch = b->pitch != 0 ? (size_t)b->pitch : row_bytes;
+        const uint8_t *src       = (const uint8_t *)stage.contents;
+        if (dst_pitch == row_bytes) {
+            memcpy(dst, src, copy_size);
+        } else {
+            for (uint32_t y = 0; y < src_h; y++) {
+                memcpy(dst + y * dst_pitch,
+                       src + y * row_bytes,
+                       row_bytes);
+            }
+        }
+        atomic_fetch_add(&s_surface_downloads, 1);
+        atomic_fetch_add(&s_surface_download_bytes, (uint64_t)copy_size);
+        succeeded = true;
+    }
+
+    if (succeeded) {
+        atomic_store(&b->draw_dirty, (uint32_t)0);
+        /* The freshly-downloaded VRAM IS the latest texture content; clear
+         * dirty_vram so the next bind-time upload doesn't redundantly copy
+         * the same bytes back to the texture (the texture already has them).
+         * The CPU-write callback will re-set dirty_vram if the guest writes
+         * to this range after the download. */
+        atomic_store(&b->dirty_vram, (uint32_t)0);
+    }
+    return succeeded;
+}
+
+/* ---------------------------------------------------------------- */
 
 bool pgraph_mtl_surface_init(void)
 {
@@ -550,6 +762,8 @@ bool pgraph_mtl_surface_init(void)
     atomic_store(&s_vram_dirty_hits, (uint64_t)0);
     atomic_store(&s_vram_uploads, (uint64_t)0);
     atomic_store(&s_vram_upload_bytes, (uint64_t)0);
+    atomic_store(&s_surface_downloads, (uint64_t)0);
+    atomic_store(&s_surface_download_bytes, (uint64_t)0);
 
     s_initialized = true;
     return true;
@@ -639,6 +853,15 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
         if (atomic_load(&s_front_framebuffer_texture) == e->texture) {
             atomic_store(&s_front_framebuffer_texture, (void *)NULL);
         }
+        /* M5.10: if the open render pass currently references this
+         * texture, drain it before binding_destroy releases the
+         * MTLTexture out from under the encoder. */
+        void *open_color_tex = NULL, *open_depth_tex = NULL;
+        pgraph_mtl_draw_get_open_pass_textures(&open_color_tex,
+                                               &open_depth_tex);
+        if (e->texture == open_color_tex || e->texture == open_depth_tex) {
+            pgraph_mtl_draw_flush_open_pass();
+        }
         cache_unlink(e);
         binding_destroy(e);
     }
@@ -670,6 +893,7 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
     atomic_store(&e->dirty_vram, (uint32_t)0);
+    atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
 
     msaa_ensure(e);
@@ -712,6 +936,13 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
                     e->width, e->height, e->nv097_format,
                     width, height, nv097_zeta_format);
         }
+        /* M5.10: open-pass drain symmetric with the color path. */
+        void *open_color_tex = NULL, *open_depth_tex = NULL;
+        pgraph_mtl_draw_get_open_pass_textures(&open_color_tex,
+                                               &open_depth_tex);
+        if (e->texture == open_color_tex || e->texture == open_depth_tex) {
+            pgraph_mtl_draw_flush_open_pass();
+        }
         cache_unlink(e);
         binding_destroy(e);
     }
@@ -743,6 +974,7 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
     atomic_store(&e->dirty_vram, (uint32_t)0);
+    atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
 
     msaa_ensure(e);
@@ -1416,6 +1648,139 @@ unsigned int pgraph_mtl_surface_iter_addresses(uint32_t *out, unsigned int cap)
         out[n++] = e->vram_addr;
     }
     return n;
+}
+
+unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
+                                                  uint32_t *out_sizes,
+                                                  unsigned int cap)
+{
+    if (!s_initialized || out_addrs == NULL || out_sizes == NULL ||
+        cap == 0) {
+        return 0;
+    }
+    unsigned int n = 0;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL && n < cap;
+         e = e->next) {
+        out_addrs[n] = e->vram_addr;
+        out_sizes[n] = (uint32_t)e->size;
+        n++;
+    }
+    return n;
+}
+
+/* ---------------------------------------------------------------- */
+/* M5.10 (2026-05-03): set-draw-dirty + download API. */
+
+void pgraph_mtl_surface_set_draw_dirty_color(void)
+{
+    if (!s_initialized || s_color_binding == NULL) {
+        return;
+    }
+    atomic_store(&s_color_binding->draw_dirty, (uint32_t)1);
+}
+
+void pgraph_mtl_surface_set_draw_dirty_depth(void)
+{
+    if (!s_initialized || s_depth_binding == NULL) {
+        return;
+    }
+    atomic_store(&s_depth_binding->draw_dirty, (uint32_t)1);
+}
+
+/* Helper: download a single entry, then invoke the QEMU-side dirty
+ * callback with the VRAM range that was written. */
+static void download_and_notify(MtlSurfaceBinding *e,
+                                uint8_t *vram_ptr_base,
+                                PgraphMtlSurfaceDownloadCb cb,
+                                void *cb_opaque)
+{
+    if (!atomic_load(&e->draw_dirty) || e->texture == NULL) {
+        return;
+    }
+    /* Compute the byte range we're about to overwrite in VRAM. Mirror
+     * the natural-row formula used by the upload helper so the caller's
+     * QEMU dirty mark covers exactly the bytes we touched. */
+    unsigned int bpp = e->is_color
+        ? color_bytes_per_pixel(e->nv097_format)
+        : 4;
+    uint32_t guest_w = e->guest_width  ? e->guest_width  : e->width;
+    uint32_t guest_h = e->guest_height ? e->guest_height : e->height;
+    if (guest_w > e->width)  guest_w = e->width;
+    if (guest_h > e->height) guest_h = e->height;
+    size_t row_bytes = (size_t)guest_w * (bpp ? bpp : 4);
+    size_t pitch     = e->pitch != 0 ? (size_t)e->pitch : row_bytes;
+    size_t byte_size = pitch * guest_h;
+    if (byte_size > e->size) {
+        byte_size = e->size;
+    }
+
+    bool wrote = download_surface_to_vram(e, vram_ptr_base);
+
+    if (wrote && cb != NULL && byte_size > 0) {
+        /* The download path wrote real bytes to vram. Invoke the QEMU
+         * dirty-mark callback so downstream consumers (display, NV2A
+         * texture cache) see the new bytes. Callback is skipped when
+         * the download was a no-op (depth, scaled-non-1×, format
+         * unknown) — see download_surface_to_vram for the gates. */
+        cb(cb_opaque, e->vram_addr, (uint32_t)byte_size);
+    }
+}
+
+void pgraph_mtl_surface_download_if_dirty_at(uint32_t vram_addr,
+                                             uint8_t *vram_ptr_base,
+                                             PgraphMtlSurfaceDownloadCb cb,
+                                             void *cb_opaque)
+{
+    if (!s_initialized || vram_ptr_base == NULL) {
+        return;
+    }
+    MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    if (e == NULL) {
+        return;
+    }
+    download_and_notify(e, vram_ptr_base, cb, cb_opaque);
+}
+
+void pgraph_mtl_surface_download_dirty_all(uint8_t *vram_ptr_base,
+                                           PgraphMtlSurfaceDownloadCb cb,
+                                           void *cb_opaque)
+{
+    if (!s_initialized || vram_ptr_base == NULL) {
+        return;
+    }
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        download_and_notify(e, vram_ptr_base, cb, cb_opaque);
+    }
+}
+
+void pgraph_mtl_surface_download_in_range_if_dirty(uint32_t start,
+                                                   uint32_t len,
+                                                   uint8_t *vram_ptr_base,
+                                                   PgraphMtlSurfaceDownloadCb cb,
+                                                   void *cb_opaque)
+{
+    if (!s_initialized || vram_ptr_base == NULL || len == 0) {
+        return;
+    }
+    uint32_t range_end = start + len;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        uint32_t ent_end = e->vram_addr + e->size;
+        bool overlaps = !(e->vram_addr >= range_end || start >= ent_end);
+        if (!overlaps) {
+            continue;
+        }
+        download_and_notify(e, vram_ptr_base, cb, cb_opaque);
+    }
+}
+
+uint64_t pgraph_mtl_surface_downloads(void)
+{
+    return atomic_load(&s_surface_downloads);
+}
+
+uint64_t pgraph_mtl_surface_download_bytes(void)
+{
+    return atomic_load(&s_surface_download_bytes);
 }
 
 /* Compute the effective host-space rectangle for a given guest-space

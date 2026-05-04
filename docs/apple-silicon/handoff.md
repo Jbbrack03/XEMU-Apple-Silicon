@@ -1,6 +1,42 @@
 # Handoff
 
-Last updated: 2026-05-03 (post-followup-E surface-cache fixes —
+Last updated: 2026-05-03 (post-M5.10 — **VRAM-coherent surface
+download infrastructure shipped default-off**). M5.10 lands the
+public download API (`pgraph_mtl_surface_download_if_dirty_at` /
+`_dirty_all` / `_in_range_if_dirty`), mirrors vk's
+`pgraph_vk_surface_download_if_dirty` field-for-field including the
+`MTLBlitCommandEncoder copyFromTexture:toBuffer:` + waitUntilCompleted
++ memcpy_image flow, adds a cross-queue `MTLSharedEvent` fence between
+the draw queue and the render queue, adds KVM/HVF parity polling in
+`pgraph_mtl_surface_update`, and gates everything behind
+`XEMU_METAL_FRONT_FB_DOWNLOAD={0,1}` default 0. Codex-validate ran
+and found 4 issues (2 HIGH, 2 MEDIUM); all addressed in-slice
+(scaled-surface readback corruption → defensive skip; KVM/HVF 4 KB
+polling → per-entry full size; depth callback spurious mark →
+`download_surface_to_vram` returns bool with callback gated;
+CLAUDE.md flag doc gap → added). **Visual gate still FAILS** —
+infrastructure is correct but does not bridge PGR2's specific
+back→front mechanism (still unidentified post-followup-B+C; queued
+for next investigation). M15 default-on stays **BLOCKED**.
+User-stated runtime goals (1080p, 30/60 fps, AA, correct colors,
+no jitter, no input-latency) **MET TODAY** via GL +
+`XEMU_GL_MSAA=4` + `surface_scale=2` + `XEMU_MACOS_NATIVE_INPUT=1`.
+
+**Highest-priority next-session action**: enable the M5.10 path at
+`XEMU_DISPLAY_SCALE=1 XEMU_METAL_FRONT_FB_DOWNLOAD=1` and capture a
+PGR2 gameplay-state screenshot via the `pgr2_gameplay_b4` snapshot
+to test whether the download path bridges the back→front gap when
+no scaling-skip is in the way. If PGR2 shows scene content, M5.10
+is sufficient infrastructure-wise and only the surface_scale=2
+GPU-downsample pass is the remaining slice. If still magenta /
+empty, PGR2 uses a fourth back→front mechanism (likely an
+unimplemented NV2A engine class — NV3089 / NV0039 / 2D blit
+subchannel — or a software post-process draw pass that we'd see
+via texture-bind reads of `0x3628000`). See decision-log "2026-05-03:
+Metal slice M5.10" and benchmark note
+`docs/apple-silicon/benchmarks/2026-05-03-metal-m5_10-vram-coherent-download.md`.
+
+(Earlier banner — post-followup-E surface-cache fixes —
 **three real bugs in the Metal surface cache shipped + one decisive
 diagnostic counter**: per-vram_addr `metal_draw_target` counter at
 `pgraph_mtl_flush_draw` now exposes WHICH cached surface receives
