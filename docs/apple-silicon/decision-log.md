@@ -1,5 +1,140 @@
 # Decision Log
 
+## 2026-05-04: Codex review of Metal porting workflow rollout — fixes (W6) plus follow-up slices
+
+**Context.** Codex-validate review of the prior session's
+D1 + W1 + W2 + W3 + W4 + W5 rollout flagged six issues. This entry
+records the four-fix W6 slice landed today and names two larger
+follow-up slices (F1, F2) deferred to dedicated future sessions.
+
+**Decisions landed in W6.**
+
+- **Fix 1 — paired-harness size mismatch.** `metal-gl-compare.sh`'s
+  GL leg captured the full desktop via `screencapture -x` while the
+  Metal leg wrote drawable-only PNGs from the in-renderer screenshot
+  path. `compare-screenshots.py` exited on size mismatch, so the
+  Phase 2 gate INFRA-FAILed on the first paired run. **Two-layer fix:**
+  (a) `macos-capture.sh` now reads `XEMU_CAPTURE_WINDOW_PATTERN`
+  and runs `screencapture -l <wid>` against the matching on-screen
+  window (resolved through Quartz `CGWindowListCopyWindowInfo`),
+  falling back to full-desktop capture when the pattern matches
+  nothing this cycle; `metal-gl-compare.sh`'s GL leg sets
+  `XEMU_CAPTURE_WINDOW_PATTERN=xemu` so the GL capture is bounded
+  to the same logical region the Metal drawable PNG covers.
+  (b) `compare-screenshots.py` gains `--resize {none,smaller}`;
+  `metal-gl-compare.sh` passes `--resize smaller`, so any residual
+  retina-vs-drawable mismatch is normalized via LANCZOS resize down
+  to the smaller dimensions before crop+diff. The auto-derived crop
+  is now `0,0,min(W_gl,W_metal),min(H_gl,H_metal)`. The two layers
+  combine to "the diff is computed over a meaningful common region";
+  the per-frame TSV / `report.md` table / `summary.json` entries
+  record `raw_baseline_size`, `raw_candidate_size`, and `resized=
+  {no,smaller}` so triage knows which capture surfaces were used.
+
+- **Fix 2 — HUD pollution.** W1 auto-on-promotes `XEMU_METAL_HUD=1`
+  for any `XEMU_RENDERER=METAL` benchmark. The Metal Performance HUD
+  overlay was bleeding into `metal-gl-compare.sh`'s captured PNGs,
+  silently inflating the per-pixel diff. `metal-gl-compare.sh`'s
+  Metal leg now passes `--metal-no-hud`. `metal-canary-regress.sh`
+  already passed it; both scripts now also write the effective
+  HUD/validation state into their `report.md` and `summary.json`
+  (`metal_hud=off`, `metal_validation=on|auto-on`) so the artifact
+  documents the configuration rather than implying it.
+
+- **Fix 3 — workflow doc imaginary flags.**
+  `docs/apple-silicon/metal-porting-workflow.md` §3.2 referenced
+  `metal-gl-compare.sh --title <game> --route <csv> --interval N
+  --tolerance F`; none of those flags exist. The actual signature
+  is positional `<game>` plus `--input`, `--frames`, `--crop`,
+  `--threshold`, `--duration`, `--out-dir`. The doc now mirrors the
+  real signature and worked example. The §4.6 Scripts entries for
+  `metal-gl-compare.sh` and `metal-canary-regress.sh` gained a
+  one-line signature each so a future drift is harder to miss.
+
+- **Fix 4 — range semantics.** The workflow doc said
+  `XEMU_METAL_DUMP_DRAW_RT` / `XEMU_GL_DUMP_DRAW_RT` use half-open
+  `[START, END)`. The W4 implementations in `pgraph/mtl/draw.mm`
+  (line ~1289) and `pgraph/gl/draw.c` (line ~1193) both check
+  `idx >= START && idx <= END`; the upstream `xemu-fork/CLAUDE.md`
+  flag entry already said inclusive. Workflow doc §3.3 + §4.2 now
+  say inclusive `[START, END]`. `xemu-fork/CLAUDE.md` reinforces
+  the convention by quoting the in-source check explicitly.
+
+- **Fix 5 — Vulkan triangulation primacy demoted.** Workflow doc
+  §3.4 + §7 still presented `XEMU_RENDERER=VULKAN` as a primary
+  triangulation procedure even though W5 documented MoltenVK as
+  BLOCKED on Apple Silicon (MoltenVK 1.4.1 reports `geometryShader =
+  0`; xemu's vk renderer hard-requires it). §3.4 is now a
+  "primary triangulation = per-draw RT dump + Xcode `.gputrace` +
+  paired Metal-vs-GL diff" procedure with the Vulkan path called out
+  as BLOCKED with a cross-reference to the W5 entry. §7 retains the
+  three-backend matrix as a "recoverable when MoltenVK ships GS
+  support" appendix rather than the headline procedure. The
+  Vulkan/MoltenVK prose is preserved (per the slice's instructions
+  not to remove it); only its placement changed.
+
+**Cross-cuts updated.** `docs/apple-silicon/automation.md` —
+"Paired Metal-vs-GL Diff Harness" subsection notes the
+`XEMU_CAPTURE_WINDOW_PATTERN` + `--resize smaller` two-layer fix and
+the `--metal-no-hud` Metal-leg flag. The "Canary regression gate"
+subsection notes the `metal_hud` / `metal_validation` recording in
+the report. The `compare-screenshots.py` reference subsection
+documents the new `--resize` policy. The screenshot-backend
+subsection documents the new `XEMU_CAPTURE_WINDOW_PATTERN` env var
+and its fallback semantics. `xemu-fork/CLAUDE.md` "Diagnostic
+toggles" tightens the W4 range-semantics text for both the Metal
+and GL flags so the inclusive `[START, END]` convention is no
+longer ambiguous.
+
+**Validation.** `bash -n` clean for `metal-gl-compare.sh`,
+`metal-canary-regress.sh`, `macos-capture.sh`. `python3 -m
+py_compile compare-screenshots.py` clean. No source changes in
+`xemu-fork/hw/` so `./build.sh -a arm64` is not required for this
+slice; the W4 source-side `[START, END]` check remains unchanged
+(only docs needed updating per the slice instructions).
+`grep -nE "metal-gl-compare\.sh|metal-canary-regress\.sh"
+docs/apple-silicon/metal-porting-workflow.md` confirms every flag
+mentioned in the doc is present in the actual scripts.
+
+**Follow-up slices captured (DEFERRED — not implemented in W6).**
+
+- **Slice F1 (HIGH, deferred): deterministic frame alignment for
+  the Phase 2 paired diff.** `metal-gl-compare.sh` today pairs
+  screenshots by ordinal across two cold launches of the same
+  scripted-input route. Real-world timing drift between the GL and
+  Metal cold launches (shader compile durations, OS scheduler
+  variance, asset-load order) means the same ordinal does not
+  necessarily correspond to the same in-game frame. A robust gate
+  needs a deterministic alignment: QMP/HMP `loadvm` for both
+  backends from the same saved-state, plus a same-event capture
+  trigger (vblank counter, NV2A flip-stall, or scripted-input
+  marker frame) so the two captured ordinals reference the same
+  guest-side frame. Codex-validate review 2026-05-04. Until F1
+  lands, treat per-frame `changed_pixels_pct` differences below ~3
+  % as inconclusive on dynamic gameplay; static menus / loading
+  screens (the W3 canary set) are not affected.
+
+- **Slice F2 (MEDIUM, deferred): canary gold-image artifact
+  store.** `metal-canary-regress.sh` reads its gold PNGs from
+  `benchmark-runs/visual-checks/`, which is gitignored alongside
+  the rest of `benchmark-runs/`. A fresh checkout therefore fails
+  the gate on every canary with `INFRA-FAIL: missing gold PNG`
+  before any Metal change is even evaluated. Two viable fixes are
+  on the table: (i) move the four canary golds (PGR2 / Rainbow /
+  Halo / boot at the f900/f600/f1200/f300 ordinals) to a new
+  tracked directory like `docs/apple-silicon/canary-baselines/`
+  with a `MANIFEST.tsv` recording the build commit and the
+  capture environment that produced each PNG; or (ii) add an
+  artifact-fetch step that downloads the golds from a
+  release-attached zip on `apple-silicon-performance` tags. (i) is
+  the simpler near-term fix; (ii) is more scalable for a wider
+  baseline corpus. Codex-validate review 2026-05-04.
+
+Both follow-up slices are non-blocking for the current four-fix
+landing — the immediate Phase 2 gate breakage is closed by W6 — but
+they are required to make the gate reliable in CI / fresh-checkout
+contexts.
+
 ## 2026-05-04: Canary regression gate (W3)
 
 **Context.** Metal renderer code changes routinely silently regress one

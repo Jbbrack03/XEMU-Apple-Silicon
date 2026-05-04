@@ -249,23 +249,37 @@ running gameplay routes.
 ### 3.2 Paired diff for the suspected failing canary
 
 Use `metal-gl-compare.sh` (W2 — introduced 2026-05-04) when
-investigating a specific title:
+investigating a specific title. The script's actual signature
+(positional `<game>` plus optional flags) is:
 
 ```sh
-scripts/apple-silicon/metal-gl-compare.sh \
-  --title pgr2 \
-  --route scripts/apple-silicon/input-scripts/pgr2-gameplay.csv \
+scripts/apple-silicon/metal-gl-compare.sh pgr2 \
+  --input scripts/apple-silicon/input-scripts/pgr2-smoke.csv \
   --duration 90 \
-  --interval 30 \
-  --tolerance 0.01
+  --frames mid,end \
+  --threshold 1.0
 ```
 
+`<game>` is one of `pgr2 | rainbow | crimson | sc2 | halo |
+flat-tri-depth` (same aliases as `run-benchmark.sh`). `--input`
+defaults to `input-scripts/<game>-smoke.csv` (with the known
+`crimson-skies-smoke.csv` / `rainbow-six-3-smoke.csv` fallbacks);
+`--frames` is a comma-separated list of 1-indexed screenshot ordinals
+(default `mid,end` — the middle and last entry of the captured set's
+intersection); `--threshold` is the maximum changed-pixels percentage
+per compared frame for the run to PASS (default 1.0). Optional
+`--crop x,y,w,h` overrides the auto-derived "0,0,W,H" crop (where W/H
+are the smaller of the GL and Metal capture dimensions per W6).
+`--out-dir` overrides the default `benchmark-runs/<TS>-metal-gl-
+compare-<game>/` output path.
+
 The harness runs the same scripted route under GL and Metal at
-matched screenshot intervals, runs Visual Flight Recorder over each
-output sequence, and writes a side-by-side diff under
-`benchmark-runs/<timestamp>-<title>-metal-gl-compare/`. Per-pixel
-diff above the tolerance becomes the failing-frame index that
-Section 3.3's per-draw RT dump targets.
+matched screenshot intervals (GL via `screencapture` window-targeted
+to the xemu window; Metal via the in-renderer drawable PNG path), runs
+`compare-screenshots.py` per requested frame, and writes a side-by-
+side diff plus a `report.md` + `summary.json` PASS/FAIL verdict.
+Per-pixel diff above `--threshold` becomes the failing-frame index
+that Section 3.3's per-draw RT dump targets.
 
 When `metal-gl-compare.sh` is not yet available in your branch, the
 fallback is two manually-paired `run-benchmark.sh` invocations with
@@ -305,63 +319,72 @@ read its NV2A method dispatch in `xemu.log` and the corresponding
 state in the Metal pipeline-key builder
 (`hw/xbox/nv2a/pgraph/mtl/state.c`).
 
-The format `START:END:PREFIX` writes
-`<PREFIX>.draw<NNNN>.<frame>.png` for draws indexed `[START, END)`.
-Keep the range tight to bound disk usage — a single Metal frame can
-issue 100+ draws at PGR2 gameplay rates.
+The format `START:END:PREFIX` writes `<PREFIX>.<NNNNNN>.png` (a
+zero-padded 6-digit cumulative-per-RUN draw index, matching
+Mesa/RADV debug-dump semantics) for draws indexed `[START, END]`
+**inclusive**. The W4 implementations in `pgraph/mtl/draw.mm` and
+`pgraph/gl/draw.c` both check `idx >= START && idx <= END`; the
+upstream `xemu-fork/CLAUDE.md` flag entry says inclusive too. Keep
+the range tight to bound disk usage — a single Metal frame can issue
+100+ draws at PGR2 gameplay rates.
 
-### 3.4 MoltenVK triangulation when stuck
+### 3.4 Triangulation when stuck
 
-If Metal-vs-GL diverges and the root cause is ambiguous (it could be
-either path's bug), a third backend triangulates. W5 (introduced
-2026-05-04) wires `XEMU_RENDERER=VULKAN` on Apple Silicon via
-MoltenVK so the same scripted route runs through xemu's existing
-Vulkan renderer on top of MoltenVK's Vulkan-on-Metal translation:
+When Metal-vs-GL diverges and the root cause is ambiguous, the
+**primary** triangulation path on this fork is the **per-draw RT
+dump + Xcode `.gputrace` + paired diff** combination — NOT a third
+backend. Decision-log entry "2026-05-04: MoltenVK W5 BLOCKED"
+records why: xemu's Vulkan renderer hard-requires `geometryShader`,
+and MoltenVK 1.4.1 reports `geometryShader = 0` on Apple Silicon
+(M3 Ultra probe). The Vulkan renderer is therefore not built into
+the Apple Silicon `dist/xemu.app` (`vulkan = not_found` in
+`meson.build`); `XEMU_RENDERER=VULKAN` does not run.
 
-```sh
-XEMU_RENDERER=VULKAN \
-scripts/apple-silicon/run-benchmark.sh pgr2 \
-  scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 60
-```
+**Primary triangulation path (use this first):**
 
-If the MoltenVK output matches GL but Metal does not, the bug is on
-xemu's Metal-renderer side (most common). If the MoltenVK output
-matches Metal but neither matches GL, the bug is in xemu's Vulkan
-renderer or in MoltenVK's translation. If MoltenVK matches Metal and
-GL agrees with both at the failing frame index, the failing frame
-is mis-aligned between runs — go re-run with deterministic input
-timing.
+1. **Per-draw RT dump under both backends** (Section 3.3). Run the
+   same scripted route through GL and Metal with matched
+   `XEMU_GL_DUMP_DRAW_RT` / `XEMU_METAL_DUMP_DRAW_RT` ranges. Step
+   through the resulting PNG pairs in lockstep until the first
+   divergence; that's the failing-draw index.
 
-**HEDGE: W5 may be BLOCKED.** xemu's Vulkan renderer relies on
-geometry-shader features that MoltenVK does not implement on Apple
-Silicon (specifically `VK_EXT_geometry_shader` is unsupported on
-MoltenVK 1.3.x for Apple7+). If `XEMU_RENDERER=VULKAN` aborts at
-init or hits a translator failure on every frame, the W5 slice will
-land in BLOCKED state — see `handoff.md` for the current W5 status
-and the fallback path below.
-
-When W5 is BLOCKED, fall back to:
-
-1. **Per-draw RT dump (Section 3.3)** to localize the failing draw
-   from Metal-vs-GL alone. The first divergent draw is usually
-   identifiable without a third oracle.
 2. **Xcode `.gputrace` capture** of the failing Metal frame:
 
    ```sh
    XEMU_METAL_CAPTURE=/tmp/pgr2-fail.gputrace \
    XEMU_METAL_CAPTURE_FRAMES=5 \
    scripts/apple-silicon/run-benchmark.sh pgr2 \
-     scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 30
+     scripts/apple-silicon/input-scripts/pgr2-smoke.csv 30
    ```
 
    Open in Xcode (Window → Organizer → GPU Frame Capture), navigate
    to the failing draw index identified in Section 3.3, inspect
    bound resources and shader inputs.
-3. **Read the GL renderer's behavior** at the same draw index in
+
+3. **Paired Metal-vs-GL diff at that frame** via `metal-gl-compare.sh`
+   (Section 3.2) with `--frames` set to bracket the failing index.
+   The diff confirms the divergence is real, isolates it to a frame,
+   and produces the artifact attached to the benchmark note.
+
+4. **Read the GL renderer's behavior** at the same draw index in
    `hw/xbox/nv2a/pgraph/gl/draw.c` and the corresponding Metal
    path in `hw/xbox/nv2a/pgraph/mtl/draw.mm`. The most common
    Phase 1 bug class is a missing per-state branch on the Metal
    side that GL handles correctly.
+
+**MoltenVK / Vulkan triangulation: BLOCKED.** As of 2026-05-04 the
+Vulkan-renderer-as-third-oracle path is not available on Apple
+Silicon; the per-draw RT dump + Xcode `.gputrace` + paired diff
+combination above absorbs the triangulation load. See decision-log
+"2026-05-04: MoltenVK W5 BLOCKED — pgraph/vk hard-requires
+geometryShader; MoltenVK 1.4.1 reports it false on M3 Ultra" and
+`automation.md` "Triangulation backend status: BLOCKED" for the
+detailed evidence and the future-unblock criteria. If MoltenVK ships
+geometry-shader support OR the project takes on the multi-week
+GS-free pgraph/vk rewrite, the third-backend procedure that lived
+here is recoverable from this section's git history; the future
+unblock would also call for re-promoting it as a corroborating
+oracle when the diagnosis between GL and Metal is ambiguous.
 
 ### 3.5 Update docs and re-run canaries
 
@@ -465,13 +488,15 @@ forward reference to `handoff.md` for current implementation status.
   normalization issues.
 - `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (W4, **introduced
   2026-05-04**; phase 1) — per-draw color RT snapshot for the
-  Metal renderer. Writes `<PREFIX>.draw<NNNN>.<frame>.png` for
-  draws in the half-open index range. See `handoff.md` for the
-  current implementation status.
+  Metal renderer. Writes `<PREFIX>.<NNNNNN>.png` (zero-padded
+  cumulative-per-RUN draw index) for draws in the **inclusive**
+  index range `[START, END]`. See `handoff.md` for current
+  implementation status.
 - `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` (W4, **introduced
   2026-05-04**; phase 1) — same per-draw color RT snapshot on the
-  GL renderer; intended for paired use with `XEMU_METAL_DUMP_DRAW_RT`
-  to do first-divergent-draw isolation.
+  GL renderer; same inclusive `[START, END]` semantics; intended
+  for paired use with `XEMU_METAL_DUMP_DRAW_RT` to do
+  first-divergent-draw isolation.
 
 ### 4.3 Diagnostic / capture flags (Phase 1, 2, 3)
 
@@ -537,14 +562,17 @@ forward reference to `handoff.md` for current implementation status.
   and exits 0/1.
 - `scripts/apple-silicon/metal-gl-compare.sh` (W2, **introduced
   2026-05-04**; phases 1, 2) — paired Metal-vs-GL diff harness
-  modelled on `native-tri-depth-compare.sh`. See `handoff.md` for
-  current implementation status.
+  modelled on `native-tri-depth-compare.sh`. Signature
+  `<game> [--input <csv>] [--frames N,M,K] [--crop x,y,w,h]
+  [--threshold pct] [--duration seconds] [--out-dir <path>]`.
+  See `handoff.md` for current implementation status.
 - `scripts/apple-silicon/metal-canary-regress.sh` (W3, **introduced
   2026-05-04**; phases 1, 2) — runs the green canary set
   (PGR2/Rainbow/Halo/boot) and gates on per-pixel diff against the
-  recorded `benchmark-runs/visual-checks/` baselines. Depends on
-  W2's diff harness. See `handoff.md` for current implementation
-  status.
+  recorded `benchmark-runs/visual-checks/` baselines. Signature
+  `[--canary <name>] [--threshold pct] [--out-dir <path>]`. Depends
+  on W2's diff harness for the underlying `compare-screenshots.py`
+  helper. See `handoff.md` for current implementation status.
 - `scripts/apple-silicon/visual-flight-recorder.py` (2026-05-04) —
   bounded visual timeline analyzer for PNG sequences and short
   videos. Produces `visual-summary.json`, `timeline.csv`,
@@ -885,77 +913,79 @@ records the flip with a pointer to the validation artifacts.
 
 ## 7. Triangulation appendix
 
-A "triangulation" exercise combines three independent oracles to
-localize a hard correctness bug to a single NV2A command. The
-oracles, in order of authority:
+A "triangulation" exercise localizes a hard correctness bug to a
+single NV2A command using independent oracles plus diagnostic lenses.
+
+**Primary oracles (active today on Apple Silicon):**
 
 1. **GL renderer** — the project's correctness reference; behavior is
    well-trodden through retail-game testing on this fork.
-2. **MoltenVK (`XEMU_RENDERER=VULKAN` on Apple Silicon)** —
-   independent Vulkan-on-Metal translation. Disagreement between GL
-   and MoltenVK localizes the bug to either xemu's Vulkan renderer
-   (rare) or MoltenVK's translation (rare). Agreement between GL and
-   MoltenVK is the strongest "Metal is the bug" signal.
-3. **Metal renderer (`XEMU_RENDERER=METAL`)** — the path under test.
+2. **Metal renderer (`XEMU_RENDERER=METAL`)** — the path under test.
 
-Combine the oracles with two diagnostic lenses:
+**Primary diagnostic lenses (the W4 + M13 + W2 combination is the
+canonical triangulation path on this fork):**
 
 - **Per-draw RT dump** (`XEMU_METAL_DUMP_DRAW_RT` and
   `XEMU_GL_DUMP_DRAW_RT`, W4) — narrows the failing frame to a
-  failing draw index.
+  single failing draw index.
 - **Xcode `.gputrace` capture** (`XEMU_METAL_CAPTURE`, M13) —
-  inspect bound resources and shader inputs at the failing draw.
+  inspects bound resources and shader inputs at the failing draw.
+- **Paired Metal-vs-GL diff** (`metal-gl-compare.sh`, W2) —
+  produces the artifact attached to the benchmark note and confirms
+  the divergence is real and frame-localized.
 
-### 7.1 The full triangulation procedure
+**MoltenVK / Vulkan as a third oracle: BLOCKED.** Vulkan triangulation
+via `XEMU_RENDERER=VULKAN` over MoltenVK is not available today —
+xemu's Vulkan renderer hard-requires `geometryShader`, which MoltenVK
+1.4.1 reports as `0` on Apple Silicon. See decision-log
+"2026-05-04: MoltenVK W5 BLOCKED" and `automation.md` "Triangulation
+backend status: BLOCKED" for the device-feature probe and the
+required-feature gate in `pgraph/vk/instance.c:482-517`. If MoltenVK
+ships GS support or the project takes on the multi-week GS-free
+pgraph/vk rewrite, the third-backend procedure becomes available; the
+section below documents how it would re-enter the workflow.
+
+### 7.1 Primary triangulation procedure (Metal + GL only)
 
 For a Crimson-class "Metal goes black after one frame" bug:
 
 ```sh
-# Run the same scripted route through all three backends.
-for renderer in GL VULKAN METAL; do
-  XEMU_RENDERER=$renderer \
-  XEMU_BENCH_VISUAL_ANALYSIS=1 \
-  XEMU_BENCH_SCREENSHOT_INTERVAL=15 \
-  scripts/apple-silicon/run-benchmark.sh crimson \
-    scripts/apple-silicon/input-scripts/crimson-gameplay.csv 60
-done
+# Step 1 — paired diff to locate the failing frame range.
+scripts/apple-silicon/metal-gl-compare.sh crimson \
+  --duration 60 \
+  --frames mid,end \
+  --threshold 1.0
 ```
 
-Compare the three Visual Flight Recorder summaries. The expected
-matrix in a Phase 1 bug:
-
-| GL    | MoltenVK | Metal | Diagnosis                               |
-|-------|----------|-------|-----------------------------------------|
-| green | green    | black | Metal renderer bug. Most common. Go to per-draw dump. |
-| green | black    | black | xemu Vulkan renderer + Metal both buggy at same NV2A path; very unlikely. Or MoltenVK is dropping a feature both backends rely on. |
-| green | black    | green | Vulkan-only or MoltenVK-only; ignore for Metal work. |
-| black | green    | green | GL is the regression. Bisect GL.        |
-| green | green    | green | Frame-alignment artifact in capture; re-run with deterministic input. |
-
-If the matrix points at Metal:
+Read the resulting `report.md` to identify which captured ordinal
+is the first that exceeds threshold; map that back to a flush_draw
+range (the W4 dumps are cumulative-per-RUN, so use a generous range
+that brackets the failing frame's draws — 50-100 indices is usually
+plenty).
 
 ```sh
-# Find the failing-frame index from Visual Flight Recorder.
-# Then dump per-draw color RT for the same range under GL and Metal.
+# Step 2 — paired per-draw color RT dump for that range.
+# Inclusive [START, END] indices on both backends.
 XEMU_RENDERER=METAL \
 XEMU_METAL_DUMP_DRAW_RT=120:180:/tmp/crimson-metal-d \
 scripts/apple-silicon/run-benchmark.sh crimson \
-  scripts/apple-silicon/input-scripts/crimson-gameplay.csv 30
+  scripts/apple-silicon/input-scripts/crimson-skies-smoke.csv 30
 
 XEMU_GL_DUMP_DRAW_RT=120:180:/tmp/crimson-gl-d \
 scripts/apple-silicon/run-benchmark.sh crimson \
-  scripts/apple-silicon/input-scripts/crimson-gameplay.csv 30
+  scripts/apple-silicon/input-scripts/crimson-skies-smoke.csv 30
 ```
 
 Step through the per-draw PNG pairs to find the first divergence.
 Capture the failing frame in Xcode:
 
 ```sh
+# Step 3 — Xcode .gputrace at the failing frame.
 XEMU_RENDERER=METAL \
 XEMU_METAL_CAPTURE=/tmp/crimson-fail.gputrace \
 XEMU_METAL_CAPTURE_FRAMES=5 \
 scripts/apple-silicon/run-benchmark.sh crimson \
-  scripts/apple-silicon/input-scripts/crimson-gameplay.csv 30
+  scripts/apple-silicon/input-scripts/crimson-skies-smoke.csv 30
 ```
 
 Open `/tmp/crimson-fail.gputrace` in Xcode (Window → Organizer → GPU
@@ -966,28 +996,42 @@ NV2A method dispatch in `xemu.log` against the GL renderer's path in
 `hw/xbox/nv2a/pgraph/gl/draw.c` for any state branch the Metal path
 is missing.
 
-### 7.2 Fallback when MoltenVK is blocked
+The three-step sequence (paired diff → per-draw dump → `.gputrace`)
+localizes the majority of Phase 1 bugs without a third backend. When
+one backend is clearly producing a black/garbled frame, that frame
+is its own root-cause signal and a third oracle is mostly redundant.
 
-xemu's Vulkan renderer relies on `VK_EXT_geometry_shader`, which is
-not implemented on MoltenVK 1.3.x for Apple7+ devices. If the W5
-slice lands in BLOCKED state (handoff.md will say so), the
-triangulation reduces to:
+### 7.2 Recoverable third-oracle procedure (MoltenVK currently BLOCKED)
 
-1. **Per-draw RT dump under GL and Metal** (Section 3.3) for
-   first-divergent-draw identification.
-2. **Xcode `.gputrace`** of the failing Metal frame (Section 3.4).
-3. **Read GL vs Metal renderer code at the failing NV2A method** to
-   find the missing state branch.
+When the MoltenVK / Vulkan-on-Metal path becomes available on Apple
+Silicon, a third oracle adds diagnostic value when the diagnosis
+between GL and Metal is ambiguous (neither backend is obviously
+wrong but they disagree). The recoverable procedure:
 
-This three-step sequence localizes the majority of Phase 1 bugs
-without the third backend. The MoltenVK oracle's value is highest
-when the diagnosis is ambiguous (neither GL nor Metal looks
-obviously wrong); when one backend is clearly producing a
-black/garbled frame, that frame is its own root-cause signal and
-the triangulation is mostly redundant.
+```sh
+for renderer in GL VULKAN METAL; do
+  XEMU_RENDERER=$renderer \
+  XEMU_BENCH_VISUAL_ANALYSIS=1 \
+  XEMU_BENCH_SCREENSHOT_INTERVAL=15 \
+  scripts/apple-silicon/run-benchmark.sh crimson \
+    scripts/apple-silicon/input-scripts/crimson-skies-smoke.csv 60
+done
+```
 
-The W5 BLOCKED state does not block Phase 1 progress; it only
-removes one corroborating tool.
+The corresponding diagnosis matrix (recoverable when MoltenVK
+ships GS support):
+
+| GL    | MoltenVK | Metal | Diagnosis                               |
+|-------|----------|-------|-----------------------------------------|
+| green | green    | black | Metal renderer bug. Go to per-draw dump. |
+| green | black    | black | xemu Vulkan renderer + Metal both buggy at same NV2A path, or MoltenVK is dropping a feature both backends rely on. |
+| green | black    | green | Vulkan-only or MoltenVK-only; ignore for Metal work. |
+| black | green    | green | GL is the regression. Bisect GL.        |
+| green | green    | green | Frame-alignment artifact in capture; re-run with deterministic input. |
+
+This section is preserved against the day MoltenVK 1.x or 2.x ships
+geometry-shader support OR the project lands a GS-free pgraph/vk
+subset; the §7.1 primary path is sufficient until then.
 
 ---
 

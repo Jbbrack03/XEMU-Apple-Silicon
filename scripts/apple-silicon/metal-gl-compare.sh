@@ -273,11 +273,19 @@ METAL_SCREENSHOT_INTERVAL_FRAMES=60
 run_gl() {
     log "starting GL baseline run (XEMU_RENDERER=GL)"
     local rc
+    # W6 (2026-05-04): set XEMU_CAPTURE_WINDOW_PATTERN=xemu so
+    # macos-capture.sh runs `screencapture -l <wid>` against the
+    # xemu window only, instead of the full desktop. This bounds
+    # the GL capture to the same logical region the Metal leg's
+    # in-renderer drawable PNG covers; any residual size mismatch
+    # (retina vs. drawable scaling) is absorbed by the
+    # `--resize smaller` normalization in compare-screenshots.py.
     set +e
     XEMU_RENDERER=GL \
     XEMU_BENCH_SCREENSHOT_BACKEND=macos \
     XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
     XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
+    XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
         "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
         > "$GL_LAUNCHER_LOG" 2>&1
     rc=$?
@@ -306,6 +314,10 @@ run_metal() {
     local metal_shot_base="$OUT_DIR/metal/screenshot.png"
 
     # XEMU_METAL_VALIDATION=1 — explicit even if W1 already auto-ons it.
+    # W6 (2026-05-04): --metal-no-hud is REQUIRED — W1 auto-ons
+    # XEMU_METAL_HUD=1 for any Metal benchmark, and the HUD overlay
+    # would pollute the captured PNGs versus the GL leg (which has
+    # no overlay). Validation stays on; only the visual HUD is off.
     set +e
     XEMU_RENDERER=METAL \
     XEMU_METAL_VALIDATION=1 \
@@ -314,6 +326,7 @@ run_metal() {
         "$RUN_BENCHMARK" \
             --metal-screenshot "$metal_shot_base" \
             --metal-screenshot-at-frame "$METAL_SCREENSHOT_AT_FRAME" \
+            --metal-no-hud \
             "$GAME" "$INPUT_CSV" "$DURATION" \
         > "$METAL_LAUNCHER_LOG" 2>&1
     rc=$?
@@ -426,16 +439,22 @@ nth_path() {
 # --- diff stage ------------------------------------------------------------
 
 # Synthesize a default crop for compare-screenshots.py. The comparator
-# requires --crop; when the user did not pass one we read each PNG's
-# size and emit "0,0,W,H". W/H are not known until we have the image, so
-# this is computed per frame.
+# requires --crop; when the user did not pass one we read both PNGs'
+# sizes and emit "0,0,W,H" using the SMALLER dimensions of the pair
+# (W6, 2026-05-04). The smaller-of-two is what compare-screenshots.py
+# resizes the larger image down to under `--resize smaller`, so the
+# crop must fit inside the common normalized area.
 default_crop_for() {
-    local png="$1"
-    python3 - "$png" <<'PY'
+    local gl_png="$1"
+    local metal_png="$2"
+    python3 - "$gl_png" "$metal_png" <<'PY'
 import sys
 from PIL import Image
-img = Image.open(sys.argv[1])
-print(f"0,0,{img.size[0]},{img.size[1]}")
+gl = Image.open(sys.argv[1])
+metal = Image.open(sys.argv[2])
+w = min(gl.size[0], metal.size[0])
+h = min(gl.size[1], metal.size[1])
+print(f"0,0,{w},{h}")
 PY
 }
 
@@ -458,19 +477,25 @@ diff_one_frame() {
 
     local crop="$CROP"
     if [[ -z "$crop" ]]; then
-        if ! crop="$(default_crop_for "$gl_png" 2>"$frame_dir/crop-err.txt")"; then
-            err "could not read PNG dimensions for default crop: $gl_png"
+        if ! crop="$(default_crop_for "$gl_png" "$metal_png" 2>"$frame_dir/crop-err.txt")"; then
+            err "could not read PNG dimensions for default crop: $gl_png $metal_png"
             cat "$frame_dir/crop-err.txt" >&2 || true
             return 2
         fi
     fi
 
+    # W6 (2026-05-04): pass --resize smaller so a size mismatch
+    # between the GL full-desktop / window-targeted capture and the
+    # Metal in-renderer drawable PNG is normalized rather than
+    # exiting INFRA-FAIL. Records the raw sizes in the per-frame TSV
+    # so the report can show what was normalized.
     local stdout_file="$frame_dir/compare-stdout.txt"
     local rc
     set +e
     "$COMPARE_SCREENSHOTS" \
         "$gl_png" "$metal_png" \
         --crop "$crop" \
+        --resize smaller \
         --out-dir "$frame_dir" \
         > "$stdout_file" 2>&1
     rc=$?
@@ -480,14 +505,18 @@ diff_one_frame() {
         return 2
     fi
 
-    local mae rms max_abs changed_pct
+    local mae rms max_abs changed_pct raw_gl_size raw_metal_size resized
     mae="$(parse_kv mean_abs_error "$stdout_file")"
     rms="$(parse_kv rms_error "$stdout_file")"
     max_abs="$(parse_kv max_abs_error "$stdout_file")"
     changed_pct="$(parse_kv changed_pixels_pct "$stdout_file")"
+    raw_gl_size="$(parse_kv raw_baseline_size "$stdout_file")"
+    raw_metal_size="$(parse_kv raw_candidate_size "$stdout_file")"
+    resized="$(parse_kv resized "$stdout_file")"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$ordinal" "$gl_png" "$metal_png" "$mae" "$rms" "$max_abs" "$changed_pct" \
+        "$raw_gl_size" "$raw_metal_size" "$resized" \
         >> "$OUT_DIR/diffs/frames.tsv"
 }
 
@@ -569,7 +598,7 @@ fi
 # Determine PASS/FAIL by walking frames.tsv.
 PASS=1
 FAIL_LINES=()
-while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct; do
+while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
     [[ -z "$ordinal" ]] && continue
     # Float compare: candidate's changed_pct vs THRESHOLD.
     if awk -v c="$changed_pct" -v t="$THRESHOLD" 'BEGIN { exit !(c+0 > t+0) }'; then
@@ -594,13 +623,19 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf '- metal_run: %s\n' "$METAL_RUN_DIR"
     printf '- gl_launcher_log: %s\n' "$GL_LAUNCHER_LOG"
     printf '- metal_launcher_log: %s\n' "$METAL_LAUNCHER_LOG"
+    printf '- gl_capture: macos screencapture, XEMU_CAPTURE_WINDOW_PATTERN=xemu (window-id-targeted; falls back to full desktop when xemu window not found)\n'
+    printf '- metal_capture: in-renderer XEMU_METAL_SCREENSHOT_PATH (post-HUD, pre-presentDrawable: drawable PNG)\n'
+    printf '- metal_hud: off (--metal-no-hud passed; HUD overlay never bleeds into Metal-leg PNGs)\n'
+    printf '- metal_validation: on (XEMU_METAL_VALIDATION=1 explicit on Metal leg)\n'
+    printf '- size_mismatch_policy: --resize smaller (compare-screenshots.py LANCZOS-resizes the larger image down to the smaller dimensions before crop+diff)\n'
     printf '\n## Per-frame visual diff\n\n'
-    printf '| frame | mae | rms | max_abs | changed_pct |\n'
-    printf '|------:|----:|----:|--------:|------------:|\n'
-    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct; do
+    printf '| frame | gl_size | metal_size | resized | mae | rms | max_abs | changed_pct |\n'
+    printf '|------:|---------|------------|---------|----:|----:|--------:|------------:|\n'
+    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
         [[ -z "$ordinal" ]] && continue
-        printf '| %s | %s | %s | %s | %s |\n' \
-            "$ordinal" "$mae" "$rms" "$max_abs" "$changed_pct"
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$ordinal" "${raw_gl_size:-?}" "${raw_metal_size:-?}" "${resized:-?}" \
+            "$mae" "$rms" "$max_abs" "$changed_pct"
     done < "$OUT_DIR/diffs/frames.tsv"
     if [[ "$PASS" -eq 0 ]]; then
         printf '\n## Frames over threshold\n\n'
@@ -629,13 +664,19 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf '  "gl_run_dir": "%s",\n' "$GL_RUN_DIR"
     printf '  "metal_run_dir": "%s",\n' "$METAL_RUN_DIR"
     printf '  "perf_summary_path": "%s",\n' "$PERF_DIFF_FILE"
+    printf '  "gl_capture": "macos-screencapture-window-targeted",\n'
+    printf '  "metal_capture": "in-renderer-drawable-png",\n'
+    printf '  "metal_hud": "off",\n'
+    printf '  "metal_validation": "on",\n'
+    printf '  "size_mismatch_policy": "resize-smaller",\n'
     printf '  "frames": [\n'
     first=1
-    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct; do
+    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
         [[ -z "$ordinal" ]] && continue
         if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
-        printf '    { "index": %s, "mae": %s, "rms": %s, "max_abs": %s, "changed_pct": %s, "gl_png": "%s", "metal_png": "%s" }' \
-            "$ordinal" "$mae" "$rms" "$max_abs" "$changed_pct" "$gl_png" "$metal_png"
+        printf '    { "index": %s, "mae": %s, "rms": %s, "max_abs": %s, "changed_pct": %s, "gl_png": "%s", "metal_png": "%s", "raw_gl_size": "%s", "raw_metal_size": "%s", "resized": "%s" }' \
+            "$ordinal" "$mae" "$rms" "$max_abs" "$changed_pct" "$gl_png" "$metal_png" \
+            "${raw_gl_size:-unknown}" "${raw_metal_size:-unknown}" "${resized:-unknown}"
     done < "$OUT_DIR/diffs/frames.tsv"
     printf '\n  ]\n'
     printf '}\n'
