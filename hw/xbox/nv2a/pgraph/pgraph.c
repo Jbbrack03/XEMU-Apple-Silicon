@@ -1036,6 +1036,13 @@ DEF_METHOD(NV097, FLIP_STALL)
      * advance / page flip completion). */
     xemu_display_perf_flip_stall();
     xemu_pfifo_perf_record_flip_stall_set();
+    /* Apple Silicon performance fork — slice F1 (2026-05-04):
+     * deterministic capture trigger. Counts every guest FLIP_STALL
+     * since process start; on the Nth (XEMU_CAPTURE_AT_FLIP_STALL=N)
+     * arms a one-shot flag the renderer consumes to fire a screenshot.
+     * Used by metal-gl-compare.sh's --trigger flip mode to pair
+     * GL/Metal screenshots against the same guest page-flip event. */
+    xemu_capture_at_flip_stall_tick();
     pg->waiting_for_flip = true;
 }
 

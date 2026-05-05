@@ -49,6 +49,7 @@
 #ifndef QEMU_XEMU_DISPLAY_PERF_H
 #define QEMU_XEMU_DISPLAY_PERF_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -65,6 +66,37 @@ void xemu_display_perf_gl_swap(void);
  * reset the counters for the next interval. Called from
  * nv2a_profile_log_emit_interval. */
 void xemu_display_perf_emit_and_reset(FILE *out);
+
+/* Apple Silicon performance fork — slice F1 (2026-05-04):
+ * deterministic "fire a screenshot on the Nth NV2A FLIP_STALL since
+ * process start" trigger. Used by metal-gl-compare.sh to align paired
+ * GL and Metal screenshots against the same guest-side page-flip event,
+ * removing the cold-launch timing-drift false positives that the
+ * previous "Nth submit-time frame" trigger produced.
+ *
+ * Semantics:
+ *   - "Nth flip_stall since process start" — the counter is process-
+ *     lifetime, not loadvm-relative. Pre-loadvm flip_stall events do
+ *     count, but the counter typically stays at zero pre-loadvm because
+ *     the guest only issues NV097_FLIP_STALL once a game frame loop is
+ *     running. With XEMU_BENCH_LOADVM_AT defaulting to 2 s, choosing N
+ *     >= 30 effectively means "30th post-loadvm flip_stall".
+ *   - One-shot: arming clears after a single consume on the renderer
+ *     side. The sentinel file (when configured) is also touched once.
+ *
+ * Configuration (env vars, read once at xemu_capture_at_flip_stall_init):
+ *   XEMU_CAPTURE_AT_FLIP_STALL=N    (1-indexed; 0 / unset = disabled)
+ *   XEMU_CAPTURE_FLIP_STALL_SENTINEL=/path
+ *       Optional. When set, the trigger touches this file once on
+ *       arming. macos-capture.sh polls for the file's existence and
+ *       takes a single screencapture shot when it appears, giving the
+ *       GL leg a renderer-agnostic capture trigger.
+ */
+void xemu_capture_at_flip_stall_init(void);
+void xemu_capture_at_flip_stall_tick(void);
+bool xemu_capture_at_flip_stall_consume(void);
+unsigned long long xemu_capture_at_flip_stall_count(void);
+unsigned long long xemu_capture_at_flip_stall_target(void);
 
 #ifdef __cplusplus
 }

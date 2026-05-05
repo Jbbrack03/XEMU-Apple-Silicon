@@ -28,6 +28,8 @@ usage() {
 usage: $0 <game> [--input <csv>] [--frames N,M,K]
                  [--crop x,y,w,h] [--threshold pct]
                  [--duration seconds] [--out-dir <path>]
+                 [--snapshot <tag>] [--loadvm-at <sec>]
+                 [--trigger frame|flip] [--trigger-ordinal <N>]
                  [--help]
 
 Paired Metal-vs-GL visual + perf diff harness. Runs the same game/input
@@ -46,6 +48,8 @@ Options:
   --frames N,M,K     1-indexed screenshot ordinals to compare. Default
                      "mid,end" — picks two ordinals from the captured
                      sequence (the middle one and the last one).
+                     Ignored when --trigger=flip (the trigger fires a
+                     single one-shot capture per leg).
   --crop x,y,w,h     Crop rectangle passed to compare-screenshots.py.
                      Default: full frame (no crop applied; the comparator
                      receives a synthetic full-image crop after the PNG
@@ -55,6 +59,32 @@ Options:
   --duration seconds Per-renderer benchmark duration. Default 30.
   --out-dir <path>   Output directory. Default
                      benchmark-runs/<TS>-metal-gl-compare-<game>/.
+  --snapshot <tag>   F1 (2026-05-04) — load the named savevm tag into
+                     the guest at \`--loadvm-at\` seconds (default 2 s)
+                     via QMP/HMP, then drive the input script. Removes
+                     cold-launch shader-compile / OS-scheduler / asset-
+                     load drift between the two legs by starting both
+                     from the same guest state.
+  --loadvm-at <sec>  F1 — number of seconds after xemu launch at which
+                     the harness restores --snapshot. Default 2.
+  --trigger frame|flip
+                     F1 — capture trigger.  \`frame\` (default for
+                     back-compat) uses the original ordinal-based
+                     submit-time-frame schedule on Metal and the
+                     wallclock-interval cadence on GL.  \`flip\` activates
+                     the flip-stall trigger: the renderer-agnostic
+                     XEMU_CAPTURE_AT_FLIP_STALL counts NV097_FLIP_STALL
+                     events (a guest-side page-flip request) and arms a
+                     one-shot capture on the --trigger-ordinal-th event.
+                     The Metal leg fires its in-renderer screenshot
+                     directly; the GL leg watches a sentinel file
+                     touched by xemu and runs screencapture once.
+  --trigger-ordinal <N>
+                     F1 — N for the trigger.  Defaults: 30 for
+                     \`flip\` (gives the post-loadvm guest several
+                     frames to settle / shader cache to warm), 60 for
+                     \`frame\` (matches the existing harness default
+                     submit-time at_frame).
   --help             Print this usage.
 
 Exit codes:
@@ -78,6 +108,11 @@ CROP=""
 THRESHOLD="1.0"
 DURATION="30"
 OUT_DIR=""
+# F1 (2026-05-04) — snapshot + flip-stall-trigger plumbing.
+SNAPSHOT_TAG=""
+LOADVM_AT="2"
+TRIGGER="frame"
+TRIGGER_ORDINAL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -115,6 +150,26 @@ while [[ $# -gt 0 ]]; do
             OUT_DIR="$2"; shift 2 ;;
         --out-dir=*)
             OUT_DIR="${1#--out-dir=}"; shift ;;
+        --snapshot)
+            [[ $# -ge 2 ]] || { err "--snapshot requires a tag"; exit 2; }
+            SNAPSHOT_TAG="$2"; shift 2 ;;
+        --snapshot=*)
+            SNAPSHOT_TAG="${1#--snapshot=}"; shift ;;
+        --loadvm-at)
+            [[ $# -ge 2 ]] || { err "--loadvm-at requires seconds"; exit 2; }
+            LOADVM_AT="$2"; shift 2 ;;
+        --loadvm-at=*)
+            LOADVM_AT="${1#--loadvm-at=}"; shift ;;
+        --trigger)
+            [[ $# -ge 2 ]] || { err "--trigger requires a value"; exit 2; }
+            TRIGGER="$2"; shift 2 ;;
+        --trigger=*)
+            TRIGGER="${1#--trigger=}"; shift ;;
+        --trigger-ordinal)
+            [[ $# -ge 2 ]] || { err "--trigger-ordinal requires a value"; exit 2; }
+            TRIGGER_ORDINAL="$2"; shift 2 ;;
+        --trigger-ordinal=*)
+            TRIGGER_ORDINAL="${1#--trigger-ordinal=}"; shift ;;
         --)
             shift; break ;;
         --*)
@@ -175,6 +230,31 @@ if [[ -n "$CROP" ]]; then
         err "--crop must be x,y,width,height integers (got '$CROP')"
         exit 2
     fi
+fi
+
+# F1 — validate snapshot/trigger combo.
+case "$LOADVM_AT" in
+    ''|*[!0-9]*) err "--loadvm-at must be a non-negative integer (got '$LOADVM_AT')"; exit 2 ;;
+esac
+
+case "$TRIGGER" in
+    frame|flip) ;;
+    *) err "--trigger must be 'frame' or 'flip' (got '$TRIGGER')"; exit 2 ;;
+esac
+
+if [[ -z "$TRIGGER_ORDINAL" ]]; then
+    if [[ "$TRIGGER" == "flip" ]]; then
+        TRIGGER_ORDINAL=30
+    else
+        TRIGGER_ORDINAL=60
+    fi
+fi
+case "$TRIGGER_ORDINAL" in
+    ''|*[!0-9]*) err "--trigger-ordinal must be a positive integer (got '$TRIGGER_ORDINAL')"; exit 2 ;;
+esac
+if [[ "$TRIGGER_ORDINAL" -lt 1 ]]; then
+    err "--trigger-ordinal must be >= 1 (got '$TRIGGER_ORDINAL')"
+    exit 2
 fi
 
 # --- pre-flight checks -----------------------------------------------------
@@ -256,6 +336,23 @@ log "  input       = $INPUT_CSV"
 log "  duration    = ${DURATION}s"
 log "  threshold   = ${THRESHOLD}%"
 log "  out_dir     = $OUT_DIR"
+log "  snapshot    = ${SNAPSHOT_TAG:-(none; cold launch)}"
+if [[ -n "$SNAPSHOT_TAG" ]]; then
+    log "  loadvm_at   = ${LOADVM_AT}s"
+fi
+log "  trigger     = $TRIGGER (ordinal=$TRIGGER_ORDINAL)"
+
+# F1 — sentinel file the GL leg's macos-capture.sh polls when --trigger
+# flip is active. Lives under the harness OUT_DIR so the per-leg run
+# directories stay independent of each other; xemu's flip-stall handler
+# touches it once when XEMU_CAPTURE_AT_FLIP_STALL fires. Removed pre-run
+# so a stale file from a previous invocation can never short-circuit
+# the new run's poll loop.
+FLIP_STALL_SENTINEL=""
+if [[ "$TRIGGER" == "flip" ]]; then
+    FLIP_STALL_SENTINEL="$OUT_DIR/flip-stall-armed.sentinel"
+    rm -f "$FLIP_STALL_SENTINEL" || true
+fi
 
 # --- run helpers -----------------------------------------------------------
 
@@ -280,12 +377,33 @@ run_gl() {
     # in-renderer drawable PNG covers; any residual size mismatch
     # (retina vs. drawable scaling) is absorbed by the
     # `--resize smaller` normalization in compare-screenshots.py.
+    #
+    # F1 (2026-05-04): when --trigger flip, set the renderer-agnostic
+    # XEMU_CAPTURE_AT_FLIP_STALL=N + XEMU_CAPTURE_FLIP_STALL_SENTINEL
+    # env vars; macos-capture.sh polls the sentinel and one-shots a
+    # screencapture when xemu touches it. The legacy interval-based
+    # XEMU_BENCH_SCREENSHOT_INTERVAL stays in the env so the
+    # per-launcher metadata still records sane values, but
+    # macos-capture.sh's sentinel-mode branch ignores them.
+    local gl_extra_env=()
+    if [[ -n "$SNAPSHOT_TAG" ]]; then
+        gl_extra_env+=("XEMU_BENCH_LOADVM_TAG=$SNAPSHOT_TAG"
+                       "XEMU_BENCH_LOADVM_AT=$LOADVM_AT")
+    fi
+    if [[ "$TRIGGER" == "flip" ]]; then
+        # Pre-leg sentinel scrub: keep the start of each leg in a
+        # known state.
+        rm -f "$FLIP_STALL_SENTINEL" || true
+        gl_extra_env+=("XEMU_CAPTURE_AT_FLIP_STALL=$TRIGGER_ORDINAL"
+                       "XEMU_CAPTURE_FLIP_STALL_SENTINEL=$FLIP_STALL_SENTINEL")
+    fi
     set +e
-    XEMU_RENDERER=GL \
-    XEMU_BENCH_SCREENSHOT_BACKEND=macos \
-    XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
-    XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
-    XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
+    env "${gl_extra_env[@]}" \
+        XEMU_RENDERER=GL \
+        XEMU_BENCH_SCREENSHOT_BACKEND=macos \
+        XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
+        XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
+        XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
         "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
         > "$GL_LAUNCHER_LOG" 2>&1
     rc=$?
@@ -318,14 +436,42 @@ run_metal() {
     # XEMU_METAL_HUD=1 for any Metal benchmark, and the HUD overlay
     # would pollute the captured PNGs versus the GL leg (which has
     # no overlay). Validation stays on; only the visual HUD is off.
+    #
+    # F1 (2026-05-04): in --trigger flip mode the in-renderer
+    # screenshot is one-shot (XEMU_METAL_SCREENSHOT_INTERVAL is left
+    # unset / 0) and fired by the renderer-side flip-stall consume
+    # instead of the at_frame counter. We still pass --metal-screenshot
+    # because that env (XEMU_METAL_SCREENSHOT_PATH) is what enables the
+    # blit-and-encode path inside ui/xemu-metal.mm; without it the
+    # consume() call on the renderer side has nowhere to write.
+    local metal_extra_env=()
+    local metal_extra_args=()
+    if [[ -n "$SNAPSHOT_TAG" ]]; then
+        metal_extra_env+=("XEMU_BENCH_LOADVM_TAG=$SNAPSHOT_TAG"
+                          "XEMU_BENCH_LOADVM_AT=$LOADVM_AT")
+    fi
+    if [[ "$TRIGGER" == "flip" ]]; then
+        rm -f "$FLIP_STALL_SENTINEL" || true
+        metal_extra_env+=("XEMU_CAPTURE_AT_FLIP_STALL=$TRIGGER_ORDINAL"
+                          "XEMU_CAPTURE_FLIP_STALL_SENTINEL=$FLIP_STALL_SENTINEL")
+        # Force the Metal at-frame trigger out of the way; the consume
+        # path inside xemu-metal.mm wins over the at_frame check when
+        # armed but we set it to a value that will never fire on a
+        # short benchmark so the back-compat path stays inert.
+        metal_extra_env+=("XEMU_METAL_SCREENSHOT_INTERVAL=0")
+        metal_extra_args+=("--metal-screenshot-at-frame" "999999")
+    else
+        metal_extra_env+=("XEMU_METAL_SCREENSHOT_INTERVAL=$METAL_SCREENSHOT_INTERVAL_FRAMES")
+        metal_extra_args+=("--metal-screenshot-at-frame" "$METAL_SCREENSHOT_AT_FRAME")
+    fi
     set +e
-    XEMU_RENDERER=METAL \
-    XEMU_METAL_VALIDATION=1 \
-    XEMU_METAL_SCREENSHOT_INTERVAL="$METAL_SCREENSHOT_INTERVAL_FRAMES" \
-    XEMU_BENCH_SCREENSHOT_BACKEND=none \
+    env "${metal_extra_env[@]}" \
+        XEMU_RENDERER=METAL \
+        XEMU_METAL_VALIDATION=1 \
+        XEMU_BENCH_SCREENSHOT_BACKEND=none \
         "$RUN_BENCHMARK" \
             --metal-screenshot "$metal_shot_base" \
-            --metal-screenshot-at-frame "$METAL_SCREENSHOT_AT_FRAME" \
+            "${metal_extra_args[@]}" \
             --metal-no-hud \
             "$GAME" "$INPUT_CSV" "$DURATION" \
         > "$METAL_LAUNCHER_LOG" 2>&1
@@ -384,7 +530,8 @@ metal_screenshots() {
 
 # Prints space-separated 1-indexed ordinals derived from FRAMES_SPEC.
 # Empty FRAMES_SPEC defaults to "mid,end" against the GL screenshot
-# count.
+# count, except in --trigger flip mode where each leg only produces
+# one shot and the only meaningful ordinal is 1.
 resolve_frames() {
     local gl_count="$1"
     local metal_count="$2"
@@ -400,7 +547,18 @@ resolve_frames() {
     fi
 
     local out=()
-    if [[ -z "$FRAMES_SPEC" || "$FRAMES_SPEC" == "mid,end" ]]; then
+    if [[ "$TRIGGER" == "flip" ]]; then
+        # F1 flip-stall trigger fires exactly once per run — the only
+        # meaningful comparison is the single captured frame. Force
+        # ordinal 1 regardless of whether the caller passed --frames;
+        # the help text documents --frames as ignored in flip mode and
+        # the alternative (rejecting --frames) would break shared
+        # command templates that always pass --frames mid,end.
+        if [[ -n "$FRAMES_SPEC" && "$FRAMES_SPEC" != "1" ]]; then
+            log "ignoring --frames=$FRAMES_SPEC under --trigger flip (one-shot trigger)"
+        fi
+        out=(1)
+    elif [[ -z "$FRAMES_SPEC" || "$FRAMES_SPEC" == "mid,end" ]]; then
         local mid=$(( (count + 1) / 2 ))
         if [[ "$mid" -lt 1 ]]; then mid=1; fi
         if [[ "$count" -eq 1 ]]; then
@@ -614,20 +772,36 @@ verdict="PASS"
 if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
 
 {
-    printf '# %s — metal-gl-compare report\n\n' "$verdict"
-    printf '- game: %s\n' "$GAME"
-    printf '- input: %s\n' "$INPUT_CSV"
-    printf '- duration: %ss\n' "$DURATION"
-    printf '- threshold: %s%% changed-pixels per frame\n' "$THRESHOLD"
-    printf '- gl_run: %s\n' "$GL_RUN_DIR"
-    printf '- metal_run: %s\n' "$METAL_RUN_DIR"
-    printf '- gl_launcher_log: %s\n' "$GL_LAUNCHER_LOG"
-    printf '- metal_launcher_log: %s\n' "$METAL_LAUNCHER_LOG"
-    printf '- gl_capture: macos screencapture, XEMU_CAPTURE_WINDOW_PATTERN=xemu (window-id-targeted; falls back to full desktop when xemu window not found)\n'
-    printf '- metal_capture: in-renderer XEMU_METAL_SCREENSHOT_PATH (post-HUD, pre-presentDrawable: drawable PNG)\n'
-    printf '- metal_hud: off (--metal-no-hud passed; HUD overlay never bleeds into Metal-leg PNGs)\n'
-    printf '- metal_validation: on (XEMU_METAL_VALIDATION=1 explicit on Metal leg)\n'
-    printf '- size_mismatch_policy: --resize smaller (compare-screenshots.py LANCZOS-resizes the larger image down to the smaller dimensions before crop+diff)\n'
+    # `--` after printf ends option processing — bash 3.2 (macOS default)
+    # treats a format string starting with `-` as an unknown option, so
+    # every leading-dash bullet line below uses `printf --`. Same fix
+    # applied in metal-canary-regress.sh's report block.
+    printf -- '# %s — metal-gl-compare report\n\n' "$verdict"
+    printf -- '- game: %s\n' "$GAME"
+    printf -- '- input: %s\n' "$INPUT_CSV"
+    printf -- '- duration: %ss\n' "$DURATION"
+    printf -- '- threshold: %s%% changed-pixels per frame\n' "$THRESHOLD"
+    printf -- '- gl_run: %s\n' "$GL_RUN_DIR"
+    printf -- '- metal_run: %s\n' "$METAL_RUN_DIR"
+    printf -- '- gl_launcher_log: %s\n' "$GL_LAUNCHER_LOG"
+    printf -- '- metal_launcher_log: %s\n' "$METAL_LAUNCHER_LOG"
+    printf -- '- gl_capture: macos screencapture, XEMU_CAPTURE_WINDOW_PATTERN=xemu (window-id-targeted; falls back to full desktop when xemu window not found)\n'
+    printf -- '- metal_capture: in-renderer XEMU_METAL_SCREENSHOT_PATH (post-HUD, pre-presentDrawable: drawable PNG)\n'
+    printf -- '- metal_hud: off (--metal-no-hud passed; HUD overlay never bleeds into Metal-leg PNGs)\n'
+    printf -- '- metal_validation: on (XEMU_METAL_VALIDATION=1 explicit on Metal leg)\n'
+    printf -- '- size_mismatch_policy: --resize smaller (compare-screenshots.py LANCZOS-resizes the larger image down to the smaller dimensions before crop+diff)\n'
+    printf -- '- snapshot: %s\n' "${SNAPSHOT_TAG:-(none; cold launch)}"
+    if [[ -n "$SNAPSHOT_TAG" ]]; then
+        printf -- '- loadvm_at: %ss\n' "$LOADVM_AT"
+    fi
+    printf -- '- trigger: %s (ordinal=%s)\n' "$TRIGGER" "$TRIGGER_ORDINAL"
+    if [[ "$TRIGGER" == "flip" ]]; then
+        if [[ -e "$FLIP_STALL_SENTINEL" ]]; then
+            printf -- '- trigger_fired: yes (sentinel %s present)\n' "$FLIP_STALL_SENTINEL"
+        else
+            printf -- '- trigger_fired: NO (sentinel %s never appeared within %ss)\n' "$FLIP_STALL_SENTINEL" "$DURATION"
+        fi
+    fi
     printf '\n## Per-frame visual diff\n\n'
     printf '| frame | gl_size | metal_size | resized | mae | rms | max_abs | changed_pct |\n'
     printf '|------:|---------|------------|---------|----:|----:|--------:|------------:|\n'
@@ -669,6 +843,17 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf '  "metal_hud": "off",\n'
     printf '  "metal_validation": "on",\n'
     printf '  "size_mismatch_policy": "resize-smaller",\n'
+    printf '  "snapshot": "%s",\n' "${SNAPSHOT_TAG:-}"
+    printf '  "loadvm_at_seconds": %s,\n' "${LOADVM_AT:-0}"
+    printf '  "trigger": "%s",\n' "$TRIGGER"
+    printf '  "trigger_ordinal": %s,\n' "$TRIGGER_ORDINAL"
+    if [[ "$TRIGGER" == "flip" ]]; then
+        if [[ -e "$FLIP_STALL_SENTINEL" ]]; then
+            printf '  "trigger_fired": true,\n'
+        else
+            printf '  "trigger_fired": false,\n'
+        fi
+    fi
     printf '  "frames": [\n'
     first=1
     while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do

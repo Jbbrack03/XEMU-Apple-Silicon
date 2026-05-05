@@ -24,9 +24,20 @@ START_DELAY="$4"
 # matching size-normalization safety net.
 WINDOW_PATTERN="${XEMU_CAPTURE_WINDOW_PATTERN:-}"
 
+# F1 (2026-05-04): opt-in flip-stall-driven one-shot capture. When
+# XEMU_CAPTURE_FLIP_STALL_SENTINEL is set, the loop polls for the
+# sentinel file's appearance and takes a SINGLE shot the moment it
+# appears (the file is created by xemu's NV097_FLIP_STALL handler
+# on the Nth flip_stall — see util/xemu-display-perf.c). The interval
+# / start-delay scheduler is bypassed; the loop still respects
+# DURATION as an upper bound so a missing trigger doesn't hang the
+# benchmark. When the env var is unset, behavior is identical to
+# the pre-F1 wallclock-based interval path.
+FLIP_STALL_SENTINEL="${XEMU_CAPTURE_FLIP_STALL_SENTINEL:-}"
+
 mkdir -p "$OUT_DIR"
 
-python3 - "$OUT_DIR" "$DURATION" "$INTERVAL" "$START_DELAY" "$WINDOW_PATTERN" <<'PY'
+python3 - "$OUT_DIR" "$DURATION" "$INTERVAL" "$START_DELAY" "$WINDOW_PATTERN" "$FLIP_STALL_SENTINEL" <<'PY'
 import os
 import subprocess
 import sys
@@ -38,6 +49,7 @@ duration = float(sys.argv[2])
 interval = float(sys.argv[3])
 start_delay = float(sys.argv[4])
 window_pattern = sys.argv[5] if len(sys.argv) > 5 else ""
+flip_stall_sentinel = sys.argv[6] if len(sys.argv) > 6 else ""
 
 _quartz_module = None
 _quartz_unavailable_logged = False
@@ -118,24 +130,68 @@ next_capture = start + start_delay
 end = start + duration
 index = 0
 
-while time.monotonic() < end:
-    now = time.monotonic()
-    if now < next_capture:
-        time.sleep(min(0.25, next_capture - now))
-        continue
-
-    elapsed = int((now - start) * 1000)
-    filename = out_dir / f"{index:03d}-{elapsed:06d}ms.png"
-    result, source = capture_one(filename)
-    if result.returncode == 0:
-        print(f"captured {filename} source={source}", flush=True)
+# F1 — flip-stall-driven one-shot mode.  When the sentinel path is
+# given, the loop polls every 100 ms for the file's appearance and
+# takes a single shot the moment it shows up.  The duration is still
+# honored as an upper bound so a missing/late trigger does not hang
+# the benchmark; we exit normally without a capture in that case
+# (downstream metal-gl-compare.sh treats zero-shots as INFRA-FAIL).
+if flip_stall_sentinel:
+    sentinel = Path(flip_stall_sentinel)
+    print(
+        f"macos-capture: flip-stall sentinel mode sentinel={sentinel} "
+        f"timeout={duration}s",
+        flush=True,
+    )
+    while time.monotonic() < end:
+        if sentinel.exists():
+            elapsed = int((time.monotonic() - start) * 1000)
+            filename = out_dir / f"flip-stall-{elapsed:06d}ms.png"
+            result, source = capture_one(filename)
+            if result.returncode == 0:
+                print(
+                    f"captured {filename} source={source} trigger=flip-stall",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"capture failed at {elapsed}ms source={source} "
+                    f"trigger=flip-stall: {result.stdout.strip()}",
+                    flush=True,
+                )
+            # One-shot: exit the loop after the trigger fires.  Sleep
+            # out the remaining duration so the parent's `wait
+            # CAPTURE_PID` does not race xemu's shutdown.
+            remaining = end - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            break
+        time.sleep(0.1)
     else:
         print(
-            f"capture failed at {elapsed}ms source={source}: "
-            f"{result.stdout.strip()}",
+            f"macos-capture: flip-stall sentinel did not appear within "
+            f"{duration}s; no shot taken",
             flush=True,
         )
+else:
+    while time.monotonic() < end:
+        now = time.monotonic()
+        if now < next_capture:
+            time.sleep(min(0.25, next_capture - now))
+            continue
 
-    index += 1
-    next_capture += interval
+        elapsed = int((now - start) * 1000)
+        filename = out_dir / f"{index:03d}-{elapsed:06d}ms.png"
+        result, source = capture_one(filename)
+        if result.returncode == 0:
+            print(f"captured {filename} source={source}", flush=True)
+        else:
+            print(
+                f"capture failed at {elapsed}ms source={source}: "
+                f"{result.stdout.strip()}",
+                flush=True,
+            )
+
+        index += 1
+        next_capture += interval
 PY

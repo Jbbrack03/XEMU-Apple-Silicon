@@ -12,6 +12,12 @@
 #include "qemu/xemu-ide-perf.h"
 #include "qemu/xemu-pfifo-perf.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
 static uint64_t display_perf_vblank_fires;
 static uint64_t display_perf_flip_stall_writes;
 static uint64_t display_perf_present_heartbeat;
@@ -35,6 +41,149 @@ void xemu_display_perf_present(void)
 void xemu_display_perf_gl_swap(void)
 {
     qatomic_inc(&display_perf_gl_swaps);
+}
+
+/* Apple Silicon performance fork — slice F1 (2026-05-04):
+ * "Nth flip_stall since process start" capture trigger.
+ *
+ * State:
+ *   s_capture_target          set once at init from XEMU_CAPTURE_AT_FLIP_STALL.
+ *                             0 means "disabled"; non-zero is the 1-indexed
+ *                             flip_stall ordinal at which to arm.
+ *   s_capture_count           monotonic count of flip_stalls seen since
+ *                             process start; bumped once per
+ *                             xemu_capture_at_flip_stall_tick.
+ *   s_capture_armed           one-shot atomic flag (0/1): set when
+ *                             count == target, cleared when consume()
+ *                             is called.
+ *   s_capture_sentinel_path   optional absolute path; touched once when armed.
+ *
+ * The init function reads the env once and is safe to call multiple times
+ * (first call wins via s_capture_initialized). All counter mutations use
+ * qatomic_* so the FLIP_STALL handler (vCPU thread) and the renderer
+ * (rendering thread) never race. */
+static uint32_t  s_capture_initialized;
+static uint64_t  s_capture_target;            /* 0 = disabled */
+static char     *s_capture_sentinel_path;     /* malloc'd; NULL = no sentinel */
+static uint64_t  s_capture_count;
+static uint32_t  s_capture_armed;             /* one-shot 0/1 */
+static uint32_t  s_capture_sentinel_touched;  /* one-shot 0/1 */
+
+static void xemu_capture_at_flip_stall_touch_sentinel(void)
+{
+    if (s_capture_sentinel_path == NULL) {
+        return;
+    }
+    if (qatomic_cmpxchg(&s_capture_sentinel_touched, 0u, 1u) != 0u) {
+        return;
+    }
+    /* O_CREAT | O_EXCL avoids a stale-sentinel ambiguity if the path
+     * already existed when we started; we treat that as a configuration
+     * error and log it but continue (the renderer-side arm path is the
+     * source of truth for the Metal leg). The macos-capture.sh poller
+     * is documented to expect the sentinel to NOT exist at run start. */
+    int fd = open(s_capture_sentinel_path,
+                  O_CREAT | O_EXCL | O_WRONLY, 0644);
+    if (fd < 0) {
+        if (errno == EEXIST) {
+            fprintf(stderr,
+                    "xemu-perf: capture_at_flip_stall sentinel already "
+                    "exists path=%s — treating as armed; clean up the "
+                    "file before the next run\n",
+                    s_capture_sentinel_path);
+        } else {
+            fprintf(stderr,
+                    "xemu-perf: capture_at_flip_stall sentinel open "
+                    "failed path=%s errno=%d (%s)\n",
+                    s_capture_sentinel_path, errno, strerror(errno));
+        }
+        return;
+    }
+    close(fd);
+}
+
+void xemu_capture_at_flip_stall_init(void)
+{
+    if (qatomic_cmpxchg(&s_capture_initialized, 0u, 1u) != 0u) {
+        return;
+    }
+
+    const char *target_env = getenv("XEMU_CAPTURE_AT_FLIP_STALL");
+    uint64_t target = 0;
+    if (target_env != NULL && target_env[0] != '\0') {
+        char *endp = NULL;
+        unsigned long long n = strtoull(target_env, &endp, 10);
+        if (endp != NULL && *endp == '\0') {
+            target = (uint64_t)n;
+        } else {
+            fprintf(stderr,
+                    "xemu-perf: capture_at_flip_stall ignoring malformed "
+                    "XEMU_CAPTURE_AT_FLIP_STALL=%s (expected non-negative "
+                    "integer)\n",
+                    target_env);
+        }
+    }
+    s_capture_target = target;
+
+    const char *sentinel_env = getenv("XEMU_CAPTURE_FLIP_STALL_SENTINEL");
+    if (sentinel_env != NULL && sentinel_env[0] != '\0') {
+        s_capture_sentinel_path = strdup(sentinel_env);
+    }
+
+    if (target > 0) {
+        fprintf(stderr,
+                "xemu-perf: capture_at_flip_stall target=%llu sentinel=%s\n",
+                (unsigned long long)target,
+                s_capture_sentinel_path ? s_capture_sentinel_path : "(none)");
+    }
+}
+
+void xemu_capture_at_flip_stall_tick(void)
+{
+    /* Lazy init on first tick. The CAS in init() ensures this is a
+     * one-shot; subsequent ticks pay only a single qatomic_read. The
+     * FLIP_STALL handler is the only caller in the hot path, so this
+     * is a per-frame cost at worst, not a per-draw cost. */
+    if (qatomic_read(&s_capture_initialized) == 0u) {
+        xemu_capture_at_flip_stall_init();
+    }
+    /* Hot-path ordering:
+     *   1. Bump the monotonic count unconditionally — the value surfaces
+     *      via xemu_capture_at_flip_stall_count() for diagnostic logging
+     *      and is cheap regardless of whether the trigger is armed.
+     *   2. If a target is set and we've now reached it, arm one-shot.
+     *      target == 0 disables the trigger entirely (the env was unset
+     *      or evaluated to 0); the comparison below short-circuits.
+     */
+    uint64_t target = s_capture_target;
+    uint64_t cur = qatomic_fetch_inc(&s_capture_count) + 1;
+    if (target == 0 || cur != target) {
+        return;
+    }
+    /* CAS the armed flag so we only ever arm once; the renderer's
+     * consume() also CAS-clears so any spurious extra arm at a higher
+     * ordinal becomes a no-op. */
+    if (qatomic_cmpxchg(&s_capture_armed, 0u, 1u) == 0u) {
+        fprintf(stderr,
+                "xemu-perf: capture_at_flip_stall fired ordinal=%llu\n",
+                (unsigned long long)cur);
+        xemu_capture_at_flip_stall_touch_sentinel();
+    }
+}
+
+bool xemu_capture_at_flip_stall_consume(void)
+{
+    return qatomic_cmpxchg(&s_capture_armed, 1u, 0u) == 1u;
+}
+
+unsigned long long xemu_capture_at_flip_stall_count(void)
+{
+    return (unsigned long long)qatomic_read(&s_capture_count);
+}
+
+unsigned long long xemu_capture_at_flip_stall_target(void)
+{
+    return (unsigned long long)s_capture_target;
 }
 
 void xemu_display_perf_emit_and_reset(FILE *out)

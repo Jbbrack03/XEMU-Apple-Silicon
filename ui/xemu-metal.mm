@@ -107,6 +107,15 @@ extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void *texture);
  * the per-target object is absent. */
 extern "C" bool pgraph_mtl_shader_validate_run(void) __attribute__((weak));
 
+/* F1 (2026-05-04) — flip-stall capture trigger consume API. The
+ * implementation lives in util/xemu-display-perf.c (host build, not
+ * per-target) so the symbol is unconditionally available; we still
+ * forward-declare here to avoid pulling in the full
+ * include/qemu/xemu-display-perf.h plus its qemu/osdep.h chain into
+ * a .mm translation unit. Returns true exactly once after each guest
+ * FLIP_STALL ordinal matches XEMU_CAPTURE_AT_FLIP_STALL=N. */
+extern "C" bool xemu_capture_at_flip_stall_consume(void);
+
 static void xemu_metal_run_validation_if_requested(void)
 {
     if (pgraph_mtl_shader_validate_run == NULL) {
@@ -1508,7 +1517,21 @@ void xemu_metal_end_imgui_frame(void)
     if (s_screenshot_path != NULL) {
         uint64_t cur_frame = cur_end_frame;
         bool should_fire = false;
-        if (s_screenshot_interval == 0) {
+        /* F1 (2026-05-04) — flip-stall-driven capture trigger, the
+         * Metal half. The vCPU thread bumps an atomic count in the
+         * NV097_FLIP_STALL handler; on the Nth flip_stall (where N
+         * comes from XEMU_CAPTURE_AT_FLIP_STALL) it arms a one-shot
+         * flag. consume() CAS-clears it and we fire a screenshot
+         * here on the renderer thread, reusing the existing
+         * blit/encode-PNG machinery. The consume call is essentially
+         * free when the flag is unset (one CAS) so it's safe to call
+         * unconditionally per frame. With this trigger, the legacy
+         * at_frame / interval mode is bypassed for this frame; the
+         * configured XEMU_METAL_SCREENSHOT_AT_FRAME / _INTERVAL still
+         * govern the non-flip case so back-compat is preserved. */
+        if (xemu_capture_at_flip_stall_consume()) {
+            should_fire = true;
+        } else if (s_screenshot_interval == 0) {
             should_fire = (cur_frame == s_screenshot_at_frame);
         } else if (cur_frame >= s_screenshot_at_frame) {
             uint64_t since = cur_frame - s_screenshot_at_frame;
