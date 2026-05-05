@@ -1,5 +1,82 @@
 # Decision Log
 
+## 2026-05-04 evening: Front-fb fallback policy — analysis, no default flip yet
+
+**Context.** `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (M5.10 experimental,
+2026-05-03) opts in to publishing the most-recently-bound color RT as
+the front-fb when the CRTC-pointed surface lookup hits a stale entry.
+Default 0 (off). M15 default-on (Metal becomes the default renderer)
+is currently blocked on a decision: either make the front-fb publish
+path correctness-faithful OR document an accepted policy that ships
+with the fallback default-on.
+
+**Empirical evidence.**
+
+- **PGR2 with fallback=1**: PASS visual canary, real menu rendered
+  (gold image is the PGR2 main menu).
+- **PGR2 with fallback=0** (`benchmark-runs/20260504-101416-pgr2`):
+  upside-down/wrong frame rendered. The CRTC-pointed surface receives
+  ~1 draw per frame (HUD overlay) while PGR2's actual scene goes to a
+  different back-buffer at a different vram_addr.
+- **Crimson Skies**: visual route BLOCKED in both modes (black drawable
+  after one patterned frame). Fallback doesn't help.
+- **SC2**: visual route BLOCKED in both modes (boot/black with no input).
+  Fallback doesn't help.
+- **Halo CE menu, Xbox boot/flubber, Rainbow Six 3 loading**: PASS in
+  both modes (don't depend on the fallback because their CRTC publish
+  resolves to the actually-rendered surface).
+
+**The trade-off.**
+
+- **Fallback OFF (current default)**: PGR2 user experience is broken
+  (wrong/upside-down frame). Other tested titles work. Correctness-
+  faithful for titles that legitimately use both front and back
+  surfaces (none observed yet).
+- **Fallback ON as default**: PGR2 works. Risk: titles that use both
+  surfaces (e.g. picture-in-picture HUDs) may show the wrong content.
+  Current four-canary set doesn't catch this but a wider title sweep
+  might surface it.
+
+**Decision.** Do NOT flip default to ON in this autonomous session.
+Per project rule #2 (no shortcuts), the correctness-faithful path is
+to make the CRTC publish do what it should: read the CRTC-pointed
+surface AND any back-buffer that has draws since last flip_stall,
+then composite or alternate per the title's actual display semantics.
+That requires understanding NV2A's pageflip mechanism for several
+titles. The fallback-default-on shortcut would ship a known visual
+class of bugs.
+
+**Pragmatic recommendation for downstream consumers.** Until the
+faithful path lands, document the recommended Apple Silicon Metal
+recipe as `XEMU_RENDERER=METAL XEMU_METAL_FRONT_FB_FALLBACK=1`
+(plus the existing closed flags). This is the recipe that produces
+the four canary PASS results today. Updated automation.md and the
+metal-canary-regress.sh CANARY_TABLE to reflect this; the env var
+is still opt-in but the recommended value is clearly documented.
+
+**M15 default-on consequences.** M15's "Metal becomes the default
+renderer" decision is separately gated. Even if the fallback ships
+default-on, M15 still requires:
+- Crimson Skies and SC2 routed visual correctness (independent of
+  fallback policy)
+- Visual gate ≤1% per-pixel diff vs GL on PGR2/Rainbow/Crimson/SC2
+  + 1 broader-sweep title
+- Console-native FPS plus p99 jitter validation on that same set
+- Fresh-cache cold-launch shader compile time below the M15 target
+
+The fallback-policy decision is one prerequisite among five; closing
+it alone does not unblock M15.
+
+**Filed follow-up tasks.**
+
+1. Implement faithful CRTC publish path that handles back-buffer
+   propagation (significant engineering — ~mid-sized slice
+   comparable to the M5.9-followup-E surface-cache fixes).
+2. Wider title sweep with both fallback ON and OFF to characterize
+   which title classes benefit / regress under each policy.
+
+---
+
 ## 2026-05-04 evening: W4 unconditional pass-flush fix + magenta investigation reclassified
 
 **Context.** The 2026-05-04 F1+F2+W3 baseline-lock attempt's "Investigate
