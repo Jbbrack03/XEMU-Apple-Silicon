@@ -1,13 +1,26 @@
 # Benchmark Automation
 
-Last updated: 2026-05-04 (F1+F2+W3 baseline-lock repairs:
-`XEMU_CAPTURE_AT_FLIP_STALL` + `XEMU_CAPTURE_FLIP_STALL_SENTINEL`
-flip-stall capture trigger and `metal-gl-compare.sh --snapshot /
---loadvm-at / --trigger / --trigger-ordinal` flags (F1), tracked
-canary gold artifact store under `docs/apple-silicon/canary-baselines/`
-with `MANIFEST.tsv` provenance (F2), three W3 script repairs
-(positional-arg in `run-benchmark.sh` consumers, `--resize smaller`
-for resolution-mismatched golds, `printf -- '-…'` for bash 3.2). Earlier
+Last updated: 2026-05-05 (W3 counter-mode regression gate operational
++ W4 unconditional-flush fix. `metal-canary-regress.sh` now supports
+`--mode {counters,pixels,both}`; counter mode parses last-interval
+`xemu-perf:` counters and validates renderer health autonomously
+without depending on pixel-perfect golds. End-to-end PASS verdict on
+all four canaries in ~6 minutes. The W4 wrapper in
+`pgraph_mtl_flush_draw` previously called `pgraph_mtl_draw_flush_open_pass`
+unconditionally, defeating M5.7 coalescing on every benchmark; gated
+behind a new `pgraph_mtl_draw_dump_rt_active()` accessor. The previously
+banner'd "PGR2/Rainbow drawable-magenta in autonomous shell" is
+reclassified as a workflow setup issue (smoke scripts are placeholders;
+gold images required interactive profile-HDD + gameplay-script setup),
+NOT a renderer regression. Earlier 2026-05-04: F1+F2+W3 baseline-lock
+repairs: `XEMU_CAPTURE_AT_FLIP_STALL` +
+`XEMU_CAPTURE_FLIP_STALL_SENTINEL` flip-stall capture trigger and
+`metal-gl-compare.sh --snapshot / --loadvm-at / --trigger /
+--trigger-ordinal` flags (F1), tracked canary gold artifact store
+under `docs/apple-silicon/canary-baselines/` with `MANIFEST.tsv`
+provenance (F2), three W3 script repairs (positional-arg in
+`run-benchmark.sh` consumers, `--resize smaller` for
+resolution-mismatched golds, `printf -- '-…'` for bash 3.2). Earlier
 2026-05-04: Metal porting workflow rollout: auto-on
 Metal validation + post-build M5 gate (W1), paired Metal-vs-GL diff
 harness `metal-gl-compare.sh` (W2), single-renderer canary regression
@@ -2617,21 +2630,51 @@ modify `run-benchmark.sh`, `compare-screenshots.py`, or
 exported on the Metal leg so any Metal-API misuse is logged whether or
 not slice W1's auto-on landed.
 
-## Canary regression gate (W3, 2026-05-04)
+## Canary regression gate (W3, 2026-05-04; counter mode 2026-05-04 evening)
 
 `scripts/apple-silicon/metal-canary-regress.sh` is the single-renderer
 "post-change smoke" tool from the Phase 1 daily loop in
 `docs/apple-silicon/metal-porting-workflow.md` §3.5. After every Metal
-renderer change it runs the four green Metal canaries (PGR2 menu,
-Rainbow Six 3 loading screen, Halo CE menu, Xbox boot/flubber) under
-the established green-canary env recipe, captures one screenshot per
-canary at the canary's frame ordinal via the in-renderer
-`XEMU_METAL_SCREENSHOT_PATH` / `XEMU_METAL_SCREENSHOT_AT_FRAME` path,
-and per-pixel-diffs each shot against the stored gold PNG under
-`docs/apple-silicon/canary-baselines/<canary>/<frame>.png`
-(F2, 2026-05-04 — promoted from gitignored
-`benchmark-runs/visual-checks/` so a fresh checkout includes the
-gold set). Emits `report.md` + `summary.json` with PASS/FAIL.
+renderer change it runs the four green Metal canaries (PGR2, Rainbow
+Six 3, Halo CE, Xbox boot/flubber) under the established green-canary
+env recipe and validates the result via one of two modes.
+
+**Two validation modes (`--mode {counters,pixels,both}`):**
+
+- **`--mode counters` (DEFAULT, autonomous-friendly).** Parses the
+  last-interval `xemu-perf:` line of each canary's run and validates
+  renderer-health counters against per-canary thresholds:
+  `METAL_PIPELINE_TRANSLATED_FAILED == 0` (PSH/VSH translator works);
+  `METAL_DRAWABLE_ACQUIRE_FAILS == 0` (CAMetalDrawable available);
+  `METAL_PIPELINE_FALLBACKS / METAL_DRAW_COUNT < 0.50` (passthrough
+  rare); `METAL_FRONT_FB_PUBLISHES > 0` (publish path active);
+  `METAL_DRAW_COUNT > 0`, `fps > 1.0` (basic liveness); when
+  `METAL_DRAW_COUNT > 100`: `METAL_DRAW_PASS_COALESCED /
+  METAL_DRAW_COUNT > 0.10` (M5.7 coalescing not regressed; W4-style
+  unconditional pass-flush would push this to 0.0). End-to-end
+  validated PASS verdict on all four canaries in
+  `benchmark-runs/20260504-221957-canary-regress` at ~6-minute
+  runtime. **This is the default and recommended mode after every
+  Metal renderer change.**
+- **`--mode pixels` (legacy).** Captures one screenshot per canary at
+  the canary's frame ordinal via `XEMU_METAL_SCREENSHOT_PATH` /
+  `XEMU_METAL_SCREENSHOT_AT_FRAME` and per-pixel-diffs each shot
+  against the stored gold PNG under
+  `docs/apple-silicon/canary-baselines/<canary>/<frame>.png` (F2,
+  2026-05-04 — promoted from gitignored `benchmark-runs/visual-checks/`).
+  Limited utility: gold images were captured INTERACTIVELY with the
+  profile HDD + recorded gameplay scripts; the smoke recipe cannot
+  reproduce the same game state, so the diff measures setup mismatch
+  + frame-ordinal drift rather than renderer regression. Preserved
+  for use cases where the operator has manually re-captured stable
+  golds (e.g. via interactive snapshot capture at static menu
+  states). See decision-log "2026-05-04 evening: W4 unconditional
+  pass-flush fix + magenta investigation reclassified" for the full
+  empirical analysis.
+- **`--mode both`.** Run counters first, then pixels. Both must pass.
+
+Emits `report.md` + `summary.json` with the per-mode tables and
+overall PASS/FAIL verdict.
 
 **Manifest provenance (F2).** The companion file
 `docs/apple-silicon/canary-baselines/MANIFEST.tsv` carries one
@@ -2734,11 +2777,14 @@ than re-deriving it from the launcher invocation.
 Usage:
 
 ```sh
-scripts/apple-silicon/metal-canary-regress.sh [--canary <name>]
-    [--threshold pct] [--out-dir <path>] [--help]
+scripts/apple-silicon/metal-canary-regress.sh
+    [--mode counters|pixels|both]
+    [--canary <name>] [--threshold pct]
+    [--out-dir <path>] [--help]
 ```
 
-Worked example — full canary set at the default 1 % threshold:
+Worked example — full counter-mode regression smoke (default,
+~6-minute runtime, autonomous-friendly):
 
 ```sh
 scripts/apple-silicon/metal-canary-regress.sh
@@ -2748,6 +2794,14 @@ Single-canary smoke after a localized renderer change:
 
 ```sh
 scripts/apple-silicon/metal-canary-regress.sh --canary pgr2
+```
+
+Run BOTH modes (counter mode first, then pixel mode against the
+stored golds — useful when the operator has re-captured stable
+golds and wants both gates to confirm):
+
+```sh
+scripts/apple-silicon/metal-canary-regress.sh --mode both
 ```
 
 Output directory layout (default

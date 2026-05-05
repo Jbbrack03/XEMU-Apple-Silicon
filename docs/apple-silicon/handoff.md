@@ -359,45 +359,71 @@ fix-up) representing ~4200 line diff vs the session base
 HIGH/MEDIUM/LOW findings either fixed (5/7) or filed as future
 slices (2/7).
 
-**Highest-priority next-session actions (updated 2026-05-04 late-evening).**
-The Phase 1 daily loop in
+**Highest-priority next-session actions (updated 2026-05-05).**
+Workflow tooling is operational autonomously; remaining open work
+requires interactive controller input. The Phase 1 daily loop in
 `docs/apple-silicon/metal-porting-workflow.md` is the canonical
 operating reference; the bullets below summarize the immediate work:
 
-1. **Investigate PGR2/Rainbow drawable-magenta regression observed
-   during the F1+F2 baseline-lock attempt** (autonomous-shell env).
-   Renderer produces real frames mid-run (`METAL_DRAW_COUNT=6778`,
-   `fps=22`) but the post-HUD drawable captured by
-   `XEMU_METAL_SCREENSHOT_PATH` came up uniform `(255,0,255)`. Halo
-   and Boot drawables rendered correctly in the same run. Hypothesis:
-   foreground GUI Quartz session vs autonomous shell affects which
-   drawable surface is presented at HUD-pre-present time. Confirm by
-   running `metal-canary-regress.sh` from a foreground macOS GUI
-   session and comparing. The morning's PGR2/Rainbow MSAA4 PASS
-   evidence (cited in the banners above) remains valid — this is a
-   new title-specific regression, not a F1+F2+W3 side effect.
-2. **Halo / Boot canary baseline thresholds.** End-to-end run completed
-   but Halo (74.4 % changed_pct) and Boot (58.4 %) exceeded the
-   default 1 % threshold against gold. Lock per-canary thresholds in
-   `MANIFEST.tsv` once the action #1 magenta regression is closed and
-   PGR2/Rainbow have a clean gold-vs-current diff for cross-reference.
-3. Crimson gameplay routed visual canary remains BLOCKED. The new
-   per-draw RT dump (`XEMU_METAL_DUMP_DRAW_RT`) plus
-   `metal-gl-compare.sh --trigger flip` (F1) should let a future
-   session isolate the first divergent draw between Metal and GL on
-   the gameplay route and target the actual NV2A semantics bug.
-4. SC2 routed input script or known-good snapshot still missing.
-5. Front-fb fallback faithfulness or accepted default policy still
-   pending (M15 default-on dependency).
-6. **F1 + F2 LANDED** (see banner above and decision-log
-   "2026-05-04: F1 — deterministic frame alignment for paired diff
-   (flip-stall trigger + snapshot threading)" /
-   "2026-05-04: F2 — canary gold artifact store + W3 first-end-to-end
-   lock-attempt repairs"). Future workflow-tooling follow-up: the
-   deferred LOW Codex finding "manifest×CANARY_TABLE bidirectional
-   cross-check" — assert the MANIFEST_TSV flag string equals the
-   in-script env recipe so a flag-recipe drift between
-   `xemu-fork/CLAUDE.md` and the manifest fails fast.
+1. **(INTERACTIVE) Record real input scripts for Crimson Skies and
+   Soul Calibur 2 visual routes** via
+   `./scripts/apple-silicon/record-input.sh`. The existing
+   `crimson-gameplay.csv` produces a black drawable on the visual
+   route (one patterned frame followed by black); SC2 has no script
+   at all. Save outputs as `crimson-canary.csv` and `sc2-canary.csv`
+   alongside the existing `pgr2-gameplay.csv` /
+   `rainbow-gameplay.csv`. Optionally save QMP snapshots at known
+   stable visual frames (e.g. via `XEMU_BENCH_SAVEVM_AT=N
+   XEMU_BENCH_SAVEVM_TAG=crimson-canary`) so subsequent runs can
+   `loadvm` for deterministic state.
+2. **Run the broader Metal-vs-GL paired diff** for the M15 default-on
+   visual gate:
+   ```
+   for title in pgr2 rainbow crimson sc2 <broader-sweep>; do
+     ./scripts/apple-silicon/metal-gl-compare.sh "$title" \
+       --input scripts/apple-silicon/input-scripts/${title}-canary.csv \
+       --trigger flip --trigger-ordinal 30 --threshold 1.0
+   done
+   ```
+   ≤1% per-pixel diff vs GL on all five = M15 default-on visual gate
+   met. Combine with FPS / p99 jitter validation per
+   `metal-renderer-plan.md` §4 M15.
+3. **Run `metal-canary-regress.sh --mode counters` after every Metal
+   renderer change** as the post-change smoke (autonomous,
+   ~6 minutes; catches PSH/VSH translator failures, M5.7 coalescing
+   collapse, drawable starvation). This is the W3 default validation
+   mode introduced 2026-05-04 evening.
+4. **Decide front-fb fallback policy** (`XEMU_METAL_FRONT_FB_FALLBACK`
+   default flip ON, or implement faithful CRTC publish path with
+   back-buffer propagation). See decision-log
+   "2026-05-04 evening: Front-fb fallback policy". Reopen after the
+   wider title sweep characterizes which title classes benefit /
+   regress.
+5. **(GL-side) Audio listen-test for `XEMU_APU_LOCK_RELEASE`** —
+   still UNBLOCKED, orthogonal to Metal. Human listener plays
+   Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice on. If
+   clean: declare I5 fully shipped. If glitches: revert or design
+   finer-grained lock split.
+
+**Workflow operational checklist (2026-05-05).**
+
+- [x] D1 metal-porting-workflow.md operating playbook
+- [x] W1 auto-on Metal validation/HUD + post-build M5 gate
+- [x] W2 metal-gl-compare.sh paired Metal-vs-GL diff (with F1)
+- [x] W3 metal-canary-regress.sh `--mode counters` (default,
+      autonomous-friendly) — validated PASS on all 4 canaries in
+      `benchmark-runs/20260504-221957-canary-regress`
+- [x] W4 per-draw RT dump + W4 fix (M5.7 coalescing restored)
+- [W5] BLOCKED — MoltenVK geometryShader unsupported on M3 Ultra
+- [x] F1 deterministic frame alignment via flip-stall trigger
+- [x] F2 tracked canary gold artifact store + MANIFEST.tsv
+- [x] Visual Flight Recorder
+- [x] Skills + Stop hooks
+
+The only remaining workflow-tooling deferred item is the LOW Codex
+finding "manifest×CANARY_TABLE bidirectional cross-check" (assert
+the MANIFEST_TSV flag string equals the in-script env recipe so
+flag-recipe drift fails fast). Trivial; queued.
 
 **What changed this session (2026-05-04 — Visual Flight Recorder tooling, earlier).**
 

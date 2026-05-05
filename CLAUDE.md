@@ -807,24 +807,36 @@ Stable opt-in:
 
 Diagnostic toggles (intentionally not correctness paths):
 
-- `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (W4, 2026-05-04) — per-draw
-  color render-target dump on the Metal renderer. `START` and `END` are
-  0-indexed **inclusive** `[START, END]` **cumulative-per-RUN**
-  flush_draw indices (NOT per-frame; matches Mesa/RADV debug-dump
-  semantics; the in-source check is `idx >= START && idx <= END`).
-  `PREFIX` is a filesystem prefix (absolute or relative); outputs are
-  written to `<PREFIX>.<draw_index_zero_padded_6>.png`, e.g.
-  `/tmp/wd_test.000010.png`. Empty / unset / malformed → disabled with
-  zero hot-path cost (one global load + branch). Asynchronous: at the
-  end of every `pgraph_mtl_flush_draw` the open coalesced render pass
-  is closed (so the post-MSAA-resolve color texture is the source),
-  the bound color binding texture is blit-copied into a host-shared
-  MTLBuffer, and the cmdbuf's `addCompletedHandler` BGRA→RGBA swaps
-  and writes the PNG via FPNG. Renderer thread does not block. First
-  five dumps emit a `xemu-perf: metal_draw_rt_dump idx=N path=...`
-  rate-limited line; further dumps are silent (counter still ticks).
-  Counter `METAL_DRAW_RT_DUMPS` (per-interval delta) surfaces on the
-  `xemu-perf:` interval line. Implementation in `mtl/draw.mm`.
+- `XEMU_METAL_DUMP_DRAW_RT=START:END:PREFIX` (W4, 2026-05-04;
+  fix 2026-05-04 evening) — per-draw color render-target dump on
+  the Metal renderer. `START` and `END` are 0-indexed **inclusive**
+  `[START, END]` **cumulative-per-RUN** flush_draw indices (NOT
+  per-frame; matches Mesa/RADV debug-dump semantics; the in-source
+  check is `idx >= START && idx <= END`). `PREFIX` is a filesystem
+  prefix (absolute or relative); outputs are written to
+  `<PREFIX>.<draw_index_zero_padded_6>.png`, e.g.
+  `/tmp/wd_test.000010.png`. Empty / unset / malformed → disabled
+  with zero hot-path cost (one global load + branch via the new
+  `pgraph_mtl_draw_dump_rt_active()` accessor in `mtl/draw.h`).
+  Asynchronous: when active the wrapper around `pgraph_mtl_flush_draw_inner`
+  closes the open coalesced render pass (so the post-MSAA-resolve
+  color texture is the source), blit-copies the bound color binding
+  texture into a host-shared MTLBuffer, and the cmdbuf's
+  `addCompletedHandler` BGRA→RGBA swaps and writes the PNG via
+  FPNG. Renderer thread does not block. First five dumps emit a
+  `xemu-perf: metal_draw_rt_dump idx=N path=...` rate-limited line;
+  further dumps are silent (counter still ticks). Counter
+  `METAL_DRAW_RT_DUMPS` (per-interval delta) surfaces on the
+  `xemu-perf:` interval line. **Important note**: the W4 wrapper
+  was originally calling the open-pass flush + texture lookup
+  unconditionally, defeating M5.7 render-pass coalescing on every
+  benchmark regardless of whether dumping was enabled. Fixed
+  2026-05-04 evening by gating the wrapper's post-`flush_draw_inner`
+  work behind `pgraph_mtl_draw_dump_rt_active()`. When the env var
+  is unset the wrapper now early-returns to preserve M5.7
+  coalescing; when set the per-draw flush+resolve cost is accepted
+  as a debug-mode tax. Implementation in `mtl/draw.{h,mm}` and
+  `mtl/renderer.c::pgraph_mtl_flush_draw`.
 - `XEMU_GL_DUMP_DRAW_RT=START:END:PREFIX` (W4, 2026-05-04) — GL-side
   equivalent. Same inclusive `[START, END]` semantics as the Metal
   flag. Synchronous-but-isolated: `glReadPixels` blocks the

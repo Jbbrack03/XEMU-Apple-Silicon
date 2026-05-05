@@ -1,28 +1,34 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-04 (F1+F2+W3 baseline-lock repairs — flip-stall
-capture trigger and `metal-gl-compare.sh` `--snapshot` /
-`--loadvm-at` / `--trigger` / `--trigger-ordinal` flags (F1), tracked
-canary gold artifact store under `canary-baselines/` with
-`MANIFEST.tsv` provenance (F2), three W3 script repairs surfaced by
-first end-to-end gate run. Earlier 2026-05-04: Metal porting workflow
-rollout: adopted a
-formal five-phase playbook in `metal-porting-workflow.md` and landed
-six implementation slices plus one Codex fix-up — auto-on validation
-(W1), paired diff harness (W2), canary regression gate (W3), per-draw
-RT dump (W4), MoltenVK triangulation BLOCKED (W5), Phase-2 gate
-fix-ups (W6). Project is now in Phase 1 (Translation Correctness,
-ACTIVE). Earlier today: Metal boot/flubber + surface/RTT follow-up.
-PGR2 has clean Metal menu/logo/text/color output with the translated
-pipeline and front-fb fallback; Rainbow Six 3 loading-screen output is
-also clean. The previously reported green/wireframe failure was the
-Xbox boot/flubber animation, not in-game Crimson Skies, and that boot
-canary now renders shaded geometry and glow without texture blobs.
+Last updated: 2026-05-05 (W3 counter-mode regression gate operational +
+W4 unconditional-flush fix + magenta investigation reclassified as a
+workflow setup issue, NOT a renderer regression.
+`metal-canary-regress.sh` now supports `--mode {counters,pixels,both}`;
+counter mode parses last-interval `xemu-perf:` counters
+(METAL_PIPELINE_TRANSLATED_FAILED, METAL_DRAW_PASS_COALESCED ratio,
+METAL_DRAWABLE_ACQUIRE_FAILS, METAL_FRONT_FB_PUBLISHES, fps) and
+catches concrete renderer regressions WITHOUT depending on
+pixel-perfect golds. End-to-end PASS verdict on all four canaries
+(pgr2, rainbow, halo, boot) under autonomous shell. The W4 wrapper
+in `pgraph_mtl_flush_draw` previously called the open-pass flush
+unconditionally, defeating M5.7 coalescing on every benchmark; gated
+behind `pgraph_mtl_draw_dump_rt_active()`, restoring 96.8%
+coalescing rate. Workflow tooling status: D1 / W1 / W2 / W3
+(counters) / W4 / F1 / F2 / VFR / skills / hooks all operational.
+W5 remains BLOCKED (MoltenVK geometryShader unsupported on M3
+Ultra). Earlier 2026-05-04: Metal porting workflow rollout adopted a
+formal five-phase playbook in `metal-porting-workflow.md` and
+landed six implementation slices plus one Codex fix-up — auto-on
+validation (W1), paired diff harness (W2), canary regression gate
+(W3), per-draw RT dump (W4), MoltenVK triangulation BLOCKED (W5),
+Phase-2 gate fix-ups (W6). Project is now in Phase 1 (Translation
+Correctness, ACTIVE). PGR2 / Rainbow Six 3 / Halo CE menu / Xbox
+boot/flubber are useful Metal canaries with 4x MSAA active.
 **The user's stated 30/60 FPS at 1080p / high-quality AA /
 correct-colors goals remain met today via the GL renderer** with
 `XEMU_GL_MSAA=4` + `surface_scale=2`; Metal remains opt-in /
-experimental until the broader visual-diff/gameplay gate passes. Input
-slices N1+N2 also shipped via opt-in `XEMU_MACOS_NATIVE_INPUT=1`
+experimental until the broader visual-diff/gameplay gate passes.
+Input slices N1+N2 also shipped via opt-in `XEMU_MACOS_NATIVE_INPUT=1`
 GameController.framework backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
@@ -215,12 +221,31 @@ visible regressions point first at the renderer.
 
 ## Next Session Start
 
-**Read `handoff.md` first.** Its top 2026-05-04 section is the
+**Read `handoff.md` first.** Its top 2026-05-05 section is the
 authoritative current-state briefing and lists the next-action
 priority. The summary below is for orientation only — `handoff.md`
 wins when the two diverge.
 
-**Current state (2026-05-04, post PGR2 Metal surface/RTT fix).**
+**Current state (2026-05-05, post W3 counter-mode + W4 fix).**
+
+- **W3 regression gate is operational autonomously.** Run
+  `./scripts/apple-silicon/metal-canary-regress.sh` (defaults to
+  counter mode) for a 6-minute PASS/FAIL verdict on all four canaries
+  (pgr2 / rainbow / halo / boot). Catches PSH/VSH translator failures,
+  M5.7 coalescing collapse, drawable starvation, present-path silence
+  without depending on pixel-perfect golds. Use after every Metal
+  renderer change.
+- **Workflow tooling status: D1 / W1 / W2 / W3 (counters) / W4 / F1 /
+  F2 / VFR / skills / hooks all operational.** W5 BLOCKED (MoltenVK).
+- **Remaining open work for M15 default-on requires interactive
+  recording** of real input scripts for Crimson Skies and Soul
+  Calibur 2 visual routes (the existing `record-input.sh` workflow
+  with a controller). Once those land, the W2 paired Metal-vs-GL diff
+  harness can run them at deterministic state and produce the M15
+  ≤1% per-pixel diff measurement.
+
+**Current state (2026-05-04, post PGR2 Metal surface/RTT fix — preserved
+for empirical audit trail).**
 
 - **Eight default-on Apple Silicon flags ship**: `XEMU_NATIVE_TRI_DEPTH`,
   `XEMU_NATIVE_QUAD`, `XEMU_PGRAPH_FAST_READ`, `XEMU_TCG_SPLITWX`,
@@ -257,24 +282,34 @@ wins when the two diverge.
   (SC2 sanity test sustains 60.57 FPS on same build). The literal
   "60 FPS on PGR2/Rainbow/Crimson" goal is technically impossible.
 
-**Next-action priority.**
+**Next-action priority (2026-05-05).**
 
-1. **Run the broader Metal-vs-GL gameplay gate.** Include PGR2,
-   Rainbow Six 3, Crimson Skies gameplay after the boot animation, SC2,
-   and one further title with paired screenshots/FPS/jitter/input
-   counters before revisiting M15 default-on.
-2. **Keep the green canaries green after each Metal fix.** PGR2:
-   `benchmark-runs/20260504-092708-pgr2` /
-   `benchmark-runs/visual-checks/pgr2-post-oob-f900.png`. Rainbow:
-   `benchmark-runs/20260504-092750-rainbow-six-3` /
-   `benchmark-runs/visual-checks/rainbow-post-oob-f600.png`.
-   Boot/flubber: `benchmark-runs/20260504-092824-crimson-skies` /
-   `benchmark-runs/visual-checks/boot-post-oob-f300.png`. Crimson
-   gameplay stability:
-   `benchmark-runs/20260504-092403-crimson-skies`.
-3. **Only then revisit M15 default-on.** Outcome from the paired
-   gameplay and visual-diff sweep feeds the M15 decision.
-4. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
+1. **Record real input scripts for Crimson and SC2 visual routes**
+   (interactive — requires a controller). Use
+   `./scripts/apple-silicon/record-input.sh crimson` and
+   `record-input.sh sc2` to capture deterministic gameplay routes
+   from the profile HDD. Save outputs as
+   `crimson-canary.csv` / `sc2-canary.csv` next to the existing
+   `pgr2-gameplay.csv` / `rainbow-gameplay.csv`. Optionally save QMP
+   snapshots at known stable points via `XEMU_BENCH_SAVEVM_AT` so
+   subsequent runs can `loadvm` for deterministic state.
+2. **Run the broader Metal-vs-GL gameplay gate.** With the new input
+   scripts, run `metal-gl-compare.sh <title> --input <script>` for
+   PGR2, Rainbow, Crimson, SC2, and one further title. Use
+   `--trigger flip --trigger-ordinal N` (F1) for paired-frame
+   alignment. The `--threshold 1.0` gate with paired-diff PASS on
+   all five is the M15 default-on visual gate.
+3. **Run `metal-canary-regress.sh --mode counters` after every Metal
+   renderer change** to catch the regression classes the gate is
+   designed for (translator failures, coalescing collapse, drawable
+   starvation). 6-minute autonomous loop. This is the "post-change
+   smoke" recommended in `metal-porting-workflow.md` Phase 1 daily
+   loop §3.5.
+4. **Decide whether to flip `XEMU_METAL_FRONT_FB_FALLBACK` default
+   to ON** after the wider title sweep characterizes which title
+   classes benefit / regress. Currently default OFF; project rule #2
+   (no shortcuts) prefers a faithful CRTC publish path.
+5. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
    UNBLOCKED, GL-side, orthogonal to Metal):** A human listener
    plays Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice
    on. If clean: declare I5 fully shipped. If glitches: revert or

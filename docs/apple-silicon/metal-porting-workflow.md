@@ -1,6 +1,6 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-04. This is the canonical operating playbook for
+Last updated: 2026-05-05. This is the canonical operating playbook for
 the native Metal renderer port. It supersedes nothing — `metal-renderer-plan.md`
 remains the slice-level implementation plan (M0–M15), `handoff.md`
 remains the per-session current-state pointer, and `decision-log.md`
@@ -13,9 +13,13 @@ session should follow inside each phase.
 This document was added 2026-05-04 alongside the parallel automation
 slices D1 (this doc) and W1 / W2 / W3 / W4 / W5 (auto-on validation,
 paired diff harness, canary regression gate, per-draw RT dump,
-MoltenVK triangulation backend). Forward-language references to those
-slices throughout this document mean "introduced 2026-05-04 in slice
-W*" — see `handoff.md` for the current implementation status of each.
+MoltenVK triangulation backend). 2026-05-04 evening: W3 gained a
+counter-mode validation (default `--mode counters`) that catches
+concrete renderer regressions without depending on pixel-perfect
+golds; pixel mode preserved as `--mode pixels`. Forward-language
+references to those slices throughout this document mean "introduced
+2026-05-04" — see `handoff.md` for the current implementation status
+of each.
 
 ---
 
@@ -392,10 +396,9 @@ Phase 1 sessions that change Metal renderer code must:
 
 1. After every Metal renderer change, run
    `scripts/apple-silicon/metal-canary-regress.sh` as the post-change
-   smoke. Expected outcome: all four canaries (PGR2 / Rainbow / Halo /
-   boot) PASS at the default 1 % per-pixel-changed threshold. This is
-   the post-change smoke tool the W3 slice (introduced 2026-05-04)
-   ships:
+   smoke. The default `--mode counters` validates renderer-health
+   counters (introduced 2026-05-04 evening); expected outcome: all
+   four canaries (PGR2 / Rainbow / Halo / boot) PASS in ~6 minutes.
 
    ```sh
    scripts/apple-silicon/metal-canary-regress.sh
@@ -403,18 +406,28 @@ Phase 1 sessions that change Metal renderer code must:
 
    This runs PGR2 / Rainbow / Halo / boot through Metal at MSAA4
    under the established green-canary env recipe (verbatim from the
-   `handoff.md` "PGR2 PASS" bullet) and diffs each captured screenshot
-   against the recorded gold PNG under `benchmark-runs/visual-checks/`
-   via `compare-screenshots.py`. Per project rule #11 the script
-   ASSERTS the closed default-on Apple Silicon flags still produce
-   the gold PNG; it does NOT re-validate them. Non-zero exit blocks
-   the commit. Exit-code semantics match `metal-gl-compare.sh`: 0 PASS,
-   1 FAIL on the visual diff, 2 INFRA-FAIL.
+   `handoff.md` "PGR2 PASS" bullet) and validates the last-interval
+   `xemu-perf:` counters: `METAL_PIPELINE_TRANSLATED_FAILED == 0`,
+   `METAL_DRAWABLE_ACQUIRE_FAILS == 0`,
+   `METAL_PIPELINE_FALLBACKS / METAL_DRAW_COUNT < 0.50`,
+   `METAL_FRONT_FB_PUBLISHES > 0`, `METAL_DRAW_COUNT > 0`,
+   `fps > 1.0`, and (for non-idle workloads with > 100 draws/interval)
+   `METAL_DRAW_PASS_COALESCED / METAL_DRAW_COUNT > 0.10`. Per project
+   rule #11 the script ASSERTS the closed default-on Apple Silicon
+   flags still produce green renderer-health counters; it does NOT
+   re-validate them. Non-zero exit blocks the commit. Exit-code
+   semantics: 0 PASS, 1 FAIL on the validation, 2 INFRA-FAIL.
 
    For a focused re-run after a localized change, use
    `--canary <name>` (`pgr2` | `rainbow` | `halo` | `boot`).
-   See `automation.md` "Canary regression gate (W3, 2026-05-04)" for
-   the embedded canary table and per-canary frame ordinals.
+   The legacy pixel-diff mode is preserved for use cases where the
+   operator has manually re-captured stable golds:
+   `--mode pixels` runs the legacy per-pixel diff against
+   `docs/apple-silicon/canary-baselines/<canary>/<frame>.png`;
+   `--mode both` runs both modes and requires both to pass.
+   See `automation.md` "Canary regression gate (W3, 2026-05-04;
+   counter mode 2026-05-04 evening)" for the full counter threshold
+   list, per-canary durations, and per-mode output schemas.
 
 2. Update `handoff.md` if the canary state changed, append a
    benchmark note under `docs/apple-silicon/benchmarks/<date>-*.md`,
