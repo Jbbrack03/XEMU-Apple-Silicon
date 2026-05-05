@@ -24,6 +24,17 @@ START_DELAY="$4"
 # matching size-normalization safety net.
 WINDOW_PATTERN="${XEMU_CAPTURE_WINDOW_PATTERN:-}"
 
+# 2026-05-05 (Codex review followup): opt-in strict window mode for
+# paired-diff use. When XEMU_CAPTURE_WINDOW_REQUIRED=1, a Quartz
+# unavailability OR a window-id lookup miss after backoff retries
+# fails the capture (exit 3) instead of silently falling back to
+# full-desktop screencapture. Full-desktop fallback for the GL leg
+# of metal-gl-compare.sh has been a recurring source of meaningless
+# ~70% changed_pct FAILs (the GL screenshot is then macOS desktop
+# chrome compared against the Metal in-renderer drawable). Default
+# off so the pre-W6 / pre-F1 use cases keep their tolerant behavior.
+WINDOW_REQUIRED="${XEMU_CAPTURE_WINDOW_REQUIRED:-0}"
+
 # F1 (2026-05-04): opt-in flip-stall-driven one-shot capture. When
 # XEMU_CAPTURE_FLIP_STALL_SENTINEL is set, the loop polls for the
 # sentinel file's appearance and takes a SINGLE shot the moment it
@@ -37,7 +48,7 @@ FLIP_STALL_SENTINEL="${XEMU_CAPTURE_FLIP_STALL_SENTINEL:-}"
 
 mkdir -p "$OUT_DIR"
 
-python3 - "$OUT_DIR" "$DURATION" "$INTERVAL" "$START_DELAY" "$WINDOW_PATTERN" "$FLIP_STALL_SENTINEL" <<'PY'
+python3 - "$OUT_DIR" "$DURATION" "$INTERVAL" "$START_DELAY" "$WINDOW_PATTERN" "$FLIP_STALL_SENTINEL" "$WINDOW_REQUIRED" <<'PY'
 import os
 import subprocess
 import sys
@@ -50,18 +61,23 @@ interval = float(sys.argv[3])
 start_delay = float(sys.argv[4])
 window_pattern = sys.argv[5] if len(sys.argv) > 5 else ""
 flip_stall_sentinel = sys.argv[6] if len(sys.argv) > 6 else ""
+window_required = bool(int((sys.argv[7] if len(sys.argv) > 7 else "0") or "0"))
 
 _quartz_module = None
 _quartz_unavailable_logged = False
 
 
 def _load_quartz():
-    """Lazy-load Quartz. Returns the module or None when unavailable."""
+    """Lazy-load Quartz. Returns the module or None when unavailable.
+
+    Caches the failed-load sentinel as ``False`` so repeated calls
+    don't pay the import cost on every retry. ``None`` is the
+    "not yet attempted" sentinel; ``False`` is "tried, missing"."""
     global _quartz_module, _quartz_unavailable_logged
-    if _quartz_module is not None:
-        return _quartz_module
     if _quartz_module is False:
         return None
+    if _quartz_module is not None:
+        return _quartz_module
     try:
         import Quartz  # type: ignore
     except ImportError:
@@ -102,9 +118,26 @@ def find_window_id(pattern):
 
 
 def capture_one(filename):
-    """Capture a single PNG. Returns (returncode, command_used)."""
+    """Capture a single PNG. Returns (returncode, command_used) or
+    (None, "window-required-failed") to signal an INFRA failure when
+    XEMU_CAPTURE_WINDOW_REQUIRED=1 and the window-id lookup fails.
+
+    When a window pattern is set, retry window-id lookup with backoff
+    (0.05/0.1/0.2/0.4s = up to ~0.75s total) before falling back.
+    Quartz CGWindowListCopyWindowInfo can briefly miss a freshly-
+    created xemu window during cold launch (the F1 flip-stall trigger
+    fires within the first few seconds and can race the AppKit
+    window registration), and a full-desktop fallback at that moment
+    captures the macOS desktop with a tiny black xemu rect — useless
+    for paired diff."""
     if window_pattern:
-        wid = find_window_id(window_pattern)
+        wid = None
+        for backoff_s in (0.0, 0.05, 0.1, 0.2, 0.4):
+            if backoff_s > 0:
+                time.sleep(backoff_s)
+            wid = find_window_id(window_pattern)
+            if wid is not None:
+                break
         if wid is not None:
             cmd = ["screencapture", "-x", "-l", str(wid), str(filename)]
             result = subprocess.run(
@@ -114,7 +147,14 @@ def capture_one(filename):
                 text=True,
             )
             return result, "window:%d" % wid
-        # Pattern given but no match this cycle — fall through to full-desktop.
+        # Pattern given but no match after retries.
+        if window_required:
+            print(
+                f"macos-capture: WINDOW_REQUIRED=1 and window-id lookup failed "
+                f"for pattern={window_pattern!r}; refusing full-desktop fallback",
+                flush=True,
+            )
+            return None, "window-required-failed"
     cmd = ["screencapture", "-x", str(filename)]
     result = subprocess.run(
         cmd,
@@ -148,6 +188,12 @@ if flip_stall_sentinel:
             elapsed = int((time.monotonic() - start) * 1000)
             filename = out_dir / f"flip-stall-{elapsed:06d}ms.png"
             result, source = capture_one(filename)
+            if result is None:
+                # WINDOW_REQUIRED strict mode failure — already logged
+                # in capture_one. Exit nonzero so the parent harness
+                # treats the leg as INFRA-FAIL instead of producing a
+                # meaningless full-desktop capture for paired diff.
+                sys.exit(3)
             if result.returncode == 0:
                 print(
                     f"captured {filename} source={source} trigger=flip-stall",
@@ -183,6 +229,10 @@ else:
         elapsed = int((now - start) * 1000)
         filename = out_dir / f"{index:03d}-{elapsed:06d}ms.png"
         result, source = capture_one(filename)
+        if result is None:
+            # WINDOW_REQUIRED strict mode failure (interval mode).
+            # Treat as INFRA-FAIL so the parent harness sees nonzero.
+            sys.exit(3)
         if result.returncode == 0:
             print(f"captured {filename} source={source}", flush=True)
         else:

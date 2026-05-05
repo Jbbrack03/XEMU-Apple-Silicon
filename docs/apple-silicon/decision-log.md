@@ -1,5 +1,155 @@
 # Decision Log
 
+## 2026-05-05: Crimson Metal "blocker" reclassified as config; harness fixes; F3 snapshot anchor opened
+
+**Context.** The handoff carried Crimson Skies as a Metal visual-route
+"BLOCKED" canary citing `benchmark-runs/20260504-100815-crimson-skies`
+which captured one patterned-green frame followed by 12 black drawable
+screenshots. Three days of follow-up framing assumed a Crimson-specific
+NV2A semantics bug in the Metal renderer.
+
+**Investigation.** Re-ran the same input script with the canonical M15
+Metal recipe explicit:
+
+```
+XEMU_RENDERER=METAL
+XEMU_METAL_TRANSLATED_PIPELINE=1
+XEMU_NATIVE_TRI_DEPTH=1
+XEMU_NATIVE_QUAD=1
+XEMU_PGRAPH_FAST_READ=1
+XEMU_METAL_FRONT_FB_FALLBACK=1
+XEMU_METAL_MSAA=4
+```
+
+Run `benchmark-runs/20260505-104139-crimson-skies` (90s, 16 captured
+PNGs at frame 600 + every 300 frames thereafter). Frames 0005 through
+0016 each show the Crimson Skies main menu (Justice / Wealth / Lovers /
+Death tarot cards) rendered correctly with sustained ~30 FPS.
+Counters at last interval: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+`METAL_PIPELINE_FALLBACKS=0`, M5.7 coalescing intact.
+
+The original failing run did not have `XEMU_METAL_FRONT_FB_FALLBACK=1`
+explicit. Crimson's CRTC publish target is `vram_addr=0x32a4000` (the
+640x480 menu surface), but the engine abandons it mid-run and switches
+to `0x1ad8000` (640x480, format 4 X8R8G8B8) and `0x1c04000` (1280x480
+back buffer). Without the fallback, Metal publishes the now-quiescent
+`0x32a4000` → black drawable. With the fallback, Metal publishes the
+most-recently selected color binding → real rendered scene reaches the
+display. This is the same architectural pattern resolved by PGR2's
+front-fb fallback path.
+
+**Decision.** Reclassify Crimson Skies as **NOT a Metal renderer
+regression**. The 2026-05-04 banner's "patterned frame followed by black
+drawable" symptom was a missing-config symptom, not a renderer bug.
+Crimson joins PGR2 as a documented "PASS only with
+`XEMU_METAL_FRONT_FB_FALLBACK=1`" title. The front-fb fallback policy
+decision (decision-log "2026-05-04 evening: Front-fb fallback policy —
+analysis, no default flip yet") becomes the governing question for M15
+default-on; documenting Crimson + PGR2 as fallback-dependent strengthens
+the case for default-on flip when the broader sweep characterizes other
+title classes.
+
+**Three orthogonal harness bugs fixed in the same session.**
+
+1. **`scripts/apple-silicon/metal-gl-compare.sh` did not thread the
+   canonical M15 Metal recipe.** The W2 paired-diff harness invoked the
+   Metal leg with only `XEMU_RENDERER=METAL` + `XEMU_METAL_VALIDATION=1`,
+   leaving FRONT_FB_FALLBACK / TRANSLATED_PIPELINE / MSAA to whatever the
+   user's shell happened to have. The canary regression gate
+   `metal-canary-regress.sh` already hardcodes the full canonical recipe
+   (lines 119-120 / 533-534 / 620-621); bringing parity to the
+   paired-diff harness is the fix. Pattern: default-with-user-env-override
+   via `[[ "${VAR+x}" != "x" ]] && metal_extra_env+=("VAR=val")`. GL leg
+   gets a matching `XEMU_GL_MSAA=4` so AA edge classes are comparable.
+
+2. **`scripts/apple-silicon/metal-canary-regress.sh` parsed the atexit
+   cleanup interval.** The W3 counter-mode gate's
+   `last_interval_counter()` walked every `xemu-perf: interval_id=` line
+   and returned the value from the last match. xemu emits a degenerate
+   final interval at process teardown (`final=1 reason=atexit
+   interval_ms=0 frames=1 fps=0.00`) which made the gate FAIL otherwise-
+   healthy runs on `fps==0.00 / draws==1 / publishes==0`. Rainbow's smoke
+   run hit this today (fps=6-7 throughout the run, fps=0.00 in the
+   atexit record). Fix: skip lines containing `final=1`. Validated by
+   re-running the gate end-to-end (4/4 PASS in
+   `benchmark-runs/20260505-110002-canary-regress`).
+
+3. **`scripts/apple-silicon/macos-capture.sh` Quartz cache + retry-with-
+   backoff.** GL-leg paired captures via `screencapture -l <wid>` were
+   silently falling back to full-desktop because `_load_quartz()` cached
+   its failed-import sentinel as `False` and `find_window_id()`'s `if
+   Quartz is None: return None` did not match. Two fixes: reorder the
+   cache check so the `False` case is tested before `is not None`; add
+   a retry-with-backoff loop in `capture_one()` (5 attempts, ~0.75s
+   total) to absorb the brief window between xemu process start and
+   AppKit window registration. Local environment caveat: Quartz is
+   installed only for `/usr/bin/python3.9` (system Python), but
+   `macos-capture.sh` invokes `/opt/homebrew/bin/python3.14`. PEP 668
+   prevents pip-installing into the homebrew python globally; window-
+   targeted capture is currently a no-op locally pending a venv or
+   pinning the script to `python3.9`. Documented as known env limit.
+
+**Paired-diff cold-launch alignment is structurally limited.** Two
+attempted runs of `metal-gl-compare.sh crimson` (ordinal 30 and ordinal
+1500, with the canonical recipe + harness fixes above) both returned
+FAIL verdicts not because of renderer divergence but because:
+
+- Ordinal 30 fires during Xbox boot (5.37s in) before the GL window
+  has drawn anything; GL leg captures the macOS desktop with a black
+  xemu rect.
+- Ordinal 1500 lands at different game states between legs:
+  - GL reaches Crimson Settings submenu by 58.5s (xemu.log fps=58)
+  - Metal stays on card-fan main menu at 60s+ (xemu.log fps≈30)
+  Input scripts are wall-clock-driven, so per-leg timing differences
+  accumulate into different menu states by the same flip-stall ordinal.
+
+The fix is **slice F3 — per-title snapshot anchor for paired diff**.
+Spec:
+
+- Record per-title `<title>-canary` snapshot at a stable menu/gameplay
+  state via `XEMU_BENCH_SAVEVM_AT=<seconds>
+  XEMU_BENCH_SAVEVM_TAG=<title>-canary` once interactively per title.
+- Plumb through `metal-gl-compare.sh`'s existing `--snapshot <tag>` and
+  `--loadvm-at <seconds>` flags (already in place from F1).
+- Capture immediately after loadvm so neither leg can drift into
+  divergent menu navigation before the trigger fires.
+
+F3 recording is interactive (user must drive the controller to a stable
+state per title). Once F3 lands, the paired-diff harness becomes
+operationally useful for the M15 visual gate.
+
+**Files changed.**
+
+- `scripts/apple-silicon/metal-gl-compare.sh`: canonical M15 Metal
+  recipe defaults + matching `XEMU_GL_MSAA=4` for the GL leg.
+- `scripts/apple-silicon/metal-canary-regress.sh`: skip `final=1`
+  atexit interval in `last_interval_counter()`.
+- `scripts/apple-silicon/macos-capture.sh`: Quartz cache-check
+  reorder + `find_window_id()` retry-with-backoff in `capture_one()`.
+- `docs/apple-silicon/benchmarks/2026-05-05-crimson-config-not-renderer-bug.md`:
+  full session note.
+- This decision-log entry.
+
+**Supersession.**
+
+- The 2026-05-04 evening entry "Front-fb fallback policy" stays the
+  governing reference for the policy decision; this entry adds Crimson
+  to the documented "fallback-dependent" title list.
+- Handoff banner Crimson "Visual route BLOCKED" framing is superseded
+  by this entry: visual route is **not blocked**, the previous run
+  lacked the canonical recipe.
+
+**Next session priorities (carry-over).**
+
+1. Slice F3 — per-title snapshot anchor for paired diff (interactive).
+2. Record `sc2-gameplay.csv` (interactive; user-blocking).
+3. Audio listen-test for `XEMU_APU_LOCK_RELEASE` (interactive; user).
+4. M15 default-on visual-gate sweep once F3 + SC2 land.
+5. Front-fb fallback default-on flip decision (Crimson + PGR2 now both
+   documented fallback-dependent).
+
+---
+
 ## 2026-05-04 evening: W3 counter-mode regression gate — operational autonomously
 
 **Context.** After the W4 unconditional-flush fix, the W3 regression

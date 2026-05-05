@@ -1,11 +1,117 @@
 # Handoff
 
-Last updated: 2026-05-04 (W3 counter-mode regression gate operational +
-W4 unconditional-flush fix + magenta investigation reclassified). The
-W3 metal-canary-regress.sh gate now has a `--mode counters` validation
-(default) that catches concrete renderer regressions without depending
-on pixel-perfect golds. End-to-end PASS verdict on all four canaries
-under autonomous shell. Current branch: `apple-silicon-performance`.
+Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+config issue; three harness fixes; F3 snapshot-anchor slice opened).
+Crimson Skies is **not** a Metal renderer regression — running the
+existing `crimson-gameplay.csv` script with the canonical M15 Metal
+recipe explicit (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`)
+produces correct rendering of the tarot-card menu. The 2026-05-04
+"patterned frame followed by black drawable" symptom was caused by
+`metal-gl-compare.sh` not threading the canonical recipe to the Metal
+leg. Crimson now joins PGR2 as a documented "PASS only with
+front-fb fallback ON" title. Three orthogonal harness bugs fixed:
+metal-gl-compare.sh canonical recipe defaults, metal-canary-regress.sh
+atexit-interval skip, macos-capture.sh Quartz cache + retry. Paired-
+diff cold-launch alignment is structurally limited without snapshot
+loadvm — slice F3 opened to record per-title canary snapshots
+(interactive). Current branch: `apple-silicon-performance`.
+
+**Crimson Metal correctness evidence (2026-05-05).** Run
+`benchmark-runs/20260505-104139-crimson-skies` (90s, canonical recipe
+explicit). 16 captured PNGs at frame 600 + every 300 thereafter
+(`/tmp/crimson-canonical-fallback.0001.png` through `.0016.png`):
+frames 0005 through 0016 each show the Crimson main menu (Justice /
+Wealth / Lovers / Death tarot cards on parchment background) rendered
+correctly with sustained ~30 FPS. Counters at last interval clean:
+`METAL_PIPELINE_TRANSLATED_FAILED=0`, `METAL_PIPELINE_FALLBACKS=0`,
+M5.7 coalescing intact. The Crimson `metal_draw_target` log shows
+the engine abandons CRTC publish target `0x32a4000` (640x480 menu
+surface) and switches to `0x1c04000` (1280x480 back buffer) +
+`0x1ad8000` (640x480 X8R8G8B8) mid-run — exactly the surface-
+abandonment pattern PGR2 exhibits. The front-fb fallback path
+publishes the most-recently-selected color binding instead of the
+quiescent CRTC pointer, so real rendered scene reaches the display.
+
+**Three harness bugs fixed (2026-05-05).**
+
+1. `scripts/apple-silicon/metal-gl-compare.sh` now threads the
+   canonical M15 Metal recipe to the Metal leg
+   (`XEMU_METAL_TRANSLATED_PIPELINE=1`,
+   `XEMU_METAL_FRONT_FB_FALLBACK=1`, `XEMU_METAL_MSAA=4`) and
+   `XEMU_GL_MSAA=4` to the GL leg. User-env override pattern
+   `[[ "${VAR+x}" != "x" ]] && metal_extra_env+=("VAR=val")` so
+   bisection-style alternate recipes still work.
+2. `scripts/apple-silicon/metal-canary-regress.sh` skips the
+   `final=1 reason=atexit` cleanup interval in
+   `last_interval_counter()`. Was failing otherwise-healthy runs
+   on `fps=0.00 / draws=1 / publishes=0` (the degenerate teardown
+   record). Re-validated 4/4 canary PASS in
+   `benchmark-runs/20260505-110002-canary-regress`.
+3. `scripts/apple-silicon/macos-capture.sh` Quartz cache check
+   reordered (was returning `False` instead of `None` on cached
+   failure → AttributeError on retries) plus `find_window_id()`
+   retry-with-backoff (5 attempts, ~0.75s) to absorb cold-boot
+   AppKit window registration race. Local environment caveat:
+   Quartz module installed only for system Python 3.9; homebrew
+   `python3.14` invoked by the script can't load it (PEP 668),
+   so window-targeted capture is currently a no-op locally —
+   documented as known env limit. The retry path is correct for
+   environments where Quartz IS available.
+
+**Paired-diff cold-launch alignment limit (2026-05-05).** Two
+attempted runs of `metal-gl-compare.sh crimson` (ordinal 30 and
+ordinal 1500, with the canonical recipe + harness fixes) both
+returned FAIL not because of renderer divergence but because:
+
+- Ordinal 30 (~5.37s in) fires during Xbox boot before the GL
+  window has drawn anything; GL leg captures macOS desktop with
+  black xemu rect.
+- Ordinal 1500 (~58s in) lands at different game states between
+  legs: GL reaches Crimson Settings submenu (fps=58 in xemu.log),
+  Metal stays on card-fan main menu (fps≈30). Input scripts are
+  wall-clock-driven, so per-leg timing differences accumulate
+  into divergent menu states by the same flip-stall ordinal.
+
+**Slice F3 — per-title snapshot anchor for paired diff** is the fix:
+record per-title `<title>-canary` snapshots at a stable visual state
+once interactively, then `metal-gl-compare.sh --snapshot <tag>`
+(F1-threaded) anchors both legs to the same guest state and captures
+immediately. Filed in decision-log "2026-05-05: Crimson Metal
+'blocker' reclassified as config".
+
+**M15 default-on remaining blockers.**
+
+- (a) Front-fb fallback policy decision (Crimson + PGR2 documented
+  as both fallback-dependent — strengthens the case for default-on
+  flip).
+- (b) Slice F3 — per-title snapshot anchor (interactive recording
+  needed).
+- (c) Record `sc2-gameplay.csv` via `record-input.sh sc2`
+  (interactive; SC2 is the only canary title without a route).
+- (d) Audio listen-test for `XEMU_APU_LOCK_RELEASE` (orthogonal to
+  Metal; user-blocking).
+- (e) Once (a)-(c) land: M15 visual-gate sweep across PGR2 / Rainbow
+  / Crimson / SC2 + one broader-sweep title at ≤1% per-pixel diff
+  vs GL. FPS / p99 jitter validation. Cold-launch shader compile
+  total < 5s.
+
+**Original W3 counter-mode banner preserved below for empirical
+audit trail.**
+
+---
+
+**W3 counter-mode regression gate operational (2026-05-04 evening).
+Re-validated 2026-05-05.** All four canaries PASS counter mode in
+`benchmark-runs/20260505-110002-canary-regress` after the
+atexit-interval skip fix:
+
+```
+[pgr2][counters]    PASS draws=48   fps=23.86 publishes=24
+[rainbow][counters] PASS draws=472  fps=7.00  publishes=8   coalesced=357
+[halo][counters]    PASS draws=2325 fps=30.96 publishes=31  coalesced=2294
+[boot][counters]    PASS draws=416  fps=30.99 publishes=32  coalesced=96
+verdict: PASS
+```
 
 **W3 counter-mode regression gate operational (2026-05-04 evening).**
 `scripts/apple-silicon/metal-canary-regress.sh` now supports

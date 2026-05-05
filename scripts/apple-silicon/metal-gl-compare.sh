@@ -386,6 +386,25 @@ run_gl() {
     # per-launcher metadata still records sane values, but
     # macos-capture.sh's sentinel-mode branch ignores them.
     local gl_extra_env=()
+    # Canonical M15 recipe defaults for the GL leg (user env wins).
+    # The geometry-shader bypass + lock-free PGRAPH read flags are
+    # env-gated in pgraph.c:97 / glsl/geom.c:86,117 — they are NOT
+    # auto-on for Apple Silicon builds. metal-canary-regress.sh
+    # hardcodes them at lines 533-538; matching parity here keeps both
+    # gates exercising the same documented PASS recipe. XEMU_GL_MSAA=4
+    # is added to match the Metal leg's MSAA=4 so AA edge classes are
+    # comparable. XEMU_CAPTURE_WINDOW_REQUIRED=1 makes the GL leg
+    # INFRA-FAIL instead of falling back to full-desktop screencapture
+    # when window-id lookup fails — full-desktop capture compares
+    # macOS desktop chrome against the Metal in-renderer drawable PNG,
+    # producing meaningless ~70% changed_pct FAILs (Codex review,
+    # 2026-05-05).
+    [[ "${XEMU_NATIVE_TRI_DEPTH+x}" != "x" ]] && gl_extra_env+=("XEMU_NATIVE_TRI_DEPTH=1")
+    [[ "${XEMU_NATIVE_QUAD+x}" != "x" ]] && gl_extra_env+=("XEMU_NATIVE_QUAD=1")
+    [[ "${XEMU_PGRAPH_FAST_READ+x}" != "x" ]] && gl_extra_env+=("XEMU_PGRAPH_FAST_READ=1")
+    [[ "${XEMU_GL_MSAA+x}" != "x" ]] && gl_extra_env+=("XEMU_GL_MSAA=4")
+    [[ "${XEMU_CAPTURE_WINDOW_REQUIRED+x}" != "x" ]] && \
+        gl_extra_env+=("XEMU_CAPTURE_WINDOW_REQUIRED=1")
     if [[ -n "$SNAPSHOT_TAG" ]]; then
         gl_extra_env+=("XEMU_BENCH_LOADVM_TAG=$SNAPSHOT_TAG"
                        "XEMU_BENCH_LOADVM_AT=$LOADVM_AT")
@@ -446,6 +465,30 @@ run_metal() {
     # consume() call on the renderer side has nowhere to write.
     local metal_extra_env=()
     local metal_extra_args=()
+    # Canonical M15 Metal recipe defaults (user env wins). The
+    # documented PASS recipe for the four green canaries
+    # (PGR2/Rainbow/Halo/boot) and the gameplay route diagnostic for
+    # Crimson is MSAA4 + translated pipeline + front-fb fallback +
+    # geometry-shader bypasses + lock-free PGRAPH reads. Without
+    # these defaults the diff harness would publish a CRTC-strict
+    # 0x32a4000 surface that titles abandon mid-run after
+    # menu→gameplay (Crimson) or mid-render-pass switch (PGR2),
+    # AND would run the wrong shader/pgraph path, causing spurious
+    # "FAIL" verdicts unrelated to renderer correctness. The canary
+    # regression script (metal-canary-regress.sh) already hardcodes
+    # the same 7-flag recipe; this brings parity.
+    [[ "${XEMU_METAL_TRANSLATED_PIPELINE+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_METAL_TRANSLATED_PIPELINE=1")
+    [[ "${XEMU_METAL_FRONT_FB_FALLBACK+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_METAL_FRONT_FB_FALLBACK=1")
+    [[ "${XEMU_METAL_MSAA+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_METAL_MSAA=4")
+    [[ "${XEMU_NATIVE_TRI_DEPTH+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_NATIVE_TRI_DEPTH=1")
+    [[ "${XEMU_NATIVE_QUAD+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_NATIVE_QUAD=1")
+    [[ "${XEMU_PGRAPH_FAST_READ+x}" != "x" ]] && \
+        metal_extra_env+=("XEMU_PGRAPH_FAST_READ=1")
     if [[ -n "$SNAPSHOT_TAG" ]]; then
         metal_extra_env+=("XEMU_BENCH_LOADVM_TAG=$SNAPSHOT_TAG"
                           "XEMU_BENCH_LOADVM_AT=$LOADVM_AT")

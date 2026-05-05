@@ -366,13 +366,19 @@ parse_kv() {
 # Extract a counter value from the LAST `xemu-perf: interval_id=...`
 # line in the run's xemu.log. The xemu-perf interval line carries
 # space-separated key=value pairs; we want the value of the requested
-# key from the latest interval.
+# key from the latest interval. Skip the `final=1 reason=atexit`
+# cleanup interval — it is a degenerate `frames=1 fps=0.00` record
+# emitted at process teardown that does not reflect renderer state
+# (parsing it would FAIL every healthy run on draws=1/fps=0.00).
 last_interval_counter() {
     local log_file="$1"
     local key="$2"
-    # Grep only interval-id lines, take last, then awk-parse.
+    # Grep only interval-id lines, skip atexit cleanup, take last, awk-parse.
     awk -v k="$key" '
-        /^xemu-perf: interval_id=/ { last = $0 }
+        /^xemu-perf: interval_id=/ {
+            if (index($0, "final=1") > 0) next
+            last = $0
+        }
         END {
             if (!last) { print ""; exit }
             n = split(last, fields, " ")
