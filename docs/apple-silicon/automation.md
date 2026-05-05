@@ -1329,6 +1329,37 @@ bound the GL-leg capture to xemu's drawable region; pair with
 retina-vs-drawable scaling. Unset by default; behavior with the env
 var unset is identical to the pre-W6 full-desktop path.
 
+**Strict mode (2026-05-05).** Set `XEMU_CAPTURE_WINDOW_REQUIRED=1`
+to make the script exit code 3 on Quartz unavailability or window-id
+miss instead of falling back to full-desktop. `metal-gl-compare.sh`
+sets this by default for the GL leg (user env wins) — without it,
+fullscreen fallback compares macOS desktop chrome against the Metal
+in-renderer drawable, producing meaningless ~70% changed_pct FAILs
+in paired diff. The retry loop in `find_window_id()` (5 attempts,
+~0.75s total) absorbs the brief AppKit window-registration race at
+xemu cold launch.
+
+**Quartz install for the script's Python.** `macos-capture.sh`
+invokes `python3` from PATH. On Apple Silicon Homebrew systems that's
+typically `/opt/homebrew/bin/python3` (Python 3.14+). PyObjC's
+`Quartz` module must be installed against that interpreter; the
+default Apple-bundled `pyobjc-framework-Quartz` only covers
+`/usr/bin/python3` (Python 3.9). PEP 668 marks the Homebrew
+interpreter as externally-managed, so the user-level install command
+needs the explicit escape hatch:
+
+```sh
+/opt/homebrew/bin/python3 -m pip install --user \
+    --break-system-packages pyobjc-framework-Quartz
+```
+
+This installs into `~/Library/Python/3.14/lib/python/site-packages`
+without touching the Homebrew Cellar. Verified safe on the project's
+M3 Ultra reference machine (2026-05-05). Skip if the install path
+ever changes — a venv at `xemu-fork/.venv-quartz/` plus a
+`#!/path/to/.venv-quartz/bin/python3` shebang on `macos-capture.sh`
+is the alternative if `--break-system-packages` is later disallowed.
+
 Frame pacing and NV2A profile summaries are enabled by the launcher through
 `XEMU_PERF_LOG=1`. The summary interval defaults to one second and can be
 changed with:

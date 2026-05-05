@@ -210,13 +210,27 @@ paired diff:
    in project rule #12 (USB-hub device-tree mismatch). Could be
    a separate slice to investigate.
 2. **GL window-targeted capture requires Quartz.** Local environment
-   has Quartz only for system Python 3.9; homebrew Python 3.14 (which
-   `macos-capture.sh` invokes) cannot import it. With
+   initially had Quartz only for system Python 3.9; homebrew Python
+   3.14 (which `macos-capture.sh` invokes) couldn't import it. With
    `XEMU_CAPTURE_WINDOW_REQUIRED=1` set by metal-gl-compare.sh
-   (correct strict-mode behavior per Codex review), GL leg refuses to
-   fall back to fullscreen. Local user must `pip install
-   pyobjc-framework-Quartz` into the homebrew Python (or a venv) to
-   exercise the harness. This is an environment fix, not a code fix.
+   (correct strict-mode behavior per Codex review), GL leg refuses
+   to fall back to fullscreen. **RESOLVED 2026-05-05**: install
+   command for homebrew Python 3.14:
+   ```
+   /opt/homebrew/bin/python3 -m pip install --user --break-system-packages pyobjc-framework-Quartz
+   ```
+   PEP 668 marks homebrew Python as externally managed but
+   `--break-system-packages` is the supported escape hatch for user-
+   level installs (verified — no Homebrew breakage). After install,
+   `python3 -c 'import Quartz'` succeeds and `macos-capture.sh`
+   captures the actual xemu window via `screencapture -l <wid>`.
+   First post-Quartz paired diff
+   (`benchmark-runs/20260505-115225-metal-gl-compare-crimson`)
+   captured `source=window:14443` correctly; the only remaining
+   issue is title-specific trigger-ordinal calibration so the trigger
+   fires AFTER loadvm completes and renderer has produced a real
+   front-fb (Crimson cold-boots fast enough that pre-loadvm flip
+   stalls inflate the ordinal count).
 
 So F3 is operationally "snapshot save+load works; paired-diff
 end-to-end is blocked on Quartz install." The decision-log F3 spec
