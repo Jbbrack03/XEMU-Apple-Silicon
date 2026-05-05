@@ -1,35 +1,39 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-05 (W3 counter-mode regression gate operational +
-W4 unconditional-flush fix + magenta investigation reclassified as a
-workflow setup issue, NOT a renderer regression.
-`metal-canary-regress.sh` now supports `--mode {counters,pixels,both}`;
-counter mode parses last-interval `xemu-perf:` counters
-(METAL_PIPELINE_TRANSLATED_FAILED, METAL_DRAW_PASS_COALESCED ratio,
-METAL_DRAWABLE_ACQUIRE_FAILS, METAL_FRONT_FB_PUBLISHES, fps) and
-catches concrete renderer regressions WITHOUT depending on
-pixel-perfect golds. End-to-end PASS verdict on all four canaries
-(pgr2, rainbow, halo, boot) under autonomous shell. The W4 wrapper
-in `pgraph_mtl_flush_draw` previously called the open-pass flush
-unconditionally, defeating M5.7 coalescing on every benchmark; gated
-behind `pgraph_mtl_draw_dump_rt_active()`, restoring 96.8%
-coalescing rate. Workflow tooling status: D1 / W1 / W2 / W3
-(counters) / W4 / F1 / F2 / VFR / skills / hooks all operational.
-W5 remains BLOCKED (MoltenVK geometryShader unsupported on M3
-Ultra). Earlier 2026-05-04: Metal porting workflow rollout adopted a
-formal five-phase playbook in `metal-porting-workflow.md` and
-landed six implementation slices plus one Codex fix-up — auto-on
-validation (W1), paired diff harness (W2), canary regression gate
-(W3), per-draw RT dump (W4), MoltenVK triangulation BLOCKED (W5),
-Phase-2 gate fix-ups (W6). Project is now in Phase 1 (Translation
-Correctness, ACTIVE). PGR2 / Rainbow Six 3 / Halo CE menu / Xbox
-boot/flubber are useful Metal canaries with 4x MSAA active.
-**The user's stated 30/60 FPS at 1080p / high-quality AA /
-correct-colors goals remain met today via the GL renderer** with
-`XEMU_GL_MSAA=4` + `surface_scale=2`; Metal remains opt-in /
-experimental until the broader visual-diff/gameplay gate passes.
-Input slices N1+N2 also shipped via opt-in `XEMU_MACOS_NATIVE_INPUT=1`
-GameController.framework backend.)
+Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+config — Crimson now joins PGR2 / Rainbow / Halo / boot as a
+documented MSAA4 PASS canary when launched with the canonical M15
+recipe (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`). Three
+orthogonal harness bugs landed: `metal-gl-compare.sh` now threads
+the canonical 7-flag M15 Metal recipe to its Metal leg + matching
+`XEMU_GL_MSAA=4` + the geometry-shader bypasses to its GL leg with
+user-env override pattern; `metal-canary-regress.sh` skips the
+`final=1 reason=atexit` cleanup interval in
+`last_interval_counter()` (was failing healthy runs on the
+degenerate teardown record); `macos-capture.sh` Quartz cache-check
+reorder + `find_window_id()` retry-with-backoff + opt-in
+`XEMU_CAPTURE_WINDOW_REQUIRED=1` strict mode (default ON in
+metal-gl-compare.sh's GL leg). F3 (per-title snapshot anchor for
+paired diff) partially proven autonomous: snapshot save+load via
+QMP/HMP works for same-renderer; cross-renderer Metal-saved →
+GL-loaded crashes (workaround: save via GL). Quartz install
+documented for homebrew Python 3.14 (`pip install --user
+--break-system-packages pyobjc-framework-Quartz`). Two passes of
+`/codex-validate changes`: pass 1 surfaced three findings, all
+addressed; pass 2 verdict PASS. Earlier 2026-05-04: W3 counter-mode
+gate, W4 unconditional-flush fix, F1+F2 baseline-lock repairs,
+Metal porting workflow rollout (D1 playbook + W1 auto-on validation
++ W2 paired diff + W3 canary regression gate + W4 per-draw RT dump
++ W5 MoltenVK BLOCKED + W6 Codex fix-ups). Project is now in
+Phase 1 (Translation Correctness, ACTIVE). **The user's stated
+30/60 FPS at 1080p / high-quality AA / correct-colors goals remain
+met today via the GL renderer** with `XEMU_GL_MSAA=4` +
+`surface_scale=2`; Metal remains opt-in until M15 default-on
+visual-gate sweep passes — now blocks on F3 cross-title rollout
+(PGR2 / Rainbow / SC2 each need recorded canary snapshots), SC2
+input recording, and front-fb fallback default-on policy decision.
+Input slices N1+N2 also shipped via opt-in
+`XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run

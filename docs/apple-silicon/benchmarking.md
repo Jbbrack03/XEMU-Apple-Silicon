@@ -1,20 +1,29 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-04 (Metal boot/flubber + PGR2/Rainbow follow-up
-added in
+Last updated: 2026-05-05 (Crimson reclassified as MSAA4 PASS canary
+with the canonical recipe in
+`benchmarks/2026-05-05-crimson-config-not-renderer-bug.md`; the
+previous "Crimson screenshot lands on black transition/loading
+output" framing was the result of `metal-gl-compare.sh` not threading
+`XEMU_METAL_FRONT_FB_FALLBACK=1` to its Metal leg. Earlier 2026-05-04:
+Metal boot/flubber + PGR2/Rainbow follow-up in
 `benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`; PGR2
-texture-bind attribution and early-cache fast-path handoff added in
+texture-bind attribution + early-cache fast-path handoff in
 `benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`. GL
 renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` remains the
 production configuration meeting the user's stated 30/60 FPS at 1080p
-goals. Metal visual canaries: PGR2 PASS, Rainbow Six 3 loading screen
-PASS, Xbox boot/flubber PASS. Metal PGR2 shader fallbacks are now zero,
-but the 150s gameplay run still averaged 11.21 post-load FPS before the
-final early-cache fast-path rerun; texture binding was the measured CPU
-bottleneck. Crimson gameplay automation completes without aborting, but
-the current screenshot lands on black transition/loading output and is
-not yet a visual canary. M15 remains blocked on the broader
-Metal-vs-GL gameplay/visual-diff gate.
+goals. Metal visual canaries (post-2026-05-05 reclassification):
+PGR2 PASS, Rainbow Six 3 loading screen PASS, Halo CE menu PASS,
+Xbox boot/flubber PASS, **Crimson Skies main menu PASS** (sustained
+~30 FPS for 90s with canonical recipe; benchmark
+run `benchmark-runs/20260505-104139-crimson-skies`). Metal PGR2
+shader fallbacks zero post-shared-GLSL-fix; texture binding was the
+measured CPU bottleneck before the early cached-texture bind path.
+M15 remains blocked on (a) F3 cross-title snapshot anchor for paired
+diff (interactive recording needed; proof-of-concept proven for
+Crimson via crimson-canary snapshot), (b) SC2 routed visual canary
+(interactive input recording), (c) front-fb fallback default-on
+policy decision (PGR2 + Crimson now both fallback-dependent).
 Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
 `INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
 `XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
@@ -131,6 +140,14 @@ Known emulator files:
 | M5.12-BOOT | Front-face + cubemap-border canary | Metal | Xbox boot/flubber animation | frame 300 screenshot | PASS | `benchmark-runs/20260504-092824-crimson-skies`, `benchmark-runs/visual-checks/boot-post-oob-f300.png` |
 | M5.12-CS-STAB | Texture-DMA OOB + invalid-stage shader hardening | Metal | Crimson Skies gameplay route | frame 1800 screenshot + 70s run | STABILITY PASS / VISUAL PENDING | `benchmark-runs/20260504-092403-crimson-skies`; screenshot lands on black transition/loading output |
 | M5.13-PGR2-TEX | Texture dirty semantics + shader-dot fix + Metal CPU wall counters | Metal | PGR2 gameplay route | 150s | ATTRIBUTED: shader fallbacks 0, texture bind CPU bottleneck | `benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`, `benchmark-runs/20260504-132806-pgr2` |
+
+### 2026-05-05 Metal visual canary + harness entries
+
+| ID | Slice / target | Renderer | Game / scene | Duration | Verdict | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| M5.14-CS-VISUAL | Crimson Metal "blocker" reclassified as config | Metal | Crimson Skies main menu (canonical recipe) | 90s | PASS — sustained ~30 FPS; tarot-card menu rendered correctly | `benchmarks/2026-05-05-crimson-config-not-renderer-bug.md`, `benchmark-runs/20260505-104139-crimson-skies` |
+| W3-RERUN | Counter-mode regression gate post-atexit-skip fix | Metal | All four canaries (PGR2 / Rainbow / Halo / boot) | ~6 min total | 4/4 PASS | `benchmark-runs/20260505-110002-canary-regress` |
+| F3-CRIMSON | Per-title snapshot anchor proof-of-concept | GL+Metal | Crimson menu via `crimson-canary` snapshot | 30s | snapshot save+load PASS same-renderer; cross-renderer Metal-saved → GL-loaded SIGSEGV | `benchmark-runs/profile-prep/crimson-canary.qcow2`, `benchmark-runs/20260505-114034-metal-gl-compare-crimson` |
 
 
 ## Retail Gameplay Targets

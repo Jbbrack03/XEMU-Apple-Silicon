@@ -43,8 +43,11 @@ the task touches the Metal port):
   R1–R8, open questions Q1–Q6 (all resolved as of M14).
   **Slices M0–M14 SHIPPED 2026-05-02; M5.x correctness follow-ups
   continue through 2026-05-04; M15 (default-on selection) BLOCKED
-  on the front-fb fallback policy, Crimson/SC2 routed visual
-  correctness, and the broader paired visual/perf gate.**
+  on the front-fb fallback policy, F3 per-title snapshot anchor for
+  paired diff (interactive cross-title rollout), SC2 routed visual
+  canary (interactive input recording), and the cross-renderer
+  loadvm SIGSEGV investigation. Crimson reclassified as PASS 2026-05-05
+  (see decision-log entry of that date).**
   Read this when the
   task touches the Metal port; per-slice "Status (2026-05-02):
   SHIPPED" annotations document the landed implementation.
@@ -232,7 +235,9 @@ The fork-specific source-code changes are concentrated in:
       the next blocker for M15 default-on. See decision-log
       "2026-05-03: Metal slice M5.9-followup-E".
       **(M5.10/M5.11 + MSAA follow-up, 2026-05-04 — PGR2/Rainbow/Halo/boot
-      MSAA4 canaries PASS; Crimson/SC2 visual routes BLOCKED)** PGR2's
+      MSAA4 canaries PASS; Crimson/SC2 visual routes BLOCKED;
+      Crimson reclassified PASS 2026-05-05 — see "2026-05-05" updates
+      below)** PGR2's
       old white/magenta/front-fb failure is closed, and the later PGR2
       MSAA4 black-frame regression is fixed by storing MSAA attachments
       across pass breaks. Surface cache now retains multiple shapes per
@@ -263,6 +268,22 @@ The fork-specific source-code changes are concentrated in:
       Next Metal work should route Crimson gameplay and SC2 to real
       rendered visual canaries and resolve the front-fb fallback policy
       before revisiting M15.
+      **(2026-05-05 update)** Crimson reclassified as MSAA4 PASS canary
+      with the canonical recipe (`benchmark-runs/20260505-104139-crimson-skies`
+      sustained ~30 FPS for 90s rendering tarot-card menu); the
+      previous "patterned frame followed by black drawable" framing
+      was a missing-config artifact in `metal-gl-compare.sh`, not a
+      renderer bug. Crimson now joins PGR2 as documented
+      "fallback-dependent". Five Metal MSAA4 canaries now PASS
+      (PGR2 / Rainbow / Halo / boot / Crimson). Remaining M15
+      blockers: (a) F3 per-title snapshot anchor for paired diff
+      (interactive cross-title rollout — proof-of-concept proven for
+      Crimson via `crimson-canary` snapshot), (b) SC2 routed visual
+      canary (interactive `sc2-gameplay.csv` recording), (c)
+      front-fb fallback default-on policy, (d) cross-renderer loadvm
+      SIGSEGV investigation (workaround: save snapshots via GL only).
+      See decision-log "2026-05-05: Crimson Metal 'blocker'
+      reclassified as config".
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and

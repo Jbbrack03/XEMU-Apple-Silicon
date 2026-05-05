@@ -1,18 +1,27 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-04 (Metal MSAA store/resolve correctness
-follow-up plus PGR2 texture-bind attribution. PGR2, Rainbow Six 3,
-Halo CE menu, and Xbox boot/flubber now pass useful MSAA4 visual
-canaries. The old white/magenta front-buffer failure is closed, and
-the MSAA4 black-frame regression is fixed by
-StoreAndMultisampleResolve plus stored depth/stencil MSAA attachments.
-PGR2 no longer hits Metal shader translation failures or pipeline
-fallbacks after the shared GLSL dot-intermediate fix. The remaining
-measured Metal PGR2 gameplay bottleneck before the final fast-path
-rerun is CPU time in texture binding; Metal now has CPU wall-time
-counters and an early cached-texture bind path. M15 default-on stays
-BLOCKED until the broader Metal-vs-GL visual-diff/gameplay gate,
-front-fb fallback policy, and Crimson/SC2 visual routes are resolved.)
+Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+config — Crimson now joins PGR2, Rainbow Six 3, Halo CE menu, and
+Xbox boot/flubber as documented MSAA4 PASS canaries with the
+canonical M15 recipe (`XEMU_METAL_FRONT_FB_FALLBACK=1` plus the
+rest). The previous "patterned frame followed by black drawable"
+symptom on Crimson was a missing-config artifact in
+`metal-gl-compare.sh`, not a renderer bug. Five canaries now pass
+visually. M15 default-on stays BLOCKED on (a) F3 per-title snapshot
+anchor for paired diff (interactive recording needed; proof-of-concept
+proven for Crimson 2026-05-05 — `crimson-canary` snapshot in
+`benchmark-runs/profile-prep/crimson-canary.qcow2` loads on both
+GL and Metal legs, but cross-renderer Metal-saved → GL-loaded
+crashes), (b) SC2 routed visual canary (interactive input-script
+recording), (c) front-fb fallback default-on policy decision
+(PGR2 + Crimson now both documented as fallback-dependent).
+Earlier 2026-05-04: Metal MSAA store/resolve correctness follow-up
++ PGR2 texture-bind attribution. The old white/magenta front-buffer
+failure is closed; MSAA4 black-frame regression fixed by
+StoreAndMultisampleResolve + stored depth/stencil MSAA attachments;
+PGR2 shader translation failures and pipeline fallbacks zero
+post-shared-GLSL-dot-intermediate fix; CPU wall-time counters +
+early cached-texture bind path landed.)
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon

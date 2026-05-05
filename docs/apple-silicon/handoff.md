@@ -140,26 +140,47 @@ preserved for use cases where the operator has manually re-captured
 stable golds; it remains limited by frame-ordinal nondeterminism +
 smoke-script game-state-reach issues described below.
 
-**Workflow operational checklist** (2026-05-04 evening):
+**Workflow operational checklist** (2026-05-05 update):
 
 - [x] D1 `metal-porting-workflow.md` operating playbook
 - [x] W1 auto-on Metal validation/HUD in `run-benchmark.sh` + post-build
       shader-validation gate
 - [x] W2 `metal-gl-compare.sh` paired Metal-vs-GL diff harness
+      (canonical M15 recipe + `XEMU_GL_MSAA=4` defaults landed
+      2026-05-05)
 - [x] W3 `metal-canary-regress.sh` regression gate (counter mode
-      operational; pixel mode requires stable golds)
+      operational; atexit-interval skip fix landed 2026-05-05; pixel
+      mode requires stable golds)
 - [x] W4 per-draw RT dump (`XEMU_METAL_DUMP_DRAW_RT`) + W4 fix for
       M5.7 coalescing regression
 - [x] F1 deterministic frame alignment (`XEMU_CAPTURE_AT_FLIP_STALL`)
 - [x] F2 tracked canary gold artifact store + MANIFEST
+- [x] F3 per-title snapshot anchor for paired diff —
+      proof-of-concept 2026-05-05 via `crimson-canary` snapshot
+      (`benchmark-runs/profile-prep/crimson-canary.qcow2`); same-renderer
+      loadvm works, cross-renderer Metal-saved → GL-loaded crashes;
+      cross-title rollout (PGR2 / Rainbow / SC2) interactive-blocked
+- [x] `macos-capture.sh` strict mode (`XEMU_CAPTURE_WINDOW_REQUIRED=1`)
+      + Quartz cache fix + retry-with-backoff (2026-05-05)
+- [x] Quartz install for homebrew Python 3.14 documented in
+      `automation.md` (verified end-to-end:
+      `benchmark-runs/20260505-115225-crimson-skies/capture.log`
+      records `source=window:14443`)
 - [x] Visual Flight Recorder
 - [x] Skills: `/session-start`, `/sync-docs`, `/codex-validate`,
       `/benchmark-and-document`, `/append-decision`
 - [x] Stop hooks for doc-sync and codex-validate enforcement
 - [W5] BLOCKED — MoltenVK on M3 Ultra (geometryShader unsupported)
-- [ ] M15 default-on still requires interactive recording of real
-      input scripts for Crimson/SC2 visual routes + paired Metal-vs-GL
-      diff at the same recorded state.
+- [ ] M15 default-on still requires:
+      (a) interactive `sc2-gameplay.csv` recording (only canary title
+      without a recorded route)
+      (b) F3 per-title snapshot rollout for PGR2 / Rainbow / SC2
+      (c) front-fb fallback default-on policy decision (PGR2 + Crimson
+      both documented as fallback-dependent)
+      (d) audio listen-test for `XEMU_APU_LOCK_RELEASE` (orthogonal
+      to Metal; user-blocking)
+      (e) cross-renderer loadvm SIGSEGV investigation (workaround:
+      save snapshots via GL only)
 
 **W4 unconditional-flush fix (2026-05-04 evening).** W4 introduced
 `pgraph_mtl_flush_draw` as a wrapper over `pgraph_mtl_flush_draw_inner`

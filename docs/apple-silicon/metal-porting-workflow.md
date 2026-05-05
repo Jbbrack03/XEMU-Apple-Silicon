@@ -27,15 +27,14 @@ of each.
 
 **Phase pointer: Phase 1 — Translation Correctness, ACTIVE.**
 
-Date: 2026-05-04. Last canary state pulled from `handoff.md`:
+Date: 2026-05-05. Last canary state pulled from `handoff.md`:
 
 - PGR2 MSAA4: **PASS** as a static-canary
   (`benchmark-runs/20260504-100458-pgr2`,
   `benchmark-runs/visual-checks/pgr2-gate-metal-msaa4-f900-after-msaa-store.png`).
-  PGR2 still requires `XEMU_METAL_FRONT_FB_FALLBACK=1` to publish a
-  correct frame; without the fallback the captured drawable is
-  upside-down/wrong
-  (`benchmark-runs/20260504-101416-pgr2`).
+  PGR2 requires `XEMU_METAL_FRONT_FB_FALLBACK=1` to publish a correct
+  frame; without the fallback the captured drawable is
+  upside-down/wrong (`benchmark-runs/20260504-101416-pgr2`).
 - Rainbow Six 3 loading-screen MSAA4: **PASS**
   (`benchmark-runs/20260504-100546-rainbow-six-3`,
   `benchmark-runs/visual-checks/rainbow-gate-metal-msaa4-f600-after-msaa-store.png`).
@@ -45,17 +44,26 @@ Date: 2026-05-04. Last canary state pulled from `handoff.md`:
 - Xbox boot/flubber MSAA4: **PASS**
   (`benchmark-runs/20260504-100747-crimson-skies`,
   `benchmark-runs/visual-checks/boot-gate-metal-msaa4-f300-after-msaa-store.png`).
-- Crimson Skies gameplay visual route: **BLOCKED** — the route
-  produces one patterned frame followed by black drawable captures
-  (`benchmark-runs/20260504-100815-crimson-skies`); Visual Flight
-  Recorder quantifies an existing failed Crimson sequence as 92.31 %
-  black frames after one patterned frame.
+- **Crimson Skies main menu MSAA4: PASS (2026-05-05 reclassification).**
+  Run `benchmark-runs/20260505-104139-crimson-skies` (90s with the
+  canonical M15 recipe). Captured PNGs at
+  `/tmp/crimson-canonical-fallback.0005.png` through `.0016.png` show
+  the tarot-card menu rendered correctly with sustained ~30 FPS. The
+  previous "BLOCKED — patterned frame followed by black drawable"
+  framing in `benchmark-runs/20260504-100815-crimson-skies` was
+  caused by `metal-gl-compare.sh` not threading
+  `XEMU_METAL_FRONT_FB_FALLBACK=1` to its Metal leg; Crimson abandons
+  CRTC publish target `0x32a4000` mid-run for `0x1ad8000` (640×480
+  X8R8G8B8). Crimson now joins PGR2 as a documented "PASS only with
+  fallback ON" title. See decision-log "2026-05-05: Crimson Metal
+  'blocker' reclassified as config".
 - Soul Calibur 2 visual route: **BLOCKED** — counters look strong
   (`post_load_avg_fps=57.63` in
   `benchmark-runs/20260504-101242-soul-calibur-2`) but the no-input
   route captures only boot/flubber and then black; Visual Flight
   Recorder quantifies an existing SC2 sequence as 87.50 % black after
-  boot/flubber.
+  boot/flubber. Unblock requires interactive recording of
+  `sc2-gameplay.csv` via `scripts/apple-silicon/record-input.sh sc2`.
 - M5 shader-translation harness: **7/7 PASS** via
   `scripts/apple-silicon/metal-shader-validation/run-validation.sh`.
 

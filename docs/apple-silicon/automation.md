@@ -1,18 +1,35 @@
 # Benchmark Automation
 
-Last updated: 2026-05-05 (W3 counter-mode regression gate operational
-+ W4 unconditional-flush fix. `metal-canary-regress.sh` now supports
-`--mode {counters,pixels,both}`; counter mode parses last-interval
-`xemu-perf:` counters and validates renderer health autonomously
-without depending on pixel-perfect golds. End-to-end PASS verdict on
-all four canaries in ~6 minutes. The W4 wrapper in
-`pgraph_mtl_flush_draw` previously called `pgraph_mtl_draw_flush_open_pass`
-unconditionally, defeating M5.7 coalescing on every benchmark; gated
-behind a new `pgraph_mtl_draw_dump_rt_active()` accessor. The previously
-banner'd "PGR2/Rainbow drawable-magenta in autonomous shell" is
-reclassified as a workflow setup issue (smoke scripts are placeholders;
-gold images required interactive profile-HDD + gameplay-script setup),
-NOT a renderer regression. Earlier 2026-05-04: F1+F2+W3 baseline-lock
+Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+config; three harness bugs fixed; F3 snapshot anchor partially
+proven; Quartz install documented. Crimson now joins PGR2 / Rainbow /
+Halo / boot as MSAA4 PASS canary with canonical recipe
+(`XEMU_METAL_FRONT_FB_FALLBACK=1` + the rest). `metal-gl-compare.sh`
+now threads the canonical 7-flag M15 Metal recipe + matching
+`XEMU_GL_MSAA=4` + geometry-shader bypasses to both legs with
+user-env override pattern; `metal-canary-regress.sh`
+`last_interval_counter()` skips the `final=1 reason=atexit`
+cleanup interval; `macos-capture.sh` adds opt-in
+`XEMU_CAPTURE_WINDOW_REQUIRED=1` strict mode + Quartz cache fix +
+`find_window_id()` retry-with-backoff. Quartz install for
+homebrew Python 3.14: `pip install --user --break-system-packages
+pyobjc-framework-Quartz` (PEP 668 escape hatch — verified safe on
+M3 Ultra reference machine). F3 snapshot save+load via QMP/HMP
+proven autonomous for same-renderer; cross-renderer Metal-saved →
+GL-loaded crashes (workaround: save via GL). Earlier 2026-05-04:
+W3 counter-mode regression gate operational + W4 unconditional-flush
+fix. `metal-canary-regress.sh` supports `--mode {counters,pixels,both}`;
+counter mode parses last-interval `xemu-perf:` counters and
+validates renderer health autonomously without depending on
+pixel-perfect golds. End-to-end PASS verdict on all four canaries
+in ~6 minutes. The W4 wrapper in `pgraph_mtl_flush_draw` previously
+called `pgraph_mtl_draw_flush_open_pass` unconditionally, defeating
+M5.7 coalescing on every benchmark; gated behind a new
+`pgraph_mtl_draw_dump_rt_active()` accessor. The previously
+banner'd "PGR2/Rainbow drawable-magenta in autonomous shell" was
+reclassified as a workflow setup issue (smoke scripts are
+placeholders; gold images required interactive profile-HDD +
+gameplay-script setup), NOT a renderer regression. Earlier 2026-05-04: F1+F2+W3 baseline-lock
 repairs: `XEMU_CAPTURE_AT_FLIP_STALL` +
 `XEMU_CAPTURE_FLIP_STALL_SENTINEL` flip-stall capture trigger and
 `metal-gl-compare.sh --snapshot / --loadvm-at / --trigger /
