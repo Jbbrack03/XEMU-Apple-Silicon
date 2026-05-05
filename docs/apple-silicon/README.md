@@ -1,6 +1,12 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-04 (Metal porting workflow rollout: adopted a
+Last updated: 2026-05-04 (F1+F2+W3 baseline-lock repairs — flip-stall
+capture trigger and `metal-gl-compare.sh` `--snapshot` /
+`--loadvm-at` / `--trigger` / `--trigger-ordinal` flags (F1), tracked
+canary gold artifact store under `canary-baselines/` with
+`MANIFEST.tsv` provenance (F2), three W3 script repairs surfaced by
+first end-to-end gate run. Earlier 2026-05-04: Metal porting workflow
+rollout: adopted a
 formal five-phase playbook in `metal-porting-workflow.md` and landed
 six implementation slices plus one Codex fix-up — auto-on validation
 (W1), paired diff harness (W2), canary regression gate (W3), per-draw

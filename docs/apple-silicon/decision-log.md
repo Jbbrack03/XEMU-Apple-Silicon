@@ -1,5 +1,232 @@
 # Decision Log
 
+## 2026-05-04: F2 — canary gold artifact store + W3 first-end-to-end lock-attempt repairs
+
+**Context.** The 2026-05-04 W6 close-out captured F2 (canary gold-image
+artifact store) as a deferred slice. `metal-canary-regress.sh` read its
+gold PNGs from `benchmark-runs/visual-checks/`, which is gitignored
+alongside the rest of `benchmark-runs/`; a fresh checkout therefore
+INFRA-FAILed the regression gate before a single Metal change had been
+made. F2 makes the canary gold set a tracked artifact under
+`docs/apple-silicon/`. The same session ran the gate end-to-end for
+the first time after F2+F1 landed and exposed three real script-side
+bugs surfaced by W3 only when the four-canary loop actually executed.
+
+**Decisions landed in F2.**
+
+- **Tracked gold path.** Promoted four canary gold PNGs from gitignored
+  `benchmark-runs/visual-checks/` to a tracked path
+  `docs/apple-silicon/canary-baselines/<canary>/<frame>.png` for
+  pgr2/f900, rainbow/f600, halo/f1200, boot/f300. The originals in
+  `benchmark-runs/visual-checks/` are left untouched so the existing
+  `handoff.md` "PASS" citations stay valid; the canary harness is the
+  only consumer that switched paths.
+- **Provenance manifest.** Added
+  `docs/apple-silicon/canary-baselines/MANIFEST.tsv` with 12 columns:
+  `canary, gold_path, build_commit, build_date, xemu_version,
+  gpu_family, macos_version, flags, frame, source_run, threshold_pct,
+  notes`. Four data rows pinned to build_commit
+  `03d38ca1f1290c4aeeb8292b9cc00ea2c3ad040f`, xemu_version
+  `0.8.134-88-gbaa7aa2542`, GPU `Apple9` (M3 Ultra), macOS `26.4.1`,
+  the full closed default-on flag recipe, and the source benchmark-run
+  for each gold PNG. The harness reads the manifest at startup,
+  validates per-canary `gold_path` exists, and emits a `## Manifest
+  provenance` section in `report.md` plus a top-level `manifest`
+  object in `summary.json` so every harness artifact carries its own
+  build/commit/flag provenance.
+- **Harness rewire.** `scripts/apple-silicon/metal-canary-regress.sh`
+  now sets `GOLD_DIR=docs/apple-silicon/canary-baselines/`,
+  introduces a `MANIFEST_TSV` global (line ~38), and runs a
+  manifest-validation block (lines ~251-311) at script entry that
+  parses the TSV header, asserts every CANARY_TABLE row has a
+  matching manifest row, asserts each gold file resolves, and aborts
+  with INFRA-FAIL `2` if any check fails. The originals under
+  `benchmark-runs/visual-checks/` are no longer referenced by the
+  harness.
+
+**Decisions landed in W3 first-end-to-end repairs.** When the
+four-canary loop executed end-to-end for the first time after F2
+landed, three real bugs surfaced that the prior single-canary smoke
+runs had not exercised:
+
+1. **Positional-arg bug in `run-benchmark.sh`** (lines 200-201). The
+   launcher reads positional `2` as `INPUT_SCRIPT` unconditionally;
+   Halo/Boot canaries previously passed only `<game> <duration>`,
+   which made the duration get mis-read as a missing input file:
+   `missing required file: 120`. Fixed in the harness, not the
+   launcher: `metal-canary-regress.sh`'s `CANARY_TABLE` now always
+   carries an explicit input path (halo→`noop.csv`,
+   boot→`crimson-skies-smoke.csv`), and `run_canary` always uses the
+   3-positional form `<game> <input_csv> <duration>` so the launcher
+   never has to guess which positional is which.
+2. **Image-resize policy.** Golds were captured at 1280×931 vs
+   current renderer drawable at 1280×960; `compare-screenshots.py`
+   exited 1 on dimension mismatch. The compare invocation now passes
+   `--resize smaller`, mirroring W6's `metal-gl-compare.sh` fix; crop
+   is still derived from gold dimensions and LANCZOS resize handles
+   the height delta before crop and diff.
+3. **`printf -- '-…'` for bash 3.2.** macOS's default bash 3.2 treats
+   `printf '-…'` as starting with an option flag, which crashed the
+   report-generation block once the gate ran more than one canary in
+   a row. Fixed in BOTH `metal-canary-regress.sh` (lines ~543-550)
+   AND `metal-gl-compare.sh` (lines ~769-791), per Codex review of
+   W6's later rollout.
+
+**Cross-cuts updated.** `docs/apple-silicon/automation.md` "Canary
+regression gate (W3, 2026-05-04)" subsection now points at
+`docs/apple-silicon/canary-baselines/MANIFEST.tsv` as the source of
+truth, documents the manifest schema, and notes the three repairs
+landed when the gate first ran end-to-end. `xemu-fork/CLAUDE.md`
+script roster mentions the F2 `canary-baselines/` tracked store.
+Workspace-level `CLAUDE.md` script roster updated to point at the
+tracked path. The originals under `benchmark-runs/visual-checks/`
+remain in place and remain cited by the older `handoff.md` PASS
+banners.
+
+**Validation.** `bash -n scripts/apple-silicon/metal-canary-regress.sh`
+PASS. `bash -n scripts/apple-silicon/metal-gl-compare.sh` PASS.
+Manifest schema check via `awk -F'\t' '{print NF}'`: every row 12
+columns. `metal-canary-regress.sh` ran 4/4 canaries end-to-end after
+the W3 fixes (positional + resize + printf): the four-canary loop
+itself completed without bash 3.2 syntax abort or
+`compare-screenshots.py` infrastructure error, which was the
+fail-mode this slice was designed to fix. Halo and Boot rendered
+real content but exceeded the default 1 % threshold (74.4 % / 58.4 %
+changed_pct against gold) — distinct from the F2/W3 bugfix scope.
+
+**Baseline-lock outcome (open issue, not blocking F2/W3 close-out).**
+PGR2 and Rainbow drawables in the same end-to-end run came up
+uniform magenta `(255,0,255)` despite identical env recipe with the
+morning 2026-05-04 PGR2/Rainbow MSAA4 PASS runs cited by
+`handoff.md`. The renderer was producing real frames mid-run
+(`METAL_DRAW_COUNT=6778`, `fps=22` in late intervals) but the
+post-HUD drawable that the in-renderer screenshot path captures
+came up uninitialized. Likely an interactive-GUI-vs-autonomous-shell
+environmental difference, NOT an F1+F2+W3 regression — the F1 hooks
+are env-gated and do nothing when `XEMU_CAPTURE_AT_FLIP_STALL` is
+unset; the F2 path-rewire is read-only on capture. The morning's
+`PGR2 PASS` / `Rainbow PASS` evidence remains valid.
+
+**Follow-ups (DEFERRED).**
+
+- **Manifest×CANARY_TABLE cross-check (LOW, Codex W6 review).** The
+  current harness validates "every CANARY_TABLE row has a manifest
+  row" but does not enforce the reverse direction (manifest rows
+  without a CANARY_TABLE entry are silently allowed). A future slice
+  should make the check bidirectional and assert the MANIFEST_TSV
+  flag string equals the CANARY_TABLE env recipe so a flag-recipe
+  drift between `xemu-fork/CLAUDE.md` and the manifest fails fast.
+- **PGR2/Rainbow drawable-magenta regression in autonomous-shell
+  runs.** Worth a focused investigation in the next interactive
+  session: confirm by running `metal-canary-regress.sh` from a
+  foreground macOS GUI session and compare. Hypothesis: foreground
+  Quartz session vs autonomous shell affects which drawable surface
+  is presented at HUD-pre-present time. Halo/Boot drawables
+  rendered correctly in the same run, so the regression is
+  title-specific not harness-wide.
+
+## 2026-05-04: F1 — deterministic frame alignment for paired diff (flip-stall trigger + snapshot threading)
+
+**Context.** The 2026-05-04 W6 close-out captured F1 (deterministic
+frame alignment for the Phase 2 paired diff) as the highest-severity
+deferred slice. `metal-gl-compare.sh` paired screenshots by ordinal
+across two cold launches of the same scripted-input route; real-world
+timing drift between the GL and Metal cold launches (shader compile
+durations, OS scheduler variance, asset-load order) meant the same
+ordinal did not necessarily correspond to the same in-game frame.
+Until F1 landed, per-frame `changed_pixels_pct` differences below
+~3 % on dynamic gameplay were inconclusive. F1 lands the
+guest-side-event capture trigger and threads QMP/HMP snapshot restore
+through the harness so the Phase 2 gate can pin both legs to the
+same in-guest moment.
+
+**Decisions landed.**
+
+- **`XEMU_CAPTURE_AT_FLIP_STALL=N` env var.** Renderer-agnostic,
+  opt-in, default off. `N` is the 1-indexed Nth `NV097_FLIP_STALL`
+  since process start; the FLIP_STALL handler in
+  `hw/xbox/nv2a/pgraph/pgraph.c:1045` calls
+  `xemu_capture_at_flip_stall_tick()` (right after
+  `xemu_pfifo_perf_record_flip_stall_set`); when the count equals
+  the target the trigger arms one-shot via CAS. The Metal
+  renderer's `end_imgui_frame` (`ui/xemu-metal.mm:1525-1539`)
+  consumes the armed flag and one-shots its in-renderer screenshot
+  path, bypassing the existing `s_screenshot_at_frame` ordinal
+  matching so the capture lands on the exact frame the FLIP_STALL
+  fired. `0`/unset disables the trigger entirely; subsequent
+  flip_stalls past the target stay no-op.
+- **`XEMU_CAPTURE_FLIP_STALL_SENTINEL=/path` env var.** Companion
+  filesystem sentinel touched once on arm via `O_CREAT|O_EXCL`
+  (`util/xemu-display-perf.c:72-103`). Renderer-side
+  `xemu_capture_at_flip_stall_touch_sentinel` is one-shot
+  (CAS-guarded) and fail-soft on `EEXIST` (treats the existing file
+  as armed and continues — the renderer-side arm path is the source
+  of truth for the Metal leg). The GL leg's `macos-capture.sh`
+  polls the sentinel path every 100 ms (`scripts/apple-silicon/
+  macos-capture.sh:115-160`) and one-shots `screencapture` on
+  first appearance. Sentinel semantics: must NOT exist at run start,
+  and is created by the xemu process on the precise tick that the
+  Nth FLIP_STALL fires; the GL host harness consumes that as the
+  same-event trigger.
+- **Public API surface.** `include/qemu/xemu-display-perf.h:75-99`
+  declares the four functions: `_init`, `_tick`, `_consume`,
+  `_count`, `_target`. All counter mutations use `qatomic_*` so the
+  vCPU-thread FLIP_STALL handler and the rendering-thread consume
+  call never race. Lazy init in `_tick` is idempotent (CAS-guarded).
+- **Snapshot threading.** Snapshot restore goes through QMP/HMP via
+  the existing `XEMU_BENCH_LOADVM_TAG` / `XEMU_BENCH_LOADVM_AT`
+  path in `run-benchmark.sh` (project rule #12 honored). No new
+  CLI `-loadvm` plumbing.
+- **`metal-gl-compare.sh` flag additions.**
+  - `--snapshot <tag>` exports `XEMU_BENCH_LOADVM_TAG=<tag>` on
+    both legs.
+  - `--loadvm-at <sec>` exports `XEMU_BENCH_LOADVM_AT=<sec>`
+    (default `2`).
+  - `--trigger <flip|frame>` chooses the capture trigger: `frame`
+    (default; back-compat ordinal-based capture) or `flip` (F1's
+    flip_stall-aligned path; sets `XEMU_CAPTURE_AT_FLIP_STALL` and
+    `XEMU_CAPTURE_FLIP_STALL_SENTINEL` on both legs).
+  - `--trigger-ordinal <N>` defaults to `30` for `flip` (lets the
+    shader cache warm before the captured frame); ignored for
+    `frame`.
+  - When `--trigger flip` and `--frames` is set with a non-`1`
+    value, the script logs `ignoring --frames=… (flip trigger
+    captures one frame)` and forces ordinal `1`. Post-codex
+    UX-fix at `metal-gl-compare.sh` ~line 550.
+
+**Cross-cuts updated.** `docs/apple-silicon/automation.md` —
+"Capture-on-flip-stall trigger (F1, 2026-05-04)" subsection
+documents the two new env vars and their semantics. The "Paired
+Metal-vs-GL Diff Harness (W2, 2026-05-04)" subsection documents
+the four new flags and a worked example for snapshot+flip-trigger
+usage. `xemu-fork/CLAUDE.md` "Diagnostic toggles" section adds
+entries for the two F1 env vars (matching the existing
+`XEMU_METAL_DUMP_DRAW_RT` / `XEMU_METAL_DIAG_CLEAR` pattern; F1's
+toggles are dev-only paired-diff aids).
+
+**Validation.** `bash -n scripts/apple-silicon/macos-capture.sh`
+PASS. `bash -n scripts/apple-silicon/metal-gl-compare.sh` PASS.
+F1 hot-path cost when both env vars are unset: one
+`qatomic_read(&s_capture_target)` per FLIP_STALL plus a CAS-protected
+lazy-init guard. F1 lands without disturbing `XEMU_BENCH_LOADVM_TAG`
+or any of the existing `--frames` / `--threshold` / `--crop`
+flags — `--trigger frame` is the default and identical to the
+pre-F1 behavior.
+
+**Follow-ups (DEFERRED).**
+
+- **End-to-end exercise of `--snapshot <tag>` + `--trigger flip`.**
+  F1 lands the plumbing; the matching tag/snapshot-policy work for
+  PGR2 / Rainbow / Crimson / SC2 routes is a separate follow-up.
+  The `metal-canary-regress.sh` baseline-lock attempt this session
+  did NOT use F1 (canaries continued to use ordinal-based capture
+  since their gold PNGs were captured under the old trigger).
+- **`XEMU_BENCH_LOADVM_AT=<sec>` deterministic-vs-real-time gap.**
+  The current path uses wall-clock seconds; future work could
+  switch the load trigger to a guest-side event (e.g. first
+  FLIP_STALL after process start) so cold-launch timing variance
+  doesn't decoherence the load point itself.
+
 ## 2026-05-04: Codex review of Metal porting workflow rollout — fixes (W6) plus follow-up slices
 
 **Context.** Codex-validate review of the prior session's

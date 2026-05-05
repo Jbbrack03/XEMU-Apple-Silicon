@@ -834,6 +834,29 @@ Diagnostic toggles (intentionally not correctness paths):
   surfaces on the `xemu-perf:` interval line. Implementation in
   `pgraph/gl/draw.c` + `pgraph/gl/dump.cc` (FPNG shim).
 
+- `XEMU_CAPTURE_AT_FLIP_STALL=N` (F1, 2026-05-04) — dev-only paired-diff
+  alignment aid. `N` is the 1-indexed Nth `NV097_FLIP_STALL` since
+  process start; the FLIP_STALL handler in `pgraph.c:1045` calls
+  `xemu_capture_at_flip_stall_tick()` and arms one-shot via CAS when
+  the count equals the target. The Metal renderer's `end_imgui_frame`
+  consumes the armed flag and one-shots the in-renderer screenshot
+  path, bypassing the existing `s_screenshot_at_frame` ordinal match.
+  `0`/unset disables; subsequent flip_stalls past the target stay
+  no-op. Renderer-agnostic; with the env unset, hot-path cost is one
+  `qatomic_read` per FLIP_STALL plus a CAS-guarded lazy init.
+  Implementation in `util/xemu-display-perf.c:42-187` and
+  `include/qemu/xemu-display-perf.h:75-99`. Used in tandem with
+  `metal-gl-compare.sh --trigger flip --trigger-ordinal N` for
+  Phase 2 paired-diff alignment.
+- `XEMU_CAPTURE_FLIP_STALL_SENTINEL=/path` (F1, 2026-05-04) —
+  dev-only companion sentinel filesystem path. xemu touches it once
+  on arm via `O_CREAT | O_EXCL`; the GL leg's `macos-capture.sh`
+  polls every 100 ms and one-shots `screencapture` on first
+  appearance. Path must NOT exist at run start (`EEXIST` is logged
+  and treated as already-armed). Used together with
+  `XEMU_CAPTURE_AT_FLIP_STALL=N`; setting only the sentinel without
+  the trigger ordinal is a no-op.
+
 - `XEMU_METAL_DIAG_CLEAR={0,1}` (2026-05-03) — diagnostic logger for
   `pgraph_mtl_surface_clear`. When `=1`, emits up to 32 one-line
   `xemu-perf: metal_surface_clear vram_addr=0x.. rgba=(R,G,B,A)

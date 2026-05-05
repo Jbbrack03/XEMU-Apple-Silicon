@@ -33,3 +33,6 @@ build.log
 /macos-libs/
 /macos-pkgs/
 /xemu.iconset/
+
+# Claude Code session state and agent worktrees
+/.claude/
