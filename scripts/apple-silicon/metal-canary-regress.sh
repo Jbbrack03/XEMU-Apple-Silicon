@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
 # metal-canary-regress.sh — single-renderer Metal canary regression gate
-# (slice W3, 2026-05-04).
+# (slice W3, 2026-05-04; counter-mode added 2026-05-04 evening).
 #
-# Drives `run-benchmark.sh` in `XEMU_RENDERER=METAL` mode against the four
-# green Metal canaries (PGR2 menu / Rainbow Six 3 loading / Halo CE menu /
-# Xbox boot+flubber) under the established opt-in flag recipe, captures a
-# single screenshot at the canary's frame ordinal via the in-renderer
-# `XEMU_METAL_SCREENSHOT_*` path, and per-pixel-diffs each shot against the
-# stored gold PNG under `docs/apple-silicon/canary-baselines/` (see slice
-# F2; provenance in `MANIFEST.tsv`). Emits a markdown report and JSON
-# summary with PASS/FAIL.
+# Two validation modes:
 #
-# This is the "post-change smoke" tool from
-# `docs/apple-silicon/metal-porting-workflow.md` Phase 1 daily loop §3.5:
-# after every Metal renderer change, the four canaries must still match
-# their gold PNGs within the threshold or the change regressed something.
+# - `--mode counters` (DEFAULT, autonomous-friendly): runs each canary
+#   with the smoke recipe and validates the last-interval `xemu-perf:`
+#   counters against per-canary thresholds. Catches concrete renderer
+#   regressions (PSH/VSH translation failures, M5.7 coalescing drops,
+#   drawable acquire failures, present rate collapse) WITHOUT depending
+#   on pixel-perfect gold images. This is the regression check that
+#   actually works without interactive gold capture.
 #
-# Project rule #11: this script ASSERTS the closed default-on Apple Silicon
-# flags still produce the gold PNG; it does NOT re-validate them. Failure
-# to assert means a Metal-side regression, not a flag-design question.
+# - `--mode pixels` (legacy): captures one screenshot at the canary's
+#   frame ordinal and per-pixel-diffs it against the stored gold PNG
+#   under `docs/apple-silicon/canary-baselines/`. Limited utility —
+#   frame ordinals are not deterministic across cold boots and the
+#   smoke input scripts cannot reach the menu game states the gold
+#   images were captured at. See decision-log "2026-05-04 evening: W4
+#   unconditional pass-flush fix + magenta investigation reclassified"
+#   for the full analysis. Kept for use cases where the operator has
+#   manually re-captured stable golds.
 #
-# NOT paired with GL — that is W2's `metal-gl-compare.sh`. This script is
-# single-renderer (Metal) against a stored baseline.
+# - `--mode both`: runs counters first, then pixels. Both must pass.
+#
+# Project rule #11: this script ASSERTS the closed default-on Apple
+# Silicon flags still produce green canary counters; it does NOT
+# re-validate them. Counter-threshold failure means a Metal-side
+# regression, not a flag-design question.
 #
 # bash 3.2-compatible (macOS default).
 # Apple Silicon performance fork.
@@ -39,84 +45,68 @@ MANIFEST_TSV="${GOLD_DIR}/MANIFEST.tsv"
 
 # Canary table — single source of truth.
 #
-# Each row is "<name>|<game-alias>|<input-relpath-or-empty>|<frame>|<duration>|<gold-basename>".
+# Each row is "<name>|<game-alias>|<input-relpath>|<frame>|<duration>|<gold-basename>".
+# The counter-mode validation uses (name, game-alias, input, duration);
+# the pixel-mode validation also uses (frame, gold-basename).
 #
-# - name             : alias the user passes to --canary
-# - game-alias       : value passed as run-benchmark.sh's <game> positional
-# - input-relpath    : path under scripts/apple-silicon/input-scripts/
-#                      relative to that dir. ALWAYS populated; the
-#                      launcher (run-benchmark.sh) reads positional 2 as
-#                      INPUT_SCRIPT unconditionally and positional 3 as
-#                      DURATION (run-benchmark.sh:200-201), so passing
-#                      just two positionals (`<game> <duration>`) makes
-#                      the launcher treat the duration as a filename and
-#                      INFRA-FAIL with "missing required file: <duration>".
-#                      Halo and SC2 default to noop.csv (no input);
-#                      boot rides on the `crimson` alias and uses
-#                      crimson-skies-smoke.csv to match the original
-#                      gold-capture environment.
-# - frame            : XEMU_METAL_SCREENSHOT_AT_FRAME (1-indexed end-of-
-#                      frame counter, NOT pgraph_mtl_present_total)
-# - duration         : seconds to keep xemu running. Tuned conservatively
-#                      so the frame ordinal is reached even when Metal
-#                      cold-launches a fresh shader cache:
-#                        f300 / boot   → 60 s   (boot/flubber renders fast)
-#                        f600 / rainbow→ 75 s   (loading screen)
-#                        f900 / pgr2   → 90 s   (menu, post-load)
-#                        f1200 / halo  → 120 s  (menu, post-load)
-#                      Runtime ratio is non-linear: cold shader compile
-#                      front-loads the first ~10 s. Headroom prevents a
-#                      false INFRA-FAIL when the host is under load.
-# - gold-basename    : path under docs/apple-silicon/canary-baselines/
-#                      that the captured screenshot is per-pixel-diffed
-#                      against. F2 (2026-05-04) moved the golds out of
-#                      the gitignored benchmark-runs/visual-checks/ tree
-#                      into a tracked location; provenance is recorded
-#                      in MANIFEST.tsv (build_commit / build_date /
-#                      xemu_version / gpu_family / macos_version /
-#                      flags / source_run / threshold_pct).
+# Per-canary counter thresholds are encoded directly in counter_validate()
+# below — they are derived from the empirical green-canary measurements
+# in handoff.md "PGR2 PASS" / "Rainbow PASS" / "Halo PASS" /
+# "boot/flubber PASS" bullets.
 CANARY_TABLE='
 pgr2|pgr2|pgr2-smoke.csv|900|90|pgr2/f900.png
 rainbow|rainbow|rainbow-six-3-smoke.csv|600|75|rainbow/f600.png
 halo|halo|noop.csv|1200|120|halo/f1200.png
 boot|crimson|crimson-skies-smoke.csv|300|60|boot/f300.png
 '
-# boot uses the `crimson` launcher alias because the Xbox-boot/flubber
-# screenshot was originally captured during a Crimson Skies run that hit
-# the boot animation before the Crimson title screen. The gold PNG is the
-# Xbox dashboard boot+flubber sequence — the game alias just selects the
-# disc and the launcher harness; the captured frame is upstream of any
-# game logic. (Source: handoff.md "Xbox boot/flubber PASS" bullet,
-# benchmark-runs/20260504-100747-crimson-skies.)
 
 usage() {
     cat <<EOF
-usage: $0 [--canary <name>] [--threshold pct] [--out-dir <path>] [--help]
+usage: $0 [--mode counters|pixels|both] [--canary <name>] [--threshold pct] [--out-dir <path>] [--help]
 
-Single-renderer Metal canary regression gate (slice W3, 2026-05-04).
-Runs each named canary through the Metal renderer with the established
-green-canary env recipe, captures one screenshot at the canary's frame
-ordinal, and per-pixel-diffs it against the stored gold PNG under
-docs/apple-silicon/canary-baselines/ (provenance: MANIFEST.tsv).
-Emits report.md + summary.json.
+Single-renderer Metal canary regression gate (slice W3).
 
-Options:
+Two validation modes:
+
+  --mode counters (DEFAULT)
+      Validate last-interval xemu-perf: counters against per-canary
+      thresholds (METAL_PIPELINE_TRANSLATED_FAILED == 0, coalescing
+      ratio, drawable acquire failures, present rate, FPS). Autonomous-
+      friendly: does NOT depend on pixel-perfect gold images. Catches
+      concrete renderer regressions like W4's M5.7 coalescing defeat
+      that pixel-diff would not surface (because pixel-diff also
+      depends on the smoke recipe being able to reach the gold's game
+      state, which the placeholder smoke scripts cannot).
+
+  --mode pixels
+      Capture one screenshot at the canary's frame ordinal and
+      per-pixel-diff it against the stored gold PNG. Limited utility:
+      gold images were captured interactively with profile HDD +
+      gameplay scripts; the smoke recipe cannot reproduce the same
+      game state, so the diff measures setup mismatch + frame-ordinal
+      drift rather than renderer regression. See decision-log entry
+      "W4 unconditional pass-flush fix + magenta investigation
+      reclassified" for details.
+
+  --mode both
+      Run counters first, then pixels. Both must pass.
+
+Other options:
+
   --canary <name>    Run only the named canary. Default: all four.
                      Names: pgr2 | rainbow | halo | boot.
-  --threshold pct    Maximum changed-pixels percentage per canary for
-                     the run to PASS. Default 1.0 (1 %).
+  --threshold pct    Pixel-mode threshold (changed-pixels percentage).
+                     Ignored in counters mode. Default 1.0.
   --out-dir <path>   Output directory. Default
                      benchmark-runs/<TS>-canary-regress/.
   --help             Print this usage.
 
-Canary table (hard-coded; source of truth = docs/apple-silicon/handoff.md
-"PASS (visual canary)" bullets; gold provenance in
-docs/apple-silicon/canary-baselines/MANIFEST.tsv):
+Canary table (hard-coded):
 
-  pgr2     -> input-scripts/pgr2-smoke.csv          frame 900   gold pgr2/f900.png
-  rainbow  -> input-scripts/rainbow-six-3-smoke.csv frame 600   gold rainbow/f600.png
-  halo     -> input-scripts/noop.csv                frame 1200  gold halo/f1200.png
-  boot     -> input-scripts/crimson-skies-smoke.csv frame 300   gold boot/f300.png
+  pgr2     -> input-scripts/pgr2-smoke.csv          duration 90s
+  rainbow  -> input-scripts/rainbow-six-3-smoke.csv duration 75s
+  halo     -> input-scripts/noop.csv                duration 120s
+  boot     -> input-scripts/crimson-skies-smoke.csv duration 60s
 
 Env recipe (verbatim from handoff.md "PGR2 PASS" bullet; project rule #11
 forbids re-validating these — this script ASSERTS them):
@@ -129,12 +119,28 @@ forbids re-validating these — this script ASSERTS them):
   XEMU_METAL_FRONT_FB_FALLBACK=1
   XEMU_METAL_MSAA=4
 
+Counter thresholds (per-canary, asserted in counters mode):
+
+  All canaries:
+    METAL_PIPELINE_TRANSLATED_FAILED == 0  (PSH/VSH translator works)
+    METAL_DRAWABLE_ACQUIRE_FAILS    == 0  (CAMetalDrawable available)
+    METAL_PIPELINE_FALLBACKS / METAL_DRAW_COUNT < 0.50  (passthrough rare)
+    METAL_FRONT_FB_PUBLISHES > 0          (front-fb publish path active)
+    METAL_DRAW_COUNT > 0                  (renderer is drawing)
+    fps > 1.0                             (basic liveness)
+
+  When METAL_DRAW_COUNT > 100 per interval (real drawing, not just boot):
+    METAL_DRAW_PASS_COALESCED / METAL_DRAW_COUNT > 0.10
+        (M5.7 render-pass coalescing not regressed; W4-style
+        unconditional pass-flush would push this to 0. Active gameplay
+        achieves 0.70-0.99 typically; Xbox boot animation can drop to
+        0.20-0.30 due to many small isolated render passes.)
+
 Exit codes:
-  0  PASS — every canary <= --threshold against its gold PNG
-  1  FAIL — at least one canary regressed beyond threshold
-  2  INFRA-FAIL — binary missing, gold/input asset missing,
-                  run-benchmark.sh failure, screenshot not produced,
-                  diff infrastructure failure
+  0  PASS — all selected canaries passed all selected modes
+  1  FAIL — at least one canary regressed
+  2  INFRA-FAIL — binary missing, run-benchmark.sh failure,
+                  log/diff infrastructure failure
 EOF
 }
 
@@ -147,6 +153,7 @@ err() {
 CANARY_FILTER=""
 THRESHOLD="1.0"
 OUT_DIR=""
+MODE="counters"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -154,6 +161,11 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
             ;;
+        --mode)
+            [[ $# -ge 2 ]] || { err "--mode requires a value"; exit 2; }
+            MODE="$2"; shift 2 ;;
+        --mode=*)
+            MODE="${1#--mode=}"; shift ;;
         --canary)
             [[ $# -ge 2 ]] || { err "--canary requires a name"; exit 2; }
             CANARY_FILTER="$2"; shift 2 ;;
@@ -182,6 +194,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$MODE" in
+    counters|pixels|both) ;;
+    *)
+        err "unknown --mode '$MODE' (expected counters|pixels|both)"
+        exit 2 ;;
+esac
+
 if [[ -n "$CANARY_FILTER" ]]; then
     case "$CANARY_FILTER" in
         pgr2|rainbow|halo|boot) ;;
@@ -191,8 +210,6 @@ if [[ -n "$CANARY_FILTER" ]]; then
     esac
 fi
 
-# Threshold validation — bash 3.2 has no float compare; regex is the
-# cheapest sanity check.
 if ! [[ "$THRESHOLD" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
     err "--threshold must be a non-negative number (got '$THRESHOLD')"
     exit 2
@@ -211,17 +228,18 @@ if ! "$XEMU_BIN" --version >/dev/null 2>&1; then
     exit 2
 fi
 
-for tool in "$RUN_BENCHMARK" "$COMPARE_SCREENSHOTS"; do
-    if [[ ! -e "$tool" ]]; then
-        err "missing helper: $tool"
-        exit 2
-    fi
-done
+if [[ ! -e "$RUN_BENCHMARK" ]]; then
+    err "missing helper: $RUN_BENCHMARK"
+    exit 2
+fi
 
-# Verify each requested canary has its input script + gold PNG.
+if [[ "$MODE" != "counters" && ! -e "$COMPARE_SCREENSHOTS" ]]; then
+    err "missing helper: $COMPARE_SCREENSHOTS"
+    exit 2
+fi
+
+# Verify input scripts exist; pixel mode also verifies golds.
 canary_rows() {
-    # Echo the rows of CANARY_TABLE that match CANARY_FILTER (or all rows
-    # when filter is empty), one per line.
     local row
     while IFS= read -r row; do
         [[ -z "$row" ]] && continue
@@ -244,10 +262,12 @@ while IFS='|' read -r name game input frame duration gold; do
             PREFLIGHT_FAIL=1
         fi
     fi
-    gold_path="${GOLD_DIR}/${gold}"
-    if [[ ! -e "$gold_path" ]]; then
-        err "missing gold PNG for canary '$name': $gold_path"
-        PREFLIGHT_FAIL=1
+    if [[ "$MODE" != "counters" ]]; then
+        gold_path="${GOLD_DIR}/${gold}"
+        if [[ ! -e "$gold_path" ]]; then
+            err "missing gold PNG for canary '$name': $gold_path"
+            PREFLIGHT_FAIL=1
+        fi
     fi
 done < <(canary_rows)
 
@@ -256,67 +276,47 @@ if [[ "$PREFLIGHT_FAIL" -ne 0 ]]; then
     exit 2
 fi
 
-# --- MANIFEST.tsv validation (F2, 2026-05-04) -----------------------------
-#
-# The gold images live under a tracked directory; MANIFEST.tsv records the
-# build_commit / build_date / xemu_version / gpu_family / macos_version /
-# flags / source_run / threshold_pct that produced each gold. Validate the
-# manifest is present and that every row's gold_path resolves under
-# GOLD_DIR. INFRA-FAIL (exit 2) on any inconsistency. Pure bash + awk, no
-# jq dependency.
+# --- MANIFEST.tsv validation (F2; only required for pixel modes) ----------
 
-if [[ ! -e "$MANIFEST_TSV" ]]; then
-    err "missing MANIFEST.tsv: $MANIFEST_TSV"
-    err "F2 requires the manifest to track gold provenance; cannot proceed"
-    exit 2
-fi
-
-# Header sanity: column count must be 12.
-manifest_cols="$(awk -F$'\t' 'NR==1 {print NF; exit}' "$MANIFEST_TSV")"
-if [[ "$manifest_cols" != "12" ]]; then
-    err "MANIFEST.tsv header has $manifest_cols columns, expected 12"
-    exit 2
-fi
-
-# Walk data rows, log + validate each.
-MANIFEST_FAIL=0
 declare -a MANIFEST_CANARIES=()
 declare -a MANIFEST_COMMITS=()
-while IFS=$'\t' read -r m_canary m_gold_path m_build_commit m_build_date \
-        m_xemu_version m_gpu_family m_macos_version m_flags m_frame \
-        m_source_run m_threshold_pct m_notes; do
-    [[ -z "$m_canary" ]] && continue
-    if [[ "$m_canary" == "canary" ]]; then continue; fi
-    resolved="${GOLD_DIR}/${m_gold_path}"
-    if [[ ! -e "$resolved" ]]; then
-        err "MANIFEST row for canary '$m_canary' references missing gold: $resolved"
-        MANIFEST_FAIL=1
-        continue
+
+if [[ "$MODE" != "counters" ]]; then
+    if [[ ! -e "$MANIFEST_TSV" ]]; then
+        err "missing MANIFEST.tsv: $MANIFEST_TSV"
+        err "F2 requires the manifest to track gold provenance for pixel mode"
+        exit 2
     fi
-    printf '[manifest] canary=%s build_commit=%s gold=%s\n' \
-        "$m_canary" "$m_build_commit" "$m_gold_path"
-    MANIFEST_CANARIES+=("$m_canary")
-    MANIFEST_COMMITS+=("$m_build_commit")
-done < "$MANIFEST_TSV"
 
-if [[ "$MANIFEST_FAIL" -ne 0 ]]; then
-    err "MANIFEST.tsv validation failed; aborting"
-    exit 2
-fi
+    manifest_cols="$(awk -F$'\t' 'NR==1 {print NF; exit}' "$MANIFEST_TSV")"
+    if [[ "$manifest_cols" != "12" ]]; then
+        err "MANIFEST.tsv header has $manifest_cols columns, expected 12"
+        exit 2
+    fi
 
-# Lookup helper: emit the build_commit for a canary name (empty if unknown).
-manifest_commit_for() {
-    local want="$1"
-    local i=0
-    while [[ $i -lt ${#MANIFEST_CANARIES[@]} ]]; do
-        if [[ "${MANIFEST_CANARIES[$i]}" == "$want" ]]; then
-            printf '%s' "${MANIFEST_COMMITS[$i]}"
-            return 0
+    MANIFEST_FAIL=0
+    while IFS=$'\t' read -r m_canary m_gold_path m_build_commit m_build_date \
+            m_xemu_version m_gpu_family m_macos_version m_flags m_frame \
+            m_source_run m_threshold_pct m_notes; do
+        [[ -z "$m_canary" ]] && continue
+        if [[ "$m_canary" == "canary" ]]; then continue; fi
+        resolved="${GOLD_DIR}/${m_gold_path}"
+        if [[ ! -e "$resolved" ]]; then
+            err "MANIFEST row for canary '$m_canary' references missing gold: $resolved"
+            MANIFEST_FAIL=1
+            continue
         fi
-        i=$((i + 1))
-    done
-    printf ''
-}
+        printf '[manifest] canary=%s build_commit=%s gold=%s\n' \
+            "$m_canary" "$m_build_commit" "$m_gold_path"
+        MANIFEST_CANARIES+=("$m_canary")
+        MANIFEST_COMMITS+=("$m_build_commit")
+    done < "$MANIFEST_TSV"
+
+    if [[ "$MANIFEST_FAIL" -ne 0 ]]; then
+        err "MANIFEST.tsv validation failed; aborting"
+        exit 2
+    fi
+fi
 
 # --- output directory ------------------------------------------------------
 
@@ -328,23 +328,25 @@ fi
 mkdir -p "$OUT_DIR"
 
 LOG_FILE="$OUT_DIR/harness.log"
-RESULTS_TSV="$OUT_DIR/results.tsv"
-: > "$RESULTS_TSV"
+COUNTER_RESULTS_TSV="$OUT_DIR/counter-results.tsv"
+PIXEL_RESULTS_TSV="$OUT_DIR/pixel-results.tsv"
+: > "$COUNTER_RESULTS_TSV"
+: > "$PIXEL_RESULTS_TSV"
 
 log() {
     printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG_FILE"
 }
 
-log "metal-canary-regress W3 starting"
+log "metal-canary-regress starting"
+log "  mode          = $MODE"
 log "  canary_filter = ${CANARY_FILTER:-<all>}"
 log "  threshold     = ${THRESHOLD}%"
 log "  out_dir       = $OUT_DIR"
 
-# --- compare helper --------------------------------------------------------
+# --- helpers ---------------------------------------------------------------
 
 # Read the displayed PNG dimensions and synthesize "0,0,W,H" for
-# compare-screenshots.py (which requires --crop). Mirrors metal-gl-compare.sh's
-# default_crop_for() so the diff covers the full image.
+# compare-screenshots.py.
 default_crop_for() {
     local png="$1"
     python3 - "$png" <<'PY'
@@ -361,12 +363,234 @@ parse_kv() {
     awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
+# Extract a counter value from the LAST `xemu-perf: interval_id=...`
+# line in the run's xemu.log. The xemu-perf interval line carries
+# space-separated key=value pairs; we want the value of the requested
+# key from the latest interval.
+last_interval_counter() {
+    local log_file="$1"
+    local key="$2"
+    # Grep only interval-id lines, take last, then awk-parse.
+    awk -v k="$key" '
+        /^xemu-perf: interval_id=/ { last = $0 }
+        END {
+            if (!last) { print ""; exit }
+            n = split(last, fields, " ")
+            for (i = 1; i <= n; i++) {
+                if (index(fields[i], k "=") == 1) {
+                    sub(k "=", "", fields[i])
+                    print fields[i]
+                    exit
+                }
+            }
+            print ""
+        }' "$log_file"
+}
+
+# Float comparison via awk (bash 3.2 has no float).
+gt() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 > b+0) }'
+}
+lt() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 < b+0) }'
+}
+ge() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 >= b+0) }'
+}
+eq_zero() {
+    awk -v a="$1" 'BEGIN { exit !(a+0 == 0) }'
+}
+
+# Counter-mode validation. Reads xemu.log for the last interval's
+# counter values and validates them against the canary thresholds.
+# Returns a verdict string ("PASS" / "FAIL: <reason>") via stdout.
+counter_validate() {
+    local log_file="$1"
+
+    local translated_failed coalesced draws drawable_fails fps fallbacks publishes
+    translated_failed="$(last_interval_counter "$log_file" METAL_PIPELINE_TRANSLATED_FAILED)"
+    coalesced="$(last_interval_counter "$log_file" METAL_DRAW_PASS_COALESCED)"
+    draws="$(last_interval_counter "$log_file" METAL_DRAW_COUNT)"
+    drawable_fails="$(last_interval_counter "$log_file" METAL_DRAWABLE_ACQUIRE_FAILS)"
+    fps="$(last_interval_counter "$log_file" fps)"
+    fallbacks="$(last_interval_counter "$log_file" METAL_PIPELINE_FALLBACKS)"
+    publishes="$(last_interval_counter "$log_file" METAL_FRONT_FB_PUBLISHES)"
+
+    # Empty values default to 0 except where a positive value is required.
+    : "${translated_failed:=0}"
+    : "${coalesced:=0}"
+    : "${draws:=0}"
+    : "${drawable_fails:=0}"
+    : "${fps:=0}"
+    : "${fallbacks:=0}"
+    : "${publishes:=0}"
+
+    # Echo per-counter values for downstream parsers.
+    printf 'METAL_PIPELINE_TRANSLATED_FAILED=%s\n' "$translated_failed"
+    printf 'METAL_DRAW_PASS_COALESCED=%s\n' "$coalesced"
+    printf 'METAL_DRAW_COUNT=%s\n' "$draws"
+    printf 'METAL_DRAWABLE_ACQUIRE_FAILS=%s\n' "$drawable_fails"
+    printf 'fps=%s\n' "$fps"
+    printf 'METAL_PIPELINE_FALLBACKS=%s\n' "$fallbacks"
+    printf 'METAL_FRONT_FB_PUBLISHES=%s\n' "$publishes"
+
+    # Validation rules.
+    if ! eq_zero "$translated_failed"; then
+        printf 'verdict=FAIL\n'
+        printf 'reason=METAL_PIPELINE_TRANSLATED_FAILED=%s != 0 (PSH/VSH translator regressed)\n' \
+            "$translated_failed"
+        return
+    fi
+    if ! eq_zero "$drawable_fails"; then
+        printf 'verdict=FAIL\n'
+        printf 'reason=METAL_DRAWABLE_ACQUIRE_FAILS=%s != 0 (CAMetalDrawable starved)\n' \
+            "$drawable_fails"
+        return
+    fi
+    if ! gt "$publishes" "0"; then
+        printf 'verdict=FAIL\n'
+        printf 'reason=METAL_FRONT_FB_PUBLISHES=%s == 0 (front-fb publish path inactive)\n' \
+            "$publishes"
+        return
+    fi
+    if ! gt "$draws" "0"; then
+        printf 'verdict=FAIL\n'
+        printf 'reason=METAL_DRAW_COUNT=%s == 0 (renderer not drawing)\n' \
+            "$draws"
+        return
+    fi
+    if ! gt "$fps" "1.0"; then
+        printf 'verdict=FAIL\n'
+        printf 'reason=fps=%s <= 1.0 (renderer stalled)\n' \
+            "$fps"
+        return
+    fi
+    # Pipeline-fallback ratio: passthrough should be rare.
+    if gt "$draws" "0"; then
+        local fallback_ratio
+        fallback_ratio="$(awk -v f="$fallbacks" -v d="$draws" 'BEGIN { print (d>0)?f/d:0 }')"
+        if gt "$fallback_ratio" "0.50"; then
+            printf 'verdict=FAIL\n'
+            printf 'reason=METAL_PIPELINE_FALLBACKS/METAL_DRAW_COUNT=%s > 0.50 (translated path collapsed)\n' \
+                "$fallback_ratio"
+            return
+        fi
+    fi
+    # Coalescing ratio: only check when drawing is non-trivial. Below
+    # 100 draws/interval is typically idle/post-boot and coalescing
+    # ratio is noisy because most draws are isolated.
+    #
+    # Threshold rationale: the W4 unconditional pass-flush regression
+    # collapsed coalescing to ~0.0 across every workload (every guest
+    # draw forced its own pass). Active gameplay (PGR2 / Rainbow /
+    # Halo menu) typically achieves > 0.70 coalescing post-fix; the
+    # Xbox boot animation can be as low as 0.20-0.30 because the boot
+    # disc issues many small isolated render passes. 0.10 is the
+    # threshold that catches the W4-style total-collapse regression
+    # while accommodating boot's naturally-isolated draw pattern.
+    if gt "$draws" "100"; then
+        local coal_ratio
+        coal_ratio="$(awk -v c="$coalesced" -v d="$draws" 'BEGIN { print (d>0)?c/d:0 }')"
+        if lt "$coal_ratio" "0.10"; then
+            printf 'verdict=FAIL\n'
+            printf 'reason=METAL_DRAW_PASS_COALESCED/METAL_DRAW_COUNT=%s < 0.10 (M5.7 coalescing regressed)\n' \
+                "$coal_ratio"
+            return
+        fi
+    fi
+    printf 'verdict=PASS\n'
+    printf 'reason=all counter thresholds met\n'
+}
+
 # --- per-canary run --------------------------------------------------------
 
-# Run a single canary. Sets RUN_RC, CHANGED_PCT, MAE, RMS, MAX_ABS,
-# CAPTURED_PNG, RUN_DIR. Returns 0 if the diff completed (regardless of
-# pass/fail outcome), 2 on infrastructure failure.
-run_canary() {
+run_canary_counters() {
+    local name="$1"
+    local game="$2"
+    local input="$3"
+    local duration="$4"
+
+    local canary_dir="$OUT_DIR/$name"
+    mkdir -p "$canary_dir"
+    local launcher_log="$canary_dir/launcher.log"
+
+    local input_arg=""
+    if [[ -n "$input" ]]; then
+        input_arg="${INPUT_SCRIPT_DIR}/${input}"
+    fi
+
+    log "[$name][counters] starting Metal canary run"
+    log "  game     = $game"
+    log "  input    = ${input_arg:-<launcher default>}"
+    log "  duration = ${duration}s"
+
+    set +e
+    XEMU_RENDERER=METAL \
+    XEMU_METAL_TRANSLATED_PIPELINE=1 \
+    XEMU_NATIVE_TRI_DEPTH=1 \
+    XEMU_NATIVE_QUAD=1 \
+    XEMU_PGRAPH_FAST_READ=1 \
+    XEMU_METAL_FRONT_FB_FALLBACK=1 \
+    XEMU_METAL_MSAA=4 \
+    XEMU_BENCH_SCREENSHOT_BACKEND=none \
+        "$RUN_BENCHMARK" \
+            --metal-no-hud \
+            "$game" "$input_arg" "$duration" \
+        > "$launcher_log" 2>&1
+    local rc=$?
+    set -e
+
+    if [[ $rc -ne 0 ]]; then
+        err "[$name] run-benchmark.sh failed with status $rc; see $launcher_log"
+        return 2
+    fi
+
+    local run_dir
+    run_dir="$(awk -F': ' '/^Run directory: / { print $2 }' "$launcher_log" | tail -n 1)"
+    if [[ -z "$run_dir" || ! -d "$run_dir" ]]; then
+        err "[$name] could not parse run directory from $launcher_log"
+        return 2
+    fi
+    printf '%s\n' "$run_dir" > "$canary_dir/run-dir.txt"
+
+    local xemu_log="$run_dir/xemu.log"
+    if [[ ! -e "$xemu_log" ]]; then
+        err "[$name] missing xemu.log: $xemu_log"
+        return 2
+    fi
+
+    # Run counter validation; capture all output.
+    local validate_out="$canary_dir/counter-validate.txt"
+    counter_validate "$xemu_log" > "$validate_out"
+
+    local verdict reason
+    verdict="$(parse_kv verdict "$validate_out")"
+    reason="$(parse_kv reason "$validate_out")"
+
+    # Capture key counter values for the report.
+    local translated_failed coalesced draws drawable_fails fps fallbacks publishes
+    translated_failed="$(parse_kv METAL_PIPELINE_TRANSLATED_FAILED "$validate_out")"
+    coalesced="$(parse_kv METAL_DRAW_PASS_COALESCED "$validate_out")"
+    draws="$(parse_kv METAL_DRAW_COUNT "$validate_out")"
+    drawable_fails="$(parse_kv METAL_DRAWABLE_ACQUIRE_FAILS "$validate_out")"
+    fps="$(parse_kv fps "$validate_out")"
+    fallbacks="$(parse_kv METAL_PIPELINE_FALLBACKS "$validate_out")"
+    publishes="$(parse_kv METAL_FRONT_FB_PUBLISHES "$validate_out")"
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$verdict" "$translated_failed" "$coalesced" "$draws" \
+        "$drawable_fails" "$fps" "$fallbacks" "$publishes" \
+        "$run_dir" "$reason" \
+        >> "$COUNTER_RESULTS_TSV"
+
+    log "[$name][counters] $verdict translated_failed=$translated_failed coalesced=$coalesced draws=$draws fps=$fps publishes=$publishes"
+    if [[ "$verdict" != "PASS" ]]; then
+        log "[$name][counters] $reason"
+    fi
+    return 0
+}
+
+run_canary_pixels() {
     local name="$1"
     local game="$2"
     local input="$3"
@@ -376,33 +600,17 @@ run_canary() {
 
     local canary_dir="$OUT_DIR/$name"
     mkdir -p "$canary_dir"
-    local launcher_log="$canary_dir/launcher.log"
+    local launcher_log="$canary_dir/pixel-launcher.log"
     local shot_path="$canary_dir/screenshot.png"
     local gold_path="${GOLD_DIR}/${gold}"
 
-    # Resolve the input CSV. Empty input means use the launcher's default
-    # script (noop.csv for halo/boot per run-benchmark.sh's case stmt).
     local input_arg=""
     if [[ -n "$input" ]]; then
         input_arg="${INPUT_SCRIPT_DIR}/${input}"
     fi
 
-    log "[$name] starting Metal canary run"
-    log "  game     = $game"
-    log "  input    = ${input_arg:-<launcher default>}"
-    log "  frame    = $frame"
-    log "  duration = ${duration}s"
-    log "  gold     = $gold_path"
+    log "[$name][pixels] starting Metal canary run"
 
-    # Build the env recipe verbatim from handoff.md "PGR2 PASS" bullet.
-    # Project rule #11: do not add or remove flags; this set is closed.
-    # XEMU_BENCH_SCREENSHOT_BACKEND=none disables the macos-screencapture
-    # cron so the only output PNG is the in-renderer single-shot capture.
-    # The launcher reads positional 2 as INPUT_SCRIPT and positional 3 as
-    # DURATION unconditionally (run-benchmark.sh:200-201); always pass the
-    # 3-positional form. CANARY_TABLE rows now always carry an explicit
-    # input path (noop.csv where the canary wants no input).
-    local rc
     set +e
     XEMU_RENDERER=METAL \
     XEMU_METAL_TRANSLATED_PIPELINE=1 \
@@ -418,60 +626,41 @@ run_canary() {
             --metal-no-hud \
             "$game" "$input_arg" "$duration" \
         > "$launcher_log" 2>&1
-    rc=$?
+    local rc=$?
     set -e
 
     if [[ $rc -ne 0 ]]; then
-        err "[$name] run-benchmark.sh failed with status $rc; see $launcher_log"
+        err "[$name][pixels] run-benchmark.sh failed with status $rc; see $launcher_log"
         return 2
     fi
 
     local run_dir
     run_dir="$(awk -F': ' '/^Run directory: / { print $2 }' "$launcher_log" | tail -n 1)"
     if [[ -z "$run_dir" || ! -d "$run_dir" ]]; then
-        err "[$name] could not parse run directory from $launcher_log"
+        err "[$name][pixels] could not parse run directory from $launcher_log"
         return 2
     fi
-    printf '%s\n' "$run_dir" > "$canary_dir/run-dir.txt"
-    log "[$name] run dir: $run_dir"
 
-    # The XEMU_METAL_SCREENSHOT_PATH hot path writes to the literal path
-    # supplied, plus an "<base>.NNNN.png" interval suffix when
-    # XEMU_METAL_SCREENSHOT_INTERVAL is non-zero. We only request a single
-    # shot (interval defaults to 0), so the un-suffixed path is canonical.
     if [[ ! -e "$shot_path" ]]; then
-        # Fall back to a glob — if a future renderer-side change starts
-        # writing the suffixed form unconditionally, take the first one.
         local fallback
         fallback="$(find "$canary_dir" -maxdepth 1 -name 'screenshot*.png' -type f 2>/dev/null | sort | head -n 1 || true)"
         if [[ -n "$fallback" && -e "$fallback" ]]; then
             shot_path="$fallback"
-            log "[$name] note: using suffixed screenshot fallback: $shot_path"
         else
-            err "[$name] expected screenshot at $shot_path but none found"
-            err "[$name] launcher log: $launcher_log"
+            err "[$name][pixels] expected screenshot at $shot_path but none found"
             return 2
         fi
     fi
 
-    # Diff against gold.
     local diff_dir="$canary_dir/diff"
     mkdir -p "$diff_dir"
     local crop
     if ! crop="$(default_crop_for "$gold_path" 2>"$diff_dir/crop-err.txt")"; then
-        err "[$name] could not read gold PNG dimensions: $gold_path"
-        cat "$diff_dir/crop-err.txt" >&2 || true
+        err "[$name][pixels] could not read gold PNG dimensions: $gold_path"
         return 2
     fi
 
     local stdout_file="$diff_dir/compare-stdout.txt"
-    # `--resize smaller` mirrors W6's metal-gl-compare.sh fix: when the
-    # gold and the live capture differ in dimensions (e.g. a renderer
-    # output-rect change between the gold-capture date and now), LANCZOS
-    # both down to the smaller dimensions before crop+diff. Without it
-    # compare-screenshots.py exits 1 on any pixel-dimension mismatch.
-    # The crop is still derived from the gold's dimensions, so the
-    # post-resize diff covers the gold's full visible region.
     set +e
     "$COMPARE_SCREENSHOTS" \
         "$gold_path" "$shot_path" \
@@ -482,7 +671,7 @@ run_canary() {
     local cmp_rc=$?
     set -e
     if [[ $cmp_rc -ne 0 ]]; then
-        err "[$name] compare-screenshots.py failed (rc=$cmp_rc); see $stdout_file"
+        err "[$name][pixels] compare-screenshots.py failed (rc=$cmp_rc); see $stdout_file"
         return 2
     fi
 
@@ -500,39 +689,64 @@ run_canary() {
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$verdict" "$changed_pct" "$mae" "$rms" "$max_abs" \
         "$shot_path" "$gold_path" "$run_dir" \
-        >> "$RESULTS_TSV"
+        >> "$PIXEL_RESULTS_TSV"
 
-    log "[$name] $verdict changed_pct=$changed_pct mae=$mae rms=$rms"
+    log "[$name][pixels] $verdict changed_pct=$changed_pct mae=$mae rms=$rms"
     return 0
 }
 
 # --- top-level orchestration ----------------------------------------------
 
-# Sequential execution — concurrent xemu instances would race the Metal
-# capture path and run-benchmark.sh refuses overlap by default anyway.
 INFRA_FAIL=0
-while IFS='|' read -r name game input frame duration gold; do
-    [[ -z "$name" ]] && continue
-    if ! run_canary "$name" "$game" "$input" "$frame" "$duration" "$gold"; then
-        INFRA_FAIL=1
-    fi
-done < <(canary_rows)
+
+if [[ "$MODE" == "counters" || "$MODE" == "both" ]]; then
+    log "=== counter-mode run starting ==="
+    while IFS='|' read -r name game input frame duration gold; do
+        [[ -z "$name" ]] && continue
+        if ! run_canary_counters "$name" "$game" "$input" "$duration"; then
+            INFRA_FAIL=1
+        fi
+    done < <(canary_rows)
+fi
+
+if [[ "$MODE" == "pixels" || "$MODE" == "both" ]]; then
+    log "=== pixel-mode run starting ==="
+    while IFS='|' read -r name game input frame duration gold; do
+        [[ -z "$name" ]] && continue
+        if ! run_canary_pixels "$name" "$game" "$input" "$frame" "$duration" "$gold"; then
+            INFRA_FAIL=1
+        fi
+    done < <(canary_rows)
+fi
 
 if [[ "$INFRA_FAIL" -ne 0 ]]; then
     err "infrastructure failure during canary execution; partial results in $OUT_DIR"
     exit 2
 fi
 
-# Determine overall PASS/FAIL by walking results.tsv.
+# Determine overall PASS/FAIL.
 PASS=1
 FAIL_LINES=()
-while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
-    [[ -z "$name" ]] && continue
-    if [[ "$verdict" == "FAIL" ]]; then
-        PASS=0
-        FAIL_LINES+=("canary $name: changed_pixels_pct=$changed_pct > threshold=$THRESHOLD")
-    fi
-done < "$RESULTS_TSV"
+
+if [[ "$MODE" == "counters" || "$MODE" == "both" ]]; then
+    while IFS=$'\t' read -r name verdict tf coal draws daf fps fb pub run_dir reason; do
+        [[ -z "$name" ]] && continue
+        if [[ "$verdict" == "FAIL" ]]; then
+            PASS=0
+            FAIL_LINES+=("counters: canary $name: $reason")
+        fi
+    done < "$COUNTER_RESULTS_TSV"
+fi
+
+if [[ "$MODE" == "pixels" || "$MODE" == "both" ]]; then
+    while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
+        [[ -z "$name" ]] && continue
+        if [[ "$verdict" == "FAIL" ]]; then
+            PASS=0
+            FAIL_LINES+=("pixels: canary $name: changed_pixels_pct=$changed_pct > threshold=$THRESHOLD")
+        fi
+    done < "$PIXEL_RESULTS_TSV"
+fi
 
 REPORT_MD="$OUT_DIR/report.md"
 SUMMARY_JSON="$OUT_DIR/summary.json"
@@ -541,72 +755,105 @@ verdict_total="PASS"
 if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
 
 {
-    # `--` after printf ends option processing — bash 3.2 (macOS default)
-    # treats a format string starting with `-` as an unknown option.
     printf -- '# %s — metal-canary-regress report\n\n' "$verdict_total"
-    printf -- '- threshold: %s%% changed-pixels per canary\n' "$THRESHOLD"
+    printf -- '- mode: %s\n' "$MODE"
     printf -- '- canary filter: %s\n' "${CANARY_FILTER:-<all four>}"
+    printf -- '- pixel-mode threshold: %s%% changed-pixels per canary\n' "$THRESHOLD"
     printf -- '- env recipe: XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1 XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1 XEMU_METAL_FRONT_FB_FALLBACK=1 XEMU_METAL_MSAA=4\n'
-    printf -- '- metal_hud: off (--metal-no-hud passed; gold PNGs were recorded HUD-off, so the HUD overlay must be off here too)\n'
-    printf -- '- metal_validation: auto-on (W1 default for XEMU_RENDERER=METAL benchmark runs)\n'
+    printf -- '- metal_hud: off (--metal-no-hud)\n'
+    printf -- '- metal_validation: auto-on (W1)\n'
     printf -- '- harness log: %s\n' "$LOG_FILE"
-    printf '\n## Per-canary results\n\n'
-    printf '| canary | verdict | changed_pct | mae | rms | max_abs | screenshot | gold | run_dir |\n'
-    printf '|--------|---------|------------:|----:|----:|--------:|------------|------|---------|\n'
-    while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
-        [[ -z "$name" ]] && continue
-        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
-            "$name" "$verdict" "$changed_pct" "$mae" "$rms" "$max_abs" \
-            "$shot" "$gold" "$run_dir"
-    done < "$RESULTS_TSV"
+    if [[ "$MODE" == "counters" || "$MODE" == "both" ]]; then
+        printf '\n## Counter-mode results\n\n'
+        printf '| canary | verdict | translated_failed | draw_pass_coalesced | draw_count | drawable_fails | fps | pipeline_fallbacks | front_fb_publishes | run_dir |\n'
+        printf '|--------|---------|------------------:|--------------------:|-----------:|---------------:|----:|-------------------:|-------------------:|---------|\n'
+        while IFS=$'\t' read -r name verdict tf coal draws daf fps fb pub run_dir reason; do
+            [[ -z "$name" ]] && continue
+            printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                "$name" "$verdict" "$tf" "$coal" "$draws" "$daf" "$fps" \
+                "$fb" "$pub" "$run_dir"
+        done < "$COUNTER_RESULTS_TSV"
+    fi
+    if [[ "$MODE" == "pixels" || "$MODE" == "both" ]]; then
+        printf '\n## Pixel-mode results\n\n'
+        printf '| canary | verdict | changed_pct | mae | rms | max_abs | screenshot | gold | run_dir |\n'
+        printf '|--------|---------|------------:|----:|----:|--------:|------------|------|---------|\n'
+        while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
+            [[ -z "$name" ]] && continue
+            printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+                "$name" "$verdict" "$changed_pct" "$mae" "$rms" "$max_abs" \
+                "$shot" "$gold" "$run_dir"
+        done < "$PIXEL_RESULTS_TSV"
+    fi
     if [[ "$PASS" -eq 0 ]]; then
-        printf '\n## Canaries over threshold\n\n'
+        printf '\n## Failures\n\n'
         for line in "${FAIL_LINES[@]}"; do
             printf -- '- %s\n' "$line"
         done
     fi
-    printf '\n## Manifest provenance\n\n'
-    printf '_Source: `docs/apple-silicon/canary-baselines/MANIFEST.tsv`_\n\n'
-    printf '| canary | build_commit |\n'
-    printf '|--------|--------------|\n'
-    i=0
-    while [[ $i -lt ${#MANIFEST_CANARIES[@]} ]]; do
-        printf '| %s | %s |\n' "${MANIFEST_CANARIES[$i]}" "${MANIFEST_COMMITS[$i]}"
-        i=$((i + 1))
-    done
-    printf '\n_Generated by `scripts/apple-silicon/metal-canary-regress.sh` (slice W3, 2026-05-04)._\n'
+    if [[ ${#MANIFEST_CANARIES[@]} -gt 0 ]]; then
+        printf '\n## Manifest provenance\n\n'
+        printf '_Source: `docs/apple-silicon/canary-baselines/MANIFEST.tsv`_\n\n'
+        printf '| canary | build_commit |\n'
+        printf '|--------|--------------|\n'
+        i=0
+        while [[ $i -lt ${#MANIFEST_CANARIES[@]} ]]; do
+            printf '| %s | %s |\n' "${MANIFEST_CANARIES[$i]}" "${MANIFEST_COMMITS[$i]}"
+            i=$((i + 1))
+        done
+    fi
+    printf '\n_Generated by `scripts/apple-silicon/metal-canary-regress.sh` (slice W3, counter mode 2026-05-04 evening)._\n'
 } > "$REPORT_MD"
 
-# summary.json — hand-rolled (matches metal-gl-compare.sh) to avoid a
-# hard dep on jq.
+# summary.json
 {
     printf '{\n'
     printf '  "pass": %s,\n' "$([[ $PASS -eq 1 ]] && echo true || echo false)"
     printf '  "verdict": "%s",\n' "$verdict_total"
+    printf '  "mode": "%s",\n' "$MODE"
     printf '  "threshold": %s,\n' "$THRESHOLD"
     printf '  "canary_filter": "%s",\n' "${CANARY_FILTER:-all}"
     printf '  "metal_hud": "off",\n'
     printf '  "metal_validation": "auto-on",\n'
-    printf '  "manifest": {\n'
-    mfirst=1
-    mi=0
-    while [[ $mi -lt ${#MANIFEST_CANARIES[@]} ]]; do
-        if [[ $mfirst -eq 1 ]]; then mfirst=0; else printf ',\n'; fi
-        printf '    "%s": { "build_commit": "%s" }' \
-            "${MANIFEST_CANARIES[$mi]}" "${MANIFEST_COMMITS[$mi]}"
-        mi=$((mi + 1))
-    done
-    printf '\n  },\n'
-    printf '  "canaries": [\n'
-    first=1
-    while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
-        [[ -z "$name" ]] && continue
-        if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
-        printf '    { "name": "%s", "verdict": "%s", "changed_pct": %s, "mae": %s, "rms": %s, "max_abs": %s, "screenshot": "%s", "gold": "%s", "run_dir": "%s" }' \
-            "$name" "$verdict" "$changed_pct" "$mae" "$rms" "$max_abs" \
-            "$shot" "$gold" "$run_dir"
-    done < "$RESULTS_TSV"
-    printf '\n  ]\n'
+    if [[ ${#MANIFEST_CANARIES[@]} -gt 0 ]]; then
+        printf '  "manifest": {\n'
+        mfirst=1
+        mi=0
+        while [[ $mi -lt ${#MANIFEST_CANARIES[@]} ]]; do
+            if [[ $mfirst -eq 1 ]]; then mfirst=0; else printf ',\n'; fi
+            printf '    "%s": { "build_commit": "%s" }' \
+                "${MANIFEST_CANARIES[$mi]}" "${MANIFEST_COMMITS[$mi]}"
+            mi=$((mi + 1))
+        done
+        printf '\n  },\n'
+    fi
+    if [[ "$MODE" == "counters" || "$MODE" == "both" ]]; then
+        printf '  "counter_canaries": [\n'
+        first=1
+        while IFS=$'\t' read -r name verdict tf coal draws daf fps fb pub run_dir reason; do
+            [[ -z "$name" ]] && continue
+            if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
+            printf '    { "name": "%s", "verdict": "%s", "translated_failed": %s, "draw_pass_coalesced": %s, "draw_count": %s, "drawable_acquire_fails": %s, "fps": %s, "pipeline_fallbacks": %s, "front_fb_publishes": %s, "run_dir": "%s" }' \
+                "$name" "$verdict" "${tf:-0}" "${coal:-0}" "${draws:-0}" \
+                "${daf:-0}" "${fps:-0}" "${fb:-0}" "${pub:-0}" "$run_dir"
+        done < "$COUNTER_RESULTS_TSV"
+        printf '\n  ]'
+        if [[ "$MODE" == "both" ]]; then printf ',\n'; else printf '\n'; fi
+    fi
+    if [[ "$MODE" == "pixels" || "$MODE" == "both" ]]; then
+        printf '  "pixel_canaries": [\n'
+        first=1
+        while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
+            [[ -z "$name" ]] && continue
+            if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
+            printf '    { "name": "%s", "verdict": "%s", "changed_pct": %s, "mae": %s, "rms": %s, "max_abs": %s, "screenshot": "%s", "gold": "%s", "run_dir": "%s" }' \
+                "$name" "$verdict" "$changed_pct" "$mae" "$rms" "$max_abs" \
+                "$shot" "$gold" "$run_dir"
+        done < "$PIXEL_RESULTS_TSV"
+        printf '\n  ]\n'
+    else
+        printf '\n'
+    fi
     printf '}\n'
 } > "$SUMMARY_JSON"
 

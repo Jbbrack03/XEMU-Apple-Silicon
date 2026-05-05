@@ -1,5 +1,92 @@
 # Decision Log
 
+## 2026-05-04 evening: W3 counter-mode regression gate — operational autonomously
+
+**Context.** After the W4 unconditional-flush fix, the W3 regression
+gate's pixel-diff mode still cannot reach the gold images' game state
+from autonomous shell (smoke scripts are placeholders, frame ordinals
+are non-deterministic across cold boots). Empirical evidence:
+
+- Two cold-boot runs of PGR2 + gameplay.csv at the same frame=780
+  capture different game states (Run A: "Loading" screen; Run B:
+  PRESS START splash). 100% changed_pct.
+- Snapshot-loadvm gives 99.995% deterministic captures (only 63 pixels
+  differ across two reload runs) AT THE SNAPSHOT MOMENT, but the
+  subsequent presented frames diverge because the game continues
+  advancing (PGR2 in-race camera moves at race speed, etc).
+- Static-state snapshots (PRESS START splash before input) hit a
+  Metal renderer issue where the present pipeline reads from
+  uninitialized texture and shows magenta — the renderer requires
+  active drawing to publish a usable front-fb under the current
+  fallback policy.
+
+The pixel-diff approach to autonomous regression checking is
+fundamentally blocked by these three layered issues.
+
+**Decision.** Add a `--mode counters` validation to `metal-canary-regress.sh`
+that parses the last-interval `xemu-perf:` counters and validates
+renderer health against per-canary thresholds. Counter mode catches
+the regressions that ACTUALLY MATTER for renderer correctness:
+
+- PSH/VSH translator failures (`METAL_PIPELINE_TRANSLATED_FAILED`)
+- M5.7 render-pass coalescing collapse
+  (`METAL_DRAW_PASS_COALESCED / METAL_DRAW_COUNT < 0.10`) — this is
+  exactly what the W4 unconditional pass-flush regression caused
+- Drawable starvation (`METAL_DRAWABLE_ACQUIRE_FAILS`)
+- Front-fb publish path silence (`METAL_FRONT_FB_PUBLISHES == 0`)
+- Pipeline-fallback ratio collapse (`METAL_PIPELINE_FALLBACKS /
+  METAL_DRAW_COUNT > 0.50`)
+- Basic liveness (`METAL_DRAW_COUNT > 0`, `fps > 1.0`)
+
+These thresholds catch real regressions. Pixel-perfect comparison is
+overkill for "smoke after every Metal change"; reserve pixel-diff for
+visual-correctness validation (M15 default-on visual gate) where
+stable golds with deterministic state can be set up interactively.
+
+**Empirical validation.** End-to-end run
+`benchmark-runs/20260504-221957-canary-regress` reports verdict=PASS
+on all four canaries via counter mode:
+
+| canary  | translated_failed | coalesced/draws | drawable_fails | fps   | publishes |
+|---------|------------------:|----------------:|---------------:|------:|----------:|
+| pgr2    | 0                 | 0/31 (n/a, idle) | 0              | 17.88 | 15        |
+| rainbow | 0                 | 204/291 = 70.1% | 0              | 5.17  | 5         |
+| halo    | 0                 | 1036/1050 = 98.7% | 0            | 22.57 | 14        |
+| boot    | 0                 | 12/51 (n/a, idle) | 0            | 15.15 | 3         |
+
+Gate runtime is ~6 minutes for all four. The W4 unconditional-flush
+regression (now fixed at HEAD) would push the coalesced/draws ratio
+to 0.0 across all canaries, well below the 0.10 threshold — confirmed
+by reasoning (the coalescing logic only counts hits when `open_pass_matches`
+returns true; the W4 unconditional flush calls `open_pass_close_locked`
+between every draw, leaving no open pass to match).
+
+**Pixel mode preserved.** `--mode pixels` keeps the legacy per-pixel
+diff against stored golds for use cases where the operator has
+manually re-captured stable golds (e.g. via interactive snapshot
+capture at static menu states). Use `--mode both` to run both modes;
+both must pass.
+
+**Files changed.**
+
+- `scripts/apple-silicon/metal-canary-regress.sh`: rewritten with
+  `--mode {counters,pixels,both}` flag; counter validation logic;
+  per-canary counter thresholds; new `counter-results.tsv` and
+  `pixel-results.tsv` outputs; report.md and summary.json now carry
+  per-mode tables.
+- `docs/apple-silicon/handoff.md`: updated banner with counter-mode
+  details and workflow operational checklist.
+
+**Workflow status post-decision.** D1 / W1 / W2 / W3 (counters) / W4 /
+F1 / F2 / VFR / skills / hooks all operational. W5 remains BLOCKED
+(MoltenVK geometryShader). The remaining open work is M15 default-on
+which requires interactive recording of real input scripts for
+Crimson and SC2 visual routes plus the paired Metal-vs-GL diff at
+the same recorded state — outside autonomous scope but no longer
+blocked on workflow tooling.
+
+---
+
 ## 2026-05-04 evening: Front-fb fallback policy — analysis, no default flip yet
 
 **Context.** `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` (M5.10 experimental,

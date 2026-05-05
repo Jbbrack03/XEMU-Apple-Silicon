@@ -1,13 +1,59 @@
 # Handoff
 
-Last updated: 2026-05-04 (W4 unconditional-flush fix + magenta
-investigation: the previously-banner'd "PGR2/Rainbow drawable-magenta
-regression in autonomous shell" is reclassified as a workflow setup
-issue, NOT a renderer regression. W4's per-flush_draw call to
-pgraph_mtl_draw_flush_open_pass() was unconditional, defeating M5.7
-coalescing on every benchmark; gated behind a new dump_rt_active()
-accessor, restoring 96.8% coalescing rate). Current branch:
-`apple-silicon-performance`.
+Last updated: 2026-05-04 (W3 counter-mode regression gate operational +
+W4 unconditional-flush fix + magenta investigation reclassified). The
+W3 metal-canary-regress.sh gate now has a `--mode counters` validation
+(default) that catches concrete renderer regressions without depending
+on pixel-perfect golds. End-to-end PASS verdict on all four canaries
+under autonomous shell. Current branch: `apple-silicon-performance`.
+
+**W3 counter-mode regression gate operational (2026-05-04 evening).**
+`scripts/apple-silicon/metal-canary-regress.sh` now supports
+`--mode {counters,pixels,both}`. The default `counters` mode parses
+the last-interval `xemu-perf:` line of each canary's run and validates
+renderer-health counters against per-canary thresholds:
+
+- `METAL_PIPELINE_TRANSLATED_FAILED == 0` (PSH/VSH translator works)
+- `METAL_DRAWABLE_ACQUIRE_FAILS == 0` (CAMetalDrawable available)
+- `METAL_PIPELINE_FALLBACKS / METAL_DRAW_COUNT < 0.50` (passthrough rare)
+- `METAL_FRONT_FB_PUBLISHES > 0` (publish path active)
+- `METAL_DRAW_COUNT > 0`, `fps > 1.0` (basic liveness)
+- When `METAL_DRAW_COUNT > 100`: `METAL_DRAW_PASS_COALESCED / METAL_DRAW_COUNT > 0.10`
+  (M5.7 coalescing not regressed; W4-style unconditional pass-flush
+  would push this to 0.0)
+
+**Validated end-to-end PASS** in
+`benchmark-runs/20260504-221957-canary-regress`: pgr2 (draws=31,
+fps=17.88), rainbow (coalesced=204/291=70%, fps=5.17), halo
+(coalesced=1036/1050=98.7%, fps=22.57), boot (coalesced=12/51,
+fps=15.15). All four PASS counter-mode validation. Gate runtime
+~6 minutes for the full set.
+
+The legacy `--mode pixels` (per-pixel diff against stored golds) is
+preserved for use cases where the operator has manually re-captured
+stable golds; it remains limited by frame-ordinal nondeterminism +
+smoke-script game-state-reach issues described below.
+
+**Workflow operational checklist** (2026-05-04 evening):
+
+- [x] D1 `metal-porting-workflow.md` operating playbook
+- [x] W1 auto-on Metal validation/HUD in `run-benchmark.sh` + post-build
+      shader-validation gate
+- [x] W2 `metal-gl-compare.sh` paired Metal-vs-GL diff harness
+- [x] W3 `metal-canary-regress.sh` regression gate (counter mode
+      operational; pixel mode requires stable golds)
+- [x] W4 per-draw RT dump (`XEMU_METAL_DUMP_DRAW_RT`) + W4 fix for
+      M5.7 coalescing regression
+- [x] F1 deterministic frame alignment (`XEMU_CAPTURE_AT_FLIP_STALL`)
+- [x] F2 tracked canary gold artifact store + MANIFEST
+- [x] Visual Flight Recorder
+- [x] Skills: `/session-start`, `/sync-docs`, `/codex-validate`,
+      `/benchmark-and-document`, `/append-decision`
+- [x] Stop hooks for doc-sync and codex-validate enforcement
+- [W5] BLOCKED — MoltenVK on M3 Ultra (geometryShader unsupported)
+- [ ] M15 default-on still requires interactive recording of real
+      input scripts for Crimson/SC2 visual routes + paired Metal-vs-GL
+      diff at the same recorded state.
 
 **W4 unconditional-flush fix (2026-05-04 evening).** W4 introduced
 `pgraph_mtl_flush_draw` as a wrapper over `pgraph_mtl_flush_draw_inner`
