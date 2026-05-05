@@ -180,19 +180,67 @@ interactive (user-blocking).
 - Direct Crimson Metal canonical-recipe run: 16/16 captured PNGs,
   frames 0005+ show menu rendering correctly.
 
+## F3 partial autonomous progress (2026-05-05 followup)
+
+The snapshot save+load path was exercised end-to-end during this
+session and the proof-of-concept works:
+
+- Snapshot **save** via `XEMU_BENCH_SAVEVM_AT=60
+  XEMU_BENCH_SAVEVM_TAG=crimson-canary` against a dedicated copy
+  `benchmark-runs/profile-prep/crimson-canary.qcow2` (master profile
+  HDD untouched per project rule #9). Tag `crimson-canary` recorded
+  in qcow2 internal snapshot facility (51-57 MiB VM state, VM_CLOCK
+  ~59.7s).
+- Snapshot **load** via `metal-gl-compare.sh --snapshot crimson-canary
+  --loadvm-at 5`. Both legs successfully loaded. GL leg sustained
+  29-30 FPS post-load (fps=29.11 to 30.34 across intervals 18-23 in
+  `benchmark-runs/20260505-114034-crimson-skies/xemu.log`); Metal leg
+  showed 38k draws/interval immediately after loadvm with translated
+  pipeline + MSAA active.
+
+Two issues remain blocking a clean PASS verdict from the F3-anchored
+paired diff:
+
+1. **Cross-renderer loadvm crashed.** Saving via Metal then loading
+   into GL produced a SIGSEGV (run
+   `benchmark-runs/20260505-113601-crimson-skies`). Saving via GL
+   and loading into either renderer works. Recommendation: save
+   the F3 snapshot via the GL renderer and use it for both legs.
+   The cross-renderer crash is a known-class regression mentioned
+   in project rule #12 (USB-hub device-tree mismatch). Could be
+   a separate slice to investigate.
+2. **GL window-targeted capture requires Quartz.** Local environment
+   has Quartz only for system Python 3.9; homebrew Python 3.14 (which
+   `macos-capture.sh` invokes) cannot import it. With
+   `XEMU_CAPTURE_WINDOW_REQUIRED=1` set by metal-gl-compare.sh
+   (correct strict-mode behavior per Codex review), GL leg refuses to
+   fall back to fullscreen. Local user must `pip install
+   pyobjc-framework-Quartz` into the homebrew Python (or a venv) to
+   exercise the harness. This is an environment fix, not a code fix.
+
+So F3 is operationally "snapshot save+load works; paired-diff
+end-to-end is blocked on Quartz install." The decision-log F3 spec
+still applies for cross-title rollout (PGR2, Rainbow, SC2 each need
+recorded canary snapshots).
+
 ## Next-session priorities (carry-over)
 
-1. **F3 — per-title snapshot anchor** for paired diff (slice spec
-   in decision-log).
-2. **Record `sc2-gameplay.csv`** via `record-input.sh sc2`
+1. **F3 broader rollout** — per-title snapshot anchors via the same
+   recipe (PGR2 / Rainbow at minimum; SC2 once route exists).
+2. **Cross-renderer loadvm crash investigation** (Metal-saved →
+   GL-loaded SIGSEGV) — workaround is "save via GL", but the crash
+   is a real regression class to track.
+3. **Local Quartz install** for window-targeted GL capture (env fix:
+   `pip install pyobjc-framework-Quartz` into homebrew Python or a
+   venv).
+4. **Record `sc2-gameplay.csv`** via `record-input.sh sc2`
    (interactive; user-blocking).
-3. **Audio listen-test** for `XEMU_APU_LOCK_RELEASE`
+5. **Audio listen-test** for `XEMU_APU_LOCK_RELEASE`
    (interactive; user-blocking).
-4. **M15 default-on visual-gate sweep** once F3 + SC2 land:
+6. **M15 default-on visual-gate sweep** once F3 + SC2 + Quartz land:
    PGR2 / Rainbow / Crimson / SC2 + one broader-sweep title via
    `metal-gl-compare.sh --snapshot <tag>` with ≤1% per-pixel diff.
-5. **Front-fb fallback policy decision** — Crimson now joins PGR2
-   as documented "PASS only with fallback ON" titles.
-   Default-on flip is the simplest path; document the
-   correctness caveat (the fallback is best-effort, not faithful
-   CRTC publish).
+7. **Front-fb fallback policy decision** — Crimson now joins PGR2
+   as documented "PASS only with fallback ON" titles. Default-on
+   flip is the simplest path; document the correctness caveat (the
+   fallback is best-effort, not faithful CRTC publish).
