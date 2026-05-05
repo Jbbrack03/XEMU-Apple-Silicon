@@ -1,7 +1,10 @@
 # Handoff
 
 Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
-config issue; three harness fixes; F3 snapshot-anchor slice opened).
+config issue; three harness fixes; F3 snapshot-anchor slice opened;
+SC2 input route recorded; audio listen-test closed via SC2
+single-title verification — user-authoritative deviation from
+canonical rubric).
 Crimson Skies is **not** a Metal renderer regression — running the
 existing `crimson-gameplay.csv` script with the canonical M15 Metal
 recipe explicit (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`)
@@ -85,15 +88,40 @@ immediately. Filed in decision-log "2026-05-05: Crimson Metal
   as both fallback-dependent — strengthens the case for default-on
   flip).
 - (b) Slice F3 — per-title snapshot anchor (interactive recording
-  needed).
-- (c) Record `sc2-gameplay.csv` via `record-input.sh sc2`
-  (interactive; SC2 is the only canary title without a route).
-- (d) Audio listen-test for `XEMU_APU_LOCK_RELEASE` (orthogonal to
-  Metal; user-blocking).
-- (e) Once (a)-(c) land: M15 visual-gate sweep across PGR2 / Rainbow
+  needed; PGR2 / Rainbow / SC2 still TODO; Crimson proof-of-concept
+  proven 2026-05-05).
+- (c) Once (a)-(b) land: M15 visual-gate sweep across PGR2 / Rainbow
   / Crimson / SC2 + one broader-sweep title at ≤1% per-pixel diff
   vs GL. FPS / p99 jitter validation. Cold-launch shader compile
   total < 5s.
+
+**SC2 input route recorded 2026-05-05.**
+`scripts/apple-silicon/input-scripts/sc2-gameplay.csv` (11,384 events)
+captured via `benchmark-runs/20260505-163659-soul-calibur-2` against
+the master HDD. Distribution: 84% analog stick (movement), 235 trigger
+pulls (attacks), 102 face-button events, 14 dpad, 6 Start. First input
+at 21.5s = boot/splash bypass. Run was on **OpenGL** (XEMU_RENDERER
+unset, surface_scale=2); user-observed FPS during active 3D combat
+was ~15 FPS, matching captured intervals (fps=20.61 / 12.34 / 10.51 in
+the last three intervals). Combat is the first SC2 scene measured on
+this fork; the prior "60.57 FPS sustained" reference was likely a
+title/menu state. See
+`benchmarks/2026-05-05-sc2-gameplay-route.md`.
+
+**Audio listen-test for `XEMU_APU_LOCK_RELEASE` CLOSED 2026-05-05.**
+User completed listen-test during the SC2 recording session (~150 s of
+active gameplay with announcer, attack grunts, ring-out callouts, and
+BGM): no audio glitches, no stuck voices, no dropped SFX, no audible
+clicks. Per user-explicit decision (Option 1 in the 2026-05-05
+listen-test rubric review), I5 (`XEMU_APU_LOCK_RELEASE` slice) is
+declared **fully shipped** on the basis of single-title verification
+via SC2. **Deviation from canonical rubric documented:** the project
+rule originally specified Crimson / Rainbow / PGR2 ≥5 min each,
+because those titles are where the 2026-05-02 D3 attribution measured
+voice-lock contention. SC2 was not part of that attribution; its
+audio engine (announcer + grunts + BGM) and contention pattern are
+distinct. The deviation is accepted as a user-authoritative decision;
+revisit if audio regressions surface later in the named titles.
 
 **Original W3 counter-mode banner preserved below for empirical
 audit trail.**
@@ -171,15 +199,18 @@ smoke-script game-state-reach issues described below.
       `/benchmark-and-document`, `/append-decision`
 - [x] Stop hooks for doc-sync and codex-validate enforcement
 - [W5] BLOCKED — MoltenVK on M3 Ultra (geometryShader unsupported)
+- [x] SC2 input route recorded 2026-05-05
+      (`scripts/apple-silicon/input-scripts/sc2-gameplay.csv`,
+      11,384 events, master-HDD bootstrap)
+- [x] Audio listen-test for `XEMU_APU_LOCK_RELEASE` closed 2026-05-05
+      via SC2 single-title verification (deviation from canonical
+      Crimson/Rainbow/PGR2 rubric, user-authoritative)
 - [ ] M15 default-on still requires:
-      (a) interactive `sc2-gameplay.csv` recording (only canary title
-      without a recorded route)
-      (b) F3 per-title snapshot rollout for PGR2 / Rainbow / SC2
-      (c) front-fb fallback default-on policy decision (PGR2 + Crimson
+      (a) F3 per-title snapshot rollout for PGR2 / Rainbow / SC2
+      (Crimson proof-of-concept proven 2026-05-05)
+      (b) front-fb fallback default-on policy decision (PGR2 + Crimson
       both documented as fallback-dependent)
-      (d) audio listen-test for `XEMU_APU_LOCK_RELEASE` (orthogonal
-      to Metal; user-blocking)
-      (e) cross-renderer loadvm SIGSEGV investigation (workaround:
+      (c) cross-renderer loadvm SIGSEGV investigation (workaround:
       save snapshots via GL only)
 
 **W4 unconditional-flush fix (2026-05-04 evening).** W4 introduced
@@ -290,12 +321,19 @@ fallback dependency.
   patterned frame followed by black drawable screenshots
   (`crimson-gameplay-gate-msaa4-after-msaa-store.0001.png` through
   `.0013.png`). This route is not a visual canary yet.
-- **SC2 route BLOCKED as a visual canary.** The hidden `sc2` benchmark
-  alias runs and reports strong MSAA4 counters
+- **SC2 visual canary: input recorded, paired Metal diff still pending.**
+  The hidden `sc2` benchmark alias runs and reports strong MSAA4 counters
   (`benchmark-runs/20260504-101242-soul-calibur-2`,
-  `post_load_avg_fps=57.63`), but the no-input route captures only
-  boot/flubber then black frames. Add a routed input script or load a
-  known-good snapshot before using SC2 for paired visual diff.
+  `post_load_avg_fps=57.63`). The no-input route captured only
+  boot/flubber then black frames. As of 2026-05-05,
+  `scripts/apple-silicon/input-scripts/sc2-gameplay.csv` exists
+  (recorded via `benchmark-runs/20260505-163659-soul-calibur-2`,
+  11,384 events through main menu → Arcade mode → in-round combat).
+  GL run measured ~15 FPS in active combat at surface_scale=2 — first
+  SC2 combat measurement on this fork. Next: replay the route under
+  the canonical Metal recipe to confirm a rendered visual frame and
+  compare combat FPS against GL, then record an `sc2-canary` F3
+  snapshot for paired-diff anchoring.
 - **Visual Flight Recorder tooling is available for next-session route
   work.** `scripts/apple-silicon/visual-flight-recorder.py` consumes a
   PNG sequence or short video and writes a compact `visual-summary.json`,

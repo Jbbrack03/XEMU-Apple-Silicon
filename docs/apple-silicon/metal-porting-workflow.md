@@ -1,6 +1,8 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-05. This is the canonical operating playbook for
+Last updated: 2026-05-05 (SC2 input route recorded, GL combat FPS
+~15 measured; audio listen-test closed via SC2 single-title
+verification). This is the canonical operating playbook for
 the native Metal renderer port. It supersedes nothing — `metal-renderer-plan.md`
 remains the slice-level implementation plan (M0–M15), `handoff.md`
 remains the per-session current-state pointer, and `decision-log.md`
@@ -57,13 +59,21 @@ Date: 2026-05-05. Last canary state pulled from `handoff.md`:
   X8R8G8B8). Crimson now joins PGR2 as a documented "PASS only with
   fallback ON" title. See decision-log "2026-05-05: Crimson Metal
   'blocker' reclassified as config".
-- Soul Calibur 2 visual route: **BLOCKED** — counters look strong
-  (`post_load_avg_fps=57.63` in
-  `benchmark-runs/20260504-101242-soul-calibur-2`) but the no-input
-  route captures only boot/flubber and then black; Visual Flight
-  Recorder quantifies an existing SC2 sequence as 87.50 % black after
-  boot/flubber. Unblock requires interactive recording of
-  `sc2-gameplay.csv` via `scripts/apple-silicon/record-input.sh sc2`.
+- Soul Calibur 2 visual route: **input recorded 2026-05-05; paired
+  Metal visual diff + F3 anchor still pending.**
+  `scripts/apple-silicon/input-scripts/sc2-gameplay.csv` (11,384
+  events) was recorded via
+  `benchmark-runs/20260505-163659-soul-calibur-2`. The route boots
+  Xbox, navigates SC2 menus to Arcade mode, and runs in-round combat.
+  GL measurement of active combat at surface_scale=2 was ~15 FPS —
+  first combat-state FPS measurement on this fork. Next: replay
+  under the canonical Metal recipe to confirm a rendered frame and
+  compare FPS against GL, then capture an `sc2-canary` F3 snapshot
+  for the paired-diff harness. Older counters context:
+  `post_load_avg_fps=57.63` in
+  `benchmark-runs/20260504-101242-soul-calibur-2` — likely captured
+  in a title/menu state, not active combat. Visual Flight Recorder
+  quantified the prior no-input sequence as 87.50% black.
 - M5 shader-translation harness: **7/7 PASS** via
   `scripts/apple-silicon/metal-shader-validation/run-validation.sh`.
 

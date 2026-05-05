@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
     cat <<EOF
-usage: $0 crimson|rainbow|pgr2 [duration-seconds] [output.csv]
+usage: $0 crimson|rainbow|pgr2|sc2|halo [duration-seconds] [output.csv]
 
 Launches xemu with a physical controller bound to port 1 and records input to
 the benchmark run directory, or to output.csv when provided.

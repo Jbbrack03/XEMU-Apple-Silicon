@@ -260,6 +260,7 @@ The current profile-prepared retail gameplay routes are:
 | PGR2 | `scripts/apple-silicon/input-scripts/pgr2-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-pgr2-gameplay-route.md` | `benchmark-runs/20260501-094823-pgr2` |
 | Rainbow Six 3 | `scripts/apple-silicon/input-scripts/rainbow-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-rainbow-gameplay-route.md` | `benchmark-runs/20260501-095400-rainbow-six-3` |
 | Crimson Skies | `scripts/apple-silicon/input-scripts/crimson-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-01-crimson-gameplay-route.md` | `benchmark-runs/20260501-095905-crimson-skies` |
+| Soul Calibur 2 | `scripts/apple-silicon/input-scripts/sc2-gameplay.csv` | `docs/apple-silicon/benchmarks/2026-05-05-sc2-gameplay-route.md` | `benchmark-runs/20260505-163659-soul-calibur-2` |
 
 Replay them from the prepared profile HDD:
 

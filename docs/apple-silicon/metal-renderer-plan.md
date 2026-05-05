@@ -1,6 +1,8 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+Last updated: 2026-05-05 (SC2 input route recorded; audio listen-test
+closed via SC2 single-title verification; Crimson Metal "blocker"
+reclassified as
 config — Crimson now joins PGR2, Rainbow Six 3, Halo CE menu, and
 Xbox boot/flubber as documented MSAA4 PASS canaries with the
 canonical M15 recipe (`XEMU_METAL_FRONT_FB_FALLBACK=1` plus the
@@ -12,8 +14,11 @@ anchor for paired diff (interactive recording needed; proof-of-concept
 proven for Crimson 2026-05-05 — `crimson-canary` snapshot in
 `benchmark-runs/profile-prep/crimson-canary.qcow2` loads on both
 GL and Metal legs, but cross-renderer Metal-saved → GL-loaded
-crashes), (b) SC2 routed visual canary (interactive input-script
-recording), (c) front-fb fallback default-on policy decision
+crashes), (b) SC2 routed visual canary — input script recorded
+2026-05-05 (`sc2-gameplay.csv`, 11,384 events through Arcade combat;
+GL combat FPS ~15 measured first time on this fork); paired Metal
+visual diff + F3 `sc2-canary` snapshot still pending —, (c) front-fb
+fallback default-on policy decision
 (PGR2 + Crimson now both documented as fallback-dependent).
 Earlier 2026-05-04: Metal MSAA store/resolve correctness follow-up
 + PGR2 texture-bind attribution. The old white/magenta front-buffer

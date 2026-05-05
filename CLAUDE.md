@@ -44,9 +44,10 @@ the task touches the Metal port):
   **Slices M0–M14 SHIPPED 2026-05-02; M5.x correctness follow-ups
   continue through 2026-05-04; M15 (default-on selection) BLOCKED
   on the front-fb fallback policy, F3 per-title snapshot anchor for
-  paired diff (interactive cross-title rollout), SC2 routed visual
-  canary (interactive input recording), and the cross-renderer
-  loadvm SIGSEGV investigation. Crimson reclassified as PASS 2026-05-05
+  paired diff (interactive cross-title rollout), SC2 paired Metal
+  visual diff (input route recorded 2026-05-05; replay under Metal +
+  F3 anchor still TODO), and the cross-renderer loadvm SIGSEGV
+  investigation. Crimson reclassified as PASS 2026-05-05
   (see decision-log entry of that date).**
   Read this when the
   task touches the Metal port; per-slice "Status (2026-05-02):
@@ -278,8 +279,9 @@ The fork-specific source-code changes are concentrated in:
       (PGR2 / Rainbow / Halo / boot / Crimson). Remaining M15
       blockers: (a) F3 per-title snapshot anchor for paired diff
       (interactive cross-title rollout — proof-of-concept proven for
-      Crimson via `crimson-canary` snapshot), (b) SC2 routed visual
-      canary (interactive `sc2-gameplay.csv` recording), (c)
+      Crimson via `crimson-canary` snapshot), (b) SC2 paired Metal
+      visual diff (input route `sc2-gameplay.csv` recorded
+      2026-05-05; Metal replay + F3 anchor still TODO), (c)
       front-fb fallback default-on policy, (d) cross-renderer loadvm
       SIGSEGV investigation (workaround: save snapshots via GL only).
       See decision-log "2026-05-05: Crimson Metal 'blocker'

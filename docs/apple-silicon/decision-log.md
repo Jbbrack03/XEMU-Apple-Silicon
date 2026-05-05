@@ -1,5 +1,91 @@
 # Decision Log
 
+## 2026-05-05: I5 (`XEMU_APU_LOCK_RELEASE`) closed via SC2 single-title audio listen-test
+
+**Context.** I5 (Apple Silicon APU voice-lock release slice) was
+shipped default-on 2026-05-02 but flagged "PARTIAL — audio listen-test
+gate now UNBLOCKED post-V10". Project rule #11 specified the gate as
+"a human listener plays Crimson, Rainbow, PGR2 for ≥ 5 min each";
+those titles were chosen because the 2026-05-02 D3 attribution
+measured voice-lock contention (21.3 s / 300 s vCPU thread time
+blocked on `mcpx-apu-vp/0xfe8202fc = NV1BA0_PIO_VOICE_LOCK`) on
+exactly that workload class.
+
+**Action.** During the 2026-05-05 SC2 input-recording session
+(`benchmark-runs/20260505-163659-soul-calibur-2`, ~150 s of active
+gameplay reaching Arcade combat with announcer voice, character
+attack grunts, ring-out callouts, SC2 BGM, and impact SFX exercised),
+the user listened attentively with the slice at default (ON). Result:
+PASS — no audio glitches, no stuck voices, no dropped SFX, no
+audible pops/clicks for the full duration.
+
+**Decision.** Close I5 with single-title verification. The slice is
+declared **fully shipped**.
+
+**Deviation from canonical rubric.** SC2 was not part of the original
+D3 attribution; its audio engine and contention pattern are distinct
+from the racing / shooter titles named in the canonical rubric. The
+user (project authority) explicitly elected single-title closure
+("Option 1" in the 2026-05-05 listen-test rubric review) over the
+alternatives of marking I5 partial-pass pending the canonical three
+or running the canonical three immediately. The deviation is
+documented; revisit if audio regressions surface later in Crimson /
+Rainbow / PGR2.
+
+**Status.** I5 closed. Workspace `CLAUDE.md` `XEMU_APU_LOCK_RELEASE`
+"PARTIAL" marker removed. M15 default-on blocker list shrinks
+correspondingly.
+
+## 2026-05-05: SC2 input route recorded; M15 input-script blocker closed
+
+**Context.** The handoff carried "Record `sc2-gameplay.csv` via
+`record-input.sh sc2` (interactive; SC2 is the only canary title
+without a route)" as one of the M15 default-on blockers. Without a
+real input script, the SC2 paired-diff harness only reached
+boot/flubber → black, contributing nothing to the M15 visual gate.
+
+**Action.** Recorded
+`scripts/apple-silicon/input-scripts/sc2-gameplay.csv` via
+`./scripts/apple-silicon/record-input.sh sc2 360
+./scripts/apple-silicon/input-scripts/sc2-gameplay.csv`.
+User-terminated early after reaching active combat (~150 s wall vs
+planned 360 s). Capture run:
+`benchmark-runs/20260505-163659-soul-calibur-2`. Final CSV: 11,384
+events, distribution dominated by analog-stick movement (84 %) — the
+signature of real gameplay vs menu idling. First input at 21.5 s =
+boot/splash bypass via Start press. See
+`benchmarks/2026-05-05-sc2-gameplay-route.md`.
+
+**Performance observation.** The same run produced the first
+combat-state FPS measurement of SC2 on this fork: ~15 FPS active
+3D combat on the GL renderer at surface_scale=2 (matched by perf
+intervals fps=20.61 / 12.34 / 10.51 in the last three intervals). The
+prior `post_load_avg_fps=57.63` reference (used 2026-05-02 to argue
+SC2 is a 60 Hz title) was likely captured at title/menu state. The
+60 Hz console-native target for SC2 combat is therefore not met by GL
+on Apple Silicon at this resolution — an empirical data point
+strengthening the case for native Metal as the production renderer.
+
+**Decision.** Treat this CSV as the canonical SC2 gameplay route and
+register it in `automation.md` "Captured Retail Gameplay Routes".
+This closes the input-script blocker. SC2 as a Metal paired-diff
+canary remains pending on (1) replay under the canonical Metal recipe
+to confirm the route reaches a rendered visual frame and to obtain a
+paired Metal-vs-GL FPS number, (2) recording an `sc2-canary` F3
+snapshot anchor at a stable visual state.
+
+**Caveat — master-HDD bootstrap.** Unlike the PGR2 / Rainbow / Crimson
+routes which use a profile-prepared HDD, this SC2 route walks Xbox
+boot + dashboard + splash before reaching gameplay. Replay timing
+depends on dashboard determinism. If replay diverges, re-record
+against a profile-prepared SC2 HDD.
+
+**Status.** M15 input-script blocker closed. Remaining blockers:
+(a) F3 per-title snapshot rollout (PGR2 / Rainbow / SC2; Crimson PoC
+proven 2026-05-05); (b) front-fb fallback default-on policy decision;
+(c) M15 visual-gate sweep + FPS / p99 jitter validation; plus the
+cross-renderer loadvm SIGSEGV investigation.
+
 ## 2026-05-05: Crimson Metal "blocker" reclassified as config; harness fixes; F3 snapshot anchor opened
 
 **Context.** The handoff carried Crimson Skies as a Metal visual-route
