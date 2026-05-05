@@ -1,10 +1,70 @@
 # NV2A Rendering Pipeline — Feature Surface Research Catalog
 
-Last updated: 2026-05-05.
+Last updated: 2026-05-05 (post-Codex review revisions).
 Scope: rendering pipeline only (vertex pipeline → primitive assembly →
 rasterization → pixel pipeline → ROP → render targets → display). Audio,
 USB, AV signal, and networking subsystems are out of scope per the
 2026-05-05 direction-setting conversation.
+
+## Errata — 2026-05-05 Codex review
+
+Independent Codex-CLI review (read-only, ChatGPT auth) returned MAJOR
+ISSUES verdict and surfaced eight findings. All have been applied to
+this document. Summary:
+
+1. **HIGH** — `NV097_GET_REPORT` was overstated as a general
+   self-validation mechanism. Source confirms it is **Z-pass-pixel-count
+   only** (`hw/xbox/nv2a/pgraph/pgraph.c:2629-2635` asserts
+   `type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT`); the Metal
+   renderer's `pgraph_mtl_get_report` writes a literal **0**
+   regardless of actual pixel count
+   (`hw/xbox/nv2a/pgraph/mtl/renderer.c:1917-1920`); GL has explicit
+   FIXME limitations for MSAA / clears / clipping
+   (`hw/xbox/nv2a/pgraph/gl/reports.c:38`). The self-validation
+   contract has been rewritten — see §6 below — to use CPU-side VRAM
+   readback as the primary mechanism.
+2. **HIGH** — The original CRTC / front-fb-fallback XBE design used
+   Z-pass count to validate scanout; that's a false-negative on Metal
+   today. Redesigned to use RT-as-texture sampling and CPU-side VRAM
+   readback (§6).
+3. **MEDIUM** — §E.1 incorrectly claimed W1 and W2 "have the same
+   texture-format set." They don't: W1 lists `0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT`
+   (`texture.c:65`) that W2 doesn't enumerate symbolically; W2 lists
+   `0x16 LU_IMAGE_R8B8` (`nv_regs.h:554`) that W1 doesn't. The §E.1
+   table now has explicit per-witness columns.
+4. **MEDIUM** — §3 mixed true disagreements with gaps and agreements.
+   #8 (primitive enum) is full agreement; #10 (sRGB) is agreement;
+   #12 (logic ops) is W1-only. §3 is now split into "true
+   disagreements," "single-witness gaps," and "known xemu
+   implementation limitations."
+5. **MEDIUM** — Texture DMA selector (DMA A vs DMA B) was missing.
+   `SET_CONTEXT_DMA_A/B` set `pg->dma_a/b` (`pgraph.c:1056`);
+   `SET_TEXTURE_FORMAT_CONTEXT_DMA` selects the channel
+   (`pgraph.c:2675`); texture/palette lookup maps through both
+   (`texture.c:92, 153`). §E.11 now covers this and a DMA-A-vs-B
+   diagnostic XBE is added to the build priority.
+6. **MEDIUM** — §C.7 conflated point sprite, point parameter, and
+   point smoothing. xemu's fragment-side `point_sprite` flag is
+   currently derived from `POINTSMOOTHENABLE`
+   (`glsl/psh.c:102`) — that's *not* the same as the D3D8
+   `POINTSPRITEENABLE` source. The three concepts are now
+   distinguished separately and the true Xbox point-sprite enable
+   source is marked unresolved.
+7. **LOW** — §6 promotion contract required GL cross-validation as
+   blocking. Some XBEs are *expected* to fail GL (e.g., logic ops:
+   GL map is commented out in `gl/constants.h:86`), so blocking
+   GL would reject useful oracle XBEs. GL/Cxbx cross-validation is
+   now advisory; promotion gates on the mathematical oracle plus
+   self-validation path; known-renderer failures are recorded in
+   the manifest.
+8. **LOW** — Catalog itself was not in the Codex-validate cadence.
+   Now added (§8).
+
+The Codex review also raised three open questions; the project's
+answers are carried in §6.7. Original Codex transcript is not
+preserved in-tree; project rule #15 hook validation marker not
+written because this was a `plan`-mode review of a doc, not
+`changes` mode.
 
 ## 0. Why this document exists
 
@@ -21,8 +81,15 @@ divergence detector.
 The decision was to build a diagnostic-XBE library targeting the NV2A
 rendering pipeline feature-by-feature, with each XBE designed so its
 correct visual output is mathematically derivable and (where possible)
-self-validated on-GPU via NV097_GET_REPORT readback or RT-as-texture
-sampling. Each XBE becomes its own oracle. To do that without
+self-validated by **CPU-side VRAM readback** (the XBE runs in the
+guest; it has direct memory-mapped access to its own VRAM via
+`MmGetPhysicalAddress` / pbkit framebuffer pointers, and can decode
+rendered pixels and report PASS/FAIL via `pb_print` text overlay).
+RT-as-texture sampling is the secondary mechanism for cases where
+CPU readback is unwieldy. `NV097_GET_REPORT` is **not** suitable as
+a general self-validation mechanism — it is Z-pass-only and the
+Metal renderer currently always returns 0 (see §6 contract for full
+detail). Each XBE becomes its own oracle. To do that without
 guessing, we first need a complete and source-cited catalog of the
 NV2A rendering pipeline feature surface — which is this document.
 
@@ -85,7 +152,7 @@ Structural counts that constrain the diagnostic XBE library:
 | Vertex attribute slots | 16 | W1 (`nv2a_regs.h:1507`); W2 (`nv_objects.h:1148`) |
 | Lights | 8 | W1 (`nv2a_regs.h:1512`); W3 |
 | Texture units | 4 | W1 (`nv2a_regs.h:1508`); W2; W3 |
-| Texture format codes (catalogued) | 41 (W1) / 38 (W2) — same set, see §E.1 | W1 (`texture.c:26-79`, `kelvin_color_format_info_map[66]`); W2 (`nv_regs.h:537-579`) |
+| Texture format codes (catalogued) | 42 (union); 41 attested by W1, 41 attested by W2 — see §E.1 for per-witness divergences (0x16 W2-only, 0x2F W1-only) | W1 (`texture.c:26-79`, `kelvin_color_format_info_map[66]`); W2 (`nv_regs.h:537-579`) |
 | Combiner stages | 8 + 1 final | W1 (`glsl/psh.h:44-45`); W2 (`nv_regs.h:665-683`); W3 |
 | Texture-shader stage modes | 19 (5-bit field; see §D.8) | W1 (`psh_regs.h:31-53`); W3 (xboxdevwiki "16 from NONE to DOTPRODUCT" — a slight undercount) |
 | Primitive types | 11 (incl. `_OP_END`, points, lines, line loop/strip, tris, tri strip/fan, quads, quad strip, polygon) | W1 (`nv2a_regs.h:1160-1170`); W2 (`nv_regs.h:505-516`); W3 (community-derived, paywalled mirror) |
@@ -601,20 +668,56 @@ attribute streams instead of GS.
   `D3DRS_LASTPIXEL=16` ("FALSE to enable drawing the last pixel in a
   line or triangle") — both relate to line rasterization rules.
 
-### C.7 Point sprites / parameters / size
+### C.7 Point sprites, point parameters, point smoothing, point size
 
-- Enable: `NV097_SET_POINT_PARAMS_ENABLE` (0x00000318). (W1.)
-- Params (8 floats): `NV097_SET_POINT_PARAMS` (0x00000A30).
-- Size: `NV097_SET_POINT_SIZE` (0x0000043C), max 0x1FF.
-- Smoothing: `NV097_SET_POINT_SMOOTH_ENABLE` (0x031C).
-- State in `PshState::point_sprite` (`glsl/psh.h:47`).
-- D3D8 cross-reference (W3): `D3DRS_POINTSPRITEENABLE=156`,
-  `D3DRS_POINTSCALEENABLE=157`, `D3DRS_POINTSCALE_A/B/C` (158-160),
-  `D3DRS_POINTSIZE_MIN/MAX` (155, 166). Archived MS doc says "Not
-  supported in Windows CE" but Xbox NV2A *does* support them — emulator
-  pitfall: point sprite size is in *world units* when POINTSCALE is
-  enabled (with quadratic distance attenuation A+Bd+Cd²), screen units
-  otherwise.
+These are **three distinct features** that the catalog originally
+conflated. Codex review pointed out that xemu's `PshState::point_sprite`
+flag is currently derived from `POINTSMOOTHENABLE`
+(`glsl/psh.c:102`), not from a true `POINTSPRITEENABLE` source. The
+true Xbox-side enable for point-sprite *texture-coordinate replacement*
+(D3D8's `POINTSPRITEENABLE` semantics) is **unresolved** from these
+three witnesses; W3 mentions D3D8 enums but no source attests the
+NV097 method. Diagnostic XBE for point sprites must explicitly verify
+which combination of flags actually triggers texture-coordinate
+replacement on real Xbox.
+
+**C.7.1 Point size (always-on per-vertex):**
+- `NV097_SET_POINT_SIZE` (0x0000043C), max 0x1FF (W1: `nv2a_regs.h:498`).
+
+**C.7.2 Point parameters / size attenuation:**
+- Enable: `NV097_SET_POINT_PARAMS_ENABLE` (0x00000318) (W1:
+  `nv2a_regs.h:940`); register `NV_PGRAPH_CSV0_D_POINTPARAMSENABLE`
+  + `NV_PGRAPH_CONTROL_3_POINTPARAMSENABLE`.
+- Params (8 floats): `NV097_SET_POINT_PARAMS` (0x00000A30); xemu
+  buffers `pg->point_params[8]` (`pgraph.h:218`).
+- xemu wires this into the **vertex shader** for size attenuation
+  (`glsl/vsh.c:131`) — controls quadratic distance attenuation
+  A + B·d + C·d², not texture-coordinate replacement.
+- D3D8 cross-reference (W3): `D3DRS_POINTSCALEENABLE=157`,
+  `D3DRS_POINTSCALE_A/B/C` (158-160), `D3DRS_POINTSIZE_MIN/MAX`
+  (155, 166).
+
+**C.7.3 Point smoothing (per-pixel coverage):**
+- Enable: `NV097_SET_POINT_SMOOTH_ENABLE` (0x031C) (W1, W2).
+- Register `NV_PGRAPH_SETUPRASTER_POINTSMOOTH`.
+- xemu currently maps this to `PshState::point_sprite`
+  (`glsl/psh.c:102`) — that is **not** the same semantic as D3D8's
+  `POINTSPRITEENABLE` (texture-coordinate replacement). This is
+  either an xemu impl quirk or an undocumented Xbox shorthand;
+  diagnostic XBE should clarify.
+
+**C.7.4 True point-sprite (texture-coordinate replacement):**
+- D3D8 cross-reference (W3): `D3DRS_POINTSPRITEENABLE=156`. Archived
+  MS doc says "Not supported in Windows CE" but Xbox NV2A is widely
+  understood to support it.
+- **Xbox-side enable source: UNRESOLVED.** No witness in this
+  research pass attests which NV097 method or `NV_PGRAPH_*` register
+  flips texture-coord replacement on for point primitives. Could be
+  a bit in `SET_CONTROL0` or an undocumented combiner-stage flag.
+- Diagnostic XBE for point sprites must be designed around this
+  uncertainty: render points with each candidate flag combination,
+  inspect texture-coordinate output via fragment shader, identify
+  which flag controls replacement.
 
 ### C.8 Window clip — Xbox-specific 8-rect scissor
 
@@ -843,59 +946,66 @@ driven from this register.
 
 ### E.1 Texture formats (full enumeration)
 
-W1 (`texture.c:26-79`, `kelvin_color_format_info_map[66]`) lists 41
-codes; W2 (`nv_regs.h:537-579`) lists 38; W3 confirms the format
-families. The discrepancy is W1 covering a few additional codes that
-W2 doesn't enumerate symbolically (likely added between nxdk's pbkit
-and the version of xboxdevwiki that drove pbkit). The full union is
-catalogued below; bpp is bytes per pixel for non-compressed, "block"
-for compressed:
+W1 (`texture.c:26-79`, `kelvin_color_format_info_map[66]`) and W2
+(`nv_regs.h:537-579`) enumerate symbolic format codes; W3 confirms
+the format families and named pitfalls. The two source-code witnesses
+do **not** enumerate identical sets — see "Per-witness disagreement"
+column. The union of all codes attested by at least one witness is
+listed below; bpp is bytes per pixel for non-compressed, "block" for
+compressed.
 
-| Code | Symbolic | bpp | Layout | Notes |
-|---|---|---|---|---|
-| 0x00 | `SZ_Y8` | 1 | swizzled | luminance |
-| 0x01 | `SZ_AY8` | 1 | swizzled | combined A and Y |
-| 0x02 | `SZ_A1R5G5B5` | 2 | swizzled | |
-| 0x03 | `SZ_X1R5G5B5` | 2 | swizzled | unused bit |
-| 0x04 | `SZ_A4R4G4B4` | 2 | swizzled | |
-| 0x05 | `SZ_R5G6B5` | 2 | swizzled | |
-| 0x06 | `SZ_A8R8G8B8` | 4 | swizzled | |
-| 0x07 | `SZ_X8R8G8B8` | 4 | swizzled | unused channel |
-| 0x0B | `SZ_I8_A8R8G8B8` | 1 | swizzled | **palettized P8** → ARGB |
-| 0x0C | `L_DXT1_A1R5G5B5` | block | linear | DXT1 / S3TC |
-| 0x0E | `L_DXT23_A8R8G8B8` | block | linear | DXT3 |
-| 0x0F | `L_DXT45_A8R8G8B8` | block | linear | DXT5 |
-| 0x10 | `LU_IMAGE_A1R5G5B5` | 2 | linear | |
-| 0x11 | `LU_IMAGE_R5G6B5` | 2 | linear | |
-| 0x12 | `LU_IMAGE_A8R8G8B8` | 4 | linear | |
-| 0x13 | `LU_IMAGE_Y8` | 1 | linear | |
-| 0x16 | `LU_IMAGE_R8B8` | 2 | linear | (W2 attests; not in W1 enum but commonly hit) |
-| 0x17 | `LU_IMAGE_G8B8` | 2 | linear | |
-| 0x19 | `SZ_A8` | 1 | swizzled | |
-| 0x1A | `SZ_A8Y8` | 2 | swizzled | |
-| 0x1B | `LU_IMAGE_AY8` | 1 | linear | |
-| 0x1C | `LU_IMAGE_X1R5G5B5` | 2 | linear | |
-| 0x1D | `LU_IMAGE_A4R4G4B4` | 2 | linear | |
-| 0x1E | `LU_IMAGE_X8R8G8B8` | 4 | linear | |
-| 0x1F | `LU_IMAGE_A8` | 1 | linear | |
-| 0x20 | `LU_IMAGE_A8Y8` | 2 | linear | |
-| 0x24 | `LC_IMAGE_CR8YB8CB8YA8` | 2 | linear | YUY2 (4:2:2 YUV) |
-| 0x25 | `LC_IMAGE_YB8CR8YA8CB8` | 2 | linear | UYVY (4:2:2 swap) |
-| 0x27 | `SZ_R6G5B5` | 2 | swizzled | |
-| 0x28 | `SZ_G8B8` | 2 | swizzled | |
-| 0x29 | `SZ_R8B8` | 2 | swizzled | |
-| 0x2C | `SZ_DEPTH_Y16_FIXED` | 2 | swizzled | depth-as-texture |
-| 0x2E | `LU_IMAGE_DEPTH_X8_Y24_FIXED` | 4 | linear | depth-as-texture |
-| 0x2F | `LU_IMAGE_DEPTH_X8_Y24_FLOAT` | 4 | linear | depth-as-texture |
-| 0x30 | `LU_IMAGE_DEPTH_Y16_FIXED` | 2 | linear | depth-as-texture |
-| 0x31 | `LU_IMAGE_DEPTH_Y16_FLOAT` | 2 | linear | depth-as-texture |
-| 0x35 | `LU_IMAGE_Y16` | 2 | linear | |
-| 0x3A | `SZ_A8B8G8R8` | 4 | swizzled | channel-swapped |
-| 0x3B | `SZ_B8G8R8A8` | 4 | swizzled | channel-swapped |
-| 0x3C | `SZ_R8G8B8A8` | 4 | swizzled | channel-swapped |
-| 0x3F | `LU_IMAGE_A8B8G8R8` | 4 | linear | |
-| 0x40 | `LU_IMAGE_B8G8R8A8` | 4 | linear | |
-| 0x41 | `LU_IMAGE_R8G8B8A8` | 4 | linear | |
+| Code | Symbolic | bpp | Layout | W1 | W2 | Notes |
+|---|---|---|---|:-:|:-:|---|
+| 0x00 | `SZ_Y8` | 1 | swizzled | ✓ | ✓ | luminance |
+| 0x01 | `SZ_AY8` | 1 | swizzled | ✓ | ✓ | combined A and Y |
+| 0x02 | `SZ_A1R5G5B5` | 2 | swizzled | ✓ | ✓ | |
+| 0x03 | `SZ_X1R5G5B5` | 2 | swizzled | ✓ | ✓ | unused bit |
+| 0x04 | `SZ_A4R4G4B4` | 2 | swizzled | ✓ | ✓ | |
+| 0x05 | `SZ_R5G6B5` | 2 | swizzled | ✓ | ✓ | |
+| 0x06 | `SZ_A8R8G8B8` | 4 | swizzled | ✓ | ✓ | |
+| 0x07 | `SZ_X8R8G8B8` | 4 | swizzled | ✓ | ✓ | unused channel |
+| 0x0B | `SZ_I8_A8R8G8B8` | 1 | swizzled | ✓ | ✓ | **palettized P8** → ARGB |
+| 0x0C | `L_DXT1_A1R5G5B5` | block | linear | ✓ | ✓ | DXT1 / S3TC |
+| 0x0E | `L_DXT23_A8R8G8B8` | block | linear | ✓ | ✓ | DXT3 |
+| 0x0F | `L_DXT45_A8R8G8B8` | block | linear | ✓ | ✓ | DXT5 |
+| 0x10 | `LU_IMAGE_A1R5G5B5` | 2 | linear | ✓ | ✓ | |
+| 0x11 | `LU_IMAGE_R5G6B5` | 2 | linear | ✓ | ✓ | |
+| 0x12 | `LU_IMAGE_A8R8G8B8` | 4 | linear | ✓ | ✓ | |
+| 0x13 | `LU_IMAGE_Y8` | 1 | linear | ✓ | ✓ | |
+| 0x16 | `LU_IMAGE_R8B8` | 2 | linear | — | ✓ | **W2-only** — `nv_regs.h:554`. xemu may not handle. |
+| 0x17 | `LU_IMAGE_G8B8` | 2 | linear | ✓ | ✓ | xemu issue #320: MechAssault 2 |
+| 0x19 | `SZ_A8` | 1 | swizzled | ✓ | ✓ | |
+| 0x1A | `SZ_A8Y8` | 2 | swizzled | ✓ | ✓ | |
+| 0x1B | `LU_IMAGE_AY8` | 1 | linear | ✓ | ✓ | |
+| 0x1C | `LU_IMAGE_X1R5G5B5` | 2 | linear | ✓ | ✓ | |
+| 0x1D | `LU_IMAGE_A4R4G4B4` | 2 | linear | ✓ | ✓ | |
+| 0x1E | `LU_IMAGE_X8R8G8B8` | 4 | linear | ✓ | ✓ | |
+| 0x1F | `LU_IMAGE_A8` | 1 | linear | ✓ | ✓ | |
+| 0x20 | `LU_IMAGE_A8Y8` | 2 | linear | ✓ | ✓ | |
+| 0x24 | `LC_IMAGE_CR8YB8CB8YA8` | 2 | linear | ✓ | ✓ | YUY2 (4:2:2 YUV) |
+| 0x25 | `LC_IMAGE_YB8CR8YA8CB8` | 2 | linear | ✓ | ✓ | UYVY; xemu issue #320: MotoGP, NHL Hitz |
+| 0x27 | `SZ_R6G5B5` | 2 | swizzled | ✓ | ✓ | |
+| 0x28 | `SZ_G8B8` | 2 | swizzled | ✓ | ✓ | |
+| 0x29 | `SZ_R8B8` | 2 | swizzled | ✓ | ✓ | |
+| 0x2C | `SZ_DEPTH_Y16_FIXED` | 2 | swizzled | ✓ | ✓ | depth-as-texture; xemu issue #320: Just Cause |
+| 0x2E | `LU_IMAGE_DEPTH_X8_Y24_FIXED` | 4 | linear | ✓ | ✓ | depth-as-texture |
+| 0x2F | `LU_IMAGE_DEPTH_X8_Y24_FLOAT` | 4 | linear | ✓ | — | **W1-only** — `nv2a_regs.h:1224`, `texture.c:65`. nxdk pbkit doesn't expose. |
+| 0x30 | `LU_IMAGE_DEPTH_Y16_FIXED` | 2 | linear | ✓ | ✓ | depth-as-texture |
+| 0x31 | `LU_IMAGE_DEPTH_Y16_FLOAT` | 2 | linear | ✓ | ✓ | depth-as-texture; xemu issue #320: FireBlade, Backyard Wrestling |
+| 0x35 | `LU_IMAGE_Y16` | 2 | linear | ✓ | ✓ | |
+| 0x3A | `SZ_A8B8G8R8` | 4 | swizzled | ✓ | ✓ | channel-swapped |
+| 0x3B | `SZ_B8G8R8A8` | 4 | swizzled | ✓ | ✓ | channel-swapped; xemu issue #320: Unreal Championship 2 |
+| 0x3C | `SZ_R8G8B8A8` | 4 | swizzled | ✓ | ✓ | channel-swapped |
+| 0x3F | `LU_IMAGE_A8B8G8R8` | 4 | linear | ✓ | ✓ | |
+| 0x40 | `LU_IMAGE_B8G8R8A8` | 4 | linear | ✓ | ✓ | |
+| 0x41 | `LU_IMAGE_R8G8B8A8` | 4 | linear | ✓ | ✓ | |
+
+**Total**: 42 distinct codes attested. **W1 attests 41**; **W2
+attests 41**; the two single-witness codes (0x16 W2-only, 0x2F
+W1-only) are real divergences and the diagnostic XBE library should
+explicitly cover both — code 0x16 to confirm xemu handles it at all,
+code 0x2F to confirm nxdk programs that bypass the SDK enum can hit
+the format.
 
 **Format-family prefix conventions:**
 
@@ -1109,6 +1219,33 @@ addresses for stage N = 0x1B00 + N×0x40.)
   0xFFFF0000) — register `NV_PGRAPH_TEXCTL1_0_IMAGE_PITCH`.
 
 (W1, W2.)
+
+### E.14 Texture DMA selector (DMA A vs DMA B)
+
+Codex review surfaced this section was missing. Texture image data
+(and palettes) are fetched from one of two DMA channels per stage,
+selected by `NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA` (low 2 bits of
+`NV097_SET_TEXTURE_FORMAT`):
+
+- `NV097_SET_CONTEXT_DMA_A` (0x0000018C) → `pg->dma_a` (W1:
+  `pgraph.c:1056`).
+- `NV097_SET_CONTEXT_DMA_B` (0x00000190) → `pg->dma_b`.
+- Per-stage selector bits in `SET_TEXTURE_FORMAT` low 2 bits select
+  between channel A (0) and channel B (1) (W1: `pgraph.c:2675`).
+- Texture/palette base-address resolution maps the offset through
+  the selected DMA channel's translation
+  (W1: `texture.c:92` for image, `texture.c:153` for palette).
+
+**Why this matters:** xemu's texture-binding code paths through DMA
+A and DMA B are nominally equivalent but hit different address-
+translation code. A diagnostic XBE that binds the same texture
+data through DMA A vs DMA B and verifies pixel-identical output
+catches address-space bugs that single-DMA tests miss. The full
+test sweep should also exercise the DMA-channel switch mid-frame
+(e.g., stage 0 DMA A, stage 1 DMA B in the same draw).
+
+This is a candidate for inclusion in the priority XBE list (added
+to §6 build priority as XBE #16).
 
 ---
 
@@ -1624,11 +1761,25 @@ surface and then resolving down at present.
 (W1: `nv2a_regs.h:1149-1156`. W2: `nv_regs.h:495-502`. W3 confirms NV2A
 has occlusion query but bit-format not externally documented.)
 
-**Critical for self-validating diagnostic XBEs:** `NV097_GET_REPORT`
-is the on-GPU readback path that lets an XBE check its own results.
-Use cases:
-- Pixel-count test (rendered N visible pixels = expected N).
-- Geometry-clip test (clip plane culled M of K verts = expected ratio).
+**Limitations affecting diagnostic-XBE use** (Codex review):
+
+- The method handler asserts `type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT`
+  (`pgraph.c:2629-2635`) — **no other report types are supported**.
+  Z-pass is the *only* on-GPU value the report mechanism returns.
+- The Metal renderer's `pgraph_mtl_get_report` writes a literal
+  zero unconditionally (`mtl/renderer.c:1917-1920`). Any Z-pass
+  XBE will FAIL on Metal until that's implemented.
+- The GL renderer has explicit FIXME limitations for MSAA, clear,
+  and clipping interactions (`gl/reports.c:38`).
+
+**Therefore**: `NV097_GET_REPORT` is **not** suitable as the
+*primary* self-validation mechanism for any XBE that's expected to
+validate Metal output. See §6.1 for the revised contract; the
+primary mechanism is **CPU-side VRAM readback**.
+
+The original framing here (Z-pass count as "the on-GPU readback
+path that lets an XBE check its own results") was wrong — corrected
+2026-05-05 post-Codex review.
 
 ### K.6 Semaphore / synchronization
 
@@ -1755,27 +1906,53 @@ async-completion / page-fault recovery.
 
 ---
 
-## 3. Cross-witness disagreements
+## 3. Cross-witness disagreements, gaps, and known limitations
 
-These are explicit conflicts where two witnesses disagree. The
-diagnostic XBE library should plan to test each one to determine
-ground truth.
+The original §3 conflated three categories. Codex review surfaced
+that #8, #10 are full agreement (not disagreements), #4 mistakenly
+blanked W2, and #12 is a single-witness observation. Reorganized
+into 3a/3b/3c below.
+
+### 3a. True cross-witness disagreements
+
+These are explicit conflicts where two witnesses provide
+contradictory information. Each is a diagnostic-XBE target — the
+XBE itself is the experimental tiebreaker.
 
 | # | Topic | W1 says | W2 says | W3 says | Diagnostic action |
 |---|---|---|---|---|---|
-| 1 | Vertex attribute slot 6-15 mapping | POINT_SIZE/BACK_DIFF/BACK_SPEC/TEX0-3/RES1-3 | Generic ATTR6/ATTR7 + TEX0-7 at 8-15 | — | XBE writes known data to each slot, reads via vertex shader, samples in fragment shader; visualizes which slot lights which output. |
-| 2 | Edge flags | No method handler in `methods.h.inc` (likely no-op) | `NV097_SET_EDGE_FLAG` 0x16BC enumerated | D3D8 has no `D3DRS_EDGEFLAG` (though it's an FFP feature) | Diagnostic XBE writes edge flags; output visually shows whether edges suppress or display. Confirms whether xemu silently no-ops. |
-| 3 | Line stipple | No method handler | `NV097_SET_STIPPLE_ENABLE` 0x147C, pattern 0x1480 | `D3DRS_LINEPATTERN=10` enumerated | Same as edge flags. |
-| 4 | Texture-shader stage modes | 19 modes (W1: `psh_regs.h:31-53`) | — | "16 from NONE to DOTPRODUCT" (xboxdevwiki) | XBE iterates all 19 modes; renders identifiable pattern per mode. W3 undercounts. |
-| 5 | EDGEANTIALIAS | Implemented (commit `mborgerson/xemu@a34cab6`) | — | "Not supported in Windows CE" | Test exists. Trust W1. |
-| 6 | POINTSPRITEENABLE | Implemented; PshState `point_sprite` | — | "Not supported in Windows CE" | XBE for point sprites, esp. with POINTSCALEENABLE world-units mode. |
-| 7 | Vertex shader ARL bias | `floor(src + 0.001)` | — | xemu issue #2362 demonstrates over-correction in MM3 | XBE writes specific constants to test ARL boundary; expected output tabulates correct vs incorrect indices. |
-| 8 | NV2A primitive enum (POINTS=1..POLYGON=10) | Confirmed | Confirmed | Community-derived; paywalled NGEmu mirror | High confidence — W1+W2 attest. |
-| 9 | NV097_SET_ANTI_ALIASING_CONTROL bit-encoding | Implemented per `surface_shape.anti_aliasing` | — | "no external page enumerates this" | Trust W1. Test by setting each AA mode; output should show AA edge differences. |
-| 10 | sRGB support | No method handler | Not exposed | Not enumerated | All three witnesses agree: NO sRGB. Skip diagnostic XBE for sRGB. |
-| 11 | NV2A signed texture formats | Code path exists in xemu | — | "default-zero unsigned interpretation produces wrong dot3 bumpmaps" (xqemu PR #36) | XBE that writes signed values, samples, verifies sign-extension. |
-| 12 | LOGIC_OP on GL | GL renderer's logic-op map commented out | — | — | High-priority XBE — likely first hit on GL renderer; should fail visibly. |
-| 13 | Z24S8 floating-point depth | xemu emulates via fixed-point (FIXME) | — | xboxdevwiki: float depth is supported | XBE that uses float Z, samples depth-as-texture, verifies precision distribution. |
+| 3a.1 | Vertex attribute slot 6-15 mapping | POINT_SIZE/BACK_DIFF/BACK_SPEC/TEX0-3/RES1-3 (`nv2a_regs.h:1469-1484`) | Generic ATTR6/ATTR7 + TEX0-7 at 8-15 (`nv_objects.h:1149-1164`) | — | XBE writes a unique known constant to each slot 6-15; vertex shader emits each slot in turn; fragment shader colorizes by slot index; expected output is the W1 mapping per `pgraph.c:2444`. (Codex confirmed W1 maps TEX0 to attr 9.) |
+| 3a.2 | Edge flags | No method handler in `methods.h.inc` (likely no-op) | `NV097_SET_EDGE_FLAG` 0x16BC enumerated | D3D8 has no `D3DRS_EDGEFLAG` (though it's an FFP feature) | XBE writes edge flags; expected output (per real Xbox semantics) shows specific edges suppressed in line/wireframe mode. Confirms whether xemu silently no-ops. |
+| 3a.3 | Line stipple | No method handler | `NV097_SET_STIPPLE_ENABLE` 0x147C, pattern 0x1480 enumerated | `D3DRS_LINEPATTERN=10` enumerated | Same as 3a.2 — XBE renders stippled line; visible pattern indicates support, solid line indicates no-op. |
+| 3a.4 | Texture-shader stage mode count | 19 modes (`psh_regs.h:31-53`) | 19 modes attested via per-stage enum (`nv_regs.h:694-747`); Codex correction — W2 does enumerate, original §3 incorrectly blanked W2 | "16 from NONE to DOTPRODUCT" (xboxdevwiki) | W3 undercounts by 3 (BUMPENVMAP_LUM, DPNDNT_AR/GB, DOT_RFLCT_*); trust W1+W2 (full agreement on 19). XBE iterates all 19 valid (stage, mode) pairs. |
+| 3a.5 | Vertex shader ARL bias | `floor(src + 0.001)` (xemu impl) | nxdk supplies VS instruction encoder, no opinion on ARL semantics | xemu issue #2362 demonstrates xemu's bias over-corrects in Midtown Madness 3 | XBE constructs ARL-input vector with values near integer boundaries; vertex shader uses `c[a0+N]` indexed read; fragment shader displays decoded constant index. CPU readback compares against expected per real Xbox semantics (which xemu issue #2362 says is "specify rounding" — exact mode unresolved externally). |
+| 3a.6 | NV2A_SET_ANTI_ALIASING_CONTROL bit-encoding | Implemented per `surface_shape.anti_aliasing`, AA modes 0/1/2 (`surface.h:32`) | Bit 0 = MSAA enable + bits 31:16 sample-mask via `NV20_TCL_PRIMITIVE_3D_MULTISAMPLE` (`nv_objects.h:1213`) | "no external page enumerates this" | XBE configures each AA mode; renders edge-on quad; CPU samples adjacent pixels along diagonal; expected output shows AA edge gradients differ per mode. |
+| 3a.7 | Z24S8 floating-point depth | xemu emulates via fixed-point (`gl/constants.h:308` FIXME) | nxdk pbkit doesn't expose float Z toggle | xboxdevwiki: float depth is supported on Xbox | XBE renders coplanar geometry near far-plane and near-plane in float-Z mode; samples depth-as-texture; CPU readback verifies precision distribution differs from fixed-point case. |
+
+### 3b. Single-witness observations (not disagreements)
+
+Items where only one witness has a position; the others are silent
+rather than contradicting. Treat as "load-bearing on that one
+witness" — verify with a diagnostic XBE if relevant.
+
+| # | Topic | Witness | Claim |
+|---|---|---|---|
+| 3b.1 | EDGEANTIALIAS supported on Xbox | W1, fork commit `mborgerson/xemu@a34cab6` | Xbox supports EDGEANTIALIAS despite PC archived MS doc saying "Not supported in Windows CE." W1 trumps W3 here because the W3 source is from PC/CE D3D8, not Xbox D3D8. |
+| 3b.2 | NV2A signed texture format sign-extension | W1 (code path exists), W3 (xqemu PR #36 fix) | "default-zero unsigned interpretation produces wrong dot3 bumpmaps." Diagnostic XBE writes signed values, samples, verifies sign-extension. |
+| 3b.3 | LOGIC_OP captured but not programmed on xemu GL | W1 only | `gl/constants.h:86` map is commented out. **xemu impl limitation, not a disagreement.** XBE for logic ops is high-priority because it'll likely show as broken on GL renderer (and possibly on Metal). |
+| 3b.4 | xemu GS expansion of QUADS / QUAD_STRIP / POLYGON | W1 only | xemu's renderer-side strategy; not part of NV2A semantics. Diagnostic XBE that exercises native `_OP_QUADS` regression-gates xemu's expansion path against the closed-default-on `XEMU_NATIVE_QUAD` flag. |
+| 3b.5 | Apple Silicon fork-specific flags | W1 only | `XEMU_NATIVE_TRI_DEPTH`, `XEMU_NATIVE_QUAD`, `MtlSurfaceBinding` cache, etc. Fork-specific impl details, regression-gated by their own diagnostic XBEs (§6). |
+
+### 3c. Cross-witness agreement (high confidence)
+
+These are *not* disagreements — listed for completeness because the
+original §3 included them as "disagreements" by mistake.
+
+| # | Topic | Agreement |
+|---|---|---|
+| 3c.1 | NV2A primitive enum (POINTS=1..POLYGON=10) | W1 (`nv2a_regs.h:1160`) and W2 (`nv_regs.h:506`) match exactly. W3 is community-derived but consistent. **High confidence.** |
+| 3c.2 | sRGB support absent | All three witnesses: no NV097 method, not exposed in pbkit, not enumerated externally. **No diagnostic XBE needed.** |
+| 3c.3 | EDGEANTIALIAS / POINTSPRITEENABLE / PATCHEDGESTYLE PC-doc-disagree-with-Xbox | W3 archived MS doc says "Not supported in Windows CE"; the same W3 secondary sources confirm Xbox support. W1 confirms via implementation. **W3 doc disagreement is internal to W3** — Xbox-specific behavior is well-attested. |
 
 ## 4. Documentation gaps where only one witness attests
 
@@ -1839,89 +2016,258 @@ diagnostic-XBE candidate.
 ## 6. Implications for the diagnostic-XBE library
 
 A complete diagnostic library will produce roughly 60-80 XBEs
-covering the catalog above. Priority ordering for build (tied to bugs
-already observed and to the closed default-on flags that must be
-regression-gated):
+covering the catalog above. This section was substantively revised
+post-Codex review — the original self-validation contract overstated
+`NV097_GET_REPORT` and several proposed XBEs depended on it.
 
-1. **Mirror / viewport / scissor** — XBE renders single white pixel
-   at known position; expected output is one pixel at exactly that
-   position. Tests: vertex transform correctness, viewport offset/scale,
-   surface clip, window clip rect 0 (the basic case). Catches SC2's
-   top-mirrored-to-bottom symptom directly.
+### 6.1 Self-validation contract (revised)
+
+Each XBE picks one of these self-validation mechanisms in priority
+order. The XBE source-file header MUST declare which it uses and
+why others were not chosen.
+
+**Primary — CPU-side VRAM readback.** The XBE runs in the Xbox
+guest. It has direct memory access to its own VRAM via
+`MmGetPhysicalAddress` and pbkit framebuffer pointers. After
+issuing `pb_finished()` and waiting for GPU completion via
+`pb_wait_until_gr_not_busy()`, the XBE reads the rendered
+pixels straight out of the back-buffer (or a render-target VRAM
+offset) with a plain memcpy / pointer dereference, decodes the
+expected color/depth/stencil per the test's math, and renders
+`PASS` or `FAIL [diagnostic info]` via `pb_print` text overlay.
+
+This works on any renderer (GL, Metal, future Vulkan), is
+mathematically deterministic, and is independent of any external
+oracle. It is the **default** mechanism.
+
+**Secondary — RT-as-texture sampling.** When the XBE needs to test
+something that's awkward to read CPU-side (e.g., MSAA-resolved
+output, depth-as-texture, palette-decoded texel), the XBE binds the
+just-rendered render target as a texture in a follow-up draw, samples
+the relevant texel, and outputs it as a solid-color block in a
+known screen position. CPU-side readback (mechanism #1) then
+verifies that block.
+
+**Tertiary — `NV097_GET_REPORT` Z-pass count.** Useful only for
+**Z-pass-only** liveness (e.g., "did exactly N pixels pass depth
+test?"). Limitations:
+
+- The method asserts `type == NV097_GET_REPORT_TYPE_ZPASS_PIXEL_CNT`
+  (`hw/xbox/nv2a/pgraph/pgraph.c:2629-2635`); no other report types
+  are dispatched.
+- xemu **Metal renderer's `pgraph_mtl_get_report` writes a literal
+  zero unconditionally** (`hw/xbox/nv2a/pgraph/mtl/renderer.c:1917-1920`).
+  Z-pass count XBEs will FAIL on Metal until that's implemented.
+- xemu GL has FIXME limitations for MSAA, clear, and clipping
+  interactions (`hw/xbox/nv2a/pgraph/gl/reports.c:38`).
+
+Conclusion: do NOT use `NV097_GET_REPORT` as the *primary*
+mechanism for any XBE that's expected to validate Metal output.
+Use it only as a *secondary* liveness counter alongside CPU-side
+VRAM readback.
+
+**Skipped — visual inspection only.** Where neither CPU readback
+nor RT sampling is feasible (e.g., display-side gamma test where
+the only meaningful comparison is "does this pixel look right on
+the user's monitor"), the XBE renders side-by-side expected vs
+actual reference patterns and asks the operator to visually
+confirm. The XBE's source-file header must explicitly note that
+no on-GPU self-check is possible and explain why.
+
+### 6.2 Build priority
+
+Priority ordering for build (tied to bugs already observed and to
+the closed default-on flags that must be regression-gated):
+
+1. **Mirror / viewport / scissor** — XBE renders single white
+   pixel at known position (e.g., `(640, 100)` on a black
+   `1280×960` back-buffer). CPU reads back the entire
+   back-buffer; expected: exactly one white pixel at that
+   coordinate, every other pixel exactly the clear color. Tests:
+   vertex transform correctness, viewport offset/scale, surface
+   clip, window clip rect 0. **Catches SC2's top-mirrored-to-
+   bottom symptom directly** — if the renderer mirrors top to
+   bottom, the readback finds a second white pixel at `(640, 860)`
+   and the XBE renders `FAIL: mirror at (640, 860)`.
 2. **Color channel** — XBE renders R/G/B/W in fixed-position
-   quadrants. Tests: RT format A8R8G8B8, channel swizzle, color
-   write enable. Catches "wrong colors" symptom.
-3. **Depth / floor coverage** — XBE renders labeled checkered ground
-   plane viewed at fixed camera with z-test. Tests: depth function,
-   depth write enable, surface cache for zeta, native_tri_depth path.
-   Catches "floor disappearing" symptom.
-4. **CRTC publish race / front-fb fallback** — XBE draws to surface
-   A (CRTC publish target), switches to surface B forever, never
-   returns. Self-validates via `NV097_GET_REPORT` zpass count: if
-   zpass shows draws to A == 0, expect black; if > 0, expect content.
-   Catches PGR2/Crimson class.
+   quadrants. CPU reads back; expected: each quadrant is exactly
+   that solid color (e.g., top-left `0xFF0000FF` ARGB). Tests: RT
+   format A8R8G8B8, channel swizzle, color write enable. **Catches
+   SC2 "wrong colors" symptom.**
+3. **Depth / floor coverage** — XBE renders a labeled checkered
+   ground plane viewed at fixed camera with z-test. CPU reads back
+   each grid cell's center pixel; expected: predefined per-cell
+   color. Tests: depth function, depth write enable, surface cache
+   for zeta, `native_tri_depth` path. **Catches SC2 "floor
+   disappearing" symptom.**
+4. **CRTC publish race / front-fb fallback** — XBE allocates
+   surface A at known VRAM addr, draws known content, switches the
+   CRTC publish to addr A; then allocates surface B at a different
+   VRAM addr, switches to drawing exclusively to B, calls
+   `NV097_FLIP_STALL` to publish. The XBE itself then reads VRAM
+   at the published addr (via the CRTC `NV_PCRTC_START` register
+   value) and verifies it points at A's known content (or B's, if
+   the CRTC publish is updated; both outcomes are valid behaviors
+   to surface, so the XBE reports which one occurred rather than
+   PASS/FAIL). Tests: front-fb fallback policy, CRTC publish
+   path, surface-to-VRAM coherency. **Catches PGR2/Crimson class
+   directly.** **Self-validation: CPU-side VRAM readback** (NOT
+   `NV097_GET_REPORT` — that path returns 0 on Metal).
 5. **Native quad / native tri-depth** — XBE renders `OP_QUADS` and
-   `OP_TRIANGLES` with provoking-vertex first vs last. Tests: GS
+   `OP_TRIANGLES` with provoking-vertex first vs last. CPU readback
+   verifies expected pixel coverage and per-pixel color. Tests: GS
    expansion path on plain GL, native-quad CPU expansion path,
-   native_tri_depth fragment-shader depth derivation, flat-shading
+   `native_tri_depth` fragment-shader depth derivation, flat-shading
    with provoking vertex. Regression-gates the closed default-on
    flags `XEMU_NATIVE_QUAD` and `XEMU_NATIVE_TRI_DEPTH`.
 6. **Vertex format — CMP packed (11,11,10)** — XBE writes a known
    vector in CMP format, reads via vertex shader, outputs as solid
-   color. Tests: M5.8 Metal CPU decoder, GL `needs_conversion`
-   integer-attrib path. Self-validates by mapping decoded value to
-   pre-known on-screen color.
+   color. CPU readback verifies the decoded color matches the math.
+   Tests: M5.8 Metal CPU decoder, GL `needs_conversion` integer-
+   attrib path.
 7. **Texture format sweep** — XBE renders one texel-per-format from
-   the 41-code catalog (E.1). Each format gets a fixed input VRAM
-   pattern; output region is decoded color or pattern. Tests: every
-   texture-format decode path. Especially valuable for the formats
-   xemu issue #320 historically broke.
+   the 42-code union (E.1). Each format gets a fixed input VRAM
+   pattern; output region is the decoded color or pattern. CPU
+   readback verifies each format's region against expected. Tests
+   the W1-only `0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT`, the W2-only
+   `0x16 LU_IMAGE_R8B8`, and every format xemu issue #320
+   historically broke.
 8. **Swizzled vs linear texture layouts** — XBE writes a known mip
-   chain in swizzled vs linear layout, samples each level, expected
-   output shows mip ordering correctness.
+   chain in swizzled vs linear layout, samples each level, CPU
+   readback verifies mip-level offset math.
 9. **Blend / alpha test / color mask** — XBE renders overlapping
-   quads with each blend-factor combination; expected output is a
-   color matrix.
-10. **Stencil ops** — XBE writes stencil values, then performs each
-    of the 8 ops, then reads back; expected output is the decoded
-    stencil.
+   quads with each blend-factor combination; CPU readback verifies
+   each region's color matches the blend math.
+10. **Stencil ops** — XBE writes stencil values, performs each of
+    the 8 ops, then renders a quad with the stencil read back into
+    color via stencil-as-texture (or via stencil-test pass/fail
+    coloring); CPU readback verifies. (Mechanism #2: RT-as-texture
+    is the natural fit since stencil isn't directly memcpy-able.)
 11. **Texture filter / wrap modes** — XBE samples a UV-overrun quad
-    with each wrap mode; output is identifiable per-mode.
+    with each wrap mode; CPU readback per-mode pixel comparison.
 12. **Register combiner basic ops** — XBE configures a single
-    combiner stage with each input / mapping / output; output color
-    is the computed combiner result. Self-validates via
-    `NV097_GET_REPORT` if the result was rendered (else falls back to
-    visual inspection).
+    combiner stage with each input / mapping / output; CPU readback
+    verifies the output color matches the math. (No
+    `NV097_GET_REPORT` dependency.)
 13. **Texture-shader stage 19 modes** (D.8) — XBE iterates each
-    stage's mode; output is per-mode identifiable.
-14. **Logic ops** — XBE renders with each logic op against known dest;
-    output is the logic-op result. **Likely flags an immediate GL
-    regression** (per W1 finding the GL map is commented out).
+    valid (stage, mode) pair; CPU readback verifies expected output
+    per mode.
+14. **Logic ops** — XBE renders with each logic op against known
+    dest; CPU readback verifies the logic-op result. **Likely flags
+    an immediate GL regression** (W1 finding: GL map commented
+    out). Will also stress whether Metal implements logic ops.
 15. **MSAA / AA factor** — XBE renders edge-on geometry at fixed
-    angles, per AA mode (none/2×/4×); output edge-AA pattern is per-
-    mode identifiable.
+    angles, per AA mode (none/2×/4×); CPU readback samples adjacent
+    pixels along the edge to detect AA gradient.
+16. **Texture DMA selector A vs B** — XBE binds the same texture
+    data through DMA channel A and DMA channel B in successive
+    frames. CPU readback compares; expected: pixel-identical. Tests
+    DMA-channel address-translation parity (see §E.14).
 
-Subsequent priorities cover: CRTC publish via NV097_FLIP_STALL
+Subsequent priorities cover: CRTC publish via `NV097_FLIP_STALL`
 sequencing, vertex shader instruction-set per-op (each MAC op + each
-ILU op individually), fixed-function lighting modes (8-light combinations),
-fog modes (linear/exp/exp2/exp_abs/exp2_abs/linear_abs), texgen
-modes, skinning modes, shadow-map / depth-shadow comparison, color
-key / alpha kill, palettized texture, cube map, 3D texture,
-compressed (DXT1/3/5), bumpenvmap, anisotropic filtering, multi-
-texturing stage combinations.
+ILU op individually, especially ARL boundary cases per §3a.5),
+fixed-function lighting modes (8-light combinations), fog modes
+(linear/exp/exp2/exp_abs/exp2_abs/linear_abs), texgen modes,
+skinning modes, shadow-map / depth-shadow comparison, color key /
+alpha kill, palettized texture, cube map, 3D texture, compressed
+(DXT1/3/5), bumpenvmap, anisotropic filtering, multi-texturing
+stage combinations, point sprite (resolving §C.7.4 unresolved
+question), edge flags / line stipple (resolving §3a.2 / §3a.3).
 
-Each XBE follows the correctness contract described in the
-companion plan doc (`diagnostic-xbe-plan.md`):
-- Math-derivable expected output documented in source-file header.
-- Cited NV097 method(s) + xemu source location + xboxdevwiki / D3D8
-  citation.
-- Self-validation via NV097_GET_REPORT or RT-as-texture sample where
-  feasible; on-screen `PASS`/`FAIL` banner via `pb_print`.
-- Cross-validated against xemu-GL + Cxbx-Reloaded before promotion to
-  Metal-side oracle.
-- Codex-validate the design before nxdk source written.
-- Reproducibility check (two cold runs must produce byte-identical
-  output).
+### 6.3 Per-XBE correctness contract
+
+Each XBE follows the correctness contract described in the companion
+plan doc (`diagnostic-xbe-plan.md`):
+
+- **Math-derivable expected output** documented in source-file
+  header. The header derives the correct output from first
+  principles (projection math, NV2A method semantics, channel
+  format encoding) so a reviewer can audit "does this XBE actually
+  test what it claims" without running it.
+- **Cited NV097 method(s)**, xemu source location, and W2/W3
+  citation per claim. No undocumented behavior reliance unless
+  the XBE itself is the experimental probe (§3a items).
+- **Self-validation per §6.1**, in priority order: CPU-side VRAM
+  readback first, RT-as-texture second, `NV097_GET_REPORT`
+  Z-pass-only third, visual-only as last resort with explicit
+  rationale.
+- **On-screen PASS/FAIL banner** via `pb_print` with diagnostic
+  info on FAIL (e.g., "FAIL: pixel at (640, 100) was 0xFF00FFFF
+  expected 0xFFFFFFFF").
+- **Cross-renderer behavior recorded, not gating.** Per Codex
+  finding, GL/Cxbx-Reloaded comparison is **advisory** — known-
+  renderer failures (e.g., GL logic-op map commented out) are
+  recorded in the XBE manifest as expected-fail-on-renderer-X
+  rather than blocking promotion. Promotion gates on the
+  mathematical oracle plus self-validation passing on at least one
+  renderer.
+- **Codex-validate the design** before nxdk source is written
+  (project rule #15, plan-mode trigger).
+- **Reproducibility check** — two cold runs must produce
+  byte-identical output (no timing leaks, no uninitialized
+  memory).
+
+### 6.4 Catalog itself in the validation cadence
+
+Per Codex review, this catalog is the source of truth for the XBE
+plan; if the catalog has a witness-attribution error or a missed
+feature, every XBE downstream inherits the bug. Therefore:
+
+- **Catalog diffs go through `/codex-validate plan <path>`** before
+  expansion of the XBE plan they motivate.
+- The original creation of this catalog (2026-05-05) was
+  Codex-validated in `plan` mode and returned MAJOR ISSUES; the
+  fixes are this revision. Subsequent meaningful catalog updates
+  (new feature classes discovered, new pitfalls surfaced) repeat
+  the Codex-validate step.
+
+### 6.5 Note on `NV097_GET_REPORT` Metal stub
+
+The Metal-side `pgraph_mtl_get_report` (`mtl/renderer.c:1917-1920`)
+currently writes 0 unconditionally. **Implementing it correctly is
+itself a worthwhile fork slice** — it would unblock any future
+diagnostic XBE that wants to use Z-pass count as a secondary
+liveness check, and it would make titles that use occlusion queries
+(if any) render correctly on Metal. Filed as a candidate task; not
+on the diagnostic-XBE-library critical path (CPU-side VRAM readback
+covers all current correctness-validation needs).
+
+### 6.6 Note on point-sprite Xbox-side enable source
+
+§C.7.4 left unresolved which NV097 method or `NV_PGRAPH_*` register
+flips Xbox texture-coordinate replacement on for point primitives.
+The diagnostic XBE for point sprites should be designed as an
+**experimental probe** — render points with each candidate flag
+combination, inspect texture-coordinate output via fragment shader,
+identify which combination triggers replacement. Treat the result
+as the resolution of §C.7.4 and update both the catalog and the
+XBE design once known.
+
+### 6.7 Codex-review open questions and project answers
+
+Codex review surfaced three open questions. Project answers:
+
+1. **Should Metal `NV097_GET_REPORT` be implemented before any XBE
+   depends on Z-pass self-validation?** No — the revised
+   self-validation contract (§6.1) makes CPU-side VRAM readback
+   the primary mechanism, so no XBE should *need* Z-pass count.
+   Filing a Metal `NV097_GET_REPORT` implementation as a
+   candidate slice anyway because (a) titles that use occlusion
+   queries on Metal will silently render wrong, and (b) it
+   restores parity with GL.
+2. **What is the intended authoritative fallback for W3-only
+   hardware behavior: real Xbox capture, nv2a-trace, Cxbx, or
+   math-only?** Math-only by default; the XBE's correct output is
+   derivable from the catalog's NV097 method semantics + W1's
+   implementation. nv2a-trace is the next fallback (it can capture
+   the actual NV097 method stream from a homebrew XBE running on
+   xemu and confirm the methods are dispatched as expected). Real
+   Xbox capture is left as out-of-scope unless the user can
+   provide it. Cxbx-Reloaded is advisory only (see §6.3).
+3. **Should known GL failures be allowed as expected failures in
+   the diagnostic library manifest?** Yes — see §6.3
+   "Cross-renderer behavior recorded, not gating."
 
 ## 7. Sources / witnesses
 
@@ -1990,13 +2336,37 @@ Secondary:
 ## 8. How this catalog is consumed
 
 The next deliverable, `diagnostic-xbe-plan.md`, will translate this
-catalog into a per-XBE design with the correctness contract baked in.
-Each XBE entry in that plan will reference back to the section above
-that describes the feature it tests. This catalog itself does NOT
-prescribe the test design — it is the reference material.
+catalog into a per-XBE design with the correctness contract baked in
+(see §6.3). Each XBE entry in that plan will reference back to the
+section above that describes the feature it tests. This catalog
+itself does NOT prescribe the test design — it is the reference
+material.
 
 When new NV2A features are discovered (e.g., additional texture
 format codes, undocumented method behaviors), this catalog gets a
 new entry citing the witness; only after that does the XBE plan get
 extended to cover it. The catalog is the single source of truth for
 "what is the rendering pipeline."
+
+### 8.1 Validation cadence (per Codex review)
+
+This catalog is the source of truth that drives all downstream XBE
+designs. Witness-attribution errors here propagate. Therefore:
+
+1. **Initial creation**: Codex-validated in `plan` mode, fixes
+   applied (this revision, 2026-05-05).
+2. **Substantive revisions**: any catalog change that adds a feature
+   class, retracts a witness claim, or changes a self-validation
+   recommendation re-runs `/codex-validate plan
+   docs/apple-silicon/nv2a-feature-surface-research.md` before the
+   diagnostic XBE plan that depends on it is updated.
+3. **Diagnostic XBE plan**: `diagnostic-xbe-plan.md` itself is
+   Codex-validated in `plan` mode before any nxdk source is written
+   (project rule #15).
+4. **First-build XBEs**: Codex-validated in `changes` mode after
+   nxdk source lands but before the XBE is promoted to a regression
+   gate (project rule #15 hook).
+
+Trivial catalog edits (typos, citation-line-number tweaks) skip
+the cadence per project rule #15's "trivial work skips the gate
+automatically" clause.
