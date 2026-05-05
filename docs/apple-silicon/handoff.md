@@ -360,46 +360,69 @@ HIGH/MEDIUM/LOW findings either fixed (5/7) or filed as future
 slices (2/7).
 
 **Highest-priority next-session actions (updated 2026-05-05).**
-Workflow tooling is operational autonomously; remaining open work
-requires interactive controller input. The Phase 1 daily loop in
-`docs/apple-silicon/metal-porting-workflow.md` is the canonical
-operating reference; the bullets below summarize the immediate work:
+Workflow tooling is operational autonomously. Three recorded gameplay
+scripts already exist (`pgr2-gameplay.csv`, `rainbow-gameplay.csv`,
+`crimson-gameplay.csv`); only SC2 lacks a recorded route. The Phase
+1 daily loop in `docs/apple-silicon/metal-porting-workflow.md` is the
+canonical operating reference; the bullets below summarize the
+immediate work:
 
-1. **(INTERACTIVE) Record real input scripts for Crimson Skies and
-   Soul Calibur 2 visual routes** via
-   `./scripts/apple-silicon/record-input.sh`. The existing
-   `crimson-gameplay.csv` produces a black drawable on the visual
-   route (one patterned frame followed by black); SC2 has no script
-   at all. Save outputs as `crimson-canary.csv` and `sc2-canary.csv`
-   alongside the existing `pgr2-gameplay.csv` /
-   `rainbow-gameplay.csv`. Optionally save QMP snapshots at known
-   stable visual frames (e.g. via `XEMU_BENCH_SAVEVM_AT=N
-   XEMU_BENCH_SAVEVM_TAG=crimson-canary`) so subsequent runs can
-   `loadvm` for deterministic state.
-2. **Run the broader Metal-vs-GL paired diff** for the M15 default-on
-   visual gate:
+1. **(autonomous) Run the broader Metal-vs-GL paired diff for PGR2,
+   Rainbow, and Crimson** using the existing recorded scripts:
    ```
-   for title in pgr2 rainbow crimson sc2 <broader-sweep>; do
+   for title in pgr2 rainbow crimson; do
      ./scripts/apple-silicon/metal-gl-compare.sh "$title" \
-       --input scripts/apple-silicon/input-scripts/${title}-canary.csv \
+       --input scripts/apple-silicon/input-scripts/${title}-gameplay.csv \
        --trigger flip --trigger-ordinal 30 --threshold 1.0
    done
    ```
-   ≤1% per-pixel diff vs GL on all five = M15 default-on visual gate
-   met. Combine with FPS / p99 jitter validation per
-   `metal-renderer-plan.md` §4 M15.
-3. **Run `metal-canary-regress.sh --mode counters` after every Metal
+   Use the F1 flip-stall trigger for paired-frame alignment.
+   Expected outcome: PGR2 and Rainbow diffs within tolerance (with
+   any color/gamma differences noted); Crimson FAIL on the visual
+   diff because the Metal gameplay route currently renders one
+   patterned frame followed by a black drawable while GL renders
+   real gameplay.
+2. **(autonomous) Diagnose the Crimson Skies black-drawable visual
+   regression** using W4's per-draw RT dump on both renderers along
+   a matched draw range:
+   ```
+   # Metal leg
+   XEMU_RENDERER=METAL XEMU_METAL_DUMP_DRAW_RT=0:200:/tmp/mtl_crimson \
+     ./scripts/apple-silicon/run-benchmark.sh crimson \
+       scripts/apple-silicon/input-scripts/crimson-gameplay.csv 60
+   # GL leg
+   XEMU_RENDERER=GL   XEMU_GL_DUMP_DRAW_RT=0:200:/tmp/gl_crimson \
+     ./scripts/apple-silicon/run-benchmark.sh crimson \
+       scripts/apple-silicon/input-scripts/crimson-gameplay.csv 60
+   ```
+   Compare matched indices to find the first divergent draw, which
+   localises the NV2A semantics bug. Crimson stability is already
+   PASS (the script completes without aborting and counters stay
+   clean) — only the visual output is wrong.
+3. **(INTERACTIVE) Record SC2 input script** via
+   `./scripts/apple-silicon/record-input.sh sc2`. SC2 is the one
+   title without a recorded route; the existing `noop.csv` reaches
+   only boot/flubber. Save as `sc2-gameplay.csv`. Optional
+   companion: save a QMP snapshot at a stable visual frame via
+   `XEMU_BENCH_SAVEVM_AT=N XEMU_BENCH_SAVEVM_TAG=sc2-canary` so
+   subsequent runs can `loadvm` for deterministic state.
+4. **Run `metal-canary-regress.sh --mode counters` after every Metal
    renderer change** as the post-change smoke (autonomous,
    ~6 minutes; catches PSH/VSH translator failures, M5.7 coalescing
-   collapse, drawable starvation). This is the W3 default validation
-   mode introduced 2026-05-04 evening.
-4. **Decide front-fb fallback policy** (`XEMU_METAL_FRONT_FB_FALLBACK`
+   collapse, drawable starvation). W3 default validation mode
+   introduced 2026-05-04 evening.
+5. **Once Crimson visual route is fixed and SC2 has a script**, run
+   the full M15 default-on visual gate across PGR2 / Rainbow /
+   Crimson / SC2 + one broader-sweep title. ≤1% per-pixel diff vs
+   GL on all five = visual gate met. Combine with FPS / p99 jitter
+   validation per `metal-renderer-plan.md` §4 M15.
+6. **Decide front-fb fallback policy** (`XEMU_METAL_FRONT_FB_FALLBACK`
    default flip ON, or implement faithful CRTC publish path with
    back-buffer propagation). See decision-log
    "2026-05-04 evening: Front-fb fallback policy". Reopen after the
-   wider title sweep characterizes which title classes benefit /
+   broader sweep characterizes which title classes benefit /
    regress.
-5. **(GL-side) Audio listen-test for `XEMU_APU_LOCK_RELEASE`** —
+7. **(GL-side) Audio listen-test for `XEMU_APU_LOCK_RELEASE`** —
    still UNBLOCKED, orthogonal to Metal. Human listener plays
    Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice on. If
    clean: declare I5 fully shipped. If glitches: revert or design

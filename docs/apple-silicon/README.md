@@ -237,12 +237,21 @@ wins when the two diverge.
   renderer change.
 - **Workflow tooling status: D1 / W1 / W2 / W3 (counters) / W4 / F1 /
   F2 / VFR / skills / hooks all operational.** W5 BLOCKED (MoltenVK).
-- **Remaining open work for M15 default-on requires interactive
-  recording** of real input scripts for Crimson Skies and Soul
-  Calibur 2 visual routes (the existing `record-input.sh` workflow
-  with a controller). Once those land, the W2 paired Metal-vs-GL diff
-  harness can run them at deterministic state and produce the M15
-  ≤1% per-pixel diff measurement.
+- **Three recorded gameplay scripts already exist**:
+  `pgr2-gameplay.csv` (33k lines), `rainbow-gameplay.csv` (61k lines),
+  `crimson-gameplay.csv` (26k lines). PGR2 and Rainbow render real
+  game content via Metal under their existing scripts. Crimson's
+  script reaches the gameplay state (stability PASS, counters clean)
+  but Metal renders the resulting frames as a single patterned frame
+  followed by a black drawable — a renderer correctness bug that
+  needs diagnosis via W4 per-draw RT dump (Metal vs GL on matched
+  draw indices). Only **SC2 lacks a recorded input script**; the
+  existing `noop.csv` reaches only boot/flubber.
+- **Remaining open work for M15 default-on**: (a) diagnose +
+  fix the Crimson Metal visual route via W4 + W2 (autonomous);
+  (b) record SC2 via `record-input.sh` (interactive); (c) run the
+  full 5-title paired Metal-vs-GL diff under the M15 gate; (d)
+  decide front-fb fallback policy.
 
 **Current state (2026-05-04, post PGR2 Metal surface/RTT fix — preserved
 for empirical audit trail).**
@@ -284,32 +293,50 @@ for empirical audit trail).**
 
 **Next-action priority (2026-05-05).**
 
-1. **Record real input scripts for Crimson and SC2 visual routes**
-   (interactive — requires a controller). Use
-   `./scripts/apple-silicon/record-input.sh crimson` and
-   `record-input.sh sc2` to capture deterministic gameplay routes
-   from the profile HDD. Save outputs as
-   `crimson-canary.csv` / `sc2-canary.csv` next to the existing
-   `pgr2-gameplay.csv` / `rainbow-gameplay.csv`. Optionally save QMP
-   snapshots at known stable points via `XEMU_BENCH_SAVEVM_AT` so
-   subsequent runs can `loadvm` for deterministic state.
-2. **Run the broader Metal-vs-GL gameplay gate.** With the new input
-   scripts, run `metal-gl-compare.sh <title> --input <script>` for
-   PGR2, Rainbow, Crimson, SC2, and one further title. Use
-   `--trigger flip --trigger-ordinal N` (F1) for paired-frame
-   alignment. The `--threshold 1.0` gate with paired-diff PASS on
-   all five is the M15 default-on visual gate.
-3. **Run `metal-canary-regress.sh --mode counters` after every Metal
-   renderer change** to catch the regression classes the gate is
-   designed for (translator failures, coalescing collapse, drawable
-   starvation). 6-minute autonomous loop. This is the "post-change
-   smoke" recommended in `metal-porting-workflow.md` Phase 1 daily
-   loop §3.5.
-4. **Decide whether to flip `XEMU_METAL_FRONT_FB_FALLBACK` default
+1. **(autonomous) Run paired Metal-vs-GL diff for PGR2, Rainbow,
+   Crimson** using the existing recorded scripts:
+   ```
+   for title in pgr2 rainbow crimson; do
+     ./scripts/apple-silicon/metal-gl-compare.sh "$title" \
+       --input scripts/apple-silicon/input-scripts/${title}-gameplay.csv \
+       --trigger flip --trigger-ordinal 30 --threshold 1.0
+   done
+   ```
+   Use F1 flip-stall trigger for paired-frame alignment. PGR2 and
+   Rainbow are expected to be near-pass (modulo color/gamma deltas);
+   Crimson is expected to FAIL because the Metal gameplay route
+   currently renders one patterned frame followed by a black
+   drawable.
+2. **(autonomous) Diagnose the Crimson black-drawable visual
+   regression** via W4 per-draw RT dump on both renderers:
+   ```
+   XEMU_RENDERER=METAL XEMU_METAL_DUMP_DRAW_RT=0:200:/tmp/mtl_crimson \
+     ./scripts/apple-silicon/run-benchmark.sh crimson \
+       scripts/apple-silicon/input-scripts/crimson-gameplay.csv 60
+   XEMU_RENDERER=GL XEMU_GL_DUMP_DRAW_RT=0:200:/tmp/gl_crimson \
+     ./scripts/apple-silicon/run-benchmark.sh crimson \
+       scripts/apple-silicon/input-scripts/crimson-gameplay.csv 60
+   ```
+   Compare matched draw indices to localise the NV2A semantics bug.
+3. **(INTERACTIVE) Record SC2 input script** via
+   `./scripts/apple-silicon/record-input.sh sc2`. The only title
+   without a recorded route. Optionally pair with a QMP snapshot at
+   a stable visual frame.
+4. **Run `metal-canary-regress.sh --mode counters` after every Metal
+   renderer change** to catch translator failures, coalescing
+   collapse, drawable starvation (~6-minute autonomous loop;
+   "post-change smoke" per `metal-porting-workflow.md` §3.5).
+5. **After Crimson visual is fixed and SC2 has a script**, run the
+   full 5-title M15 default-on visual gate (PGR2 / Rainbow / Crimson
+   / SC2 + one broader-sweep title). ≤1% per-pixel diff vs GL on
+   all five = visual gate met. Combine with FPS / p99 jitter
+   validation.
+6. **Decide whether to flip `XEMU_METAL_FRONT_FB_FALLBACK` default
    to ON** after the wider title sweep characterizes which title
    classes benefit / regress. Currently default OFF; project rule #2
-   (no shortcuts) prefers a faithful CRTC publish path.
-5. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
+   prefers a faithful CRTC publish path over shipping a known visual
+   bug class.
+7. **Track B (Audio listen-test for `XEMU_APU_LOCK_RELEASE`, still
    UNBLOCKED, GL-side, orthogonal to Metal):** A human listener
    plays Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice
    on. If clean: declare I5 fully shipped. If glitches: revert or
