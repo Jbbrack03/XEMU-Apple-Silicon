@@ -1,9 +1,67 @@
 # Handoff
 
-Last updated: 2026-05-04 (F1+F2+W3 baseline-lock repairs — flip-stall
-capture trigger, tracked canary gold artifact store, three W3 script
-repairs surfaced by first end-to-end gate run). Current branch:
+Last updated: 2026-05-04 (W4 unconditional-flush fix + magenta
+investigation: the previously-banner'd "PGR2/Rainbow drawable-magenta
+regression in autonomous shell" is reclassified as a workflow setup
+issue, NOT a renderer regression. W4's per-flush_draw call to
+pgraph_mtl_draw_flush_open_pass() was unconditional, defeating M5.7
+coalescing on every benchmark; gated behind a new dump_rt_active()
+accessor, restoring 96.8% coalescing rate). Current branch:
 `apple-silicon-performance`.
+
+**W4 unconditional-flush fix (2026-05-04 evening).** W4 introduced
+`pgraph_mtl_flush_draw` as a wrapper over `pgraph_mtl_flush_draw_inner`
+that unconditionally called `pgraph_mtl_draw_flush_open_pass()` and
+`pgraph_mtl_surface_get_color_texture()` after every guest draw,
+gating only the dump itself inside `pgraph_mtl_draw_dump_rt_after_flush_draw`.
+That defeated the M5.7 render-pass coalescing optimization on every
+benchmark run regardless of whether dumping was enabled — every guest
+draw forced an MSAA resolve and a fresh pass open. New accessor
+`pgraph_mtl_draw_dump_rt_active(void)` exposed in `mtl/draw.h`; the
+wrapper now early-returns when dumping is off. Validation: 60s PGR2
+profile-HDD/gameplay run shows `METAL_DRAW_PASS_COALESCED=11615`,
+`METAL_DRAW_PASS_OPENS=380` (96.8% coalescing rate, was 0% with
+unconditional flush). `METAL_PIPELINE_TRANSLATED_FAILED=0` (dot2
+declarations from 0f14ed8edf landed). Boot canary screenshot
+unchanged (Xbox boot animation rendered correctly).
+
+**Magenta investigation reclassified.** The 2026-05-04 F1+F2+W3
+baseline-lock attempt's report "PGR2/Rainbow drawable came up uniform
+magenta `(255,0,255)` despite the same env recipe as the morning
+2026-05-04 PASS runs" was misdiagnosed as an autonomous-shell vs
+foreground-GUI environmental difference. Empirical bisect (HEAD,
+0f14ed8edf, 046160d04d all reproduce magenta; profile-HDD +
+gameplay-script run shows real PGR2 content; smoke + master HDD
+shows magenta) confirms the regression cause is the **W3 regression
+gate's CANARY_TABLE recipe**, not a renderer-side regression:
+
+- Gold images live at `docs/apple-silicon/canary-baselines/<canary>/<frame>.png`,
+  dimensions 1280x931 (= macOS windowed `screencapture` of the SDL
+  window minus title bar, NOT in-renderer Metal drawable 1280x960).
+- Gold source-runs (e.g. `benchmark-runs/20260504-100458-pgr2`) used
+  `hdd_source: benchmark-runs/profile-prep/xbox_hdd.qcow2` (a profile
+  HDD with PGR2 progress saved) and `input_script: pgr2-gameplay.csv`
+  (recorded controller inputs that navigate to the menu).
+- Current `metal-canary-regress.sh` uses `pgr2-smoke.csv` (a no-op
+  placeholder per the file's own comment "Placeholder until a real
+  Project Gotham Racing 2 route is recorded.") and the master HDD via
+  `XEMU_BENCH_HDD_SOURCE` default. PGR2 with no inputs from a fresh
+  HDD cannot reach the menu state shown in the gold; the renderer
+  produces magenta because the present pipeline reads from a still-
+  uninitialized post-boot back-buffer (no draws to it yet).
+
+The W3 regression gate as currently designed cannot work without one
+of: (a) replacing gold images with frames CAPTURABLE by the smoke
+recipe (early Xbox-boot frames), or (b) recording real input scripts
+for each canary AND configuring the gate to use the profile HDD
+(`XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2`).
+Both options are queued; neither is a renderer correctness issue.
+
+**Boot canary remains valid as a regression check** — its source-run
+captured an early Xbox boot frame (frame 300) that IS reproducible
+from the smoke recipe (the boot animation runs before any disc-game
+takes over). The boot canary screenshot path through Metal at HEAD
+with the W4 fix produces visually-correct boot output.
 
 For the canonical Metal porting workflow, see metal-porting-workflow.md.
 

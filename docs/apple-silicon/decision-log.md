@@ -1,5 +1,104 @@
 # Decision Log
 
+## 2026-05-04 evening: W4 unconditional pass-flush fix + magenta investigation reclassified
+
+**Context.** The 2026-05-04 F1+F2+W3 baseline-lock attempt's "Investigate
+PGR2/Rainbow drawable-magenta regression in autonomous shell" (filed as
+the highest-priority next-session action) suggested an autonomous-shell
+vs foreground-GUI environmental difference at HUD-pre-present time. The
+hypothesis was empirically wrong on two counts.
+
+**Decision.** The wrapper `pgraph_mtl_flush_draw` introduced by W4
+(`5a3e520e26 Add per-draw color RT dump for Metal and GL renderers`)
+unconditionally called `pgraph_mtl_draw_flush_open_pass()` and
+`pgraph_mtl_surface_get_color_texture()` after every guest draw,
+gating only the dump itself inside the `pgraph_mtl_draw_dump_rt_after_flush_draw`
+helper via `s_dump_enabled`. This defeated the M5.7 render-pass
+coalescing optimization on every benchmark run regardless of whether
+dumping was enabled. Fix: add a public accessor
+`pgraph_mtl_draw_dump_rt_active(void)` exposed in `mtl/draw.h` and
+gate the entire post-`flush_draw_inner` work behind it. When
+XEMU_METAL_DUMP_DRAW_RT is unset the wrapper now early-returns to
+preserve the M5.7 coalescing contract; when set the per-draw flush
++ resolve cost is accepted as a debug-mode tax.
+
+**Empirical validation.**
+
+- Pre-fix (W4 unconditional flush): `METAL_DRAW_PASS_OPENS=60`,
+  `METAL_DRAW_PASS_COALESCED=0`, `METAL_DRAW_PASS_FLUSHES=30` per
+  interval — every guest draw spawned its own pass open + flush.
+- Post-fix (60s PGR2 profile-HDD/gameplay): `METAL_DRAW_COUNT=11995`,
+  `METAL_DRAW_PASS_OPENS=380`, `METAL_DRAW_PASS_COALESCED=11615`
+  (96.8% coalescing rate; 11615 of 11995 draws joined existing
+  passes). `METAL_PIPELINE_TRANSLATED_FAILED=0` (the dot2 GLSL
+  declarations from `0f14ed8edf` work correctly at HEAD). Boot canary
+  Metal screenshot at frame 300 still shows the Xbox boot animation
+  rendered correctly.
+
+**Magenta investigation reclassified.** The "uniform `(255,0,255)`
+drawable" observed during the W3 baseline-lock attempt is NOT a
+renderer regression in any tested commit. Bisect: HEAD with the W4
+fix, HEAD without it (W4 ToT), 0f14ed8edf (W4 commit), and 046160d04d
+(morning-gold commit) ALL reproduce the magenta when run with the
+W3 regression-gate recipe (`pgr2-smoke.csv` placeholder + master HDD
+via `XEMU_BENCH_HDD_SOURCE` default). Re-running with the morning's
+recipe (`pgr2-gameplay.csv` + `benchmark-runs/profile-prep/xbox_hdd.qcow2`)
+at HEAD with the fix produces real PGR2 game content. The cause is
+the W3 regression-gate workflow, not the renderer:
+
+- Gold images at `docs/apple-silicon/canary-baselines/` are
+  1280x931 (= macOS windowed `screencapture` of the SDL window minus
+  title bar), NOT the in-renderer Metal 1280x960 drawable. They were
+  captured INTERACTIVELY from a session that booted PGR2 to its menu
+  via `pgr2-gameplay.csv` recorded inputs against the persisted profile
+  HDD (which has PGR2 progress saved).
+- `metal-canary-regress.sh`'s CANARY_TABLE specifies
+  `pgr2-smoke.csv` (a single-line "no-op" placeholder per the file's
+  own comment) and the gate uses `XEMU_BENCH_HDD_SOURCE` default
+  (master HDD, no PGR2 progress). PGR2 with no inputs from a fresh
+  HDD cannot reach the menu state shown in the gold; the renderer
+  produces magenta because the present pipeline reads from a
+  still-uninitialized post-boot back-buffer (no draws to it yet).
+
+**Why boot canary still works.** The boot/Crimson source-run
+captured an early Xbox boot frame (frame 300) that IS reproducible
+from the smoke recipe — the boot animation runs before any disc-game
+takes over and is independent of HDD profile state.
+
+**Consequences for the W3 gate.** The gate is mechanically correct
+(it does compare gold vs current via per-pixel diff) but its INPUT
+recipe cannot reach the gold's game state. To make it useful, choose:
+(A) replace gold images with frames CAPTURABLE by the smoke recipe
+(early boot frames where rendering is reproducible from a fresh HDD),
+or (B) record real input scripts for each canary AND configure the
+gate to use the profile HDD via
+`XEMU_BENCH_HDD_SOURCE=benchmark-runs/profile-prep/xbox_hdd.qcow2`.
+Option A is more pragmatic for autonomous regression checking;
+option B is more correct for actual visual canary validation. Filed
+as task #2 (lock per-canary baseline thresholds — depends on choosing
+option A or B).
+
+**Files changed.**
+
+- `hw/xbox/nv2a/pgraph/mtl/draw.h`: declared `pgraph_mtl_draw_dump_rt_active(void)`.
+- `hw/xbox/nv2a/pgraph/mtl/draw.mm`: defined `pgraph_mtl_draw_dump_rt_active`
+  returning `s_dump_enabled`.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c`: gated the pass-flush + texture
+  lookup in `pgraph_mtl_flush_draw` behind the new accessor; added
+  comment block explaining the M5.7 regression W4 caused.
+- `docs/apple-silicon/handoff.md`: updated banner with W4 fix +
+  magenta investigation reclassification.
+
+**Validation.** `./build.sh -a arm64 --skip-shader-validation` PASS.
+`codesign --verify --deep --strict --verbose=2 dist/xemu.app` PASS.
+PGR2 60s profile-HDD/gameplay run (Metal): `METAL_DRAW_PASS_COALESCED`
+ratio 96.8%, `METAL_PIPELINE_TRANSLATED_FAILED=0`, no spurious
+shader-translate errors. Boot Metal screenshot frame 300: Xbox boot
+animation rendered correctly (per-pixel content matches the gold's
+visual semantics).
+
+---
+
 ## 2026-05-04: F2 — canary gold artifact store + W3 first-end-to-end lock-attempt repairs
 
 **Context.** The 2026-05-04 W6 close-out captured F2 (canary gold-image

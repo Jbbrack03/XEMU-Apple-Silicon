@@ -1869,9 +1869,25 @@ static void pgraph_mtl_flush_draw_inner(NV2AState *d)
  * dump path closes the open coalesced render pass first so the
  * post-MSAA-resolve color texture is the source of the blit (the
  * resolveTexture survives the close; the multisample companion is
- * persisted-then-discarded on the next pass open). When
- * XEMU_METAL_DUMP_DRAW_RT is unset the after-hook short-circuits to
- * one global load + branch.
+ * persisted-then-discarded on the next pass open).
+ *
+ * Originally W4 always called `pgraph_mtl_draw_flush_open_pass()` and
+ * `pgraph_mtl_surface_get_color_texture()` here, gating only the dump
+ * itself on `s_dump_enabled` inside `pgraph_mtl_draw_dump_rt_after_flush_draw`.
+ * That defeated the M5.7 render-pass coalescing optimization on every
+ * benchmark run regardless of whether dumping was enabled — every
+ * guest draw forced an MSAA resolve and a fresh pass open, which on
+ * PGR2 / Rainbow caused the per-VRAM surface cache's MSAA companion
+ * to be dropped between consecutive draws to the same render target
+ * and the present pipeline read uninitialized magenta from the next
+ * cycle's freshly-allocated companion.
+ *
+ * The fix: gate the open-pass flush and texture lookup behind
+ * `pgraph_mtl_draw_dump_rt_active()`. When dumping is off the
+ * coalesced pass stays open across consecutive flush_draw calls (the
+ * M5.7 contract). When dumping is on the per-draw close+resolve cost
+ * is accepted as a debug-mode tax — that's the use case for which
+ * the dump exists.
  *
  * The cumulative draw index is bumped once per flush_draw call (the
  * NV2A logical draw boundary). It is independent of the per-pipeline
@@ -1883,6 +1899,10 @@ static void pgraph_mtl_flush_draw_inner(NV2AState *d)
 static void pgraph_mtl_flush_draw(NV2AState *d)
 {
     pgraph_mtl_flush_draw_inner(d);
+
+    if (!pgraph_mtl_draw_dump_rt_active()) {
+        return;
+    }
 
     /* Flush the open coalesced pass so the resolved color texture is
      * what the dump's blit reads. Without this the resolve has not

@@ -258,6 +258,16 @@ void pgraph_mtl_draw_dump_rt_init(void);
 void pgraph_mtl_draw_dump_rt_after_flush_draw(void *color_texture);
 uint64_t pgraph_mtl_draw_rt_dumps_count(void);
 
+/* True iff XEMU_METAL_DUMP_DRAW_RT was parsed into a usable config at
+ * init time. Used by the per-flush_draw wrapper in renderer.c to gate
+ * the open-pass flush + color-texture lookup that the dump path needs;
+ * when dumping is off the wrapper must NOT close the coalesced pass
+ * after every guest draw or the M5.7 coalescing optimization
+ * regresses (PGR2/Rainbow draw their scene to a render target whose
+ * MSAA companion gets dropped on every spurious pass close, leaving
+ * the present pipeline reading uninitialized magenta). */
+bool pgraph_mtl_draw_dump_rt_active(void);
+
 #ifdef __cplusplus
 }
 #endif

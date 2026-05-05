@@ -1389,3 +1389,8 @@ extern "C" uint64_t pgraph_mtl_draw_rt_dumps_count(void)
 {
     return atomic_load(&s_dump_count);
 }
+
+extern "C" bool pgraph_mtl_draw_dump_rt_active(void)
+{
+    return s_dump_enabled;
+}
