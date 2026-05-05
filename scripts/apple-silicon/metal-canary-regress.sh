@@ -7,8 +7,9 @@
 # Xbox boot+flubber) under the established opt-in flag recipe, captures a
 # single screenshot at the canary's frame ordinal via the in-renderer
 # `XEMU_METAL_SCREENSHOT_*` path, and per-pixel-diffs each shot against the
-# stored gold PNG under `benchmark-runs/visual-checks/`. Emits a markdown
-# report and JSON summary with PASS/FAIL.
+# stored gold PNG under `docs/apple-silicon/canary-baselines/` (see slice
+# F2; provenance in `MANIFEST.tsv`). Emits a markdown report and JSON
+# summary with PASS/FAIL.
 #
 # This is the "post-change smoke" tool from
 # `docs/apple-silicon/metal-porting-workflow.md` Phase 1 daily loop §3.5:
@@ -33,7 +34,8 @@ XEMU_BIN="${ROOT_DIR}/dist/xemu.app/Contents/MacOS/xemu"
 RUN_BENCHMARK="${ROOT_DIR}/scripts/apple-silicon/run-benchmark.sh"
 COMPARE_SCREENSHOTS="${ROOT_DIR}/scripts/apple-silicon/compare-screenshots.py"
 INPUT_SCRIPT_DIR="${ROOT_DIR}/scripts/apple-silicon/input-scripts"
-GOLD_DIR="${ROOT_DIR}/benchmark-runs/visual-checks"
+GOLD_DIR="${ROOT_DIR}/docs/apple-silicon/canary-baselines"
+MANIFEST_TSV="${GOLD_DIR}/MANIFEST.tsv"
 
 # Canary table — single source of truth.
 #
@@ -42,9 +44,17 @@ GOLD_DIR="${ROOT_DIR}/benchmark-runs/visual-checks"
 # - name             : alias the user passes to --canary
 # - game-alias       : value passed as run-benchmark.sh's <game> positional
 # - input-relpath    : path under scripts/apple-silicon/input-scripts/
-#                      relative to that dir; empty string = let
-#                      run-benchmark.sh use its DEFAULT_SCRIPT (noop.csv
-#                      for halo and boot per the launcher's case stmt)
+#                      relative to that dir. ALWAYS populated; the
+#                      launcher (run-benchmark.sh) reads positional 2 as
+#                      INPUT_SCRIPT unconditionally and positional 3 as
+#                      DURATION (run-benchmark.sh:200-201), so passing
+#                      just two positionals (`<game> <duration>`) makes
+#                      the launcher treat the duration as a filename and
+#                      INFRA-FAIL with "missing required file: <duration>".
+#                      Halo and SC2 default to noop.csv (no input);
+#                      boot rides on the `crimson` alias and uses
+#                      crimson-skies-smoke.csv to match the original
+#                      gold-capture environment.
 # - frame            : XEMU_METAL_SCREENSHOT_AT_FRAME (1-indexed end-of-
 #                      frame counter, NOT pgraph_mtl_present_total)
 # - duration         : seconds to keep xemu running. Tuned conservatively
@@ -57,15 +67,19 @@ GOLD_DIR="${ROOT_DIR}/benchmark-runs/visual-checks"
 #                      Runtime ratio is non-linear: cold shader compile
 #                      front-loads the first ~10 s. Headroom prevents a
 #                      false INFRA-FAIL when the host is under load.
-# - gold-basename    : file under benchmark-runs/visual-checks/ that the
-#                      captured screenshot is per-pixel-diffed against.
-#                      The handoff.md "PASS (visual canary)" bullets are
-#                      the source of truth for these names.
+# - gold-basename    : path under docs/apple-silicon/canary-baselines/
+#                      that the captured screenshot is per-pixel-diffed
+#                      against. F2 (2026-05-04) moved the golds out of
+#                      the gitignored benchmark-runs/visual-checks/ tree
+#                      into a tracked location; provenance is recorded
+#                      in MANIFEST.tsv (build_commit / build_date /
+#                      xemu_version / gpu_family / macos_version /
+#                      flags / source_run / threshold_pct).
 CANARY_TABLE='
-pgr2|pgr2|pgr2-smoke.csv|900|90|pgr2-gate-metal-msaa4-f900-after-msaa-store.png
-rainbow|rainbow|rainbow-six-3-smoke.csv|600|75|rainbow-gate-metal-msaa4-f600-after-msaa-store.png
-halo|halo||1200|120|halo-gate-metal-msaa4-f1200-after-msaa-store.png
-boot|crimson||300|60|boot-gate-metal-msaa4-f300-after-msaa-store.png
+pgr2|pgr2|pgr2-smoke.csv|900|90|pgr2/f900.png
+rainbow|rainbow|rainbow-six-3-smoke.csv|600|75|rainbow/f600.png
+halo|halo|noop.csv|1200|120|halo/f1200.png
+boot|crimson|crimson-skies-smoke.csv|300|60|boot/f300.png
 '
 # boot uses the `crimson` launcher alias because the Xbox-boot/flubber
 # screenshot was originally captured during a Crimson Skies run that hit
@@ -83,7 +97,8 @@ Single-renderer Metal canary regression gate (slice W3, 2026-05-04).
 Runs each named canary through the Metal renderer with the established
 green-canary env recipe, captures one screenshot at the canary's frame
 ordinal, and per-pixel-diffs it against the stored gold PNG under
-benchmark-runs/visual-checks/. Emits report.md + summary.json.
+docs/apple-silicon/canary-baselines/ (provenance: MANIFEST.tsv).
+Emits report.md + summary.json.
 
 Options:
   --canary <name>    Run only the named canary. Default: all four.
@@ -95,12 +110,13 @@ Options:
   --help             Print this usage.
 
 Canary table (hard-coded; source of truth = docs/apple-silicon/handoff.md
-"PASS (visual canary)" bullets):
+"PASS (visual canary)" bullets; gold provenance in
+docs/apple-silicon/canary-baselines/MANIFEST.tsv):
 
-  pgr2     -> input-scripts/pgr2-smoke.csv         frame 900   gold pgr2-gate-metal-msaa4-f900-after-msaa-store.png
-  rainbow  -> input-scripts/rainbow-six-3-smoke.csv frame 600  gold rainbow-gate-metal-msaa4-f600-after-msaa-store.png
-  halo     -> launcher default (noop.csv)          frame 1200  gold halo-gate-metal-msaa4-f1200-after-msaa-store.png
-  boot     -> launcher default (noop.csv)          frame 300   gold boot-gate-metal-msaa4-f300-after-msaa-store.png
+  pgr2     -> input-scripts/pgr2-smoke.csv          frame 900   gold pgr2/f900.png
+  rainbow  -> input-scripts/rainbow-six-3-smoke.csv frame 600   gold rainbow/f600.png
+  halo     -> input-scripts/noop.csv                frame 1200  gold halo/f1200.png
+  boot     -> input-scripts/crimson-skies-smoke.csv frame 300   gold boot/f300.png
 
 Env recipe (verbatim from handoff.md "PGR2 PASS" bullet; project rule #11
 forbids re-validating these — this script ASSERTS them):
@@ -240,6 +256,68 @@ if [[ "$PREFLIGHT_FAIL" -ne 0 ]]; then
     exit 2
 fi
 
+# --- MANIFEST.tsv validation (F2, 2026-05-04) -----------------------------
+#
+# The gold images live under a tracked directory; MANIFEST.tsv records the
+# build_commit / build_date / xemu_version / gpu_family / macos_version /
+# flags / source_run / threshold_pct that produced each gold. Validate the
+# manifest is present and that every row's gold_path resolves under
+# GOLD_DIR. INFRA-FAIL (exit 2) on any inconsistency. Pure bash + awk, no
+# jq dependency.
+
+if [[ ! -e "$MANIFEST_TSV" ]]; then
+    err "missing MANIFEST.tsv: $MANIFEST_TSV"
+    err "F2 requires the manifest to track gold provenance; cannot proceed"
+    exit 2
+fi
+
+# Header sanity: column count must be 12.
+manifest_cols="$(awk -F$'\t' 'NR==1 {print NF; exit}' "$MANIFEST_TSV")"
+if [[ "$manifest_cols" != "12" ]]; then
+    err "MANIFEST.tsv header has $manifest_cols columns, expected 12"
+    exit 2
+fi
+
+# Walk data rows, log + validate each.
+MANIFEST_FAIL=0
+declare -a MANIFEST_CANARIES=()
+declare -a MANIFEST_COMMITS=()
+while IFS=$'\t' read -r m_canary m_gold_path m_build_commit m_build_date \
+        m_xemu_version m_gpu_family m_macos_version m_flags m_frame \
+        m_source_run m_threshold_pct m_notes; do
+    [[ -z "$m_canary" ]] && continue
+    if [[ "$m_canary" == "canary" ]]; then continue; fi
+    resolved="${GOLD_DIR}/${m_gold_path}"
+    if [[ ! -e "$resolved" ]]; then
+        err "MANIFEST row for canary '$m_canary' references missing gold: $resolved"
+        MANIFEST_FAIL=1
+        continue
+    fi
+    printf '[manifest] canary=%s build_commit=%s gold=%s\n' \
+        "$m_canary" "$m_build_commit" "$m_gold_path"
+    MANIFEST_CANARIES+=("$m_canary")
+    MANIFEST_COMMITS+=("$m_build_commit")
+done < "$MANIFEST_TSV"
+
+if [[ "$MANIFEST_FAIL" -ne 0 ]]; then
+    err "MANIFEST.tsv validation failed; aborting"
+    exit 2
+fi
+
+# Lookup helper: emit the build_commit for a canary name (empty if unknown).
+manifest_commit_for() {
+    local want="$1"
+    local i=0
+    while [[ $i -lt ${#MANIFEST_CANARIES[@]} ]]; do
+        if [[ "${MANIFEST_CANARIES[$i]}" == "$want" ]]; then
+            printf '%s' "${MANIFEST_COMMITS[$i]}"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    printf ''
+}
+
 # --- output directory ------------------------------------------------------
 
 if [[ -z "$OUT_DIR" ]]; then
@@ -320,41 +398,27 @@ run_canary() {
     # Project rule #11: do not add or remove flags; this set is closed.
     # XEMU_BENCH_SCREENSHOT_BACKEND=none disables the macos-screencapture
     # cron so the only output PNG is the in-renderer single-shot capture.
+    # The launcher reads positional 2 as INPUT_SCRIPT and positional 3 as
+    # DURATION unconditionally (run-benchmark.sh:200-201); always pass the
+    # 3-positional form. CANARY_TABLE rows now always carry an explicit
+    # input path (noop.csv where the canary wants no input).
     local rc
     set +e
-    if [[ -n "$input_arg" ]]; then
-        XEMU_RENDERER=METAL \
-        XEMU_METAL_TRANSLATED_PIPELINE=1 \
-        XEMU_NATIVE_TRI_DEPTH=1 \
-        XEMU_NATIVE_QUAD=1 \
-        XEMU_PGRAPH_FAST_READ=1 \
-        XEMU_METAL_FRONT_FB_FALLBACK=1 \
-        XEMU_METAL_MSAA=4 \
-        XEMU_BENCH_SCREENSHOT_BACKEND=none \
-            "$RUN_BENCHMARK" \
-                --metal-screenshot "$shot_path" \
-                --metal-screenshot-at-frame "$frame" \
-                --metal-no-hud \
-                "$game" "$input_arg" "$duration" \
-            > "$launcher_log" 2>&1
-        rc=$?
-    else
-        XEMU_RENDERER=METAL \
-        XEMU_METAL_TRANSLATED_PIPELINE=1 \
-        XEMU_NATIVE_TRI_DEPTH=1 \
-        XEMU_NATIVE_QUAD=1 \
-        XEMU_PGRAPH_FAST_READ=1 \
-        XEMU_METAL_FRONT_FB_FALLBACK=1 \
-        XEMU_METAL_MSAA=4 \
-        XEMU_BENCH_SCREENSHOT_BACKEND=none \
-            "$RUN_BENCHMARK" \
-                --metal-screenshot "$shot_path" \
-                --metal-screenshot-at-frame "$frame" \
-                --metal-no-hud \
-                "$game" "$duration" \
-            > "$launcher_log" 2>&1
-        rc=$?
-    fi
+    XEMU_RENDERER=METAL \
+    XEMU_METAL_TRANSLATED_PIPELINE=1 \
+    XEMU_NATIVE_TRI_DEPTH=1 \
+    XEMU_NATIVE_QUAD=1 \
+    XEMU_PGRAPH_FAST_READ=1 \
+    XEMU_METAL_FRONT_FB_FALLBACK=1 \
+    XEMU_METAL_MSAA=4 \
+    XEMU_BENCH_SCREENSHOT_BACKEND=none \
+        "$RUN_BENCHMARK" \
+            --metal-screenshot "$shot_path" \
+            --metal-screenshot-at-frame "$frame" \
+            --metal-no-hud \
+            "$game" "$input_arg" "$duration" \
+        > "$launcher_log" 2>&1
+    rc=$?
     set -e
 
     if [[ $rc -ne 0 ]]; then
@@ -401,10 +465,18 @@ run_canary() {
     fi
 
     local stdout_file="$diff_dir/compare-stdout.txt"
+    # `--resize smaller` mirrors W6's metal-gl-compare.sh fix: when the
+    # gold and the live capture differ in dimensions (e.g. a renderer
+    # output-rect change between the gold-capture date and now), LANCZOS
+    # both down to the smaller dimensions before crop+diff. Without it
+    # compare-screenshots.py exits 1 on any pixel-dimension mismatch.
+    # The crop is still derived from the gold's dimensions, so the
+    # post-resize diff covers the gold's full visible region.
     set +e
     "$COMPARE_SCREENSHOTS" \
         "$gold_path" "$shot_path" \
         --crop "$crop" \
+        --resize smaller \
         --out-dir "$diff_dir" \
         > "$stdout_file" 2>&1
     local cmp_rc=$?
@@ -469,13 +541,15 @@ verdict_total="PASS"
 if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
 
 {
-    printf '# %s — metal-canary-regress report\n\n' "$verdict_total"
-    printf '- threshold: %s%% changed-pixels per canary\n' "$THRESHOLD"
-    printf '- canary filter: %s\n' "${CANARY_FILTER:-<all four>}"
-    printf '- env recipe: XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1 XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1 XEMU_METAL_FRONT_FB_FALLBACK=1 XEMU_METAL_MSAA=4\n'
-    printf '- metal_hud: off (--metal-no-hud passed; gold PNGs were recorded HUD-off, so the HUD overlay must be off here too)\n'
-    printf '- metal_validation: auto-on (W1 default for XEMU_RENDERER=METAL benchmark runs)\n'
-    printf '- harness log: %s\n' "$LOG_FILE"
+    # `--` after printf ends option processing — bash 3.2 (macOS default)
+    # treats a format string starting with `-` as an unknown option.
+    printf -- '# %s — metal-canary-regress report\n\n' "$verdict_total"
+    printf -- '- threshold: %s%% changed-pixels per canary\n' "$THRESHOLD"
+    printf -- '- canary filter: %s\n' "${CANARY_FILTER:-<all four>}"
+    printf -- '- env recipe: XEMU_RENDERER=METAL XEMU_METAL_TRANSLATED_PIPELINE=1 XEMU_NATIVE_TRI_DEPTH=1 XEMU_NATIVE_QUAD=1 XEMU_PGRAPH_FAST_READ=1 XEMU_METAL_FRONT_FB_FALLBACK=1 XEMU_METAL_MSAA=4\n'
+    printf -- '- metal_hud: off (--metal-no-hud passed; gold PNGs were recorded HUD-off, so the HUD overlay must be off here too)\n'
+    printf -- '- metal_validation: auto-on (W1 default for XEMU_RENDERER=METAL benchmark runs)\n'
+    printf -- '- harness log: %s\n' "$LOG_FILE"
     printf '\n## Per-canary results\n\n'
     printf '| canary | verdict | changed_pct | mae | rms | max_abs | screenshot | gold | run_dir |\n'
     printf '|--------|---------|------------:|----:|----:|--------:|------------|------|---------|\n'
@@ -491,6 +565,15 @@ if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
             printf -- '- %s\n' "$line"
         done
     fi
+    printf '\n## Manifest provenance\n\n'
+    printf '_Source: `docs/apple-silicon/canary-baselines/MANIFEST.tsv`_\n\n'
+    printf '| canary | build_commit |\n'
+    printf '|--------|--------------|\n'
+    i=0
+    while [[ $i -lt ${#MANIFEST_CANARIES[@]} ]]; do
+        printf '| %s | %s |\n' "${MANIFEST_CANARIES[$i]}" "${MANIFEST_COMMITS[$i]}"
+        i=$((i + 1))
+    done
     printf '\n_Generated by `scripts/apple-silicon/metal-canary-regress.sh` (slice W3, 2026-05-04)._\n'
 } > "$REPORT_MD"
 
@@ -504,6 +587,16 @@ if [[ "$PASS" -eq 0 ]]; then verdict_total="FAIL"; fi
     printf '  "canary_filter": "%s",\n' "${CANARY_FILTER:-all}"
     printf '  "metal_hud": "off",\n'
     printf '  "metal_validation": "auto-on",\n'
+    printf '  "manifest": {\n'
+    mfirst=1
+    mi=0
+    while [[ $mi -lt ${#MANIFEST_CANARIES[@]} ]]; do
+        if [[ $mfirst -eq 1 ]]; then mfirst=0; else printf ',\n'; fi
+        printf '    "%s": { "build_commit": "%s" }' \
+            "${MANIFEST_CANARIES[$mi]}" "${MANIFEST_COMMITS[$mi]}"
+        mi=$((mi + 1))
+    done
+    printf '\n  },\n'
     printf '  "canaries": [\n'
     first=1
     while IFS=$'\t' read -r name verdict changed_pct mae rms max_abs shot gold run_dir; do
