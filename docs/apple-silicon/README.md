@@ -222,6 +222,24 @@ visible regressions point first at the renderer.
 - `macos-input-research.md`: **(2026-05-02)** GameController.framework
   migration plan with proposed input slices N1–N6, independent of the
   renderer track.
+- `nv2a-feature-surface-research.md`: **(2026-05-05, Codex-revised
+  2026-05-06)** comprehensive feature catalog of the NV2A rendering
+  pipeline assembled from three independent witnesses (xemu source,
+  nxdk + pbkit, external docs). Foundation for the diagnostic-XBE
+  library. Read when designing or auditing diagnostic XBEs.
+- `diagnostic-xbe-plan.md`: **(2026-05-06 v2 — supersedes v1
+  d57742ef47 which was Codex-flagged BLOCKING)** implementation plan
+  for the diagnostic-XBE library. Self-validation tiers (host-side
+  capture primary, guest-side VRAM readback escape hatch), shared
+  infrastructure, manifest schema, per-XBE specs for the first 16
+  priority XBEs, build sequence. Read when implementing the
+  diagnostic-XBE library.
+- `real-xbox-oracle-feasibility.md`: **(2026-05-06)** feasibility
+  research for using a real OpenXenium-modded Original Xbox as a
+  hardware oracle. Architecture (XBDM debug kernel + PrometheOS),
+  Mac-feasibility matrix, unknowns to verify, effort estimates,
+  hardware retrieval decision pending. Read when planning Xbox-side
+  work.
 
 ## Next Session Start
 

@@ -1,5 +1,177 @@
 # Decision Log
 
+## 2026-05-06: Validation architecture pivot — host-side capture + real-Xbox oracle path identified
+
+**Context.** The 2026-05-05 SC2 Metal canonical-recipe replay
+produced clean perf counters
+(`METAL_PIPELINE_TRANSLATED_FAILED=0`, `METAL_PIPELINE_FALLBACKS=0`,
+`post_load_avg_fps=41.84`) but the user observed severe visual bugs
+in live test (top-half mirrored to bottom, missing floor, wrong
+colors). Single-renderer counters and short still-image strips
+failed to flag the divergence. The user pointed out — correctly —
+that xemu-GL is ~85 % correct, so a paired Metal-vs-GL diff is at
+most a divergence detector, not a correctness oracle.
+
+The 2026-05-05 evening conversation produced the diagnostic-XBE
+library direction: build self-validating Xbox homebrew test programs
+that exercise the NV2A rendering pipeline feature-by-feature, with
+each XBE's correct output mathematically derivable so external
+oracles aren't required. The NV2A feature surface research catalog
+(`docs/apple-silicon/nv2a-feature-surface-research.md`, committed
+1311826faf, Codex-revised fbe7d4c3f1) catalogued the pipeline as
+foundation. The diagnostic XBE plan v1 (committed d57742ef47)
+proposed CPU-side VRAM readback as the primary self-validation
+mechanism.
+
+**Codex review of plan v1 returned BLOCKING (2026-05-06).** Two
+critical findings:
+
+1. **CPU-side VRAM readback does not work on Metal by default.**
+   Metal renders into private GPU textures (`MTLStorageModePrivate`);
+   the front-fb-download path is default OFF; `WAIT_FOR_IDLE` calls
+   `surface_update(..., upload=false)` which Metal ignores for
+   downloads (`hw/xbox/nv2a/pgraph/mtl/renderer.c:1974`). The guest
+   can only read guest VRAM, but Metal hasn't written there. Most
+   first-wave PASS/FAIL results would be false on Metal.
+2. **`pb_agp_access()` is not a coherence bridge to Metal's
+   private surface cache.** It's safe for CPU-written buffers but
+   not for Metal-rendered RTs.
+
+Plus 10 high/medium/low findings (CRTC-publish category error,
+mirror coordinate confusion, stencil readback infeasible, DMA A/B
+weak, logic-ops-also-broken-on-Metal, flat-tri-depth-shouldn't-be-
+churned, reproducibility-vs-mask-conflict, run-benchmark-harness-
+hardcoded-aliases, etc.).
+
+**Architecture options considered:**
+
+- **Option A: diagnostic mode flag.** Force
+  `XEMU_METAL_FRONT_FB_DOWNLOAD=1` for all XBEs. Tests the download
+  path AND the renderer, conflated. Doesn't help with CRTC-publish
+  (host-side behavior). Doesn't catch bugs that get masked by
+  surface download.
+- **Option B: IMAGE_BLIT-based readback.** XBE renders to color RT,
+  then `NV097_IMAGE_BLIT` to CPU-readable scratch. Tests intermediate
+  state. Chicken-and-egg (IMAGE_BLIT itself needs validation).
+- **Option C: host-side capture as primary.** Tests what the user
+  actually sees. Scales to any future renderer. Handles host-side
+  behaviors (CRTC publish, fallback policies, MSAA resolve) natively.
+  Existing infrastructure already 70 % built (M13 `XEMU_METAL_SCREENSHOT_PATH`,
+  F1 flip-stall trigger, Quartz capture for GL).
+
+Decision: **adopt Option C with a small Option A escape hatch for
+guest-state probes** (Tier-1 host capture primary, Tier-2 guest
+VRAM readback for the small subset that needs it). All Codex
+findings get addressed.
+
+**Real-Xbox oracle path investigated (2026-05-06).** User has an
+OpenXenium-modded retail Xbox in storage with XBMC4Xbox + 2 TB HDD.
+User constraint: Apple-Silicon-Mac-only workstation; no PC; no
+HDMI capture card. The user proposed real Xbox as an oracle.
+
+Three parallel research streams ran:
+
+1. **Custom Xbox kernel landscape** (agent `adcf5a8b0b093e2d7`).
+   Verdict: no public *community* custom kernel does kernel-resident
+   TCP/framebuffer/input during retail-game gameplay. nxdk on Apple
+   Silicon CONFIRMED native (PR #667, May 2024). Stream 1 had a
+   blind spot: didn't consider Microsoft's debug kernel.
+2. **OpenXenium flashing + dashboard automation** (agent
+   `a7737ed210c887185`). Verdict: in-system flashing via
+   Xenium-Tools XBE fully Mac-feasible; PrometheOS REST API
+   recommended for chip-OS automation; XBMC4Xbox HTTP API supports
+   `RunXBE` + `autoexec.py` for unattended XBE launch; no
+   Wake-on-LAN means hardware mod required for remote power-on
+   (~$10 ESP32+IR or commercial XERC 2 XE; soldering); all
+   Mac-side tooling exists native or via Rosetta.
+3. **Framebuffer streaming + input injection prior art** (agent
+   `ac2b46e61736d3fbf`). **CRITICAL FINDING**: Microsoft's own
+   XBDM debug kernel service has `screenshot` command CONFIRMED on
+   OG Xbox XDK build 3521+; `autoinput` confirmed on Xbox 360,
+   UNCERTAIN on OG Xbox; debug kernels run retail games via
+   `RetailGameLoader`; multiple open-source macOS XBDM clients
+   exist; `nxdk_dyndxt` provides runtime XBDM-extension mechanism.
+
+Combined verdict: real-Xbox oracle path is **feasible, ~1-2 weeks
+of focused engineering, fully Mac-and-network-only after one-time
+Xbox retrieval and (optional) IR/relay power-on mod**. Architecture
+documented in `docs/apple-silicon/real-xbox-oracle-feasibility.md`.
+
+**Decisions taken.**
+
+1. **Diagnostic-XBE plan v1 (commit d57742ef47) superseded by v2**
+   (this commit). v2 inverts self-validation tier order: host-side
+   capture is now Tier 1 (primary, ~95 % of XBEs); guest-side VRAM
+   readback is Tier 2 (escape hatch for guest-state probes only,
+   ~5 % of XBEs); `NV097_GET_REPORT` Z-pass is Tier 3 (limited);
+   visual-only is Tier 4 (last resort). All 12 Codex findings
+   addressed; mapping table in v2 plan §10.
+
+2. **Real-Xbox oracle adopted as canonical reference when
+   available.** When the user retrieves and sets up the Xbox, the
+   reference oracle hierarchy becomes: real-Xbox capture (canonical)
+   > math-derived expected pixel buffer (audit material, used when
+   real-Xbox not available) > cross-renderer divergence detection
+   (triage signal only, not gate). Math derivation in XBE source
+   header still required — both for reviewer audit and as the
+   primary oracle when real-Xbox is unavailable; if real-Xbox and
+   math disagree, that's an actionable finding (catalog update or
+   XBE bug).
+
+3. **Hardware retrieval pending user decision.** Phases 1-2 of
+   `real-xbox-oracle-feasibility.md` (hardware bring-up, resolve
+   unknowns) require the Xbox plugged in. Phase 0 (Mac-side prep
+   — Python orchestrator + nxdk diagnostic XBE template +
+   `xbe-tests/lib/`) can run in parallel with the retrieval
+   decision.
+
+4. **Codex re-validation of v2 plan required before any new nxdk
+   source.** Per project rule #15. v1 BLOCKING verdict is the
+   prior; v2 must demonstrate all findings resolved.
+
+**Files changed this session:**
+
+- `docs/apple-silicon/real-xbox-oracle-feasibility.md`: NEW.
+  Comprehensive synthesis of three research streams. Architecture,
+  Mac-feasibility matrix, unknowns to verify, effort estimates,
+  sequencing, sources.
+- `docs/apple-silicon/diagnostic-xbe-plan.md`: REWRITTEN as v2.
+  All 12 Codex findings addressed. Self-validation tiers inverted.
+  Real-Xbox oracle integrated. Per-(renderer, flag-recipe)
+  expected-result manifest schema. v2 §10 documents the v1→v2
+  mapping.
+- `docs/apple-silicon/decision-log.md`: this entry.
+- `docs/apple-silicon/handoff.md`: banner updated with current
+  state.
+- `memory/project_real_xbox_oracle.md`: NEW (cross-session prior).
+- `memory/MEMORY.md`: index updated.
+
+**Codex transcripts:** Codex-validate plan v1 BLOCKING verdict
+preserved in conversation; cleanup of temp files per skill
+convention. Codex re-validate of v2 plan is the next step.
+
+**Supersession.**
+
+- The 2026-05-05 evening conversation's "≤1 % per-pixel diff vs
+  GL" framing as M15 default-on visual gate is **superseded by
+  this entry**. New M15 visual gate is "all priority XBEs PASS on
+  Metal against either real-Xbox reference or math-derived
+  reference." GL/Cxbx-Reloaded cross-renderer comparison becomes
+  advisory, not gating.
+- The 2026-05-05 diagnostic-XBE plan v1 (commit d57742ef47) is
+  **superseded** by v2 in this commit.
+
+**Next session priorities (carry-over).**
+
+1. Codex re-validate diagnostic-XBE plan v2 (this commit).
+2. If verdict is non-BLOCKING: begin Phase 0 (Mac-side prep)
+   immediately — Python orchestrator skeleton + `xbe-tests/lib/`
+   + first 3 XBEs (mirror, color-channel, depth-floor).
+3. User decision on Xbox retrieval. Phase 0 work proceeds in
+   parallel; Phases 1-4 of feasibility doc gate on retrieval.
+
+---
+
 ## 2026-05-05: I5 (`XEMU_APU_LOCK_RELEASE`) closed via SC2 single-title audio listen-test
 
 **Context.** I5 (Apple Silicon APU voice-lock release slice) was

@@ -1,10 +1,69 @@
 # Handoff
 
-Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+Last updated: 2026-05-06 (validation architecture pivot —
+host-side capture + real-Xbox oracle path identified). See
+decision-log entry "2026-05-06: Validation architecture pivot"
+for full context.
+
+**TOP OF STACK 2026-05-06.** The 2026-05-05 SC2 Metal canonical-
+recipe replay (counters clean, 41.84 FPS) revealed visible
+rendering bugs (top-mirrored, missing floor, wrong colors) that
+counter-only validation could not catch. The user's framing:
+xemu-GL is ~85 % correct, so paired Metal-vs-GL diff is a
+divergence detector at best, not a correctness oracle. Project
+direction pivoted to building a diagnostic-XBE library where
+each XBE's correct output is mathematically derivable.
+
+Today's progress:
+
+1. **NV2A feature surface research catalog** committed
+   1311826faf, Codex-revised fbe7d4c3f1
+   (`docs/apple-silicon/nv2a-feature-surface-research.md`).
+   Three independent witnesses (xemu source, nxdk/pbkit,
+   external docs) catalogued 42 texture format codes, 19
+   texture-shader stage modes, full vertex shader ISA, full
+   register-combiner state machine, 13 cross-witness
+   disagreements, 25+ emulation pitfalls.
+2. **Diagnostic-XBE plan v1** (committed d57742ef47) Codex-
+   flagged BLOCKING — CPU-side VRAM readback doesn't work on
+   Metal by default. Plan v2 (this commit) inverts self-
+   validation tiers: host-side capture is now primary,
+   guest-side VRAM readback is escape hatch only. All 12
+   Codex findings addressed.
+3. **Real-Xbox oracle path** investigated via three parallel
+   research streams. Verdict: **feasible, ~1-2 weeks, fully
+   Mac-and-network-only**. Architecture: Microsoft's XBDM
+   debug kernel (`screenshot` + possibly `autoinput`) on one
+   OpenXenium bank + PrometheOS chip OS for REST-API control.
+   Documented in `docs/apple-silicon/real-xbox-oracle-feasibility.md`.
+
+**Hardware retrieval pending user decision.** Mac-side prep
+work (Python orchestrator skeleton + nxdk diagnostic XBE
+template + `xbe-tests/lib/`) can proceed in parallel.
+
+**Next session priorities:**
+
+1. Codex re-validate diagnostic-XBE plan v2 (this commit).
+   v1 returned BLOCKING; v2 must demonstrate all findings
+   resolved before any new nxdk source is written.
+2. If verdict is non-BLOCKING: begin Phase 0 (Mac-side prep)
+   per `diagnostic-xbe-plan.md` §7. Build `xbe-tests/lib/` +
+   `lib-smoke` XBE + harness skeleton + first 3 priority XBEs
+   (mirror, color-channel, depth-floor).
+3. User decision on Xbox retrieval. Phase 0 work proceeds in
+   parallel; Phases 1-4 of feasibility doc gate on retrieval.
+
+The earlier banner content (Crimson reclassification, harness
+fixes, F3, SC2 route, audio listen-test closure) is preserved
+verbatim below for empirical audit trail.
+
+---
+
+**Earlier banner — 2026-05-05 (Crimson Metal "blocker" reclassified as
 config issue; three harness fixes; F3 snapshot-anchor slice opened;
 SC2 input route recorded; audio listen-test closed via SC2
 single-title verification — user-authoritative deviation from
-canonical rubric).
+canonical rubric).**
 Crimson Skies is **not** a Metal renderer regression — running the
 existing `crimson-gameplay.csv` script with the canonical M15 Metal
 recipe explicit (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`)

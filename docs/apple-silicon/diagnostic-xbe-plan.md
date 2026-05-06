@@ -1,290 +1,369 @@
-# Diagnostic XBE Library — Implementation Plan
+# Diagnostic XBE Library — Implementation Plan (v2)
 
-Last updated: 2026-05-05.
-Status: PLANNING. Codex-validation pending before any nxdk source is
-written (project rule #15).
+Last updated: 2026-05-06.
+Status: PLANNING. Revised post-Codex review and post real-Xbox
+oracle feasibility research. Codex re-validation pending before any
+nxdk source is written.
 
-This document translates the
-[NV2A feature surface research catalog](nv2a-feature-surface-research.md)
-into a concrete per-XBE design. The catalog answers "what is in the
-NV2A rendering pipeline." This plan answers "what XBEs do we build,
-in what order, with what self-validation, and how do we know each
-one is correct."
+This plan supersedes v1 (committed d57742ef47) which Codex flagged
+BLOCKING because the v1 self-validation contract assumed CPU-side
+VRAM readback worked on Metal — it does not without
+`XEMU_METAL_FRONT_FB_DOWNLOAD=1`, and even then it tests an
+intermediate state rather than the visible output. v2 inverts the
+self-validation tier order: host-side capture is now primary, with
+real-Xbox-captured frames as the canonical reference oracle when
+available.
+
+This plan is the implementation companion to:
+
+- `nv2a-feature-surface-research.md` — what the NV2A pipeline is.
+- `real-xbox-oracle-feasibility.md` — how the real-Xbox oracle path
+  works (XBDM + PrometheOS + Mac-side Python orchestrator).
 
 ## 1. Purpose
 
-Build a library of self-validating Xbox homebrew test programs (XBEs)
-that exercise the NV2A rendering pipeline feature-by-feature. Each
-XBE is its own oracle — its correct visual output is mathematically
-derivable and (where possible) verified at runtime via CPU-side VRAM
-readback, with `PASS`/`FAIL` reported on-screen via `pb_print` and
-to stderr via the existing xemu logging path.
+Build a library of diagnostic Xbox homebrew test programs (XBEs)
+that exercise the NV2A rendering pipeline feature-by-feature, with
+each XBE's correct output validated by host-side framebuffer capture
+and compared either against:
 
-The library replaces three failure modes already observed on this
-project:
+1. **A real-Xbox-captured reference frame** (canonical oracle, when
+   real Xbox is available), OR
+2. **A math-derived expected pixel buffer** (audit material; same
+   math the XBE source-file header derives) when real Xbox is not
+   available.
 
-1. **Counter-only validation says "renderer healthy" while the
-   rendering is visually broken** (2026-05-05 SC2 Metal canonical-
-   recipe replay: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
-   `METAL_PIPELINE_FALLBACKS=0`, but the user observed top-mirrored-
-   to-bottom, missing floor, wrong colors live).
-2. **xemu-GL is not a correctness oracle** — per the user, GL
-   renders games ~85 % correctly. A paired Metal-vs-GL diff is at
-   most a divergence detector; agreement just inherits GL's bugs.
-3. **YouTube reference + structural sanity oracles** are useful for
-   spot-checks but cannot catch the specific NV2A semantics bugs
-   that live below the level of "scene composition looks right."
+The library replaces three failure modes already observed:
 
-The diagnostic-XBE library replaces all three with mathematically-
-derivable correctness claims. When all priority XBEs pass on Metal,
-we have actual evidence that the renderer is correct on the feature
-surface they cover. When a real game then misrenders, we know the
-bug is *outside* the feature surface tested — narrowing the search
-space substantially.
+1. Counter-only validation says "renderer healthy" while rendering
+   is visually broken (2026-05-05 SC2 Metal canonical-recipe replay).
+2. xemu-GL is ~85 % correct so paired Metal-vs-GL diff is a
+   divergence detector, not a correctness oracle.
+3. YouTube reference + structural sanity oracles spot-check but
+   cannot catch NV2A-semantics bugs below the level of "scene
+   composition looks right."
+
+When all priority XBEs pass on Metal against either oracle, we have
+actual evidence the renderer is correct on the feature surface they
+cover. When a real game then misrenders, the bug is *outside* that
+feature surface — narrowing the search.
 
 ## 2. Design principles
 
-### 2.1 Self-validation tiers (priority order)
+### 2.1 Self-validation tiers (v2 — inverted from v1)
 
-Each XBE picks one mechanism from this priority order. The XBE's
-source-file header MUST declare which it uses and why others were
-not suitable.
+Each XBE picks one mechanism. The XBE's source-file header MUST
+declare which it uses and why.
 
-**Tier 1 — CPU-side VRAM readback.** The XBE runs in the Xbox
-guest. After issuing `pb_finished()` and waiting for GPU completion
-via `pb_wait_until_gr_not_busy()`, the XBE reads pixels straight
-out of the back-buffer (or a render-target VRAM offset) via plain
-pointer dereference, decodes the expected color/depth/stencil per
-the test's math, and renders `PASS` or `FAIL [diagnostic info]` via
-`pb_print` text overlay.
+**Tier 1 — Host-side capture (primary, ~95 % of XBEs).** The XBE
+renders its test pattern at guest 640×480 (forced; see §2.6). The
+host captures the post-HUD, pre-present drawable byte-identical to
+what's displayed:
 
-This is the **default**. Works on any renderer; mathematically
-deterministic; independent of any external oracle.
+- On **xemu**, via the existing `XEMU_METAL_SCREENSHOT_PATH` and
+  the F1 deterministic flip-stall trigger
+  (`XEMU_CAPTURE_AT_FLIP_STALL=N`). Captures the actual visible
+  output — no surface-download dependency, no
+  Metal-private-texture coherency issue.
+- On **real Xbox** (when available), via XBDM's `screenshot`
+  command on TCP/731 (debug-kernel boot path), OR via the XBE
+  itself sending the framebuffer through `libnxdk_net` (Cerbios
+  boot path).
 
-**Tier 2 — RT-as-texture sampling.** When CPU-side decode is
-awkward (MSAA-resolved output, stencil readback, palette-decoded
-texel), the XBE binds the just-rendered RT as a texture in a
-follow-up draw, samples the relevant texel, and outputs it as a
-solid-color block at a known screen position. Tier-1 readback
-then verifies that block.
+The harness compares the captured frame to either the real-Xbox
+reference (canonical) or the math-derived expected pixel buffer.
 
-**Tier 3 — `NV097_GET_REPORT` Z-pass count.** Z-pass-only,
-renderer-dependent (Metal currently writes 0 unconditionally —
-`mtl/renderer.c:1917-1920`). Use as a **secondary** liveness
-counter alongside Tier 1, never as the primary mechanism.
+**Tier 2 — Guest-side VRAM readback (escape hatch, ~5 % of XBEs).**
+Only for XBEs that legitimately test guest-visible state, not
+host-rendered output. Examples: "does `NV097_GET_REPORT` write the
+right Z-pass count to the report DMA?", "does `NV097_IMAGE_BLIT`
+preserve guest VRAM?". The XBE waits for GPU completion (`pb_finished()`,
+`pb_wait_until_gr_not_busy()`), reads VRAM via `pb_agp_access()`,
+verifies CPU-side, encodes the verdict into the rendered output for
+host capture.
 
-**Tier 4 — Visual-only reference.** Where neither readback nor
-texture sampling is feasible (gamma test, display-side post-process
-test), the XBE renders side-by-side expected vs actual reference
-patterns and asks the operator to visually confirm. The XBE's
-header must explicitly note that no on-GPU self-check is possible
-and explain why. The XBE manifest tags it `tier4`. These are last-
-resort.
+Caveat: Tier 2 on Metal **requires either `XEMU_METAL_FRONT_FB_DOWNLOAD=1`
+or an explicit IMAGE_BLIT to a CPU-readable scratch buffer** for
+any value the renderer wrote. Manifest declares which prerequisites
+each XBE needs.
 
-### 2.2 PASS/FAIL banner format
+**Tier 3 — `NV097_GET_REPORT` Z-pass count (rarely useful).**
+Z-pass-only, renderer-dependent. Metal currently writes 0
+unconditionally (`mtl/renderer.c:1917-1920`) — so any Tier-3 XBE
+will FAIL on Metal until that's implemented. Use only for guest-
+state probes that explicitly test report-DMA writeback (one or two
+XBEs total).
 
-Every XBE renders a top-of-screen banner:
+**Tier 4 — Visual-only operator confirmation (last resort).** For
+XBEs where neither host capture nor guest readback is feasible
+(display-side gamma / post-process tests). Source-file header must
+explain why no on-GPU oracle is possible. Manifest tags `tier4`.
+
+### 2.2 Reference oracle hierarchy
+
+For Tier 1 host-side capture, the comparison reference is selected
+in priority order:
+
+1. **Real-Xbox capture** — canonical. Captured once per XBE per
+   `(renderer, flag-recipe)` tuple via XBDM `screenshot` or XBE-
+   side `libnxdk_net` upload. Stored as
+   `docs/apple-silicon/xbox-real-references/<xbe-id>/<frame-id>.png`
+   plus a manifest entry. The XBE's math derivation must agree with
+   the captured pixels; if they disagree, either the math is wrong
+   (we update the XBE) or NV2A has undocumented behavior (we update
+   the catalog).
+2. **Math-derived pixel buffer** — generated by a per-XBE
+   `expected.py` Python module that encodes the same math as the
+   XBE source-file header. Used when no real-Xbox capture is
+   available. Audit-friendly: a reviewer can read the XBE's header,
+   read `expected.py`, and confirm they say the same thing.
+3. **Cross-renderer divergence detection** — running the XBE on
+   xemu-GL and xemu-Metal and diffing the captures. Useful as a
+   "look here" signal when neither real-Xbox nor math reference is
+   available, but never a PASS/FAIL gate by itself (consistent with
+   the project's "GL is ~85 % correct" framing).
+
+### 2.3 PASS/FAIL banner format (advisory; harness is the authority)
+
+The XBE renders a banner using `pb_print` for human spot-checking
+during development:
 
 ```
-Line 0: <XBE-ID>: PASS
-Line 1: <feature> | <renderer-detected> | <frame-count>
+Line 0: <XBE-ID>: PASS (or FAIL or PENDING)
+Line 1: <feature> | <renderer-detected> | <frame>
+Line 2-N: <diagnostic-X> on FAIL
 ```
 
-or on failure:
+For Tier 1 XBEs, the banner is informational — the host harness
+makes the authoritative PASS/FAIL determination by comparing the
+captured frame to the reference. For Tier 2 XBEs, the banner is
+load-bearing because the verdict comes from guest-side VRAM
+inspection.
 
-```
-Line 0: <XBE-ID>: FAIL
-Line 1: <feature> | <renderer-detected> | <frame-count>
-Line 2: <diagnostic-1>
-Line 3: <diagnostic-2>
-...
-```
+### 2.4 Reproducibility (revised)
 
-The banner is rendered via `pb_print` after `pb_draw_text_screen()`
-so it composites over the test's draw output. `<XBE-ID>` is the
-test's short slug (e.g., `mirror`, `color-channel`); `<feature>` is
-the catalog section reference (e.g., `§A.6 Z perspective`);
-`<renderer-detected>` is best-effort detected at runtime by reading
-GPU register signatures the renderer exposes (W1 source patterns
-under `pgraph_query_gpu_props`).
+Every XBE produces **byte-identical-after-applying-mask** captured
+output across two cold runs on the same renderer. The masked
+regions (frame counters, banners with timestamps, etc.) are
+declared in `manifest.json::non_deterministic_regions` and
+subtracted from the comparison. All other pixels must match
+byte-exactly across runs.
 
-The diagnostic lines are the XBE's chance to say *why* it failed —
-e.g., `expected pixel (640,100)=0xFFFFFFFF, got 0xFF00FFFF`,
-`mirror at (640,860)`, `mip-3 base offset 0xC000 != 0xA000`.
+For first-wave XBEs, all rendered content during the captured frame
+is fully deterministic — banners and counters render only on
+debug/visual-inspection frames captured at a separate ordinal.
 
-### 2.3 Reproducibility
+### 2.5 Math derivation as audit material
 
-Every XBE must produce **byte-identical** rendered output across
-two cold runs on the same renderer. No timing leaks, no
-uninitialized memory, no non-deterministic input. The XBE harness
-in `run-benchmark.sh` will run each XBE twice in succession and
-fail if the captured outputs diverge.
+The XBE source-file header derives the expected output from first
+principles (NV2A method semantics + math + W1 source line citations
+from the catalog). The paired `expected.py` encodes the same math
+in Python form. A reviewer auditing the XBE without running it can
+confirm "yes, the math says this should output that." If the
+derivation can't fit in the header without hand-waving, the XBE
+isn't isolated enough yet — split it.
 
-XBEs that have legitimate non-determinism (e.g., a frame-count
-display ticking) must isolate it to a specific sub-region of the
-frame and exclude that region from the readback comparison; the
-XBE manifest declares the excluded region.
+When real-Xbox captures are available, **math and real-Xbox must
+agree.** Disagreement is an actionable finding: either the math is
+wrong (we update) or NV2A has undocumented behavior (we update the
+catalog).
 
-### 2.4 No reliance on external oracles
+### 2.6 Diagnostic-mode prerequisites
 
-The XBE's correctness argument is encoded in its source. The
-header comment derives the expected output from first principles
-(NV2A method semantics + math + W1 source line citations). A
-reviewer auditing the XBE without running it can confirm "yes,
-the math says this should output that." If the derivation can't
-fit in the header without hand-waving, the XBE isn't isolated
-enough yet — split it.
+All diagnostic XBEs run with these settings, applied via a single
+`--xbe-mode` switch in `run-benchmark.sh`:
 
-### 2.5 Project-rule alignment
+- `XEMU_DISPLAY_SCALE=1` (forces guest 640×480 = host 640×480 ;
+  resolves Codex finding #3 about coordinate confusion).
+- `XEMU_METAL_HUD=0` (already exposed via `--metal-no-hud`; ensures
+  clean drawable for capture).
+- `XEMU_METAL_VALIDATION=1` (catches API misuse during development).
+- `XEMU_CAPTURE_AT_FLIP_STALL=<N>` (deterministic frame trigger;
+  the XBE issues exactly one `NV097_FLIP_STALL` at the validation
+  point).
+- `XEMU_CAPTURE_FLIP_STALL_SENTINEL=<path>` (sentinel for cross-leg
+  sync; harness watches for it).
+- `XEMU_PERF_LOG=0` (no perf-log noise during diagnostic runs).
 
-- **No guessing (rule #1):** every claim in the XBE header cites
-  the catalog or a specific NV097 method dispatch in `pgraph.c`.
+For Tier-2 XBEs that need surface download, the manifest declares
+`requires_flags: ["XEMU_METAL_FRONT_FB_DOWNLOAD=1"]` and the
+harness sets it.
+
+### 2.7 No reliance on external oracles
+
+The XBE's correctness argument is encoded in (a) its source header,
+(b) its paired `expected.py`, and (c) a real-Xbox capture if
+available. YouTube footage, GL-as-reference, and "vague mental
+model of how the game looks" are explicitly NOT reference oracles
+for the diagnostic-XBE library.
+
+### 2.8 Project-rule alignment
+
+- **No guessing (rule #1):** every XBE source claim cites the
+  catalog or a specific NV097 method dispatch in `pgraph.c`.
 - **Build tools when stuck (rule #5):** the diagnostic-XBE library
   IS the tool for "I can't tell whether a renderer is correct."
-- **Don't re-validate closed default-on flags (rule #11):** XBEs
-  that cover the geometry-shader-bypass paths (`XEMU_NATIVE_QUAD`,
-  `XEMU_NATIVE_TRI_DEPTH`, `XEMU_PGRAPH_FAST_READ`) become the
-  regression gates; existing `validate-native-tri-depth.sh`
-  becomes a wrapper that runs the relevant XBEs.
-- **Codex-validate the plan and the changes (rule #15):** this
-  plan goes through `/codex-validate plan` before any nxdk
+- **Don't re-validate closed default-on flags (rule #11):** the
+  existing `flat-tri-depth` XBE is **left untouched**. New XBEs
+  go in new directories. Resolves Codex finding #10.
+- **Codex-validate the plan and the changes (rule #15):** this v2
+  plan goes through `/codex-validate plan` before any new nxdk
   source is written; every batch of new XBEs goes through
   `/codex-validate changes` before commit.
 
 ## 3. Shared infrastructure
 
-Building 60-80 XBEs against raw pbkit will produce ~60 % copy-
-pasted code. Factor out shared pieces into a small library
-under `xbe-tests/lib/` (referenced by each XBE's Makefile).
+Split into XBE-side (runs on the Xbox guest) and harness-side
+(runs on the Mac).
 
-### 3.1 Library layout
+### 3.1 XBE-side library (`xbe-tests/lib/`)
+
+Pure rendering and minimal frame-loop helpers. Banner is a nice-to-
+have for human spot-check, not load-bearing.
 
 ```
 xbe-tests/
 ├── lib/
-│   ├── xbed_runtime.h          // shared types, frame-loop helpers
-│   ├── xbed_runtime.c          // pb_init wrapper, vbl loop, clear
-│   ├── xbed_readback.h         // CPU-side VRAM readback decoders
-│   ├── xbed_readback.c         // per-format pixel decoders
-│   ├── xbed_banner.h           // PASS/FAIL banner API
-│   ├── xbed_banner.c           // pb_print-based banner renderer
-│   ├── xbed_vertex.h           // vertex/index buffer helpers
-│   ├── xbed_vertex.c           // common attribute-array setup
-│   ├── xbed_compare.h          // per-pixel comparison primitives
-│   └── xbed_compare.c          // exact / epsilon / region-mask compare
-├── mirror/                     // first XBE
-│   ├── main.c
-│   ├── vs.vs.cg
-│   ├── ps.ps.cg
-│   ├── Makefile
-│   ├── manifest.json           // expected results per renderer
-│   └── README.md
+│   ├── xbed_runtime.h            // frame-loop, init, present
+│   ├── xbed_runtime.c
+│   ├── xbed_vertex.h             // attribute-array setup
+│   ├── xbed_vertex.c
+│   ├── xbed_banner.h             // pb_print-based PASS/FAIL banner
+│   ├── xbed_banner.c
+│   ├── xbed_net.h                // libnxdk_net wrapper for Xbox-real
+│   ├── xbed_net.c                //   framebuffer-to-Mac TCP upload
+│   ├── xbed_capture.h            // FLIP_STALL trigger + sentinel
+│   ├── xbed_capture.c
+│   └── xbed_readback.h           // Tier-2 helpers: pb_agp_access decode
+│       xbed_readback.c
+├── lib-smoke/                    // minimum-viable XBE that exercises
+│   ├── main.c                    //   the full lib API as proof-of-API
+│   ├── manifest.json
+│   ├── expected.py
+│   ├── README.md
+│   └── Makefile
+├── flat-tri-depth/               // EXISTING — UNTOUCHED
+│   └── ...                       // (resolves Codex finding #10)
+├── mirror/                       // first new XBE
 ├── color-channel/
-├── depth-floor/
-├── ...
-└── shared.mk                   // common Makefile fragment
+└── ...
 ```
 
-### 3.2 `xbed_runtime` API (skeleton)
+**`xbed_runtime` API (skeleton):**
 
 ```c
-// Return codes
 typedef enum {
-    XBED_OK = 0,
-    XBED_FAIL_INIT,
-    XBED_FAIL_READBACK,
-    XBED_FAIL_VRAM_LOCK,
+    XBED_OK = 0, XBED_FAIL_INIT, XBED_FAIL_VRAM,
+    XBED_FAIL_NET, XBED_FAIL_CAPTURE,
 } xbed_status_t;
 
-// Lifecycle
 xbed_status_t xbed_init(int width, int height);  // wraps pb_init + XVideoSetMode
 void          xbed_shutdown(void);
 
-// Frame loop — each XBE calls this in main()
 typedef void (*xbed_frame_fn)(uint32_t frame_idx, void *user_ctx);
 void xbed_run_frames(xbed_frame_fn fn, uint32_t total_frames, void *ctx);
 
-// Get back-buffer addr + dims for readback
-uint32_t  xbed_back_buffer_phys_addr(void);   // GPU VRAM address
-uint32_t  xbed_back_buffer_pitch(void);       // bytes per row
-int       xbed_back_buffer_width(void);
-int       xbed_back_buffer_height(void);
-uint32_t  xbed_back_buffer_format(void);      // NV097 format code
-
-// VRAM coherency: CPU sees what GPU last wrote
-void xbed_sync_for_readback(void);  // pb_finished() + wait + cache invalidate
+// Trigger host capture by issuing an extra NV097_FLIP_STALL.
+// On xemu, F1 traps it. On Xbox-real, xbed_net captures via TCP.
+void xbed_capture_now(uint32_t capture_id);
 ```
 
-### 3.3 `xbed_readback` API
+**`xbed_net` API (Xbox-real path; no-op on xemu):**
 
 ```c
-// Decode a single pixel from VRAM into linear A8R8G8B8 (host-endian).
-// Handles all NV097 RT color formats from §F.7 of the catalog.
-uint32_t xbed_decode_pixel(uint32_t vram_addr,
-                           uint32_t pitch,
-                           int x, int y,
-                           uint32_t nv097_format);
-
-// Read an entire region into a host-allocated buffer (always returned
-// as A8R8G8B8 little-endian for ease of comparison).
-xbed_status_t xbed_read_region(uint32_t vram_addr,
-                               uint32_t pitch,
-                               int x, int y, int w, int h,
-                               uint32_t nv097_format,
-                               uint32_t *out_buf);  // out_buf = w*h dwords
-
-// Decode depth from zeta surface.
-float xbed_decode_depth(uint32_t zeta_addr,
-                        uint32_t pitch,
-                        int x, int y,
-                        uint32_t nv097_zeta_format);
-
-// Decode stencil byte from a Z24S8 zeta surface.
-uint8_t xbed_decode_stencil(uint32_t zeta_addr,
-                            uint32_t pitch,
-                            int x, int y);
+xbed_status_t xbed_net_init(uint32_t mac_ip, uint16_t port);
+xbed_status_t xbed_net_send_frame(uint32_t test_id, uint32_t frame_id,
+                                  const void *fb_ptr, int w, int h,
+                                  uint32_t format);
+void          xbed_net_shutdown(void);
 ```
 
-Implementation reads VRAM via the AGP-aliased view (`pb_agp_access`,
-nxdk's `pbkit_dma.c:55-58`) so the GPU's tile cache doesn't return
-stale data.
+When built without network code (xemu-only), `xbed_net_*` are
+empty inline functions.
 
-### 3.4 `xbed_banner` API
+**`xbed_readback` API (Tier 2 only):**
 
 ```c
-// Set after init; decides default banner verdict.
-typedef enum { XBED_VERDICT_PENDING, XBED_VERDICT_PASS,
-               XBED_VERDICT_FAIL } xbed_verdict_t;
+// Read a single pixel from VRAM into linear A8R8G8B8 (host-endian).
+// Uses pb_agp_access for cache-coherent CPU read.
+// Caveat: on Metal, requires XEMU_METAL_FRONT_FB_DOWNLOAD=1 OR
+// an explicit IMAGE_BLIT to a CPU-readable scratch first.
+uint32_t xbed_decode_pixel_a8r8g8b8(uint32_t vram_addr, uint32_t pitch,
+                                    int x, int y);
 
-void xbed_banner_set_id(const char *xbe_id);
-void xbed_banner_set_feature(const char *catalog_section);
-void xbed_banner_set_verdict(xbed_verdict_t v);
-void xbed_banner_add_diag(const char *fmt, ...);  // up to 8 lines
-void xbed_banner_render(void);  // pb_erase_text_screen + pb_print + pb_draw_text_screen
+// Decode a single texel from a specific NV097 RT color format.
+// Format dispatch table covers §F.7 of the catalog (10 RT formats).
+typedef struct {
+    uint32_t format_code;     // NV097_SET_SURFACE_FORMAT_COLOR_*
+    uint32_t (*decoder)(const uint8_t *bytes, int x, int y, uint32_t pitch);
+    int      bytes_per_pixel;
+} xbed_rt_format_decoder_t;
+extern const xbed_rt_format_decoder_t xbed_rt_format_decoders[10];
+
+// Decode a single texel from a specific NV097 texture format.
+// Format dispatch table covers §E.1 of the catalog (42 codes).
+typedef struct {
+    uint32_t format_code;     // NV097_SET_TEXTURE_FORMAT_COLOR_*
+    uint32_t (*decoder)(const uint8_t *bytes, int x, int y,
+                        int swizzled, uint32_t pitch);
+    int      bytes_per_pixel;
+} xbed_tex_format_decoder_t;
+extern const xbed_tex_format_decoder_t xbed_tex_format_decoders[42];
 ```
 
-Plus stderr/log emission via `DbgPrint`-style trace so the xemu
-process log captures verdicts even without a screenshot.
+(Resolves Codex finding #5: `xbed_decode_pixel` underspecified.
+Per-namespace dispatch tables with explicit metadata.)
 
-### 3.5 `xbed_compare` API
+### 3.2 Harness-side library (`scripts/apple-silicon/xbe-harness/`)
 
-```c
-// Exact equality. Returns first mismatch position; -1 on full match.
-int xbed_compare_exact_a8r8g8b8(const uint32_t *a, const uint32_t *b,
-                                int count);
+Mac-side Python tooling.
 
-// Epsilon-tolerant comparison for filtered/AA outputs.
-int xbed_compare_epsilon_a8r8g8b8(const uint32_t *a, const uint32_t *b,
-                                  int count, uint8_t per_channel_eps);
-
-// Region-mask: ignore pixels in masked region (for non-deterministic areas).
-int xbed_compare_masked(const uint32_t *a, const uint32_t *b,
-                        const uint8_t *mask, int count);
+```
+scripts/apple-silicon/xbe-harness/
+├── xbe_orchestrator.py     // top-level "run XBE on renderer X"
+├── xbe_capture.py          // F1-trigger + screenshot capture
+├── xbe_compare.py          // pixel comparison primitives
+├── xbe_discover.py         // find XBEs from xbe-tests/*/manifest.json
+├── xbe_renderers.py        // GL / Metal / xbox-real backends
+├── xbox_real/
+│   ├── xbdm_client.py      // XBDM TCP/731 protocol
+│   ├── ftp_deploy.py       // FTP XBE to Xbox HDD
+│   ├── xbmc4xbox_api.py    // XBMC4Xbox HTTP API client
+│   ├── prometheos_api.py   // PrometheOS REST API client
+│   └── frame_server.py     // TCP listener for libnxdk_net uploads
+└── manifest_schema.json    // JSON schema for per-XBE manifest
 ```
 
-### 3.6 Standard XBE skeleton
+The orchestrator's job:
 
-Every XBE follows this template:
+1. Discover XBE manifests.
+2. For each XBE × renderer × flag-recipe combination:
+   a. Start the renderer (xemu with the right flags, or boot the
+      Xbox into the right BIOS bank).
+   b. Deploy the XBE if needed (FTP).
+   c. Trigger XBE launch (XBMC4Xbox HTTP API or xemu CLI).
+   d. Wait for the deterministic capture trigger (F1 on xemu;
+      libnxdk_net handshake on Xbox-real-Cerbios; XBDM screenshot
+      timing on Xbox-real-debug).
+   e. Capture the frame.
+   f. Compare to reference oracle (real-Xbox gold, math-derived,
+      or both).
+   g. Emit a per-(XBE, renderer, flag-recipe) PASS/FAIL.
+3. Aggregate into a regression matrix.
+
+### 3.3 Comparison primitives (`xbe_compare.py`)
+
+```python
+def compare_exact(captured, expected, mask=None) -> CompareResult: ...
+def compare_epsilon(captured, expected, eps=1, mask=None) -> CompareResult: ...
+def compare_masked_hash(captured, expected, mask) -> CompareResult: ...
+```
+
+`CompareResult` includes `passed: bool`, `n_mismatch: int`,
+`first_mismatch: (x, y, expected_argb, got_argb)`, `mask_applied:
+bool`, plus a side-by-side PNG output for human review.
+
+### 3.4 Standard XBE skeleton
 
 ```c
 /*
@@ -293,52 +372,40 @@ Every XBE follows this template:
  * NV2A feature exercised: <catalog section, e.g. §A.6 Z perspective>
  * NV097 methods:          <comma-separated symbolic names>
  * Self-validation tier:   <1 / 2 / 3 / 4>
- * Expected output:        <derived from first principles, with citations>
+ * Oracle priority:        <real-xbox / math-derived / both>
  *
- * Math:
- *   <derivation goes here, line-by-line, no hand-waving>
+ * Math derivation:
+ *   <line-by-line, no hand-waving>
  *
- * Reproducibility: byte-identical across two cold runs (no timing
- * leaks, no uninitialized memory).
+ * Reproducibility: byte-identical-after-mask across two cold runs.
+ *   Non-deterministic regions: <list, with rationale>
  */
 
 #include "../lib/xbed_runtime.h"
-#include "../lib/xbed_readback.h"
+#include "../lib/xbed_capture.h"
 #include "../lib/xbed_banner.h"
-#include "../lib/xbed_compare.h"
+#include "../lib/xbed_net.h"
 
 static void render_test_frame(uint32_t frame, void *ctx) { ... }
-static void verify_and_report(void) { ... }
 
-int main(void)
-{
-    if (xbed_init(640, 480) != XBED_OK) {
-        // best-effort error report
-        return 1;
-    }
+int main(void) {
+    if (xbed_init(640, 480) != XBED_OK) return 1;
 
     xbed_banner_set_id("<XBE-ID>");
     xbed_banner_set_feature("<catalog section>");
 
-    // Run a few warm-up frames so the renderer reaches steady state,
-    // then capture-and-verify on a known frame index.
-    xbed_run_frames(render_test_frame, /*total*/ 60, /*ctx*/ NULL);
-    verify_and_report();
+    // Render warm-up frames (renderer reaches steady state),
+    // then render the validation frame and trigger capture.
+    xbed_run_frames(render_test_frame, /*warm_up*/ 30, NULL);
+    render_test_frame(/*frame*/ 0xCAFE, /*ctx*/ NULL);
+    xbed_capture_now(/*capture_id*/ 1);
 
-    // Hold the banner on screen indefinitely (xemu harness captures
-    // a screenshot once banner is stable).
-    for (;;) {
-        xbed_run_frames(NULL, 1, NULL);  // null fn = just present
-        xbed_banner_render();
-    }
+    // Hold banner indefinitely for human spot-check.
+    for (;;) { xbed_run_frames(NULL, 1, NULL); xbed_banner_render(); }
 }
 ```
 
-## 4. Manifest schema
-
-Each XBE has a `manifest.json` that declares expected behavior per
-renderer. Used by the xemu-side run harness to mark known-renderer
-failures as expected (not gating).
+### 3.5 Manifest schema (revised, per-flag-keyed expected results)
 
 ```json
 {
@@ -346,934 +413,486 @@ failures as expected (not gating).
   "title": "Pixel mirror / viewport / scissor",
   "catalog_ref": "§A.6, §C.8, §J.1, §J.2",
   "self_validation_tier": 1,
-  "primary_oracle": "cpu_vram_readback",
-  "expected_pass_renderers": ["xbox-real", "gl", "metal"],
-  "expected_fail_renderers": [],
-  "tolerance": {
-    "kind": "exact",
-    "epsilon_per_channel": 0
-  },
-  "non_deterministic_regions": [
-    {"x": 0, "y": 0, "w": 320, "h": 32, "reason": "frame counter"}
-  ],
+  "oracle_priority": ["real-xbox", "math-derived"],
   "duration_seconds": 5,
-  "screenshot_at_frame": 30,
-  "depends_on_flags": [
-    "XEMU_NATIVE_TRI_DEPTH=1",
-    "XEMU_NATIVE_QUAD=1"
-  ]
+  "capture_at_flip_stall_ordinal": 30,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "expected_results": {
+    "real-xbox/cerbios/default": {
+      "kind": "real-xbox-capture",
+      "ref": "xbox-real-references/mirror/cerbios-default.png",
+      "tolerance": "exact"
+    },
+    "real-xbox/debug/xbdm": {
+      "kind": "real-xbox-capture",
+      "ref": "xbox-real-references/mirror/debug-xbdm.png",
+      "tolerance": "exact"
+    },
+    "xemu/gl/scale=1/msaa=0": {
+      "kind": "math-derived",
+      "generator": "expected.py:gl_no_msaa",
+      "tolerance": "exact"
+    },
+    "xemu/metal/scale=1/msaa=0/fallback=0": {
+      "kind": "math-derived",
+      "generator": "expected.py:metal_no_msaa_no_fallback",
+      "tolerance": "exact"
+    },
+    "xemu/metal/scale=1/msaa=0/fallback=1": {
+      "kind": "math-derived",
+      "generator": "expected.py:metal_no_msaa_fallback",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
 }
 ```
 
-`expected_fail_renderers` is the place to record known-renderer
-gaps (e.g., GL logic-op map commented out — `gl/constants.h:86`).
-A test failing on a renderer in `expected_fail_renderers` is
-treated as an *expected* failure and does not block promotion.
-Failing on a renderer NOT in either list is a regression.
-
-## 5. First wave — 16 priority XBEs
-
-Each XBE below has a full spec. Build order is the list order; later
-XBEs may depend on earlier ones (e.g., `color-channel` depends on
-`mirror` having validated viewport correctness).
-
-### 5.1 `mirror` — pixel-position oracle
-
-**Catalog refs:** §A.6 Z perspective; §C.8 window clip; §J.1
-viewport; §J.2 scissor.
-
-**NV097 methods:** `SET_VIEWPORT_OFFSET`, `SET_VIEWPORT_SCALE`,
-`SET_SURFACE_CLIP_HORIZONTAL/VERTICAL`, `SET_TRANSFORM_PROGRAM`,
-`SET_BEGIN_END`, `DRAW_ARRAYS`, `SET_VERTEX_DATA_ARRAY_FORMAT`.
-
-**xemu touchpoints:** `pgraph.c:2083, 2133` (viewport), `gl/draw.c:734-737`
-(GL viewport apply), `pgraph.h:266` (surface_scale_factor).
-
-**Math:**
-- Back-buffer is 1280×960 (surface_scale=2 default).
-- Clear to opaque black `0xFF000000`.
-- Render exactly one triangle that covers exactly one pixel at
-  guest coordinate `(640, 100)` after the modelview→projection→
-  viewport pipeline. Triangle is sized to be sub-pixel except at
-  the target.
-- Vertex shader applies a known projection matrix; viewport
-  scales NDC to surface coordinates with `surface_scale_factor`
-  factored in.
-- Expected back-buffer: pixel at host coord `(640*scale,
-  100*scale) = (1280, 200)` is white `0xFFFFFFFF`; every other
-  pixel is exactly `0xFF000000`.
-- A correct renderer produces this. A renderer that mirrors
-  top-half to bottom-half produces a second white pixel at
-  `(1280, 760)` (= `100 + 480 = 580` flipped to `960-100-1 = 859`,
-  scaled to `1718`, etc — the XBE computes the expected mirror
-  coordinate explicitly and reports it on FAIL).
-
-**Self-validation (Tier 1):** read entire back-buffer via
-`xbed_read_region`; count non-black pixels; assert exactly one,
-at the expected coordinate.
-
-**PASS criteria:** 1 non-black pixel, color exactly `0xFFFFFFFF`,
-location `(1280, 200)`. All other pixels exactly `0xFF000000`.
-
-**FAIL diagnostics:**
-- `count=N` non-black pixels (expected 1).
-- `pixel-i at (x,y)=0xVALUE` for each non-black pixel.
-- `mirror_suspected` if a non-black pixel exists at the predicted
-  Y-flip coordinate.
-- `viewport_skew` if the lone non-black pixel is at the right
-  color but wrong coordinate.
-
-**Cross-renderer notes:** all renderers expected PASS. If GL
-fails, regression in `pgraph_apply_scaling_factor`. If Metal
-fails, look at `MtlSurfaceBinding` / front-fb fallback path.
-
-**Reproducibility:** banner has frame counter excluded via
-non-deterministic-region mask.
-
-**Estimated complexity:** 200 lines C + 30 lines Cg shaders.
-
----
-
-### 5.2 `color-channel` — RT format and channel ordering oracle
-
-**Catalog refs:** §F.7 RT color formats; §F.3 color masks; §A.3
-vertex attribute UB_D3D vs UB_OGL byte ordering.
-
-**NV097 methods:** `SET_SURFACE_FORMAT`, `SET_VERTEX_DATA_ARRAY_FORMAT`,
-`SET_DIFFUSE_COLOR4F` / `4UB`, combiner setup for "pass diffuse to
-output."
-
-**xemu touchpoints:** `gl/constants.h:287-302` (RT format map),
-`pgraph.c:2565-2568` (UB_D3D BGRA byte order),
-`vertex.c:42` (S1 normalization).
-
-**Math:**
-- Render four screen-space quadrants, each filled with a known
-  vertex color via DIFFUSE attribute slot 3.
-- TL: `(R,G,B,A) = (1,0,0,1)` → expected back-buffer dword
-  `0xFFFF0000` (A8R8G8B8 ARGB).
-- TR: `(0,1,0,1)` → `0xFF00FF00`.
-- BL: `(0,0,1,1)` → `0xFF0000FF`.
-- BR: `(1,1,1,1)` → `0xFFFFFFFF`.
-- Test runs **twice** in successive frames: once with vertex
-  attribute format `_TYPE_F` (3 floats, expand_normal mapping),
-  once with `_TYPE_UB_D3D` (BGRA encoding) — verifies both paths
-  produce same final pixel.
-
-**Self-validation (Tier 1):** read 1 pixel from the center of
-each quadrant, assert exact match.
-
-**PASS criteria:** all four center pixels exactly match expected
-ARGB.
-
-**FAIL diagnostics:**
-- `quadrant=TL got=0xVALUE expected=0xFFFF0000` etc.
-- `channel_swap_suspected: red=blue?` if TL produces `0xFF0000FF`.
-
-**Cross-renderer notes:** the `LE_X1A7R8G8B8_*` and `Z*`/`O*`
-variants in §F.7 (catalog) are not separately implemented in xemu
-GL; an extended sweep XBE (priority 7) covers those.
-
-**Estimated complexity:** 250 lines C + minimal Cg.
-
----
-
-### 5.3 `depth-floor` — depth test and floor coverage oracle
-
-**Catalog refs:** §G.1 depth test; §G.6 depth-only RT; §K.2
-native_tri_depth; §H.5 surface-to-texture.
-
-**NV097 methods:** `SET_DEPTH_TEST_ENABLE`, `SET_DEPTH_FUNC`,
-`SET_DEPTH_MASK`, `SET_SURFACE_FORMAT_ZETA`, `CLEAR_SURFACE` with
-Z bit, `SET_TRANSFORM_PROGRAM` (perspective projection).
-
-**xemu touchpoints:** `glsl/psh.c` native_tri_depth path,
-`gl/draw.c:648-651` (polygon offset disabled, depth in fragment
-shader), `pgraph_zeta_write_enabled` (`pgraph.h:357-362`).
-
-**Math:**
-- Camera at `(0, 1.6, 0)` looking at `(0, 0, 4)` with 60° vertical
-  FOV.
-- Render an 8×8 grid of unit-quads in the XZ plane, each labeled
-  with a unique solid color encoding `(row, column)` as
-  `0xFF<row><col>00` (e.g., `(0,0) → 0xFF000000`, `(7,7) →
-  0xFF707000`).
-- Render a vertical wall at z=2 with color `0xFF808080` that
-  occludes the back half of the floor.
-- After draw: read row 4 column 4 (should be visible floor color
-  `0xFF404000`); read row 7 column 0 (should be wall `0xFF808080`
-  if wall occludes that cell, else floor color).
-
-**Self-validation (Tier 1):** sample 8 known pixels from floor +
-wall regions; assert depth-test produced the correct visibility
-ordering.
-
-**PASS criteria:** 8/8 sampled pixels match expected color from
-the depth-buffer-projected scene.
-
-**FAIL diagnostics:**
-- `floor_disappeared: row=R col=C got=0x808080` (wall color where
-  floor should be visible — depth-test inverted or write-disabled).
-- `floor_through_wall: row=R col=C got=floor_color` (depth-write
-  off so wall doesn't occlude).
-
-**Cross-renderer notes:** with `XEMU_NATIVE_TRI_DEPTH=1`, fragment
-shader derives depth from `gl_FragCoord`. Without it, geometry-
-shader path. Both must produce the same pixel output.
-
-**Estimated complexity:** 350 lines C + 40 lines Cg (perspective
-matrix, per-cell color attribute setup).
-
----
-
-### 5.4 `crtc-publish` — front-fb fallback / CRTC publish path oracle
-
-**Catalog refs:** §H.7 CRTC publish; §3b.4 (xemu GS expansion);
-§K.2 native_quad; §H.5 surface-to-texture.
-
-**NV097 methods:** `SET_SURFACE_COLOR_OFFSET`, `SET_FLIP_READ`,
-`SET_FLIP_WRITE`, `SET_FLIP_MODULO`, `FLIP_INCREMENT_WRITE`,
-`FLIP_STALL`, `CLEAR_SURFACE`.
-
-**xemu touchpoints:** `pgraph.c:989-1024, 1026-1047`,
-`mtl/surface.{h,mm}` `MtlSurfaceBinding` cache,
-`mtl/renderer.c::pgraph_mtl_flip_stall` (front-fb fallback path).
-
-**Math:**
-- Allocate three VRAM color surfaces at distinct addresses
-  `addr_A`, `addr_B`, `addr_C` (each 1280×960 A8R8G8B8 = 4.7 MB).
-- Frame 0: bind `addr_A` as RT, draw a known checkerboard
-  pattern, `FLIP_STALL` with `addr_A` as front-fb.
-- Frame 1: bind `addr_B` as RT, draw a different pattern (solid
-  red), do NOT update CRTC publish — `addr_A` stays as front-fb.
-- Frame 2: bind `addr_C` as RT, draw a third pattern (solid
-  green), do NOT update CRTC publish.
-- Frame 3: read the CRTC-published surface
-  (`NV_PCRTC_START`) and verify what it points to.
-
-**Self-validation (Tier 1):** read VRAM at the CRTC-published
-addr; assert content matches `addr_A`'s checkerboard. If front-
-fb fallback is on (default `XEMU_METAL_FRONT_FB_FALLBACK=1`)
-the addr may instead be `addr_C` (the most-recent draw target);
-the XBE reports which behavior occurred rather than PASS/FAIL —
-this XBE is **observational** about which policy is in effect.
-
-**PASS criteria:** XBE reports a verdict consistent with the
-flag setting:
-- `XEMU_METAL_FRONT_FB_FALLBACK=0`: CRTC publish == `addr_A`
-  (faithful publish).
-- `XEMU_METAL_FRONT_FB_FALLBACK=1`: CRTC publish == `addr_C`
-  (most-recent fallback) — this is what current PGR2/Crimson
-  rely on.
-
-**FAIL diagnostics:**
-- `crtc_addr=0xADDR doesn't match A or C; possibly stale
-  drawable`.
-- `published_content=incorrect: expected_pattern_X got_pattern_Y`.
-
-**Cross-renderer notes:** GL renderer's CRTC publish goes through
-`get_framebuffer_surface` (display-side). Metal goes through
-`pgraph_mtl_surface_publish_front_fb`. Both must produce
-consistent results given the same flag setting.
-
-**Estimated complexity:** 400 lines C + minimal Cg (this XBE is
-mostly state machinery and VRAM bookkeeping).
-
----
-
-### 5.5 `native-quad-tri-depth` — geometry-shader-bypass regression gate
-
-**Catalog refs:** §B.1 primitives; §C.5 smooth/flat shading;
-§K.1 GS expansion; §K.2 native_tri_depth / native_quad.
-
-**NV097 methods:** `SET_BEGIN_END_OP_QUADS`, `_OP_TRIANGLES`,
-`SET_FLAT_SHADE_OP_VERTEX_FIRST/_LAST`, `SET_SHADE_MODEL_FLAT`.
-
-**xemu touchpoints:** `gl/shaders.c:34-70` (primitive map),
-`gl/vertex.c:275` (native_quad index buffer),
-`glsl/geom.h:52-60` (eligibility predicates),
-`glsl/psh.h:72-73` (`native_tri_depth`, `native_quad` PshState).
-
-**Math:**
-- Render a 4×3 grid of quads (12 total) using `OP_QUADS`, each
-  with 4 vertices at known positions and a flat-shaded color
-  derived from the provoking vertex.
-- Half the grid uses `_VERTEX_FIRST` provoking; half uses
-  `_VERTEX_LAST` (mixed within the same draw via state changes
-  between sub-batches).
-- Render the same grid via `OP_TRIANGLES` with explicit triangle
-  expansion.
-- Both must produce pixel-identical output.
-
-**Self-validation (Tier 1):** read center pixel of each grid
-cell from both renders; assert pairwise exact match (modulo
-known per-cell expected colors).
-
-**PASS criteria:** all 12 quad-rendered cells match the
-triangle-rendered reference exactly.
-
-**FAIL diagnostics:**
-- `quad_color_wrong: cell=(r,c) tri=0xV1 quad=0xV2`
-  (provoking-vertex selection bug).
-- `quad_winding_diagonal_swapped` if cell colors form a checkerboard
-  pattern of off-by-one (GS diagonal selection regression).
-
-**Cross-renderer notes:** with `XEMU_NATIVE_QUAD=0`, GL renderer
-uses the geometry-shader path; with `=1`, CPU expansion. Metal
-always uses CPU expansion (M5.8 per-element decoder). All paths
-must match this XBE's reference.
-
-**Estimated complexity:** 300 lines C + 50 lines Cg.
-
----
-
-### 5.6 `cmp-vertex-format` — packed (11,11,10) decoder oracle
-
-**Catalog refs:** §A.3 vertex formats; §3b.5 fork-specific (M5.8
-Metal CPU decoder).
-
-**NV097 methods:** `SET_VERTEX_DATA_ARRAY_FORMAT_TYPE_CMP`.
-
-**xemu touchpoints:** `vertex.c:56-75` (CMP decode),
-`gl/vertex.c:124-130` (`needs_conversion` integer-attrib path),
-`mtl/vertex.{c,h}` (M5.8 CPU decoder).
-
-**Math:**
-- Construct vertex data with CMP-encoded normals at known values.
-  Each component is a signed 11/11/10 fixed-point in `[-1, 1]`
-  range.
-- Vertex shader projects the normal directly to color via:
-  `color.xyz = (normal.xyz + 1.0) * 0.5`. Output is the encoded
-  normal as a color.
-- For each test vertex, compute `expected_color = (decoded_n + 1) * 0.5`
-  via the CMP encoding math in the source comment.
-
-**Self-validation (Tier 1):** sample one pixel per test vertex's
-quad; assert color matches expected to within 1 LSB per channel
-(8-bit RT after 11/10-bit decode).
-
-**PASS criteria:** 6/6 (or however many test vertices) within
-tolerance.
-
-**FAIL diagnostics:**
-- `cmp_decode_off: vertex=N expected=0xV1 got=0xV2`.
-- `cmp_endian_swapped: components in wrong order`.
-
-**Cross-renderer notes:** Metal M5.8 CPU-decoder vs GL
-`needs_conversion` — both must agree.
-
-**Estimated complexity:** 200 lines C + 30 lines Cg.
-
----
+(Resolves Codex finding #4 / §9.4: per-(renderer, flag-recipe) keyed
+expected results. Resolves §9.7: each XBE explicitly declares which
+oracle for which configuration.)
 
-### 5.7 `texture-format-sweep` — full 42-code coverage
-
-**Catalog refs:** §E.1 texture formats (full table).
-
-**NV097 methods:** `SET_TEXTURE_FORMAT_COLOR` for each of the 42
-codes; `SET_TEXTURE_OFFSET`; `SET_TEXTURE_CONTROL0_ENABLE`;
-`SET_TEXTURE_FILTER_MIN/_MAG=NEAREST` (so we test format decode,
-not filtering).
-
-**xemu touchpoints:** `texture.c:26-79` (`kelvin_color_format_info_map`),
-swizzle table at `swizzle.c:180-181`, S3TC decode at `s3tc.c`.
-
-**Math:**
-- For each format code, allocate a 4×4-pixel texture in VRAM with
-  a known input bit pattern that decodes to a known
-  expected ARGB color.
-- Render a screen-aligned quad sampled from that texture.
-- Tile 7×6 = 42 quads on a 1280×960 framebuffer (each ~180×160).
-- Each quad's expected center pixel is computed in a static
-  array indexed by format code.
-
-**Self-validation (Tier 1):** sample center pixel of each quad;
-assert color matches the format-decode expectation.
+`expected.py` exposes one Python function per `generator` key. Each
+function takes `(width, height, **flags)` and returns a `bytes` /
+`numpy.ndarray` of expected ARGB pixels.
 
-**PASS criteria:** all 42 quads match expected.
+## 4. First wave — 16 priority XBEs (revised)
 
-**FAIL diagnostics:** per-format failure list with input bytes,
-expected ARGB, actual ARGB. Especially flag:
-- `0x16 LU_IMAGE_R8B8` failing on xemu (W2-only — likely not
-  handled).
-- `0x2F LU_IMAGE_DEPTH_X8_Y24_FLOAT` failing on nxdk-driven
-  paths (W1-only).
-- The xemu-issue-#320 historic offenders.
+Each spec is concise; full math derivation lives in the per-XBE
+source-file header that gets reviewed pre-build.
 
-**Cross-renderer notes:** the swizzled `SZ_*` family stresses
-`unswizzle_box`; the `LC_*` YUV family stresses YUV→RGB conversion;
-the `L_*` family stresses S3TC decode. Each may fail on one
-renderer and pass on another — manifest declares per-renderer
-expected results.
+### 4.1 `mirror` — pixel-position oracle (Tier 1)
 
-**Estimated complexity:** 600 lines C (mostly the per-format
-test-vector tables), 30 lines Cg.
+**Catalog refs:** §A.6, §C.8, §J.1, §J.2.
 
----
+**Math (revised per Codex finding #6):** uses programmable VS path
+(matches existing flat-tri-depth pattern). VS computes screen-space
+output via `surfaceSize` per `glsl/vsh-prog.c:753`; we don't touch
+`SET_VIEWPORT_SCALE/OFFSET`. Forced 640×480 surface scale. Render
+single-pixel triangle at guest coord `(320, 50)` on opaque-black
+back-buffer. Expected: pixel `(320, 50)` exactly `0xFFFFFFFF`, all
+others exactly `0xFF000000`. Mirror-bug detection: pixel at
+`(320, H-1-50) = (320, 429)` should be `0xFF000000` but FAIL
+case shows `0xFFFFFFFF` there.
 
-### 5.8 `swizzle-mipmap` — Z-order tile + mip-chain offset oracle
+**Oracle:** real-xbox (canonical) + math-derived (audit).
 
-**Catalog refs:** §E.5 LOD/mipmap; §E.9 swizzled vs linear.
-
-**NV097 methods:** `SET_TEXTURE_FORMAT_BASE_SIZE_U/V`,
-`_MIPMAP_LEVELS`, `_DIMENSIONALITY=2`, `SET_TEXTURE_OFFSET`,
-`SET_TEXTURE_FILTER_MIPMAP_LOD_BIAS`.
+**Catches:** SC2 top-mirrored-to-bottom symptom.
 
-**xemu touchpoints:** `swizzle.{h,c}` `swizzle_box` /
-`unswizzle_box`, `texture.c:166-219` (mip-level offset math).
+### 4.2 `color-channel` — RT format and channel ordering (Tier 1)
 
-**Math:**
-- Allocate a 64×64 base texture with a 7-level mipmap chain (mips
-  1..6 are 32×32, 16×16, 8×8, 4×4, 2×2, 1×1).
-- Each mip level filled with a unique solid color: mip0=red,
-  mip1=green, mip2=blue, mip3=yellow, mip4=cyan, mip5=magenta,
-  mip6=white.
-- Per the swizzle math (Z-order, level-N base = `level0_base +
-  swizzle(level_offset)` per W3 pitfall), compute the VRAM offset
-  for each level and write the solid color in swizzled order.
-- Render 7 screen-aligned quads, each forcing a specific LOD via
-  `MIPMAP_LOD_BIAS`. Each quad's pixel is the corresponding mip's
-  solid color.
-- Repeat for a linear-layout variant (different format code).
+**Catalog refs:** §F.7, §F.3, §A.3.
 
-**Self-validation (Tier 1):** sample center pixel of each
-mip-bias quad; assert exact match for swizzled and linear cases.
+Render four screen-space quadrants with known `_TYPE_F` and
+`_TYPE_UB_D3D` vertex DIFFUSE colors. Expected: TL `0xFFFF0000`,
+TR `0xFF00FF00`, BL `0xFF0000FF`, BR `0xFFFFFFFF`. Test runs both
+attribute formats in successive frames; both must produce same
+final pixel.
 
-**PASS criteria:** 7+7 = 14 sampled pixels match.
+**Catches:** SC2 wrong-colors symptom.
 
-**FAIL diagnostics:**
-- `swizzle_mip_offset_wrong: mip=N expected_color=0xV got=0xV`
-  (level-N base computed via linear offset instead of swizzle).
-- `lod_bias_off_by_one: mip=N produced mip=N+1's color`.
+### 4.3 `depth-floor` — depth test + native_tri_depth (Tier 1)
 
-**Cross-renderer notes:** swizzled mip math is the W3 pitfall
-("level-N base is `level0_base + swizzle(level_offset)`, not
-`level0_base + sum(level_sizes)`"). xemu commit `f0abe3c4`
-historically fixed this.
+**Catalog refs:** §G.1, §G.6, §K.2, §H.5.
 
-**Estimated complexity:** 400 lines C + 30 lines Cg.
+Camera at `(0, 1.6, 0)` looking at `(0, 0, 4)`. 8×8 floor grid in
+XZ plane, each cell colored `0xFF<row><col>00`. Wall at z=2
+`0xFF808080` occluding back rows. Sample center pixel of each cell;
+expected per-cell color matches depth-test visibility.
 
----
+**Catches:** SC2 floor-disappearing symptom.
 
-### 5.9 `blend-matrix` — blend factors and equations oracle
+### 4.4 `crtc-publish` — host-side comparison (Tier 1, redesigned per Codex finding #4)
 
-**Catalog refs:** §F.1 blend.
+**Catalog refs:** §H.7, §3b.4, §K.2, §H.5.
 
-**NV097 methods:** `SET_BLEND_ENABLE`, `SET_BLEND_FUNC_SFACTOR/_DFACTOR`,
-`SET_BLEND_EQUATION`, `SET_BLEND_COLOR`.
+Allocate three VRAM color surfaces at distinct addresses A/B/C.
+Render distinctive identifier into A (large "A" letter), then
+switch to B (large "B"), then C (large "C"). Issue `NV097_FLIP_STALL`
+at end of frame, capture host frame.
 
-**xemu touchpoints:** `gl/constants.h:57-74` (blend factor map),
-`gl/constants.h:76-84` (blend equation map).
+The captured frame shows whichever surface the renderer published.
+Manifest declares per-flag-setting expected reference:
 
-**Math:**
-- Render a 16×8 matrix of overlapping quad pairs (16 src factors,
-  8 row-per-factor variations including each blend equation).
-- Each cell: clear to a known dst color, then render a known src
-  color with the cell's (sfactor, dfactor, equation).
-- Expected pixel for each cell is computed by the blend math:
-  `result = sfactor*src OP dfactor*dst` per the catalog tables.
-- Tile 128 cells onto 1280×960 framebuffer (~80×60 each).
+- `XEMU_METAL_FRONT_FB_FALLBACK=0`: expected = "A" (CRTC-pointed
+  surface).
+- `XEMU_METAL_FRONT_FB_FALLBACK=1`: expected = "C" (most-recent
+  binding fallback).
 
-**Self-validation (Tier 1):** sample center pixel of each cell;
-assert exact match (8-bit per channel, within 1 LSB).
+(Resolves Codex finding #4: was a category error in v1 — guest-
+side observation can't classify host-side fallback behavior. v2
+uses host capture which sees the actual published frame.)
 
-**PASS criteria:** 128/128 cells match.
+### 4.5 `native-quad-tri-depth` — GS-bypass regression gate (Tier 1)
 
-**FAIL diagnostics:** per-cell sfactor/dfactor/equation +
-expected/actual; likely groups together if a single factor or
-equation is broken.
+**Catalog refs:** §B.1, §C.5, §K.1, §K.2.
 
-**Cross-renderer notes:** the 7 equations include 2 Xbox-specific
-`*_SIGNED` variants; emulators often skip these.
+Render 4×3 grid of quads via `OP_QUADS` with mixed flat-shade
+provoking-vertex selection; render same grid via `OP_TRIANGLES`
+reference. Capture both; pairwise center-pixel match.
 
-**Estimated complexity:** 500 lines C (mostly the test matrix
-tables), 30 lines Cg.
+**Closed default-on flag regression gate:** `XEMU_NATIVE_QUAD`,
+`XEMU_NATIVE_TRI_DEPTH`.
 
----
+### 4.6 `cmp-vertex-format` — packed (11,11,10) decoder (Tier 1)
 
-### 5.10 `stencil-ops` — 8 stencil ops oracle
+**Catalog refs:** §A.3, §3b.5.
 
-**Catalog refs:** §G.4 stencil.
+CMP layout (Codex-resolved per `vertex.c:56`): X bits 0-10, Y bits
+11-21, Z bits 22-31, signed normalized by 1023/1023/511.
 
-**NV097 methods:** `SET_STENCIL_TEST_ENABLE`, `SET_STENCIL_FUNC`,
-`SET_STENCIL_OP_FAIL/_ZFAIL/_ZPASS`, `SET_STENCIL_MASK`,
-`SET_STENCIL_FUNC_REF/_MASK`.
+Construct CMP-encoded normals at known values; VS projects normal
+to color via `(normal+1)*0.5`; sample expected color per encoded
+input; tolerance ±1 LSB.
 
-**xemu touchpoints:** `gl/constants.h:136-146` (stencil-op map).
+### 4.7 `texture-format-sweep` — full 42-code coverage (Tier 1)
 
-**Math:**
-- Z24S8 zeta surface; clear stencil to a known starting value.
-- Render 8 quads in sequence, each configured to perform one of
-  the 8 stencil ops on a specific stencil region.
-- After each op: render a follow-up quad whose color depends on
-  stencil-test pass/fail, exposing the post-op stencil value to
-  the color RT.
-- Expected color per quad position is computed from the op math.
+**Catalog refs:** §E.1.
 
-**Self-validation (Tier 2 — RT-as-texture):** stencil isn't
-directly memcpy-readable, so use the follow-up quad to read out
-stencil into color via stencil-test pass/fail; then Tier-1 read
-the color RT.
+Tile 7×6 quads on 640×480; each samples one format from §E.1
+(includes W1-only `0x2F` and W2-only `0x16`). Sample center pixel
+per cell; expected ARGB from per-format static table.
 
-**PASS criteria:** 8/8 ops produce expected post-op stencil
-values.
+### 4.8 `swizzle-mipmap` — Z-order tile + mip-chain (Tier 1)
 
-**FAIL diagnostics:** per-op stencil expected vs actual, plus
-pre-op state.
+**Catalog refs:** §E.5, §E.9.
 
-**Estimated complexity:** 400 lines C + 30 lines Cg.
+64×64 base + 7-level chain; each mip a unique solid color;
+swizzled vs linear layouts; force LOD via `MIPMAP_LOD_BIAS`;
+sample per-mip expected color.
 
----
+### 4.9 `blend-matrix` — 16 sfactors × 8 dfactor/equation rows (Tier 1)
 
-### 5.11 `texture-filter-wrap` — filter modes and wrap modes oracle
+**Catalog refs:** §F.1.
 
-**Catalog refs:** §E.3 filter modes; §E.4 wrap modes.
+128 cells on 640×480; each cell = (sfactor, dfactor, equation)
+with known src and dst colors; expected per-cell pixel computed
+from blend math.
 
-**NV097 methods:** `SET_TEXTURE_FILTER_MIN/_MAG`,
-`SET_TEXTURE_ADDRESS_ADDRU/_V/_P`.
+### 4.10 `stencil-ops` — 8 stencil ops via color probe (Tier 1, redesigned per Codex finding #7)
 
-**xemu touchpoints:** `gl/constants.h:40-46` (mag-filter map),
-`gl/constants.h:48-55` (wrap map — note GL_CLAMP→GL_CLAMP_TO_EDGE
-approximation flagged in source comment).
+**Catalog refs:** §G.4.
 
-**Math:**
-- Allocate a 4×4 texture with each texel a unique color.
-- Render quads with UV coordinates exceeding [0, 1] range; per
-  wrap mode, the out-of-range pixels decode to known texels:
-  - `WRAP=1`: UV 1.5 → texel(0.5*4) = texel 2.
-  - `MIRROR=2`: UV 1.5 → texel(2 - 0.5)*4 = texel 6 ≡ 2 mod 4.
-  - `CLAMP_TO_EDGE=3`: UV 1.5 → texel(3) (last column).
-  - `BORDER=4`: UV 1.5 → border color.
-  - `CLAMP_OGL=5`: UV 1.5 → similar to CLAMP_TO_EDGE in xemu's
-    GL backend per the FIXME comment.
-- For each filter mode, sample at sub-texel UV; expected output
-  is computed per the filter math (nearest = single texel,
-  linear = bilinear blend, trilinear = mipmap-blended bilinear).
+Z24S8 zeta; clear stencil to known value; render 8 quads each
+performing one of the 8 stencil ops; render follow-up quads whose
+**color** is gated by stencil-test pass/fail at known reference
+values. Captured frame encodes post-op stencil state into color.
 
-**Self-validation (Tier 1):** sample center pixels of each
-wrap×filter cell.
+(Resolves Codex finding #7: v1 proposed Tier-2 RT-as-texture for
+stencil readback, but Metal download skips depth/stencil. v2 uses
+color-via-stencil-compare probes; harness decodes from captured
+color frame.)
 
-**PASS criteria:** all wrap×filter combinations within 1 LSB
-of expected.
+### 4.11 `texture-filter-wrap` — filter + wrap modes (Tier 1)
 
-**FAIL diagnostics:** per-cell wrap, filter, expected, actual.
-Specifically flags the `CLAMP_OGL` vs `CLAMP_TO_EDGE` xemu
-approximation.
+**Catalog refs:** §E.3, §E.4.
 
-**Estimated complexity:** 500 lines C + 30 lines Cg.
+4×4 texture; UV-overrun quads with each (filter, wrap) combination;
+expected per-cell pixel from filter math (with epsilon for linear/
+trilinear).
 
----
+### 4.12 `combiner-basic` — single-stage combiner ops (Tier 1)
 
-### 5.12 `combiner-basic` — single-stage register combiner oracle
+**Catalog refs:** §D.1-D.7.
 
-**Catalog refs:** §D.1-D.7 register combiners.
+16-cell matrix of (input mapping × output scale modifier) at fixed
+input/op; expected color per cell from combiner equation.
 
-**NV097 methods:** `SET_COMBINER_CONTROL`,
-`SET_COMBINER_COLOR_ICW/_OCW`, `SET_COMBINER_ALPHA_ICW/_OCW`,
-`SET_COMBINER_FACTOR0/_FACTOR1`,
-`SET_COMBINER_SPECULAR_FOG_CW0/_CW1`.
+### 4.13 `texture-shader-stages` — 19 modes (Tier 1)
 
-**xemu touchpoints:** `glsl/psh.c` (combiner translator),
-`psh_regs.h:31-141` (full state-machine enums).
+**Catalog refs:** §D.8.
 
-**Math:**
-- Configure a single combiner stage with a known input (DIFFUSE),
-  input mapping (e.g., `EXPAND_NORMAL` = `2x-1`), output operation
-  (multiply by C0 constant), output scale modifier (`SHIFTLEFT_1`
-  = `2x`), and channel selector.
-- Render a quad with a known DIFFUSE color; expected output is
-  computed by the combiner equation.
-- Test a matrix of (input, mapping, op, scale) — limited subset
-  to keep the XBE bounded (e.g., 16 cells = 4×4 mapping×scale,
-  with one fixed input/op).
+Iterate each valid (stage, mode) pair from the 19-mode enum; per-
+mode signature pattern.
 
-**Self-validation (Tier 1):** sample center pixel of each cell.
+### 4.14 `logic-ops` — 16 ops (Tier 1, expected_fail Metal+GL per Codex finding #9)
 
-**PASS criteria:** 16/16 cells match.
+**Catalog refs:** §F.4, §3b.3.
 
-**FAIL diagnostics:** per-cell (mapping, scale, expected, actual).
+Render with each logic op against known dst; expected = bitwise op
+result.
 
-**Cross-renderer notes:** xemu translates combiners to GLSL/MSL
-on both backends. Bugs in the translator surface here, not in
-fixture validation.
+**Manifest:** `expected_fail_renderers: ["xemu/gl", "xemu/metal"]`
+(Codex confirmed Metal also lacks logic-op support per
+`mtl/shaders.mm:451`). The XBE still runs and reports per-op
+failure list — provides the spec for what each renderer needs to
+implement.
 
-**Estimated complexity:** 450 lines C + 50 lines Cg (combiner
-setup is verbose).
+### 4.15 `msaa-aa-factor` — MSAA gradient profile (Tier 1, epsilon)
 
----
+**Catalog refs:** §C.4, §K.4.
 
-### 5.13 `texture-shader-stages` — 19-mode texture shader oracle
+High-contrast diagonal edge at sub-pixel angle; per AA mode
+(none/2×/4×); sample edge perpendicular; expected gradient
+profile per mode.
 
-**Catalog refs:** §D.8 texture stage program.
+### 4.16 `texture-dma-ab` — DMA channel A vs B (Tier 1, redesigned per Codex finding #8)
 
-**NV097 methods:** `SET_SHADER_STAGE_PROGRAM`,
-`SET_SHADER_OTHER_STAGE_INPUT`, plus per-mode supporting state
-(BUMPENV registers for modes 6/7, etc.).
+**Catalog refs:** §E.14.
 
-**xemu touchpoints:** `psh_regs.h:31-53` (mode enum).
+Allocate two copies of identical texture content at **DIFFERENT
+VRAM base addresses** addr_A and addr_B (NOT identical bases as
+v1 proposed). Configure DMA channel A's base to addr_A; DMA channel
+B's base to addr_B. Render two side-by-side quads; left binds
+texture via `NV097_SET_TEXTURE_FORMAT_CONTEXT_DMA=0` (channel A);
+right via `=2` (channel B). Expected: pixel-identical halves
+(both channels resolve correct texture content from their
+respective bases).
 
-**Math:**
-- Iterate each valid (stage, mode) pair. Per-mode expected output
-  is documented in `psh_regs.h:31-53` and in W3 NV_texture_shader
-  spec.
-- For modes that need supporting input (BUMPENV, DOT_*), provide
-  pre-computed expected outputs.
-- Render N quads per mode (N = number of valid stages for that
-  mode); each quad's color encodes the mode index plus a per-mode
-  signature.
+(Resolves Codex finding #8: v1 used identical bases; that only
+tested selector decode. v2 uses different bases to actually test
+DMA-channel address translation.)
 
-**Self-validation (Tier 1):** sample per-quad signature pixel.
+## 5. Second wave — feature-coverage XBEs (catalog reference)
 
-**PASS criteria:** all 19 modes produce per-mode signatures.
+50-60 additional XBEs covering remaining catalog sections. Each
+follows the same template and validation tier. Build queue
+ordered by `(priority, complexity)`:
 
-**FAIL diagnostics:** per-mode (stage, expected, actual). Mode
-0x12 `DOT_RFLCT_SPEC_CONST` is rare and may surface bugs.
-
-**Estimated complexity:** 700 lines C (the supporting state per
-mode is verbose), 60 lines Cg.
-
----
-
-### 5.14 `logic-ops` — 16 logic ops oracle (will likely flag GL regression)
-
-**Catalog refs:** §F.4 logic ops; §3b.3 known xemu GL impl gap.
-
-**NV097 methods:** `SET_LOGIC_OP_ENABLE`, `SET_LOGIC_OP`.
-
-**xemu touchpoints:** `gl/constants.h:86-105` — **commented out**.
-
-**Math:**
-- 16 logic ops (CLEAR, AND, AND_REVERSE, COPY, AND_INVERTED,
-  NOOP, XOR, OR, NOR, EQUIV, INVERT, OR_REVERSE, COPY_INVERTED,
-  OR_INVERTED, NAND, SET).
-- Render src and dst with known colors; the logic op produces
-  an expected result computed bit-by-bit.
-
-**Self-validation (Tier 1):** sample one pixel per op cell.
-
-**PASS criteria:** all 16 ops match.
-
-**FAIL diagnostics:** per-op (src, dst, expected, actual). On
-GL, ALL 16 likely fail because the GL map is commented out;
-manifest marks this as `expected_fail_renderers: ["gl"]` and
-the regression gate accepts that. On Metal, this is a true
-test — if Metal also fails all 16, that's a real bug to fix.
-
-**Cross-renderer notes:** **THIS XBE IS LIKELY THE FIRST TO
-FLAG A REAL METAL GAP.** xemu's Metal renderer state.c maps
-similar enums. If logic ops aren't mapped on Metal either, the
-XBE will FAIL on Metal too.
-
-**Estimated complexity:** 250 lines C.
-
----
-
-### 5.15 `msaa-aa-factor` — multisample AA mode oracle
-
-**Catalog refs:** §C.4 multisampling; §K.4 anti-aliasing factor.
-
-**NV097 methods:** `SET_ANTI_ALIASING_CONTROL`,
-`SET_SURFACE_FORMAT_ANTI_ALIASING`.
-
-**xemu touchpoints:** `surface.h:32` (`anti_aliasing` mode),
-`pgraph.h:364-382` (`pgraph_apply_anti_aliasing_factor`),
-`mtl/heap.h` MSAA companion textures, `mtl/draw.mm` MSAA store.
-
-**Math:**
-- Render a high-contrast diagonal edge (black-to-white) at known
-  sub-pixel angle.
-- For each AA mode (none / 2× / 4×), the resolved-output edge
-  pixels show specific gradient values.
-- Sample several pixels along the edge perpendicular; expected
-  is per-mode AA gradient.
-
-**Self-validation (Tier 1, with epsilon):** epsilon-tolerant
-comparison — exact AA reconstruction varies per-sample-pattern,
-but the gradient *direction* and *step count* must match.
-
-**PASS criteria:** edge gradient profile within tolerance.
-
-**FAIL diagnostics:** per-pixel along edge (expected gradient,
-actual). Specifically flags "all-or-nothing" cases (no AA when
-mode > 0).
-
-**Cross-renderer notes:** Metal MSAA store is recent (2026-05-04
-fix); regression-gates that work.
-
-**Estimated complexity:** 300 lines C + 30 lines Cg.
-
----
-
-### 5.16 `texture-dma-ab` — DMA channel A vs B parity oracle
-
-**Catalog refs:** §E.14 texture DMA selector.
-
-**NV097 methods:** `SET_CONTEXT_DMA_A`, `SET_CONTEXT_DMA_B`,
-`SET_TEXTURE_FORMAT_CONTEXT_DMA` (low 2 bits of
-`SET_TEXTURE_FORMAT`).
-
-**xemu touchpoints:** `pgraph.c:1056` (DMA A/B handlers),
-`pgraph.c:2675` (CONTEXT_DMA selector decode), `texture.c:92,
-153` (DMA-translation in image and palette lookup).
-
-**Math:**
-- Allocate the same 4×4 texture data twice in VRAM, at addresses
-  reachable by DMA channel A and DMA channel B respectively.
-  (Practically: use a single VRAM offset but bind it through both
-  DMA channels in successive draws.)
-- Render two side-by-side quads; left uses DMA A, right uses
-  DMA B.
-- Expected output: pixel-identical halves.
-
-**Self-validation (Tier 1):** read both quads' center pixels;
-assert exact equality.
-
-**PASS criteria:** left and right halves identical.
-
-**FAIL diagnostics:**
-- `dma_b_address_translation_off: A=0xVA B=0xVB` if the two halves
-  produce different colors (one path resolved a different VRAM
-  source).
-- `dma_b_not_handled` if the right half is solid black or
-  uninitialized memory.
-
-**Estimated complexity:** 250 lines C + minimal Cg.
-
----
-
-## 6. Second wave (catalog reference, no per-XBE spec yet)
-
-The first wave covers:
-- The 3 SC2 bug classes (mirror, color, depth/floor).
-- The closed default-on flag regression gates (native_quad,
-  native_tri_depth).
-- The xemu GL impl gap most likely to surface (logic ops).
-- The fork-specific risks (CMP, surface cache, MSAA).
-- Major coverage classes (texture format sweep, blend matrix,
-  stencil ops, combiner basics, texture shader, filter/wrap,
-  DMA selector).
-
-The second wave expands feature coverage. For each, the catalog
-section provides the math; the per-XBE spec is straightforward
-extrapolation of the first-wave pattern. Listed for build queue:
-
-- §A.1 vertex shader instruction set — one XBE per MAC op + ILU
-  op (~20 XBEs; each tests one operation against a known-input
-  vector and verifies output via fragment-shader-passthrough).
-- §A.2 fixed-function: 8-light combinations, fog modes (6 modes),
-  texgen modes (6 modes), skinning modes (7 modes), material
-  source toggles.
-- §B.4 ingestion paths — one XBE per (inline buffer, inline
-  elements 16-bit, inline elements 32-bit, inline arrays,
-  draw_arrays); same scene, different ingestion.
-- §C.1 polygon mode (point / line / fill per-face).
-- §C.6 edge flags + line stipple — confirms whether xemu
-  silently no-ops these (§3a.2 / §3a.3 disagreement resolution).
+- §A.1 vertex shader instruction set — one XBE per MAC + ILU op
+  (~20 XBEs total).
+- §A.2 fixed-function: 8-light, fog modes, texgen, skinning,
+  material-source toggles.
+- §B.4 ingestion paths — one per (inline buffer, inline elements
+  16/32-bit, inline arrays, draw_arrays).
+- §C.1 polygon mode (point/line/fill per face).
+- §C.6 edge flags + line stipple — confirms whether xemu silently
+  no-ops these (§3a.2/§3a.3 catalog disagreement resolution).
 - §C.7.4 point sprites — experimental probe; iterates flag
-  combinations to find which triggers texture-coord replacement.
-- §D.13 bumpenvmap — full sweep (Bm00-11 matrix, scale, offset).
-- §D.11 shadow / depth-shadow comparison — 8 compare funcs.
-- §D.12 color key / alpha kill — kill modes with known patterns.
-- §E.6 cube map — 6 face content known; sample expected face
-  per direction.
-- §E.7 3D textures — 8×8×8 volume with known voxel pattern.
-- §E.8 palettized — 256-entry palette with known indices.
-- §E.10 texgen-driven texture coord generation.
+  combinations to identify true Xbox enable source.
+- §D.13 bumpenvmap — full Bm00-11 + scale + offset sweep.
+- §D.11 shadow / depth-shadow comparison.
+- §D.12 color key / alpha kill.
+- §E.6 cube map.
+- §E.7 3D textures.
+- §E.8 palettized.
+- §E.10 texgen-driven coords.
 - §E.13 per-format pitch + image rect alignment.
-- §G.5 Z compression — boundary cases (4:1 compress, 2:1 partial).
-- §H.6 NV_IMAGE_BLIT 2D blit context.
-- §3a.5 ARL bias — boundary-case sweep, identifies xemu issue
+- §G.5 Z compression boundary cases.
+- §H.6 NV_IMAGE_BLIT 2D blit (Tier 2 — guest VRAM oracle).
+- §3a.5 ARL bias — boundary-case sweep; identifies xemu issue
   #2362 over-correction directly.
 
-Approximate total: 50-60 XBEs in the second wave plus the 16 in
-the first wave = 65-75 total.
+Approximate total: ~70 XBEs.
 
-## 7. Validation procedure (per-XBE)
+## 6. Validation procedure (per-XBE)
 
-Each XBE proceeds through these gates before joining the regression
-suite:
+7 gates before joining the regression suite:
 
-1. **Design review.** XBE source-file header completed (math
-   derivation, citations, tier declaration). Diff goes through
-   `/codex-validate plan` before any nxdk source is written —
-   inline plan = the XBE header comment + manifest.json.
-2. **Build.** `make` in the XBE's directory produces
-   `bin/default.xbe` + `<xbe>.iso`. Build order: `lib/` first,
-   then per-XBE.
-3. **Self-test on xemu-GL.** Run via `run-benchmark.sh <xbe>`.
-   XBE renders banner. Expected: PASS, or FAIL matching the
-   manifest's `expected_fail_renderers` entry. Two consecutive
-   runs: byte-identical output.
-4. **Self-test on xemu-Metal.** Run via `XEMU_RENDERER=METAL
-   run-benchmark.sh <xbe>`. Same pass criteria.
-5. **Math audit.** Independent reviewer (or Codex) reads the
-   XBE header derivation against the catalog and confirms it's
-   sound. This is the step that prevents "XBE built against a
-   guess" — the audit re-derives the expected output from
-   first principles before trusting it.
-6. **Cross-emulator (advisory).** Run on Cxbx-Reloaded if
-   feasible. Disagreements logged; not blocking.
+1. **Design review.** Source-file header completed (math, citations,
+   tier, oracle priority). Manifest validated against schema. Diff
+   passes `/codex-validate plan` (XBE source header + manifest
+   are the inline plan).
+2. **Build.** `make` produces `bin/default.xbe` + `<xbe>.iso`.
+   Build order: `lib/` first, then `lib-smoke/`, then per-XBE.
+3. **Self-test on xemu-GL.** PASS or matches manifest's
+   `expected_fail` entry. Two consecutive runs: byte-identical
+   after applying mask.
+4. **Self-test on xemu-Metal.** Same criteria.
+5. **Math audit.** Independent reviewer (or Codex) reads the XBE
+   header derivation against the catalog; reads paired `expected.py`;
+   confirms they say the same thing. This is the step that prevents
+   "XBE built against a guess."
+6. **Real-Xbox capture (when hardware available).** Run XBE on
+   Xbox-real (Cerbios bank for Tier 1 self-instrumented; debug
+   bank + XBDM for Tier 1 host-capture); save reference frame to
+   `docs/apple-silicon/xbox-real-references/<xbe-id>/<config>.png`;
+   manifest entry promoted from `math-derived` to `real-xbox-capture`.
 7. **Regression integration.** Add to `metal-canary-regress.sh`
-   `--mode counters` rotation — XBEs that pass on Metal become
-   automatic post-change smoke. XBEs marked `expected_fail` on
-   a renderer skip that renderer in the regression sweep.
+   `--mode counters` rotation; XBEs that PASS on Metal become
+   automatic post-change smoke. `expected_fail` renderers skip
+   that renderer in the regression sweep.
 
-## 8. Build sequence
+## 7. Build sequence
 
-Phase 0 (infrastructure):
-- `xbe-tests/lib/` shared library + `shared.mk`.
-- Codex-validate the lib API.
-- Build + smoke-test against the existing `flat-tri-depth/`
-  XBE (refactor it to use the new lib as proof of API).
+**Phase 0 — Mac-side prep + xbe-tests/lib/ (Day 1-3, Mac-only).**
 
-Phase 1 (first 3 priority XBEs — proof of contract):
+- Build `xbe-tests/lib/` (xbed_runtime, xbed_vertex, xbed_banner,
+  xbed_capture, xbed_net stubs, xbed_readback dispatch tables).
+- Build `lib-smoke` XBE — minimum-viable test that exercises every
+  lib helper. Acts as "did the lib build correctly?" gate. Does
+  NOT touch `flat-tri-depth/` (Codex finding #10).
+- Build harness skeleton (`xbe-orchestrator.py` + per-renderer
+  backends). xemu-GL and xemu-Metal backends first.
+- Codex-validate the harness + lib API as `changes` mode batch.
+
+**Phase 1 — first 3 priority XBEs (Day 4-7).**
+
 - `mirror`, `color-channel`, `depth-floor`.
-- Codex-validate as a batch (plan + first changes).
-- Run on GL + Metal; confirm SC2-bug-class detection works as
-  designed.
-- If the catalog or contract needs revision based on what the
-  first 3 reveal, revise, re-Codex-validate, then continue.
+- Codex-validate as `changes` batch.
+- Run on xemu-GL + xemu-Metal; confirm SC2-bug-class detection
+  works as designed.
+- If catalog or contract needs revision based on what the first 3
+  reveal, revise + re-Codex-validate before continuing.
 
-Phase 2 (rest of first wave — 13 XBEs):
-- Build XBEs 4-16 in priority order.
+**Phase 2 — rest of first wave (Week 2).**
+
+- XBEs 4-16 in priority order.
 - Codex-validate in batches of 3-4.
-- Each addition runs the regression rotation immediately so we
-  catch coupling bugs early.
+- Each addition runs the regression rotation immediately to catch
+  coupling bugs early.
 
-Phase 3 (second wave — feature coverage):
+**Phase 3 — Real-Xbox bring-up + reference captures (Week 3, IF
+user retrieves Xbox).**
+
+- Phase 0 of `real-xbox-oracle-feasibility.md` (Mac-side prep
+  already done in this plan's Phase 0).
+- Phase 1-2 of feasibility doc: hardware bring-up + resolve
+  unknowns.
+- Capture real-Xbox reference frames for first-wave XBEs;
+  promote manifest entries from `math-derived` to `real-xbox-capture`.
+
+**Phase 4 — second wave (Week 4-6).**
+
 - ~50 XBEs covering remaining catalog sections.
 - Codex-validate per batch.
-- Goal: full pipeline coverage by end of phase.
+- Real-Xbox reference captures as XBEs come online (if hardware
+  is up).
 
-Phase 4 (use the library):
-- Run full library on Metal + GL; produce a per-XBE pass/fail
-  matrix.
-- Failures localize the actual broken NV2A-pipeline classes per
-  renderer. Fork work (Metal renderer fixes, GL gap closures)
-  proceeds against this matrix.
-- The goal "all 60+ XBEs PASS on Metal" is the new M15
-  default-on prerequisite, replacing the (broken) "≤1 % per-pixel
-  diff vs GL" criterion.
+**Phase 5 — use the library (ongoing).**
 
-## 9. Open questions for Codex review
+- Run full library on Metal + GL; produce per-(XBE, renderer,
+  flag-recipe) PASS/FAIL matrix.
+- Failures localize broken NV2A-pipeline classes per renderer.
+- Fork work (Metal renderer fixes, GL gap closures) proceeds
+  against this matrix.
+- "All N XBEs PASS on Metal" replaces the (broken) "≤1 % per-pixel
+  diff vs GL" criterion as the new M15 default-on prerequisite.
 
-1. **Self-validation tier ordering** — is Tier 1 (CPU-side VRAM
-   readback) actually feasible for every XBE on Metal? The Metal
-   renderer's surface cache (`MtlSurfaceBinding`) may keep the
-   GPU-side texture out of VRAM if the surface is private/shared.
-   The XBE infrastructure needs to force a surface download
-   (`pgraph_mtl_surface_download_if_dirty_at`) before CPU
-   readback. Verify this path works without `XEMU_METAL_FRONT_FB_DOWNLOAD=1`.
+## 8. Open questions (revised, post-Codex)
 
-2. **AGP-aliased VRAM access** — `pb_agp_access(ptr)` returns
-   `(ptr | 0xF0000000)` to bypass the GPU tile cache for CPU reads.
-   Confirm this works for color RTs (not just plain VRAM
-   buffers), and confirm it interacts correctly with the Metal
-   renderer's swizzled surface cache.
+Codex resolved most v1 open questions; new ones for v2:
 
-3. **Single-XBE total runtime** — the first-wave XBEs target ~5
-   seconds of runtime each. Total first-wave runtime ≈ 80 seconds
-   sequential. Second-wave ≈ 250 seconds. Is this acceptable for
-   regression-gate rotation, or do we need to parallelize via
-   ISO-pre-built and run all in one xemu boot?
+1. **`xbed_capture_now()` mechanism on Xbox-real-Cerbios path.** No
+   XBDM available on Cerbios. The XBE itself must do the capture
+   via `libnxdk_net` upload. Verify the existing xemu-side
+   `XEMU_CAPTURE_AT_FLIP_STALL` logic doesn't interfere when
+   running on real hardware (the renderer-side hook is in xemu's
+   Metal renderer; on real Xbox it's a no-op, so the XBE-side
+   `libnxdk_net` upload is the only path).
+2. **xbox-real-references manifest schema.** Naming convention
+   for per-config reference frames (`<bank>-<flag-recipe>.png`).
+   Should we hash flag recipes to keep filenames bounded? Or
+   rely on the manifest JSON to map?
+3. **Cross-renderer divergence detection report (no explicit
+   gate).** Even though it's not a PASS/FAIL signal, surfacing
+   "Metal and GL disagree on this XBE's pixels" is useful triage.
+   Where does it live in the orchestrator output?
+4. **128 MB RAM upgrade decision.** If Phase 3 reveals OOM on
+   PGR2/heavy titles, the user has to physically solder. Workflow
+   needs a "hardware pause" gate that pauses orchestrator runs
+   pending user action.
+5. **`autoinput` on OG Xbox.** If unverified at Phase 3 turns into
+   "missing on OG Xbox," we add ~1-2 weeks for nxdk_dyndxt
+   implementation. Is that acceptable to the user, or do they
+   want to ship without controller-injection automation and just
+   manually drive games to canonical states?
 
-4. **Manifest evolution** — `expected_fail_renderers` is
-   per-renderer-name. As fork branches (or renderer sub-modes
-   like `XEMU_METAL_FRONT_FB_FALLBACK=0`/=1) proliferate, the
-   manifest may need a more structured key. Defer until needed
-   or design upfront?
+## 9. Codex-validation cadence
 
-5. **Reproducibility enforcement** — should `run-benchmark.sh`
-   wrap each XBE run in an automatic two-cold-runs-and-diff
-   verification, or is that opt-in per-test? The cost is
-   doubling regression-gate runtime.
+Per project rule #15 + catalog §8.1 + this plan §2.8:
 
-6. **CMP format encoding** — §A.3 says CMP is "(11,11,10) packed
-   signed normalized." Verify the exact bit layout against
-   `vertex.c:56-75` before writing the cmp-vertex-format XBE
-   (§5.6) test vectors. xemu source is the authority here, not
-   the catalog summary.
-
-7. **Cross-renderer expected behavior for §3a items** — the XBEs
-   that test cross-witness disagreements (edge flags, line
-   stipple, ARL bias) don't have a clear pre-existing expected
-   PASS verdict. The XBE itself becomes the experimental probe
-   that *defines* the expected behavior. Manifest's
-   `expected_pass_renderers` for these XBEs starts empty and
-   gets populated after the first run; is this appropriate, or
-   should we write down the "real Xbox would say X" answer
-   somewhere first?
-
-## 10. Codex-validation cadence (reminder)
-
-Per project rule #15 + catalog §8.1:
-
-- This plan goes through `/codex-validate plan
-  docs/apple-silicon/diagnostic-xbe-plan.md` BEFORE any nxdk
-  source is written.
-- The shared `xbe-tests/lib/` API goes through
-  `/codex-validate changes` after build.
-- Each XBE batch (typically 3-4 at a time) goes through
+- **This v2 plan** goes through `/codex-validate plan
+  docs/apple-silicon/diagnostic-xbe-plan.md` BEFORE any new nxdk
+  source is written. (Pending; v1 Codex-validation returned
+  BLOCKING; v2 should resolve all 12 findings; re-validation
+  gates the next step.)
+- **`xbe-tests/lib/` API** goes through `/codex-validate changes`
+  after Phase 0 build.
+- **Each XBE batch** (typically 3-4) goes through
   `/codex-validate changes` before commit.
-- Catalog updates that motivate XBE additions go through
+- **Catalog updates** that motivate XBE additions go through
   `/codex-validate plan` per catalog §8.1.
-- Substantial revisions to this plan re-trigger
-  `/codex-validate plan`.
 
-## Appendix A — Worked example: `mirror` XBE source skeleton
+## 10. Summary of what changed from v1 (Codex BLOCKING resolution)
 
-For reviewer audit, here is the XBE source-file header that
-would land for §5.1 `mirror`:
+| Codex finding | v1 issue | v2 resolution |
+|---|---|---|
+| #1 Critical: Tier 1 CPU-side VRAM readback fails on Metal | Self-validation contract assumed CPU-side readback worked | §2.1 inverted tier order; host-side capture is now Tier 1 |
+| #2 Critical: pb_agp_access not coherent with Metal cache | Same root cause as #1 | Tier 2 (escape hatch) declares its surface-download prerequisite in manifest |
+| #3 High: Mirror coords mixed host/guest scaling | XBE rendered at host-scaled coords | §2.6 forces `XEMU_DISPLAY_SCALE=1` for all XBEs; §4.1 spec rewritten in guest space |
+| #4 High: CRTC-publish XBE category error | Guest can't observe host-side fallback | §4.4 redesigned for host-side capture with per-flag-recipe expected references |
+| #5 Medium: xbed_decode_pixel underspecified | One signature for two namespaces | §3.1 split into `xbed_rt_format_decoders[10]` + `xbed_tex_format_decoders[42]` dispatch tables |
+| #6 Medium: Mirror VS path conflated FFP/programmable | Header math wrong for the actual code path | §4.1 explicitly programmable VS path; math derived from `glsl/vsh-prog.c:753` |
+| #7 Medium: Stencil readback via Tier 2 not feasible on Metal | Metal download skips depth/stencil | §4.10 redesigned for color-via-stencil-compare probe (Tier 1) |
+| #8 Medium: DMA A/B used identical bases | Only tested selector decode | §4.16 uses different bases per channel; tests actual translation |
+| #9 Medium: Logic ops Metal also lacks impl | Manifest only marked GL expected_fail | §4.14 manifest marks both GL and Metal expected_fail |
+| #10 Medium: Phase 0 churned flat-tri-depth | Re-validation forbidden by project rule #11 | §3.1 + §7 build new `lib-smoke` XBE; flat-tri-depth untouched |
+| #11 Low: byte-identical vs non_deterministic_regions contradicted | Schema didn't reconcile | §2.4 defines reproducibility as "byte-identical-after-mask" |
+| #12 Low: run-benchmark.sh hardcodes title aliases | Generic XBE path mode missing | §3.2 `xbe_discover.py` + harness manages discovery; run-benchmark.sh integration is downstream |
+
+Plus one architectural addition not on Codex's list:
+
+| Architectural | What changed |
+|---|---|
+| **Real-Xbox oracle path** | New §2.2 reference oracle hierarchy puts real-Xbox-captured frames as canonical when available; math-derived as audit material; cross-renderer divergence as triage signal. Architecture details in `real-xbox-oracle-feasibility.md`. |
+
+## Appendix A — Worked example: `mirror` XBE (revised)
 
 ```c
 /*
- * mirror — pixel-position oracle for vertex transform / viewport.
+ * mirror — pixel-position oracle.
  *
  * NV2A feature exercised: §A.6 Z perspective, §C.8 window clip,
  *                         §J.1 viewport, §J.2 scissor.
- * NV097 methods:          SET_VIEWPORT_OFFSET (0x0A20),
- *                         SET_VIEWPORT_SCALE (0x0AF0),
- *                         SET_SURFACE_CLIP_HORIZONTAL/VERTICAL
- *                         (0x0200, 0x0204), SET_TRANSFORM_PROGRAM
- *                         (0x0B00), SET_BEGIN_END (0x17FC),
+ * NV097 methods:          SET_TRANSFORM_PROGRAM (0x0B00),
+ *                         SET_TRANSFORM_PROGRAM_LOAD (0x1E9C),
+ *                         SET_TRANSFORM_PROGRAM_START (0x1EA0),
+ *                         SET_BEGIN_END (0x17FC),
  *                         DRAW_ARRAYS (0x1810).
- * Self-validation tier:   1 (CPU-side VRAM readback).
+ * Self-validation tier:   1 (host-side capture).
+ * Oracle priority:        real-xbox > math-derived.
  *
- * Math:
- *   Back-buffer is W=1280 H=960 A8R8G8B8 (surface_scale=2 default).
+ * Math derivation:
+ *   Back-buffer 640x480 A8R8G8B8 (XEMU_DISPLAY_SCALE=1 forced
+ *   per diagnostic-mode prereq §2.6).
  *   Clear color: opaque black 0xFF000000.
  *
- *   Vertex shader: project NDC [-1, 1] to surface space via the
- *   identity orthographic matrix combined with the viewport
- *   transform pos = pos*scale + offset. With offset = (W/2, H/2,
- *   0, 0) and scale = (W/2, -H/2, 1, 1), NDC (0, 0) maps to
- *   surface (640, 480). To target guest coord (640, 100), the
- *   vertex's NDC is (0, (480-100)/480) = (0, 0.79166...).
- *   Surface-scaled to (1280*0, 200) = (1280, 200).
+ *   Programmable VS path: VS computes screen-space position
+ *   directly via surfaceSize uniform (per glsl/vsh-prog.c:753).
+ *   For target guest pixel (320, 50):
+ *     screen_x = 320, screen_y = 50.
+ *     o[POSITION] = vec4(screen_x, screen_y, 0, 1).
+ *   The pixel shader emits opaque white 0xFFFFFFFF.
  *
- *   Triangle: render a single 1-pixel-tall, 1-pixel-wide triangle
- *   centered at NDC (0, 0.79166). Pixel coverage: exactly the host
- *   pixel (1280, 200). Color: opaque white 0xFFFFFFFF passed
- *   through a passthrough combiner.
+ *   Triangle: 1-pixel triangle vertices arranged so coverage
+ *   collapses to exactly host pixel (320, 50).
  *
  *   Expected back-buffer:
- *     pixel(1280, 200) == 0xFFFFFFFF
+ *     pixel(320, 50)  == 0xFFFFFFFF
  *     all other pixels == 0xFF000000
  *
- *   A renderer that mirrors top-half to bottom-half produces a
- *   second white pixel at the Y-flip coordinate:
- *     mirror_y = H - 1 - 200 = 759    (host pixel)
- *     mirror_y = (1920 - 1) - 200 ... (alternative interpretations)
- *   The XBE computes both candidate mirror coordinates and
- *   reports them on FAIL.
+ *   Mirror-bug detection: a renderer that flips top-half to
+ *   bottom-half produces additional white at (320, H-1-50) =
+ *   (320, 429). The XBE's harness reports any non-(320,50)
+ *   white pixel by location.
  *
- * Reproducibility: deterministic. Frame counter rendered in
- * top-left 64x16 region (excluded via non_deterministic_regions
- * mask in manifest.json).
+ * Reproducibility: deterministic. No banner / counter on the
+ *   captured frame. (Banner renders only on later visual-debug
+ *   frames after the capture trigger fires.)
  */
 ```
 
-This is what the reviewer audits before approving the XBE for
-build. If the reviewer can't follow the math from the header to
-"yes, the expected back-buffer is correct," the XBE goes back for
-clarification.
+The `expected.py` for this XBE encodes the same math:
+
+```python
+def gl_no_msaa(width, height, **flags):
+    fb = numpy.full((height, width), 0xFF000000, dtype=numpy.uint32)
+    fb[50, 320] = 0xFFFFFFFF
+    return fb
+
+def metal_no_msaa_no_fallback(width, height, **flags):
+    return gl_no_msaa(width, height, **flags)
+
+def metal_no_msaa_fallback(width, height, **flags):
+    return gl_no_msaa(width, height, **flags)
+```
+
+Reviewer audit: read the XBE header, read expected.py, confirm
+they match. If they don't, the XBE source is wrong (or the math
+derivation is wrong). Either way, the disagreement is actionable
+before a single byte of nxdk source is written.

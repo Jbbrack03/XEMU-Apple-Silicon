@@ -64,6 +64,37 @@ the task touches the Metal port):
   migration plan, six input slices N1–N6, independent of the renderer
   track.
 
+Diagnostic-XBE library track (added 2026-05-06; read after `handoff.md`
+when the task touches XBE-side validation or real-Xbox oracle setup):
+
+- `docs/apple-silicon/nv2a-feature-surface-research.md` —
+  **(2026-05-05, Codex-revised 2026-05-06)** comprehensive feature
+  catalog of the NV2A rendering pipeline (vertex pipeline, primitive
+  assembly, rasterization, register combiners, texture system, ROP,
+  depth/stencil, render targets, display, plus 17 Xbox-specific
+  oddities). Three independent witnesses; 13 cross-witness
+  disagreements + 25+ emulation pitfalls catalogued. Foundation for
+  the diagnostic-XBE library.
+- `docs/apple-silicon/diagnostic-xbe-plan.md` — **(2026-05-06 v2 —
+  supersedes v1 d57742ef47 which was Codex-flagged BLOCKING)**
+  implementation plan. Self-validation tiers (Tier 1 host-side
+  capture primary, Tier 2 guest-side VRAM readback escape hatch
+  only, Tier 3 NV097_GET_REPORT Z-pass tertiary, Tier 4 visual-only
+  last resort), shared infrastructure under `xbe-tests/lib/` +
+  `scripts/apple-silicon/xbe-harness/`, manifest schema with
+  per-(renderer, flag-recipe) keyed expected results, per-XBE specs
+  for the first 16 priority XBEs, 4-phase build sequence. Codex
+  re-validation pending before any new nxdk source.
+- `docs/apple-silicon/real-xbox-oracle-feasibility.md` —
+  **(2026-05-06)** feasibility verdict for using the user's
+  OpenXenium-modded Original Xbox as a hardware oracle. Architecture:
+  Microsoft's XBDM debug kernel (`screenshot` + possibly `autoinput`)
+  on one OpenXenium bank, PrometheOS as chip-OS for REST-API control,
+  Mac-side Python orchestrator over LAN. Apple-Silicon-Mac-only
+  workflow confirmed feasible. Effort: ~1-2 weeks best case. Six
+  unknowns to verify by experiment once Xbox is set up. Hardware
+  retrieval pending user decision.
+
 ## Where the fork's changes live
 
 The fork-specific source-code changes are concentrated in:
