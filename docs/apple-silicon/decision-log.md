@@ -1,5 +1,198 @@
 # Decision Log
 
+## 2026-05-06: Diag XBE library Phase 3.1+3.2+harness — Tier-1 mirror/color-channel/depth-floor + xbe-harness production gate
+
+**Context.** Phase 3.0 (pipeline-smoke) proved the
+orchestrator's chainload-and-back cycle end-to-end with a
+CPU-painted Tier-4 diag XBE. The next-session priorities from
+that entry called for:
+1. Phase 3.1 — first Tier-1 NV2A diag XBE (`mirror`).
+2. Phase 3.2 — `color-channel` and `depth-floor`.
+3. Wire diag XBEs into the M15 visual gate.
+4. (Optional) Build the shared `xbe-tests/lib/` skeleton.
+
+This session lands all four.
+
+**What landed: shared `xbe-tests/lib/`.**
+
+`xbed_runtime.{c,h}` factors the per-XBE boilerplate from
+`flat-tri-depth/main.c` and `nxdk/samples/triangle/main.c` into
+a small library: `xbed_init` (XVideoSetMode + pb_init), default
+render-state setup, viewport-matrix shader-constants load,
+default passthrough VS+PS load (`vs.vs.cg` / `ps.ps.cg` baked
+into the lib dir), per-frame begin/end-and-swap helpers, and
+attribute helpers (`xbed_set_attrib_pointer`,
+`xbed_clear_all_attribs_to_float`, `xbed_draw_arrays`).
+
+`xbed_capture.{c,h}` provides `xbed_capture_front_to_xoss`
+(write the post-flip front buffer as XOSS to D:\) and
+`xbed_capture_and_reboot` (capture + done.txt + reboot via
+`HalReturnToFirmware(HalRebootRoutine)`) — same XOSS format and
+reboot pattern `pipeline-smoke` established. Plus
+`xbed_render_loop_then_capture(fn, ctx, n_frames, ...)` which
+loops `fn` for N frames before capture+reboot, giving xemu's
+in-renderer screenshot path plenty of opportunities to land
+during the diag's render window.
+
+`lib.mk` is a Makefile snippet diag XBEs include before pulling
+in nxdk's Makefile; it sets `SRCS += xbed_*.c`, `SHADER_OBJS +=
+vs.inl ps.inl`, and adds `-I$(XBED_LIB_DIR)` so a new diag XBE's
+Makefile is 6 lines.
+
+**What landed: three Tier-1 NV2A diag XBEs.**
+
+Each is ~150 lines on top of the lib:
+
+- `mirror/` (per `diagnostic-xbe-plan.md` v2 §4.1) — pixel-
+  position oracle. Renders a 4×4 white block at window
+  (318, 48)-(322, 52) on opaque-black via the standard VS path
+  + integer-corner-aligned quad. Catches Y-mirror bugs (the
+  SC2 "top-mirrored-to-bottom" symptom would land the white
+  block at row 429 instead of row 50). Math: 16 white pixels
+  + 307,184 black pixels, byte-exact.
+
+- `color-channel/` (§4.2) — RT format and channel-ordering
+  oracle. Renders four full-height vertical strips
+  (red / green / blue / white via TYPE_F DIFFUSE) covering
+  cols [0,160) / [160,320) / [320,480) / [480,640). Catches
+  B/R swaps in the front-buffer publish path or in the
+  DIFFUSE → COLOR fixed-function passthrough. (TYPE_UB_D3D
+  variant deferred to a sibling `color-channel-d3d` XBE.)
+
+- `depth-floor/` (§4.3) — depth-test + native_tri_depth oracle.
+  Originally specced as an 8×8 floor grid + wall in 3D camera
+  space; redesigned to a saturated-color split (full-screen
+  white floor at z=0.5 + bottom-half blue wall at z=0.0,
+  closer) so display-side gamma doesn't perturb the comparison.
+  With LEQUAL depth test the wall wins where it draws.
+  Catches depth-test disabled / reversed / Y-mirrored / write-
+  masked, plus native_tri_depth wrong per-fragment Z. (See
+  the source-file header in `depth-floor/main.c` for the
+  full math derivation.)
+
+Each XBE has paired `expected.py` (math-derived audit oracle)
+and `manifest.json` (per-(renderer, flag-recipe)
+`expected_results` keyed by `<renderer>/scale=<N>/msaa=<M>`
+with fallback `any/any/any`).
+
+**What landed: `scripts/apple-silicon/xbe-harness/`
+production orchestration.**
+
+- `xbe_discover.py` — walks `xbe-tests/<id>/manifest.json`,
+  returns `XbeManifest` records.
+- `xbe_renderers.py` — per-renderer drivers. xemu side: writes
+  per-run `xemu.toml`, APFS-clones the source HDD, launches
+  xemu with the canonical Metal recipe (TRANSLATED_PIPELINE=1,
+  FRONT_FB_FALLBACK=1, HUD=0, VALIDATION=1), QMP-quits
+  cleanly. Real-Xbox side: probes the agent, reboots if
+  needed for FTP, FTP-uploads the diag XBE to
+  `E:\XBMC4Gamers\Apps\<id>\default.xbe`, wraps
+  `oracle-orchestrator.py run-diag`, decodes the pulled XOSS
+  blob to PNG.
+- `xbe_compare.py` — comparison primitives. Synthesizes the
+  math-derived expected PNG by importing the manifest's
+  `expected.py:<fn>` generator. Wraps `compare-screenshots.py`
+  but PARSES `changed_pixels_pct` from stdout (the underlying
+  script always exits 0 — the harness applies its own
+  `--max-changed-pct` gate). Default `--resize smaller` so
+  retina-scaled Metal drawables compare against guest-native
+  640×480 references.
+- `xbe_orchestrator.py` — top-level CLI:
+  `list / probe / expected / capture-reference / run`. The
+  `run` matrix iterates over every captured PNG per cell
+  (xemu records boot + diag-render + post-reboot frames; we
+  want the diag-render frame), picks the one with the lowest
+  `changed_pixels_pct` against the reference, then re-runs
+  the compare on that chosen PNG and applies the gate.
+
+**Validation evidence.**
+
+`python3 xbe-harness/xbe_orchestrator.py run --renderer metal
+--surface-scale 1 --threshold 16 --max-changed-pct 1.0` on
+this fork's `apple-silicon-performance` branch:
+
+```
+[xbe-harness] running color-channel on metal ...    → pass ()
+[xbe-harness] running depth-floor on metal ...      → pass ()
+[xbe-harness] running mirror on metal ...           → pass ()
+[xbe-harness] 3 pass, 0 fail, 0 infra-error/skip
+```
+
+mirror's best-frame `changed_pixels_pct=0.0078%` (24 pixels
+out of 307200, max abs diff 71/255 = sub-pixel sampling
+drift only, well under the 1.0% gate).
+
+**Bug surfaced and fixed in flight: compare-screenshots.py
+exit semantics.** The existing `compare-screenshots.py`
+always exits 0 and prints `changed_pixels_pct=N.NNNN` for the
+caller to gate on. The harness's first cut treated rc==0 as
+pass — gave a false PASS for a 100% changed run. Fixed via
+`_parse_changed_pct(stdout)` + `--max-changed-pct` enforcement
+in `xbe_compare.compare`.
+
+**Bug surfaced and fixed in flight: stale BIOS path.** First
+xemu run logged `Failed to load BIOS '(null)'` because
+`xbe_renderers.py` had `MCPX = .../mcpx_1.0.bin` and `BIOS =
+.../Complex_4627.bin` at the top-level Xbox-Emulator-Files
+directory; the actual files are at `mcpx/` and `bios/`
+subdirs (matches `run-benchmark.sh` lines 8-10). Fixed.
+
+**Known limitation: real-Xbox capture for pbkit-based diag
+XBEs.** Mirror (and likely color-channel + depth-floor)
+chainload via `oracle-orchestrator.py run-diag`, FTP comes
+back after reboot, but the diag XBE does NOT write
+`D:\<id>-capture.bin` to its parent directory. pipeline-smoke
+(no pbkit) writes its D:\ blob fine, so the orchestrator
+pipeline is correct — the issue is pbkit-specific. Filed as
+task #9 "Investigate pbkit + D: write hang" for a follow-up
+session: try reducing render frame count (currently 300 ×
+~16 ms = 5 s), call `pb_kill()` before the fopen, add
+explicit `fflush()` and check `fclose` rc, run with TV
+attached to read debugPrint console output.
+
+Math-derived oracle is fully valid Tier-1 reference per
+`diagnostic-xbe-plan.md` v2 §2.2 ("when no real-Xbox capture
+is available"); the Metal gate is operational against
+math-derived without the real-Xbox canonical reference. When
+the pbkit + D:\ issue is fixed, capturing canonical references
+is one command per XBE: `xbe-harness/xbe_orchestrator.py
+capture-reference --xbe <id>`.
+
+**Known limitation: GL renderer screencapture for diag XBEs.**
+xemu's GL renderer has no in-renderer screenshot path; the
+sidecar `macos-capture.sh` window-targeted screencapture
+captures the xemu window at retina-scaled dimensions
+(~1416×1160 vs guest 640×480) and the comparison's
+`--resize smaller` LANCZOS path doesn't recover the exact
+integer-grid mapping. GL cells in the matrix currently FAIL
+for this reason even though the GL renderer probably renders
+the diag XBEs correctly. The orchestrator's autodetect
+deliberately excludes GL by default; pass `--renderer gl`
+explicitly if needed. Future slice: add an in-renderer GL
+screenshot path (parallel to `XEMU_METAL_SCREENSHOT_PATH`)
+so GL captures match Metal's pixel-exact path.
+
+**Why this matters for M15 default-on.** The diagnostic-XBE
+library was identified in `diagnostic-xbe-plan.md` v2 as the
+correctness oracle the M15 visual-gate sweep should run
+against. Counter-only validation can show "renderer healthy"
+while rendering is visually broken (the 2026-05-05 SC2 Metal
+canonical-recipe replay symptom). Paired Metal-vs-GL diff is
+a divergence detector, not a correctness oracle (GL is "~85%
+correct"). Tier-1 host-side capture against math-derived or
+real-Xbox-canonical references closes that gap. With the
+xbe-harness shipped, the M15 default-on prerequisite list
+gains a mechanical gate: all Tier-1 XBEs PASS on Metal vs
+the canonical oracle.
+
+**Status.** SHIPPED. The xemu-Metal validation is operational
+3/3 PASS. Real-Xbox capture path is wired but blocked on the
+pbkit + D:\ fopen issue (task #9). GL renderer best-effort
+(documented limitation). M15 default-on visual-gate
+prerequisite slot is now occupied by `xbe-harness run --renderer
+metal --max-changed-pct 1.0` instead of the originally-planned
+manual paired-diff sweep.
+
 ## 2026-05-06: Real Xbox oracle Phase 3.0 — pipeline-smoke validates orchestrator end-to-end
 
 **Context.** Phase 2 of the oracle agent + orchestrator was

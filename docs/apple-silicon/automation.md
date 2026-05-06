@@ -3358,13 +3358,54 @@ the EEPROM dump path; do not commit).
    `ok`. Real-Xbox reference stashed at
    `docs/apple-silicon/xbox-real-references/pipeline-smoke/real-xbox.png`.
    See "pipeline-smoke" section above for the drive recipe.
-8. Real Xbox oracle Phase 3.1 (next-session): build the first
-   Tier-1 NV2A-pipeline diag XBE — `mirror` per
-   `diagnostic-xbe-plan.md` v2 §4.1. Same XOSS-capture-then-
-   reboot skeleton pipeline-smoke established, but with the
-   pixel paint coming from the NV2A pgraph pipeline (single-
-   pixel triangle at guest coord (320, 50) via VS path) instead
-   of CPU memcpy. Tier-1 catches the SC2 visual symptoms
-   (top-mirrored, wrong colors, missing floor) which Tier-4
-   pipeline-smoke cannot. Then `color-channel` (§4.2) and
-   `depth-floor` (§4.3).
+8. Real Xbox oracle Phase 3.1+3.2 (2026-05-06): **SHIPPED.**
+   Three Tier-1 NV2A-pipeline diag XBEs landed under
+   `scripts/apple-silicon/xbe-tests/`:
+   - `mirror/` — pixel-position oracle. Renders a 4x4 white block
+     at window (318, 48)-(322, 52) on opaque-black; catches
+     Y-mirror bugs.
+   - `color-channel/` — RT format and channel-ordering oracle.
+     Four full-height vertical strips (red/green/blue/white via
+     TYPE_F DIFFUSE); catches B/R swaps in publish path or
+     DIFFUSE → COLOR passthrough.
+   - `depth-floor/` — depth test + native_tri_depth oracle.
+     Full-screen white floor at z=0.5 + blue bottom-half wall
+     at z=0.0; with LEQUAL depth test the wall wins where
+     drawn (top half white, bottom half blue). Saturated
+     0/255 colors only — byte-exact across renderers regardless
+     of any display-side gamma table. Catches depth-test /
+     depth-write / Y-mirror regressions.
+   All three share `xbe-tests/lib/` (xbed_runtime + xbed_capture
+   + passthrough vs.vs.cg/ps.ps.cg) so a new diag XBE is ~150
+   lines of test-specific code on top. Each XBE is paired with
+   `expected.py` (math-derived audit oracle) and `manifest.json`
+   (per-(renderer, flag-recipe) expected_results). Rebuild via
+   `make` after `eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)"`.
+
+9. Real Xbox oracle production harness (2026-05-06): **SHIPPED.**
+   `scripts/apple-silicon/xbe-harness/` — top-level driver that
+   runs each Tier-1 XBE on every available renderer (xemu-GL,
+   xemu-Metal, real Xbox) and emits a per-cell PASS/FAIL
+   matrix. CLI:
+   ```sh
+   python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py list
+   python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py probe
+   python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py expected --xbe mirror --out /tmp/m.png
+   python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py capture-reference --xbe mirror
+   python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run [--xbe ID] [--renderer R] [--out DIR]
+   ```
+   Renderer drivers: xemu side launches xemu directly with the
+   diag iso, scratch HDD (APFS clone), canonical Metal recipe
+   (TRANSLATED_PIPELINE=1, FRONT_FB_FALLBACK=1, HUD=0,
+   VALIDATION=1) for Metal; macos-capture.sh sidecar for GL.
+   Real-Xbox driver wraps `oracle-orchestrator.py run-diag`:
+   FTP-uploads the XBE, agent chainloads, FTP-collects XOSS
+   blob, decodes to PNG. Comparison gate iterates over all
+   captured screenshots (xemu boot + diag-render + post-reboot
+   dashboard) and picks the lowest changed_pixels_pct vs the
+   reference (math-derived from expected.py or
+   real-xbox-canonical from
+   `docs/apple-silicon/xbox-real-references/<id>/`); pass if
+   `changed_pixels_pct ≤ --max-changed-pct` (default 0.5%).
+   See `scripts/apple-silicon/xbe-harness/README.md` for full
+   layout, render-loop pattern, and per-XBE add-new-XBE recipe.

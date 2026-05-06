@@ -1,0 +1,9 @@
+// xbed default PS — diffuse passthrough.
+struct vOut {
+    float4 color : COLOR;
+};
+
+float4 main(vOut I) : COLOR
+{
+    return I.color;
+}

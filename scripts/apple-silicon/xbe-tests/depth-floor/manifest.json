@@ -1,0 +1,37 @@
+{
+  "id": "depth-floor",
+  "title": "Depth-test + native_tri_depth oracle (saturated split)",
+  "purpose": "Render a full-screen white floor at z=0.5, then a blue wall covering the bottom half at z=0.0 (closer). With LEQUAL depth test the wall wins over the floor in the bottom half. Captures post-flip front buffer; expected = top half white, bottom half blue. Saturated 0/255 colors only — byte-exact across renderers regardless of any display-side gamma table. Catches the SC2 'floor disappearing' symptom plus depth-test/depth-write/Y-mirror regressions in the native triangle-depth path. (Earlier v0.1 spec used an 8x8 colored grid + gray wall in 3D camera space; redesigned to the current 2-quad saturated split because intermediate per-cell colors get gamma'd at display scan-out, breaking byte-exact comparison.)",
+  "catalog_ref": "§G.1, §G.6, §K.2, §H.5",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 4,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\depth-floor-capture.bin",
+      "ftp_path": "/E/XBMC4Gamers/Apps/depth-floor/depth-floor-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\depth-floor-done.txt",
+      "ftp_path": "/E/XBMC4Gamers/Apps/depth-floor/depth-floor-done.txt"
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

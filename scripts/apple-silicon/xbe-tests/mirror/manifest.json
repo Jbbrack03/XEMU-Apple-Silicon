@@ -1,0 +1,37 @@
+{
+  "id": "mirror",
+  "title": "Pixel-position oracle (Y-mirror detection)",
+  "purpose": "Render a 4x4 white block at window-coords (318, 48)-(322, 52) on opaque-black back-buffer; capture the post-flip front buffer and compare. Catches Y-mirror bugs in the renderer or front-buffer publisher (the SC2 'top-mirrored-to-bottom' symptom would put the white block at row 429 instead of row 50).",
+  "catalog_ref": "§A.6, §C.8, §J.1, §J.2",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 4,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\mirror-capture.bin",
+      "ftp_path": "/E/XBMC4Gamers/Apps/mirror/mirror-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\mirror-done.txt",
+      "ftp_path": "/E/XBMC4Gamers/Apps/mirror/mirror-done.txt"
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

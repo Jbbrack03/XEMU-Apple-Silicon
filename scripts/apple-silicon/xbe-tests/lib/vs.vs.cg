@@ -1,0 +1,26 @@
+// xbed default VS — same passthrough used by `nxdk/samples/triangle`
+// and `flat-tri-depth`. POSITION is in clip space (-1..+1 with +Y up,
+// Z in [0,1]); m_viewport mapped from clip to window coords by the
+// runtime's xbed_load_viewport_matrix(). DIFFUSE forwards as COLOR.
+struct vIn {
+    float4 color    : DIFFUSE;
+    float4 position : POSITION;
+};
+
+struct vOut {
+    float4 col : COLOR;
+    float4 pos : POSITION;
+};
+
+vOut main(vIn I, uniform float4x4 m_viewport)
+{
+    vOut result;
+    float4 position;
+
+    position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+    position.xyz = position.xyz / position.w;
+
+    result.col = I.color;
+    result.pos = position;
+    return result;
+}

@@ -1,0 +1,76 @@
+/*
+ * xbed_runtime — shared diag-XBE runtime helpers.
+ *
+ * Wraps the boilerplate every Tier-1 NV2A diag XBE needs:
+ *   - XVideoSetMode + pb_init
+ *   - default render-state setup (NV097_SET_BLEND_ENABLE etc.)
+ *   - viewport-matrix shader constants
+ *   - back-buffer clear / depth-stencil clear / present-and-wait
+ *   - shutdown
+ *
+ * Each diag XBE links the lib by adding `SRCS += $(CURDIR)/../lib/xbed_*.c`
+ * to its Makefile (see `lib/lib.mk` for the include snippet).
+ *
+ * The lib targets the diagnostic-XBE plan v2 §3.1 API surface
+ * (`docs/apple-silicon/diagnostic-xbe-plan.md`).
+ */
+#ifndef XBED_RUNTIME_H
+#define XBED_RUNTIME_H
+
+#include <stdint.h>
+
+typedef enum {
+    XBED_OK = 0,
+    XBED_FAIL_INIT,
+    XBED_FAIL_VRAM,
+    XBED_FAIL_NET,
+    XBED_FAIL_CAPTURE,
+} xbed_status_t;
+
+/* xbed_init: bring up XVideo + pbkit at (width, height, 32 bpp).
+ * On failure returns XBED_FAIL_INIT and sleeps 2 s before returning so
+ * a real-Xbox tester can read the debug print. */
+xbed_status_t xbed_init(int width, int height);
+
+/* xbed_shutdown: tear down pbkit. Diag XBEs typically reboot via
+ * xbed_capture_and_reboot() and never reach here. */
+void          xbed_shutdown(void);
+
+/* Frame loop helpers. Mirror the triangle sample's order:
+ *   xbed_frame_begin();
+ *   <issue draws>
+ *   xbed_frame_end_and_swap();   // flushes, waits for GPU, swaps */
+void          xbed_frame_begin(void);
+void          xbed_frame_end_and_swap(void);
+
+/* Convenience: clear back buffer to ARGB color. */
+void          xbed_clear_color_argb(uint32_t argb);
+
+/* Default render-state setup (no blend, no alpha, no cull, no depth,
+ * fill mode, smooth shading). Diag XBEs that need depth or blend
+ * enable them themselves AFTER calling this. */
+void          xbed_set_default_render_state(void);
+
+/* Standard viewport matrix at the active back-buffer dimensions.
+ * Loads into transform constants C[96..99] (the matrix slot that
+ * `lib/vs.vs.cg` consumes — same offset the triangle sample uses). */
+void          xbed_load_viewport_matrix(void);
+
+/* Standard VS / PS upload. The shaders are baked into `lib/vs.inl`
+ * and `lib/ps.inl`; both are passthrough with screen-space POSITION
+ * (already in window coordinates) + DIFFUSE → COLOR. */
+void          xbed_load_default_shaders(void);
+
+/* Geometry helpers: clear all 16 attribute slots to TYPE_F (so unused
+ * slots don't leak prior state), then bind individual attributes. */
+void          xbed_clear_all_attribs_to_float(void);
+void          xbed_set_attrib_pointer(unsigned index, unsigned format,
+                                      unsigned size, unsigned stride,
+                                      const void *data);
+void          xbed_draw_arrays(unsigned mode, int start, int count);
+
+/* Back-buffer geometry (after xbed_init). */
+int           xbed_back_buffer_width(void);
+int           xbed_back_buffer_height(void);
+
+#endif /* XBED_RUNTIME_H */

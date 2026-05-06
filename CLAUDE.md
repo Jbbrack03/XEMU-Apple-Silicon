@@ -121,9 +121,34 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   writes XOSS-format capture to D:\\, reboots via
   `HalReturnToFirmware(HalRebootRoutine)`. Captured PNG SHA-256
   matches `expected.py:default()` math-derived oracle byte-for-
-  byte. Tier-1 NV2A-pipeline XBEs (mirror / color-channel /
-  depth-floor per `diagnostic-xbe-plan.md` v2 §4.1–§4.3) are
-  next-session work and plug into the same skeleton.
+  byte.
+- **`scripts/apple-silicon/xbe-tests/lib/`** — **Phase
+  3.1+3.2** shared diag-XBE runtime (`xbed_runtime` for pbkit
+  init / default render state / viewport matrix / frame loop;
+  `xbed_capture` for XOSS write + reboot;
+  `xbed_render_loop_then_capture` so a diag renders N frames
+  before capture so xemu's in-renderer screenshot path lands
+  on the diag pattern). Includes passthrough `vs.vs.cg` /
+  `ps.ps.cg` and a `lib.mk` snippet diag XBEs include from
+  their Makefile.
+- **`scripts/apple-silicon/xbe-tests/mirror/`,
+  `color-channel/`, `depth-floor/`** — **Phase 3.1+3.2** Tier-1
+  NV2A diag XBEs. Each is ~150 lines on top of the lib + paired
+  `expected.py` (math-derived audit oracle) + `manifest.json`
+  (per-(renderer, flag-recipe) `expected_results`). All three
+  PASS on xemu-Metal vs math-derived oracle 2026-05-06. mirror
+  catches Y-mirror bugs, color-channel catches B/R swaps,
+  depth-floor catches depth-test regressions (saturated
+  0/255 colors only — byte-exact across renderers).
+- **`scripts/apple-silicon/xbe-harness/`** — **Phase
+  3.1+3.2** production matrix runner. CLI: `list / probe /
+  expected / capture-reference / run`. Iterates {XBE × renderer
+  × flag-recipe} cells, picks the diag-render frame from each
+  cell's screenshot sequence by lowest-`changed_pixels_pct`
+  scan, applies `--max-changed-pct` gate. M15 default-on
+  visual-gate prerequisite. See
+  `scripts/apple-silicon/xbe-harness/README.md` for the full
+  layout, render-loop pattern, and add-new-XBE recipe.
 - `scripts/apple-silicon/oracle-client.py` — Mac-side Python
   class + CLI wrapping the agent's TCP-9001 protocol. Typed
   exception hierarchy (OracleRemoteError / OracleProtocolError
