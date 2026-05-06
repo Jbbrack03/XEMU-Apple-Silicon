@@ -1,13 +1,17 @@
 # Benchmark Automation
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 1 — three new
-artifacts in `scripts/apple-silicon/`: `xbox-ftp-mirror.py`
-recursive FTP mirror with sha-256 manifest;
-`xbe-tests/eeprom-dump/` one-shot EEPROM-capture XBE;
-`xbe-tests/oracle-agent/` persistent network-listening oracle
-agent on TCP 9001. See "Real Xbox oracle agent" section below
-for protocol + commands and the per-XBE READMEs for usage.
-Earlier 2026-05-05: Crimson Metal "blocker" reclassified as
+Last updated: 2026-05-06 (real-Xbox oracle Phase 1 + Phase 2 +
+Phase 3.0 SHIPPED — orchestrator pipeline validated end-to-end
+against the project Xbox via the `pipeline-smoke` Tier-4 diag
+XBE. Captured framebuffer SHA-256 byte-for-byte matches
+math-derived expected. Mac-side wrappers `oracle-client.py` +
+`oracle-orchestrator.py` are live; agent ships nine commands
+(mem/nv2a/vram read+write, screenshot, runxbe, unsafe.enable,
+help) on top of Phase 1's info/eeprom/reboot/bye. See "Real
+Xbox oracle agent", "oracle-client.py", "oracle-orchestrator.py",
+and "pipeline-smoke" sections below for protocol + commands
++ pipeline drive recipe; per-XBE READMEs for usage. Earlier
+2026-05-05: Crimson Metal "blocker" reclassified as
 config; three harness bugs fixed; F3 snapshot anchor partially
 proven; Quartz install documented. Crimson now joins PGR2 / Rainbow /
 Halo / boot as MSAA4 PASS canary with canonical recipe
@@ -3341,11 +3345,26 @@ the EEPROM dump path; do not commit).
    for-byte match against the file dump), `mem.read`, `nv2a.read`,
    `vram.read`, `screenshot` (640x480 RGBA PNG), and write-gating
    verified — `mem.write` returns `500-` when not armed.
-7. Real Xbox oracle Phase 3 (next-session): wire the orchestrator
-   into the diagnostic-XBE library plan. Build the first
-   diag XBE (mirror, color-channel, or depth-floor per
-   `diagnostic-xbe-plan.md` §7 phase 1) and run an end-to-end
-   `oracle-orchestrator.py run-diag` against it. The XBE writes
-   its captures to `D:\` (the kernel-auto-mapped XBE dir), then
-   reboots; the orchestrator pulls them via FTP and computes a
-   PASS/FAIL JSON verdict.
+7. Real Xbox oracle Phase 3.0 (2026-05-06): SHIPPED.
+   `pipeline-smoke` Tier-4 diag XBE (CPU-painted single-pixel
+   oracle) under `scripts/apple-silicon/xbe-tests/pipeline-smoke/`
+   proves the orchestrator's `run-diag` chainload-and-back cycle
+   end-to-end. Captured framebuffer SHA-256 byte-for-byte matches
+   `expected.py:default()`. Two orchestrator bugs fixed in
+   flight: (a) artifact pull happened AFTER agent-relaunch but
+   the agent suspends XBMC's FTP server — reordered to
+   pull-then-relaunch; (b) zero-files-pulled now produces a
+   structured `ftp-pull-empty` verdict instead of masking as
+   `ok`. Real-Xbox reference stashed at
+   `docs/apple-silicon/xbox-real-references/pipeline-smoke/real-xbox.png`.
+   See "pipeline-smoke" section above for the drive recipe.
+8. Real Xbox oracle Phase 3.1 (next-session): build the first
+   Tier-1 NV2A-pipeline diag XBE — `mirror` per
+   `diagnostic-xbe-plan.md` v2 §4.1. Same XOSS-capture-then-
+   reboot skeleton pipeline-smoke established, but with the
+   pixel paint coming from the NV2A pgraph pipeline (single-
+   pixel triangle at guest coord (320, 50) via VS path) instead
+   of CPU memcpy. Tier-1 catches the SC2 visual symptoms
+   (top-mirrored, wrong colors, missing floor) which Tier-4
+   pipeline-smoke cannot. Then `color-channel` (§4.2) and
+   `depth-floor` (§4.3).

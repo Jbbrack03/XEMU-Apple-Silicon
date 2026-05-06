@@ -1,38 +1,31 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
-config — Crimson now joins PGR2 / Rainbow / Halo / boot as a
-documented MSAA4 PASS canary when launched with the canonical M15
-recipe (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`). Three
-orthogonal harness bugs landed: `metal-gl-compare.sh` now threads
-the canonical 7-flag M15 Metal recipe to its Metal leg + matching
-`XEMU_GL_MSAA=4` + the geometry-shader bypasses to its GL leg with
-user-env override pattern; `metal-canary-regress.sh` skips the
-`final=1 reason=atexit` cleanup interval in
-`last_interval_counter()` (was failing healthy runs on the
-degenerate teardown record); `macos-capture.sh` Quartz cache-check
-reorder + `find_window_id()` retry-with-backoff + opt-in
-`XEMU_CAPTURE_WINDOW_REQUIRED=1` strict mode (default ON in
-metal-gl-compare.sh's GL leg). F3 (per-title snapshot anchor for
-paired diff) partially proven autonomous: snapshot save+load via
-QMP/HMP works for same-renderer; cross-renderer Metal-saved →
-GL-loaded crashes (workaround: save via GL). Quartz install
-documented for homebrew Python 3.14 (`pip install --user
---break-system-packages pyobjc-framework-Quartz`). Two passes of
-`/codex-validate changes`: pass 1 surfaced three findings, all
-addressed; pass 2 verdict PASS. Earlier 2026-05-04: W3 counter-mode
-gate, W4 unconditional-flush fix, F1+F2 baseline-lock repairs,
-Metal porting workflow rollout (D1 playbook + W1 auto-on validation
-+ W2 paired diff + W3 canary regression gate + W4 per-draw RT dump
-+ W5 MoltenVK BLOCKED + W6 Codex fix-ups). Project is now in
-Phase 1 (Translation Correctness, ACTIVE). **The user's stated
-30/60 FPS at 1080p / high-quality AA / correct-colors goals remain
+Last updated: 2026-05-06 (real-Xbox oracle Phase 3.0 PASS —
+`pipeline-smoke` Tier-4 diag XBE proves the orchestrator's
+`run-diag` chainload-and-back cycle end-to-end; captured
+framebuffer SHA-256 matches math-derived expected byte-for-byte.
+Tier-1 NV2A-pipeline diag XBEs (mirror / color-channel /
+depth-floor per `diagnostic-xbe-plan.md` v2 §4.1–§4.3) are
+next-session work and plug into the same skeleton. Earlier this
+session: Phase 1 (custom nxdk oracle agent on TCP 9001
+supersedes XBDM after iND-BiOS revision blocked the leaked
+`xbdm.dll` path); Phase 2 (mem/nv2a/vram read+write +
+screenshot + runxbe + unsafe.enable + help — nine new commands;
+Mac-side `oracle-client.py` + `oracle-orchestrator.py`
+shipped); 200-cycle stress test 0 failures after polite-close
+hardening. Earlier 2026-05-05: Crimson Metal "blocker"
+reclassified as config — Crimson now joins PGR2 / Rainbow /
+Halo / boot as a documented MSAA4 PASS canary when launched
+with the canonical M15 recipe (specifically
+`XEMU_METAL_FRONT_FB_FALLBACK=1`). Project is now in Phase 1
+(Translation Correctness, ACTIVE). **The user's stated 30/60
+FPS at 1080p / high-quality AA / correct-colors goals remain
 met today via the GL renderer** with `XEMU_GL_MSAA=4` +
 `surface_scale=2`; Metal remains opt-in until M15 default-on
-visual-gate sweep passes — now blocks on F3 cross-title rollout
-(PGR2 / Rainbow / SC2 each need recorded canary snapshots), SC2
-input recording, and front-fb fallback default-on policy decision.
-Input slices N1+N2 also shipped via opt-in
+visual-gate sweep passes — blocks on F3 cross-title rollout
+(PGR2 / Rainbow / SC2 each need recorded canary snapshots),
+SC2 input recording, and front-fb fallback default-on policy
+decision. Input slices N1+N2 also shipped via opt-in
 `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
@@ -233,22 +226,101 @@ visible regressions point first at the renderer.
   capture primary, guest-side VRAM readback escape hatch), shared
   infrastructure, manifest schema, per-XBE specs for the first 16
   priority XBEs, build sequence. Read when implementing the
-  diagnostic-XBE library.
+  diagnostic-XBE library. **Phase 3.0 (`pipeline-smoke`) shipped
+  2026-05-06 and proves the chainload-and-back orchestrator
+  plumbing; Tier-1 NV2A-pipeline XBEs (mirror / color-channel /
+  depth-floor per §4.1–§4.3) are next.**
 - `real-xbox-oracle-feasibility.md`: **(2026-05-06)** feasibility
   research for using a real OpenXenium-modded Original Xbox as a
-  hardware oracle. Architecture (XBDM debug kernel + PrometheOS),
-  Mac-feasibility matrix, unknowns to verify, effort estimates,
-  hardware retrieval decision pending. Read when planning Xbox-side
-  work.
+  hardware oracle. Original architecture (XBDM debug kernel +
+  PrometheOS) was superseded same day after the iND-BiOS revision
+  blocked the leaked `xbdm.dll` path; pivot to a custom nxdk
+  oracle agent shipped Phase 1+2+3.0 against the project Xbox.
+  Read when planning Xbox-side work or when reviewing why the
+  XBDM-leg architecture was superseded.
+
+In-tree oracle artifacts (added 2026-05-06):
+
+- `scripts/apple-silicon/xbe-tests/oracle-agent/` — nxdk XBE,
+  the persistent network-listening oracle agent. TCP 9001.
+  Phase 1+2 shipped: info / eeprom / mem.read / mem.write /
+  nv2a.read / nv2a.write / vram.read / screenshot / runxbe /
+  unsafe.enable / reboot / bye / help.
+- `scripts/apple-silicon/xbe-tests/eeprom-dump/` — nxdk XBE,
+  one-shot 256-byte EEPROM capture (raw + decrypted info file).
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/` — **Phase
+  3.0** Tier-4 diag XBE that validates the orchestrator
+  pipeline end-to-end via a CPU-painted single-pixel oracle.
+  Real Tier-1 NV2A-pipeline diag XBEs build on top of the same
+  XOSS-capture-then-reboot skeleton.
+- `scripts/apple-silicon/oracle-client.py` — Mac-side Python
+  class + CLI wrapping the agent's TCP-9001 protocol.
+- `scripts/apple-silicon/oracle-orchestrator.py` — Mac-side
+  pipeline driver: status / ensure-agent / capture / run-diag
+  / validate. `run-diag` is the autonomous chainload-and-back
+  cycle for diagnostic XBEs.
+- `scripts/apple-silicon/xbox-ftp-mirror.py` — Python recursive
+  FTP mirror with SHA-256 manifest; used for Tier-1 backups.
+- `docs/apple-silicon/xbox-real-references/<xbe-id>/*.png` —
+  canonical real-Xbox reference frames captured via
+  `oracle-orchestrator.py capture` after a diag-XBE run.
 
 ## Next Session Start
 
-**Read `handoff.md` first.** Its top 2026-05-05 section is the
-authoritative current-state briefing and lists the next-action
-priority. The summary below is for orientation only — `handoff.md`
-wins when the two diverge.
+**Read `handoff.md` first.** Its TOP-OF-STACK 2026-05-06
+(Phase 3.0 PASS) banner is the authoritative current-state
+briefing and lists the next-action priority. The summary below
+is for orientation only — `handoff.md` wins when the two
+diverge.
 
-**Current state (2026-05-05, post W3 counter-mode + W4 fix).**
+**Current state (2026-05-06 — Phase 3.0 PASS).**
+
+- **Real-Xbox oracle pipeline operational end-to-end.** The
+  `oracle-orchestrator.py run-diag` cycle (ensure-agent →
+  pre-screenshot → runxbe → wait FTP back → pull artifacts →
+  relaunch agent → post-screenshot) is proven against the
+  project Xbox via the `pipeline-smoke` Tier-4 diag XBE.
+  Captured framebuffer SHA-256
+  `66f1f332f0bec182be06a53447221047af250ca708bb3525ee842821197e34b4`,
+  byte-for-byte identical across run-2 + run-3 + the math-derived
+  expected. Three commits: `c2274310fc` (Phase 2 land),
+  `abac6b5017` (orchestrator FTP except-clause fix),
+  `aae0138565` (Phase 3.0 pipeline-smoke).
+- **Two orchestrator bugs fixed in flight:** (a) FTP except
+  clause used `(OSError, ftplib.all_errors)` which Python
+  rejects (the second is a tuple) — fixed via module-level
+  `_FTP_ERRORS` tuple; (b) `run_diag` was relaunching the agent
+  BEFORE pulling FTP artifacts, but the agent suspends XBMC's
+  FTP server — reordered to pull-then-relaunch.
+- **Phase 3.0 caveat:** `pipeline-smoke` is Tier-4 (CPU-painted
+  framebuffer; no NV2A pgraph). It validates orchestrator
+  plumbing, NOT renderer behavior. The SC2 visual symptoms
+  (top-mirrored, wrong colors, missing floor) require Tier-1
+  NV2A-pipeline diag XBEs — that's Phase 3.1+ work.
+
+**Next-action priority (2026-05-06).**
+
+1. **Phase 3.1 — first Tier-1 NV2A diag XBE.** Build `mirror`
+   per `diagnostic-xbe-plan.md` v2 §4.1: VS path through
+   pgraph, single-pixel triangle at guest coord (320, 50),
+   surface scale 1, opaque-black back-buffer. Same XOSS-
+   capture-then-reboot skeleton pipeline-smoke established;
+   `oracle-orchestrator.py run-diag` is already proven and
+   ready to drive it.
+2. **Phase 3.2 — `color-channel` and `depth-floor`** per §4.2
+   and §4.3.
+3. **Wire Tier-1 diag XBEs into the M15 visual gate.** Add a
+   harness step that runs each through xemu-GL + xemu-Metal +
+   real Xbox; per-(renderer, flag-recipe) PASS/FAIL via
+   `oracle-orchestrator.py validate` (which threads
+   `--crop --out-dir --threshold` into `compare-screenshots.py`).
+4. **(Optional) Build the shared `xbe-tests/lib/` skeleton**
+   per `diagnostic-xbe-plan.md` §3.1 once 3+ XBEs share
+   pbkit/banner/capture boilerplate.
+
+**Earlier banner — 2026-05-05 (preserved verbatim for
+empirical audit trail; now superseded by the Phase 3.0 PASS
+state above).**
 
 - **W3 regression gate is operational autonomously.** Run
   `./scripts/apple-silicon/metal-canary-regress.sh` (defaults to

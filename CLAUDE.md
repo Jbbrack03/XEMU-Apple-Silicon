@@ -86,31 +86,64 @@ when the task touches XBE-side validation or real-Xbox oracle setup):
   for the first 16 priority XBEs, 4-phase build sequence. Codex
   re-validation pending before any new nxdk source.
 - `docs/apple-silicon/real-xbox-oracle-feasibility.md` —
-  **(2026-05-06; updated 2026-05-06 evening with architecture
-  pivot)** feasibility verdict and update for using the user's
-  OpenXenium-modded Original Xbox as a hardware oracle. **Hardware
-  retrieved 2026-05-06; Phase 1 SHIPPED.** Original architecture
-  proposed Microsoft XBDM on a debug-bank-flashed kernel, but
-  this Xbox's iND-BiOS revision predates BFM 5004.67 so XBDM
-  never started; pivoted to a custom nxdk-built oracle agent at
-  `scripts/apple-silicon/xbe-tests/oracle-agent/` that listens
-  on TCP 9001 with our own text-line protocol. Phase 1 commands
-  shipped (info, eeprom, reboot, bye). Phase 2+ commands queued
-  per `handoff.md`. PrometheOS / OpenXenium bank-switching plan
-  remains valid future work. See decision-log
-  "2026-05-06: Real Xbox oracle Phase 1 — custom oracle agent
-  supersedes XBDM" for the pivot.
+  **(2026-05-06; superseded same day by the Phase 1 + Phase 2
+  + Phase 3.0 implementation banners above)** feasibility
+  research for using the user's OpenXenium-modded Original Xbox
+  as a hardware oracle. Original architecture proposed
+  Microsoft XBDM on a debug-bank-flashed kernel, but this
+  Xbox's iND-BiOS revision predates BFM 5004.67 so XBDM never
+  started; pivoted same day to a custom nxdk-built oracle agent
+  at `scripts/apple-silicon/xbe-tests/oracle-agent/` that
+  listens on TCP 9001 with our own text-line protocol.
+  PrometheOS / OpenXenium bank-switching automation remains
+  valid future work but is not on the Phase 3 critical path.
+  See decision-log "2026-05-06: Real Xbox oracle Phase 1 —
+  custom oracle agent supersedes XBDM" + "Phase 2 — agent
+  commands + Mac orchestrator" + "Phase 3.0 — pipeline-smoke
+  validates orchestrator end-to-end".
 
 Real-Xbox oracle artifacts in-tree (added 2026-05-06):
 
 - `scripts/apple-silicon/xbe-tests/oracle-agent/` — nxdk XBE,
-  the persistent network-listening oracle. TCP 9001. Phase 1.
+  the persistent network-listening oracle. TCP 9001.
+  **Phase 1 + 2 SHIPPED**: info / eeprom / reboot / bye / help
+  / mem.read / mem.write (gated) / nv2a.read / nv2a.write
+  (gated) / vram.read / screenshot (XOSS-framed) / runxbe
+  (chainload another XBE) / unsafe.enable. Source split
+  across main.c + protocol.{h,c} + commands.{h,c}. RAM-only
+  allowlist for mem.read/write; typed nv2a.read/write for BAR0.
 - `scripts/apple-silicon/xbe-tests/eeprom-dump/` — nxdk XBE,
   one-shot 256-byte EEPROM capture (raw + decrypted info file).
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/` — **Phase
+  3.0** Tier-4 diag XBE that validated the orchestrator's
+  `run-diag` chainload-and-back cycle end-to-end. CPU-painted
+  single-pixel oracle (640×480 black + white pixel at (320,50));
+  writes XOSS-format capture to D:\\, reboots via
+  `HalReturnToFirmware(HalRebootRoutine)`. Captured PNG SHA-256
+  matches `expected.py:default()` math-derived oracle byte-for-
+  byte. Tier-1 NV2A-pipeline XBEs (mirror / color-channel /
+  depth-floor per `diagnostic-xbe-plan.md` v2 §4.1–§4.3) are
+  next-session work and plug into the same skeleton.
+- `scripts/apple-silicon/oracle-client.py` — Mac-side Python
+  class + CLI wrapping the agent's TCP-9001 protocol. Typed
+  exception hierarchy (OracleRemoteError / OracleProtocolError
+  / OracleTransportError). Polite-close `__exit__`
+  (`bye + shutdown(SHUT_RDWR)`) to keep agent's lwIP PCB pool
+  healthy across many short-lived connections.
+- `scripts/apple-silicon/oracle-orchestrator.py` — Mac-side
+  pipeline driver: status / ensure-agent / capture / run-diag
+  (full chainload-and-back-and-pull cycle with verdict.json
+  output) / validate (wraps compare-screenshots.py with
+  --crop --out-dir --threshold).
 - `scripts/apple-silicon/xbox-ftp-mirror.py` — Python recursive
   FTP mirror with SHA-256 manifest; used 2026-05-06 to capture
   the project Xbox's Tier-1 backup (1.5 GB). Reusable for any
   console.
+- `docs/apple-silicon/xbox-real-references/<xbe-id>/*.png` —
+  canonical real-Xbox reference frames captured via
+  `oracle-orchestrator.py capture`. Today contains
+  `pipeline-smoke/real-xbox.png` (640×480 RGBA, single white
+  pixel oracle).
 
 Per-console state (EEPROM dump, Tier-1 backup, restore runbook,
 reference SDK extract) lives at
