@@ -1,12 +1,65 @@
 # Handoff
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 2 — Phase 2
-agent commands shipped, Mac-side `oracle-client.py` + full
-`oracle-orchestrator.py` pipeline live and smoke-tested. Xbox
-hung at end of smoke testing after ~12 connection cycles;
-needs physical power-cycle by user to resume Phase 3).
-See decision-log entry "2026-05-06: Real Xbox oracle Phase 2 —
-agent commands + Mac orchestrator" for full context.
+Last updated: 2026-05-06 (real-Xbox oracle Phase 2 SHIPPED +
+post-power-cycle re-validation: 200-cycle stress 0 failures,
+all Phase 2 commands clean, orchestrator FTP except-clause
+bug fixed in flight; Phase 3 diagnostic-XBE library still
+pending). See decision-log entries
+"2026-05-06: Real Xbox oracle Phase 2 — agent commands + Mac
+orchestrator" and
+"2026-05-06: Phase 2 hardening confirmed; orchestrator FTP
+except-clause fix" for full context.
+
+**TOP OF STACK 2026-05-06 (latest).** The Phase 2 pipeline is
+shipped and validated end-to-end on the real Xbox after a
+power-cycle:
+
+- Hardened agent (393,216 bytes) deployed via FTP and launched
+  via `SITE RunXBE`.
+- All Phase 2 commands round-trip cleanly: `info`, `help`,
+  `eeprom` (SHA-256 byte-for-byte match against the
+  2026-05-06 file baseline), `mem.read`, `nv2a.read`,
+  `vram.read`, `screenshot`. Write gating verified by
+  observation that `mem.write` to a now-out-of-allowlist MMIO
+  range correctly returns `500- addr range 0xfd000000+16 not
+  in allowlist`.
+- **200-cycle stress test PASSED** with 0 failures in 12s
+  wall clock. The mix was 200 `info` cycles plus 5
+  `mem.read 1 KiB` and 5 `screenshot` interleaved every 40
+  cycles. The agent stayed responsive throughout, so the
+  polite-close hardening (Mac client `bye`+shutdown,
+  orchestrator polite-probe `_tcp_oracle_alive`,
+  `cmd_mem_write` static scratch, 4 KiB line buffer) closes
+  the lwIP-PCB-leak hypothesis decisively.
+- Orchestrator `capture` subcommand validated end-to-end
+  (`/tmp/orch-capture.png` 4613 bytes; agent-side debugPrint
+  console rendered correctly).
+- Orchestrator `runxbe` ack handshake validated:
+  `[oracle] agent acked: launching C:\xboxdash.xbe` printed
+  to the orchestrator log, then the agent self-terminated as
+  designed. The full chainload-roundtrip (`run-diag` →
+  diag-XBE → reboot → FTP back → relaunch agent → pull
+  artifacts) was NOT exercised because no real diagnostic
+  XBE exists yet — that's Phase 3.
+- One bug surfaced and shipped during the post-power-cycle
+  deployment: `oracle-orchestrator.py` had
+  `except (OSError, ftplib.all_errors):` which Python rejects
+  at except-resolution time because `ftplib.all_errors` is a
+  tuple. Fixed via a module-level `_FTP_ERRORS` tuple and
+  pushed as commit `abac6b5017`.
+
+**Outcome of the `runxbe C:\xboxdash.xbe` test.** The agent
+acked the `runxbe` and self-terminated as designed. The Xbox
+did NOT come back to FTP within the orchestrator's 240 s
+window. `xboxdash.xbe` is the boot dashboard launched by
+iND-BiOS at cold start; calling `XLaunchXBE("C:\xboxdash.xbe")`
+from inside another XBE evidently does not produce the same
+clean dashboard return that a `HalReturnToFirmware(HalRebootRoutine)`
+warm reset would. Phase 3 diagnostic XBEs will use
+`HalReturnToFirmware(HalRebootRoutine)` at the end of their
+work (per `diagnostic-xbe-plan.md`), which is the correct
+pattern. The Xbox needs another physical power-cycle to
+resume.
 
 **TOP OF STACK 2026-05-06 (later evening).** Phase 2 of the
 oracle pipeline is complete. The agent at
@@ -81,31 +134,39 @@ python3 scripts/apple-silicon/oracle-client.py screenshot --out /tmp/agent.png
 
 **Next session priorities (in order):**
 
-1. Power-cycle Xbox + redeploy hardened agent (steps above).
-2. Verify the polite-close hardening fixes the connection-cycle
-   hang. Run a 50-cycle stress test:
-   ```sh
-   for i in $(seq 1 50); do
-     python3 scripts/apple-silicon/oracle-client.py info > /dev/null
-   done
-   python3 scripts/apple-silicon/oracle-client.py info
-   ```
-   If still alive after 50 cycles, the lwIP-PCB-leak hypothesis
-   is closed.
-3. **Phase 3 — diagnostic XBE chainload pipeline.** Build the
+1. **(One-time recovery)** Power-cycle the Xbox once (it's
+   currently hung after the `runxbe C:\xboxdash.xbe` test that
+   was never going to return cleanly anyway). Then `python3
+   scripts/apple-silicon/oracle-orchestrator.py status` and
+   `ensure-agent` are enough to bring the pipeline back up.
+2. **Phase 3 — diagnostic XBE chainload pipeline.** Build the
    first diagnostic XBE per `diagnostic-xbe-plan.md` v2 §7
-   (mirror, color-channel, or depth-floor). Use
-   `oracle-orchestrator.py run-diag --xbe ... --ftp-collect ...`
-   for the full agent → runxbe → wait FTP → relaunch agent →
-   pull artifacts cycle. The orchestrator already implements
-   every step.
-4. **Wire the orchestrator into the M15 visual gate.** Once the
+   (mirror, color-channel, or depth-floor). The XBE writes its
+   captures to its own `D:\` directory and finishes with
+   `HalReturnToFirmware(HalRebootRoutine)` so the Xbox warm-
+   resets back to XBMC4Gamers. Then drive it via:
+   ```sh
+   python3 scripts/apple-silicon/oracle-orchestrator.py run-diag \
+     --xbe   'E:\XBMC4Gamers\Apps\diag-mirror\default.xbe' \
+     --ftp-collect /E/XBMC4Gamers/Apps/diag-mirror \
+     --out   benchmark-runs/oracle-mirror
+   ```
+   That exercises the full agent → runxbe → wait FTP → relaunch
+   agent → pull artifacts cycle the orchestrator already
+   implements.
+3. **Wire the orchestrator into the M15 visual gate.** Once the
    first diag XBE has a real-Xbox reference frame captured via
    `oracle-orchestrator.py capture`, add a new make-target / harness
    step that runs the XBE through xemu-GL, xemu-Metal, and the real
    Xbox, then computes per-pair PNG diffs. The infrastructure for
    each leg already exists; the orchestrator script's `validate`
-   subcommand wraps `compare-screenshots.py` for the diff math.
+   subcommand wraps `compare-screenshots.py` for the diff math
+   with `--crop --out-dir --threshold` already threaded.
+
+The earlier 50-cycle stress and Phase 2 smoke-validation tasks
+listed in prior versions of this banner are **closed** — the
+post-power-cycle session ran 200 cycles + interleaved heavy
+commands cleanly, see TOP OF STACK above.
 
 The earlier banner content (Phase 1 oracle, validation
 architecture pivot, Crimson reclassification, harness fixes,

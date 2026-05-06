@@ -1,5 +1,91 @@
 # Decision Log
 
+## 2026-05-06: Phase 2 hardening confirmed; orchestrator FTP except-clause fix
+
+**Context.** After the user power-cycled the Xbox to recover from
+the connection-cycle hang documented in the prior entry, the
+post-power-cycle session re-validated every Phase 2 component
+and shipped one bug fix.
+
+**What landed.**
+
+1. **Hardened agent deployed.** Pre-built `default.xbe` (393,216
+   bytes) uploaded to `E:/XBMC4Gamers/Apps/oracle-agent/` via
+   FTP, launched via `SITE RunXBE`. `info` returned the v0.2
+   banner showing `writes_enabled=0` (process-global arming flag
+   correctly reset on agent restart).
+
+2. **Hot bug fix: orchestrator `except (OSError, ftplib.all_errors):`.**
+   Python rejects this construct at except-resolution time
+   because `ftplib.all_errors` is a tuple, not a class. The
+   syntax error doesn't fire during static analysis or
+   `--help` invocations — only when an actual FTP error needs to
+   be caught. Surfaced when `ensure-agent` ran during the post-
+   power-cycle deployment: site_run_xbe hit the expected FTP
+   connection-tear-down after the kernel chainloaded the agent
+   and crashed with TypeError. Fixed by introducing a module-
+   level `_FTP_ERRORS = (OSError,) + tuple(ftplib.all_errors)`
+   tuple and using it in all three call sites. Commit
+   `abac6b5017`.
+
+3. **200-cycle stress test PASS.** With the polite-close
+   hardening (Mac client `bye+shutdown`, orchestrator
+   `_tcp_oracle_alive` polite probe, agent's static
+   `cmd_mem_write` scratch + 4 KiB line buffer), the agent
+   stayed responsive across 200 connect/dispatch/disconnect
+   cycles in 12 s wall clock. Five interleaved
+   `mem.read 1024-byte` and five `screenshot` (1.2 MB binary
+   payload) calls every 40 cycles also passed. Zero failures.
+   The lwIP-PCB-leak hypothesis is closed.
+
+4. **MMIO allowlist behavior validated.** `mem.read 0xFD000000 16`
+   correctly returns `500- addr range 0xfd000000+16 not in
+   allowlist` after the Codex-driven allowlist trim. NV2A BAR0
+   register access still works through the typed `nv2a.read`
+   command (`PCRTC_START`, `PMC_BOOT_0`, `PBUS_PCI_NV_0` all
+   return correct NV2A signatures).
+
+5. **End-to-end orchestrator pipeline PASS.** Full sequence
+   validated:
+   - `oracle-orchestrator.py status` → `ping=true ftp=true
+     agent=false` (XBMC4Gamers running, agent down).
+   - `oracle-orchestrator.py ensure-agent` → polite-probe
+     detects no agent, FTP-launches via `SITE RunXBE`, polls
+     polite-close until TCP/9001 accepts, reports ready.
+   - `oracle-orchestrator.py capture --out ...` → ensures
+     agent, connects, screenshots front buffer, saves a
+     640×480 RGBA PNG (5458 bytes).
+   - `eeprom` SHA-256 = `871ed8a9...` byte-for-byte match
+     against the 2026-05-06 file dump (4 cross-session
+     consistency check).
+
+**What is still pending.**
+
+- **Full chainload-roundtrip** (`run-diag` exercising the agent
+  → diag-XBE → reboot → FTP back → relaunch agent → pull
+  artifacts cycle). Pending because no real diagnostic XBE
+  exists yet. The `runxbe path=C:\xboxdash.xbe` smoke test
+  acked correctly but `xboxdash.xbe` does not warm-reset back
+  to the dashboard the way diag XBEs will (they end with
+  `HalReturnToFirmware(HalRebootRoutine)`); the Xbox needed a
+  power-cycle to recover from that test.
+- **Phase 3 — diagnostic XBE library.** Per
+  `diagnostic-xbe-plan.md` v2 §7. Mirror, color-channel, and
+  depth-floor are the first three priority XBEs. The
+  orchestrator `run-diag` subcommand is fully implemented and
+  ready to drive them.
+
+**Next-session triggers.**
+
+1. (One-time recovery) Power-cycle Xbox if needed.
+2. Build diag-XBE #1 (mirror) — single rectangle with mirrored
+   triangle pattern; capture both real-Xbox + xemu-GL +
+   xemu-Metal renderings; stash real-Xbox capture under
+   `docs/apple-silicon/xbox-real-references/mirror/`.
+3. Run `oracle-orchestrator.py run-diag` end-to-end against
+   diag-XBE #1 — that exercises the full chainload-and-back
+   cycle and produces the first real `verdict.json`.
+
 ## 2026-05-06: Real Xbox oracle Phase 2 — agent commands + Mac orchestrator
 
 **Context.** Phase 1 (committed `8b83fcfc9a`) shipped the custom
