@@ -86,14 +86,37 @@ when the task touches XBE-side validation or real-Xbox oracle setup):
   for the first 16 priority XBEs, 4-phase build sequence. Codex
   re-validation pending before any new nxdk source.
 - `docs/apple-silicon/real-xbox-oracle-feasibility.md` —
-  **(2026-05-06)** feasibility verdict for using the user's
-  OpenXenium-modded Original Xbox as a hardware oracle. Architecture:
-  Microsoft's XBDM debug kernel (`screenshot` + possibly `autoinput`)
-  on one OpenXenium bank, PrometheOS as chip-OS for REST-API control,
-  Mac-side Python orchestrator over LAN. Apple-Silicon-Mac-only
-  workflow confirmed feasible. Effort: ~1-2 weeks best case. Six
-  unknowns to verify by experiment once Xbox is set up. Hardware
-  retrieval pending user decision.
+  **(2026-05-06; updated 2026-05-06 evening with architecture
+  pivot)** feasibility verdict and update for using the user's
+  OpenXenium-modded Original Xbox as a hardware oracle. **Hardware
+  retrieved 2026-05-06; Phase 1 SHIPPED.** Original architecture
+  proposed Microsoft XBDM on a debug-bank-flashed kernel, but
+  this Xbox's iND-BiOS revision predates BFM 5004.67 so XBDM
+  never started; pivoted to a custom nxdk-built oracle agent at
+  `scripts/apple-silicon/xbe-tests/oracle-agent/` that listens
+  on TCP 9001 with our own text-line protocol. Phase 1 commands
+  shipped (info, eeprom, reboot, bye). Phase 2+ commands queued
+  per `handoff.md`. PrometheOS / OpenXenium bank-switching plan
+  remains valid future work. See decision-log
+  "2026-05-06: Real Xbox oracle Phase 1 — custom oracle agent
+  supersedes XBDM" for the pivot.
+
+Real-Xbox oracle artifacts in-tree (added 2026-05-06):
+
+- `scripts/apple-silicon/xbe-tests/oracle-agent/` — nxdk XBE,
+  the persistent network-listening oracle. TCP 9001. Phase 1.
+- `scripts/apple-silicon/xbe-tests/eeprom-dump/` — nxdk XBE,
+  one-shot 256-byte EEPROM capture (raw + decrypted info file).
+- `scripts/apple-silicon/xbox-ftp-mirror.py` — Python recursive
+  FTP mirror with SHA-256 manifest; used 2026-05-06 to capture
+  the project Xbox's Tier-1 backup (1.5 GB). Reusable for any
+  console.
+
+Per-console state (EEPROM dump, Tier-1 backup, restore runbook,
+reference SDK extract) lives at
+`/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/`,
+intentionally outside this repo: it's per-console secret data
+plus proprietary Microsoft material we are not committing.
 
 ## Where the fork's changes live
 

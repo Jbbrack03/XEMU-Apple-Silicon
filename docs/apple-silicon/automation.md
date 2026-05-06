@@ -1,6 +1,13 @@
 # Benchmark Automation
 
-Last updated: 2026-05-05 (Crimson Metal "blocker" reclassified as
+Last updated: 2026-05-06 (real-Xbox oracle Phase 1 — three new
+artifacts in `scripts/apple-silicon/`: `xbox-ftp-mirror.py`
+recursive FTP mirror with sha-256 manifest;
+`xbe-tests/eeprom-dump/` one-shot EEPROM-capture XBE;
+`xbe-tests/oracle-agent/` persistent network-listening oracle
+agent on TCP 9001. See "Real Xbox oracle agent" section below
+for protocol + commands and the per-XBE READMEs for usage.
+Earlier 2026-05-05: Crimson Metal "blocker" reclassified as
 config; three harness bugs fixed; F3 snapshot anchor partially
 proven; Quartz install documented. Crimson now joins PGR2 / Rainbow /
 Halo / boot as MSAA4 PASS canary with canonical recipe
@@ -3016,6 +3023,112 @@ RT dump remains the recommended triangulation path. See decision-log
   `send-key` path.
 - FPS/frame-pacing extraction is available from `xemu-perf:` log lines.
 
+## Real Xbox oracle agent (2026-05-06)
+
+The project's OpenXenium-modded retail Xbox is the hardware oracle
+referenced in `real-xbox-oracle-feasibility.md`. The architecture
+landed today supersedes the original "leverage Microsoft XBDM"
+direction; see decision-log "2026-05-06: Real Xbox oracle Phase 1
+— custom oracle agent supersedes XBDM" for why.
+
+Three in-tree artifacts:
+
+### `scripts/apple-silicon/xbox-ftp-mirror.py`
+
+Python 3 recursive FTP mirror with SHA-256 manifest. Uses the
+stdlib `ftplib` only — no third-party deps. Two modes:
+
+```sh
+python3 scripts/apple-silicon/xbox-ftp-mirror.py \
+  --mode mirror --remote /C \
+  --local /path/to/dest --label C
+# writes per-file MANIFEST-C.tsv (path \t size \t sha256), SKIPPED-C.tsv,
+# and mirror-C.log under the destination
+
+python3 scripts/apple-silicon/xbox-ftp-mirror.py \
+  --mode inventory --remote /F \
+  --local /path/to/dest --label F
+# walks the subtree without downloading; writes INVENTORY-F.tsv
+```
+
+Connection target hardcoded at the top of the script
+(`HOST/USER/PASS` constants); change for a different console.
+Skips `CACHE/` directories anywhere in the tree (transient game
+cache, not interesting for backup). Used 2026-05-06 to capture
+the project Xbox's Tier-1 backup (1.5 GB; ~5 min over wired LAN).
+
+### `scripts/apple-silicon/xbe-tests/eeprom-dump/`
+
+One-shot nxdk XBE that captures the 256-byte EEPROM and writes a
+decrypted-info file alongside, then reboots. See the directory's
+`README.md` for the full deploy-and-run recipe; the short version:
+
+```sh
+# (one-time: ensure E:\XBMC4Gamers\Apps\eeprom-dump\ exists, upload XBE)
+curl -u xbox:xbox --quote 'CWD /E/XBMC4Gamers/Apps' \
+  --quote 'MKD eeprom-dump' ftp://192.168.0.200/ -o /dev/null
+curl -u xbox:xbox -T scripts/apple-silicon/xbe-tests/eeprom-dump/bin/default.xbe \
+  ftp://192.168.0.200/E/XBMC4Gamers/Apps/eeprom-dump/default.xbe
+
+# launch (XBE writes 3 files, sleeps 5s, reboots; ~30s end-to-end)
+curl -u xbox:xbox \
+  --quote 'SITE RunXBE Special://xbmc/Apps/eeprom-dump/default.xbe' \
+  ftp://192.168.0.200/ -o /dev/null
+
+# pull artifacts after Xbox returns to XBMC4Gamers — to a path OUTSIDE
+# the repo. eeprom-fresh.bin / eeprom-info.txt are per-console secrets
+# (online key + HDD-key derivation material); they must never end up
+# committed. The directory's .gitignore is a backstop, but the right
+# default is to pull them straight to your oracle-backup tree:
+DEST=/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/$(date -u +%F)/eeprom
+mkdir -p "$DEST"
+curl -u xbox:xbox -o "$DEST/eeprom-fresh.bin" \
+  ftp://192.168.0.200/E/XBMC4Gamers/Apps/eeprom-dump/eeprom-fresh.bin
+curl -u xbox:xbox -o "$DEST/eeprom-info.txt" \
+  ftp://192.168.0.200/E/XBMC4Gamers/Apps/eeprom-dump/eeprom-info.txt
+```
+
+The XBE writes to `D:\` because that's the only kernel-auto-mapped
+drive letter for a launched XBE; `D:\eeprom-fresh.bin` lands at
+`E:\XBMC4Gamers\Apps\eeprom-dump\eeprom-fresh.bin` (FTP-accessible
+on the next boot).
+
+### `scripts/apple-silicon/xbe-tests/oracle-agent/`
+
+Persistent nxdk XBE with a TCP listener on port 9001, replacing
+the leaked-XDK XBDM path. Phase 1 commands: `info`, `eeprom`,
+`reboot`, `bye`. Protocol: text lines with `200- single`,
+`201- OK ...\n.\n` multi, `500- error`. See the directory's
+`README.md` for the full protocol spec, deploy steps, and the
+Phase 2+ command roadmap. Quick smoke test:
+
+```sh
+( printf 'info\nbye\n'; sleep 1 ) | nc -w 5 192.168.0.200 9001
+```
+
+The agent's `eeprom` command output is byte-for-byte identical to
+the file written by the eeprom-dump XBE — useful as a self-check
+when the agent is first deployed on a new console.
+
+### Standard recipe
+
+For any oracle-driven validation session:
+
+1. Boot Xbox, FTP up XBMC4Gamers, optionally `SITE TakeScreenshot`
+   to confirm dashboard state.
+2. `SITE RunXBE Special://xbmc/Apps/oracle-agent/default.xbe` —
+   takes ~5 s for port 9001 to listen.
+3. Mac-side client connects, drives the oracle through Phase 2+
+   commands (Phase 2 commands not yet shipped — see handoff §"Next
+   session priorities").
+4. When done: send `reboot` over the agent. ~30 s back to
+   XBMC4Gamers.
+
+Cleanup-and-decommission steps live in
+`/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/RESTORE.md`
+(outside the repo because it documents per-console state including
+the EEPROM dump path; do not commit).
+
 ## Next Automation Steps
 
 1. Use the recorded retail gameplay routes as the main replay targets for the
@@ -3029,3 +3142,11 @@ RT dump remains the recommended triangulation path. See decision-log
 5. For the next geometry-shader exit slice, use PGR2 to confirm quad-family
    pressure first. Keep Rainbow Six 3 for line-family coverage and Crimson
    Skies for sustained flight/acceleration cross-checks.
+6. Real Xbox oracle (2026-05-06): Phase 2 of the oracle agent —
+   add `mem.read`, `nv2a.read`, `screenshot`, `vram.read`, `runxbe`
+   commands to `scripts/apple-silicon/xbe-tests/oracle-agent/main.c`
+   (split into multiple `.c` files when any one section grows past
+   ~200 lines). Then build the Mac-side Python client at
+   `scripts/apple-silicon/oracle-client.py` wrapping the protocol
+   into Pythonic methods (`oracle.info()`, `oracle.eeprom()`, ...).
+   Document the client here once it lands.

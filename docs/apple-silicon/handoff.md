@@ -1,11 +1,131 @@
 # Handoff
 
-Last updated: 2026-05-06 (validation architecture pivot —
-host-side capture + real-Xbox oracle path identified). See
-decision-log entry "2026-05-06: Validation architecture pivot"
-for full context.
+Last updated: 2026-05-06 (real-Xbox oracle Phase 1 — hardware
+online, Tier-1 backup captured, EEPROM dumped, custom oracle
+agent shipped, supersedes the leaked-XDK XBDM architecture).
+See decision-log entry "2026-05-06: Real Xbox oracle Phase 1
+— custom oracle agent supersedes XBDM" for full context.
 
-**TOP OF STACK 2026-05-06.** The 2026-05-05 SC2 Metal canonical-
+**TOP OF STACK 2026-05-06 (evening).** The user retrieved the
+OpenXenium-modded retail Xbox. It is on the LAN at
+`192.168.0.200` with `xbox`/`xbox` FTP credentials (XBMC
+FileZilla 1.5.6). The XBDM-based architecture proposed in
+`real-xbox-oracle-feasibility.md` did not work on this Xbox's
+iND-BiOS revision (almost certainly predates BFM 5004.67's
+`DISABLEDM`-driven debug-monitor loading; without TV access we
+cannot read the boot banner to confirm). We pivoted to a custom
+nxdk-built oracle agent which is **shipped Phase 1 today** and
+replaces XBDM as the network bridge.
+
+The leaked Microsoft Xbox SDK 4361 was downloaded as reference
+material from `archive.org/details/xbox-sdks`, giving us
+authoritative `XbDm.h` headers and `.pdb` symbols for protocol
+study. **No Microsoft binaries are deployed on the Xbox or
+committed to this repo.**
+
+Today's progress:
+
+1. **Hardware online + Tier-1 backup captured.** 1.5 GB mirror of
+   C: + E: with SHA-256 manifest, plus F:\Games inventory and
+   boot-relevant config snapshot. Backup root lives outside this
+   repo at `/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/`
+   with a `RESTORE.md` runbook covering identity, every artifact,
+   every change made today, recovery procedures, and decommission
+   steps. Reboot round-trip via XBMC's `SITE Reboot` validated
+   (~33 s wall clock).
+2. **EEPROM captured (irreplaceable artifact).** Built
+   `scripts/apple-silicon/xbe-tests/eeprom-dump/` (nxdk XBE that
+   reads SMBus 0xA8 + `ExQueryNonVolatileSetting`, writes 256-byte
+   raw dump + decrypted info file via `D:\` auto-mapping). This
+   Xbox: SN `389029451006`, MAC `00:12:5A:00:5B:CF`, NTSC NA;
+   confirmed unique vs the user's three historical EEPROM backups
+   on a different volume — this is a 4th, never-previously-backed-up
+   console. Raw dump sha256 `871ed8a9...` lives in the backup tree;
+   not committed (per-console secret).
+3. **XBDM enable attempted, did not work, fully reverted.** Edited
+   `ind-bios.cfg DISABLEDM=0` + `x2config.ini startDebug=1`,
+   uploaded `xbdm.dll` (Latest/4242/4039 variants from SDK 4361).
+   Port 731 stayed closed; `xbmc.log` showed no debug-monitor load
+   attempt. Configs reverted, `xbdm.dll` deleted via FTP. Reference
+   `XbDm.h` + `.pdb` retained locally at the backup tree's
+   `reference-sdk/` (gitignored).
+4. **Custom oracle agent — Phase 1 SHIPPED.**
+   `scripts/apple-silicon/xbe-tests/oracle-agent/` (nxdk + lwIP TCP
+   listener on port 9001). Working commands: `info`, `eeprom`,
+   `reboot`, `bye`. End-to-end validated: launch via
+   `SITE RunXBE Special://xbmc/Apps/oracle-agent/default.xbe`, port
+   9001 listens within ~5 s, agent EEPROM hex matches the
+   file-based dump byte-for-byte, `reboot` cleanly returns to
+   XBMC4Gamers (~30 s).
+5. **`xbox-ftp-mirror.py`** added to `scripts/apple-silicon/` —
+   recursive FTP mirror with SHA-256 manifest. Used for today's
+   Tier-1 backup; reusable for any future console mirror or for
+   periodic snapshots.
+
+**Architecture pivot recorded.**
+`docs/apple-silicon/real-xbox-oracle-feasibility.md` originally
+described an architecture leveraging Microsoft XBDM + PrometheOS.
+The XBDM leg is now superseded by the custom oracle agent (same
+network-debug capability surface, no Microsoft IP, fully under our
+source control). PrometheOS / OpenXenium bank-switching automation
+remains valid future work but is not on the Phase 2 critical path.
+
+**Next session priorities (in order):**
+
+1. **Phase 2 of the oracle agent.** Add commands the correctness
+   pipeline actually needs:
+   - `mem.read addr=0xHHHH len=N` (kernel-mode physical/virtual reads)
+   - `mem.write addr=… data=hex` (limited; behind a safety env-flag)
+   - `nv2a.read off=0xHHHH` / `nv2a.write off=… val=…` (PMC base
+     register access)
+   - `screenshot` — capture front buffer, return raw RGBA + W/H
+     header (so the pipeline doesn't depend on XBMC's
+     `SITE TakeScreenshot` which only works while XBMC is running)
+   - `vram.read off=0xHHHH len=N` (NV2A VRAM window)
+   - `runxbe path=<xbox-path>` (chainload another XBE; agent
+     terminates and the named XBE takes over)
+   Source already laid out for splitting into multiple `.c` files
+   when any one section grows past ~200 lines.
+2. **Mac-side Python client** at
+   `scripts/apple-silicon/oracle-client.py`. Wraps the line protocol
+   into `oracle.info()`, `oracle.eeprom()`, `oracle.screenshot()`,
+   `oracle.mem_read()`, etc. Document in `automation.md`.
+3. **Wire into the diagnostic-XBE library plan.** Per
+   `diagnostic-xbe-plan.md`, individual diagnostic XBEs render a
+   known scene then produce a verdict file. Add a new
+   "agent-driven" tier orchestrated by the Mac client:
+   1. Client `SITE RunXBE`s the oracle agent (~5 s to listen).
+   2. Client connects to TCP 9001, sends `runxbe path=<diag>`.
+   3. Agent terminates and the kernel chainloads the diagnostic
+      XBE; the diag XBE captures whatever it needs (frame buffer,
+      VRAM, registers) to a known FTP-accessible path on disk and
+      then `HalReturnToFirmware(HalRebootRoutine)` returns to
+      XBMC4Gamers (~30 s).
+   4. Client polls FTP port 21 until SITE responds again, then
+      `SITE RunXBE`s the oracle agent **again** (the agent does
+      not auto-relaunch — XBMC has no startup-app concept), waits
+      for port 9001, and continues.
+   5. Client pulls the captured artifacts via FTP and compares
+      against xemu-GL + xemu-Metal renderings.
+   End-to-end validation: pick one of the v2 priority XBEs
+   (mirror, color-channel, depth-floor) and run it against this
+   Xbox + xemu-GL + xemu-Metal — confirm any divergence.
+4. **Xbox state cleanup.** When the project no longer needs the
+   oracle, run the cleanup script in `RESTORE.md` §4a / §7e to
+   leave the console identical to its 2026-05-06 baseline. EEPROM
+   dump must be preserved separately (the only record of this
+   Xbox's HDD-locking key).
+
+The earlier banner content (validation architecture pivot,
+Crimson reclassification, harness fixes, F3, SC2 route, audio
+listen-test closure) is preserved verbatim below for empirical
+audit trail.
+
+---
+
+**Earlier banner — 2026-05-06 (validation architecture pivot —
+host-side capture + real-Xbox oracle path identified).** The
+2026-05-05 SC2 Metal canonical-
 recipe replay (counters clean, 41.84 FPS) revealed visible
 rendering bugs (top-mirrored, missing floor, wrong colors) that
 counter-only validation could not catch. The user's framing:

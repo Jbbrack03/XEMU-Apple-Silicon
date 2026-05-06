@@ -1,7 +1,65 @@
 # Real Xbox Oracle — Feasibility Verdict
 
-Last updated: 2026-05-06.
-Status: research complete; awaiting hardware retrieval decision.
+Last updated: 2026-05-06 (evening).
+Status: **Phase 1 SHIPPED.** Hardware retrieved and online. XBDM
+architecture below superseded by a custom oracle agent — see
+"Update 2026-05-06 evening" immediately below. The rest of this
+document remains valid as the feasibility analysis that motivated
+the work, and as the roadmap for PrometheOS / OpenXenium bank
+control which is still queued (post-Phase-2 of the agent).
+
+## Update 2026-05-06 evening — XBDM architecture superseded
+
+Hardware retrieved and connected to LAN at `192.168.0.200`. The
+XBDM-on-debug-kernel architecture proposed below did not work on
+this Xbox's iND-BiOS revision: edits to `ind-bios.cfg DISABLEDM=0`
++ `x2config.ini startDebug=1` plus uploaded `xbdm.dll` (Latest /
+4242 / 4039 from SDK 4361) all failed to open port 731. Likely
+cause: this iND-BiOS revision predates BFM 5004.67 which is what
+added the documented `DISABLEDM`-driven debug-monitor loading.
+Without TV access we cannot read the boot banner to confirm the
+exact iND-BiOS version.
+
+We pivoted to a custom nxdk-built oracle agent. It listens on TCP
+port 9001 with our own text-line protocol (XBDM-inspired status
+codes — `200- single-line`, `201- OK\\n...lines...\\n.\\n` multi,
+`500- error`). Phase 1 commands are `info`, `eeprom`, `reboot`,
+`bye`, validated end-to-end on 2026-05-06 (port 9001 listens within
+~5 s of `SITE RunXBE`; agent EEPROM hex matches the file-based dump
+byte-for-byte; `reboot` returns to XBMC4Gamers in ~30 s).
+
+Source lives in-tree at
+`scripts/apple-silicon/xbe-tests/oracle-agent/` with full
+deploy/usage docs in that directory's `README.md`. Phase 2+ commands
+(`mem.read`, `mem.write`, `nv2a.read`, `nv2a.write`, `screenshot`,
+`vram.read`, `runxbe`) are queued for the next session per
+`handoff.md`.
+
+**Why the pivot is acceptable.** This project has no Visual
+Studio Xbox debugger, no Xbox Neighborhood, no other tool that
+needs XBDM-protocol compatibility. We need the *capability surface*
+(memory R/W, register access, framebuffer capture, XBE launch).
+Custom agent provides the same surface, no Microsoft IP, no
+dependency on a debug-build BIOS, full source in our control.
+
+**Reference materials retained, not deployed.** SDK 4361 was
+extracted to `/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/reference-sdk/`
+(outside this repo, gitignored). It contains `XbDm.h` (authoritative
+protocol header), `xbdm.dll`, `xbdm.pdb` (debug symbols), and the
+Windows-side `xboxdbg.dll` client lib. Used for designing Phase 2+
+commands — none of these binaries are committed or deployed on the
+Xbox.
+
+**Sections of this doc that remain authoritative.** Hardware
+inventory; the Mac-feasibility matrix; the network-only workflow
+analysis; the diagnostic-XBE-on-retail-kernel discussion; the
+PrometheOS / OpenXenium bank-switching plan (still useful future
+work for unattended power-on, just not on the Phase 2 critical
+path). Discard the XBDM-specific assumptions in §TL;DR and any
+"port 731" references — they are now historical context for why
+we built our own.
+
+---
 
 ## Purpose
 

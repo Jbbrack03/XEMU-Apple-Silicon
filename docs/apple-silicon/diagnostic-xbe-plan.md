@@ -18,7 +18,16 @@ This plan is the implementation companion to:
 
 - `nv2a-feature-surface-research.md` — what the NV2A pipeline is.
 - `real-xbox-oracle-feasibility.md` — how the real-Xbox oracle path
-  works (XBDM + PrometheOS + Mac-side Python orchestrator).
+  works. **Note (2026-05-06 evening):** that doc's original
+  XBDM-based architecture was superseded by a custom nxdk-built
+  oracle agent that ships at
+  `scripts/apple-silicon/xbe-tests/oracle-agent/`. The
+  capability surface (memory R/W, register access, framebuffer
+  capture, XBE launch) is preserved; only the wire protocol
+  changed. See decision-log "2026-05-06: Real Xbox oracle Phase 1
+  — custom oracle agent supersedes XBDM" for full context. The
+  diagnostic-XBE harness should target the oracle agent's TCP-9001
+  protocol, not XBDM's port 731.
 
 ## 1. Purpose
 

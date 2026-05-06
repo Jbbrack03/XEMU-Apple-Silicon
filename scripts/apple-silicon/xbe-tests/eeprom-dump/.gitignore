@@ -1,0 +1,10 @@
+*.d
+*.exe
+*.obj
+
+# Per-console secret outputs — never commit. The XBE writes these to D:\
+# (= its launch dir) at runtime; if a user runs the deploy recipe from
+# this directory they would otherwise land here as untracked files.
+eeprom-fresh.bin
+eeprom-info.txt
+xbe-ran-marker.txt

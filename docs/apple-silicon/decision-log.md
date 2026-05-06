@@ -1,5 +1,109 @@
 # Decision Log
 
+## 2026-05-06: Real Xbox oracle Phase 1 — custom oracle agent supersedes XBDM
+
+**Context.** The user retrieved the OpenXenium-modded retail Xbox
+referenced in `real-xbox-oracle-feasibility.md` and connected it to
+the project LAN at `192.168.0.200` with default `xbox`/`xbox` FTP
+credentials. The plan-of-record was the XBDM-based architecture from
+that doc: enable iND-BiOS `DISABLEDM=0`, install Microsoft `xbdm.dll`
+on `E:\xbdm.dll`, talk to it on TCP port 731 from the Mac.
+
+**What worked today.**
+
+1. **Reachability + capability survey.** XBMC4Gamers' FileZilla
+   FTP server on port 21 with rich `SITE` extensions: `Reboot`,
+   `Reset`, `RunXBE`, `TakeScreenshot`, `EjectTray`, `Notification`,
+   ~30 others. Network reboot round-trip measured at ~33 s end-to-end
+   (`SITE Reboot` → unreachable → ping back → port 21 → SITE
+   responsive). `SITE TakeScreenshot` writes 720×480 BMP to
+   `E:\XBMC4Gamers\system\screenshots\screenshotNNN.bmp` — visual
+   feedback without a TV. `SITE RunXBE` requires `Special://xbmc/...`
+   path syntax and the launched XBE must use `D:\` for writes (the
+   only kernel-auto-mapped drive letter; other letters need explicit
+   `IoCreateSymbolicLink`).
+2. **Tier-1 backup captured.** 1.5 GB recursive FTP mirror of C: + E:
+   with SHA-256 manifest, plus F:\Games inventory and boot-relevant
+   config snapshot under `xbox-oracle-backup/2026-05-06/` (outside
+   this repo). Backup tool committed in-tree as
+   `scripts/apple-silicon/xbox-ftp-mirror.py`.
+3. **EEPROM captured.** Built
+   `scripts/apple-silicon/xbe-tests/eeprom-dump/` (nxdk XBE).
+   Reads 256 raw bytes via `HalReadSMBusValue(0xA8, ...)`, queries
+   decrypted fields via `ExQueryNonVolatileSetting` (S/N, MAC,
+   AV/Game region, online key, video/audio/DVD/language), writes
+   both files via `D:\` auto-mapping, then `HalReturnToFirmware(
+   HalRebootRoutine)` returns to XBMC4Gamers via the normal boot
+   chain. Project Xbox identity: SN `389029451006`, MAC
+   `00:12:5A:00:5B:CF`, NTSC NA (verified unique vs the user's three
+   historical EEPROM backups; this is a 4th, never-previously-backed-
+   up console). Raw dump sha256 `871ed8a9...`; not committed (per-
+   console secret that derives the HDD unlock key).
+
+**What did NOT work.**
+
+The XBDM architecture itself. We edited `C:/ind-bios.cfg
+DISABLEDM=0` + `E:/x2config.ini startDebug=1`, downloaded SDK 4361
+from `archive.org/details/xbox-sdks` (162 MB compressed, 1.1 GB
+extracted), and uploaded each `xbdm.dll` variant in turn:
+
+- `XDK/xbox/symbols/Latest/xbdm.dll` (529 KB, sha256 `5330a3ad...`)
+- `XDK/xbox/symbols/4242/xbdm.dll` (529 KB)
+- `XDK/xbox/symbols/4039/xbdm.dll` (319 KB)
+
+After each, `SITE Reboot` and probe TCP port 731. Result in every
+case: "Connection refused" — the kernel never started a debug
+listener. XBMC's `xbmc.log` showed normal startup with no `xbdm`
+references at all, meaning the kernel's loader never tried.
+
+**Root-cause hypothesis (un-disprovable without TV access).** The
+documented `DISABLEDM=0 → load xbdm.dll` behavior was added in
+iND-BiOS BFM 5004.67. Earlier iND-BiOS revisions read the cfg flag
+but the kernel-side debug-monitor loader is absent. We cannot read
+the version banner this Xbox boots into without a TV; brute-forcing
+through later iND-BiOS images would risk a non-recoverable flash on
+a console that is the only confirmed copy of its EEPROM key.
+
+**Architecture pivot.** Built a custom nxdk-based oracle agent at
+`scripts/apple-silicon/xbe-tests/oracle-agent/`. Listens on TCP
+port 9001 using nxdk's lwIP stack (proven via the existing httpd
+sample). Text-line RPC protocol with XBDM-inspired status codes
+(`200- single-line`, `201- OK\n...lines...\n.\n`, `500- error`).
+Phase 1 commands: `info`, `eeprom`, `reboot`, `bye`. Validated
+end-to-end: launch via
+`SITE RunXBE Special://xbmc/Apps/oracle-agent/default.xbe`, port
+9001 listens within ~5 s, agent EEPROM hex matches the file-based
+dump byte-for-byte, `reboot` cleanly returns to XBMC4Gamers.
+
+**Why this supersedes XBDM for our use case.** We have no Visual
+Studio Xbox debugger, no Xbox Neighborhood, no other tool that
+needs XBDM-protocol compatibility. We only need the *capability
+surface* (memory read/write, register access, framebuffer capture,
+XBE launch). The custom agent provides the same surface, source
+under our control, no Microsoft IP in the build, no dependency on
+a debug-build BIOS. The trade-off (XBDM-protocol compatibility) is
+not load-bearing.
+
+**Reference materials retained, not deployed.** SDK 4361 extract
+includes `XbDm.h`, `xbdm.dll`, `xbdm.pdb` (debug symbols), and
+the Windows-side `xboxdbg.dll` client lib. These live at
+`xbox-oracle-backup/2026-05-06/reference-sdk/` outside this repo
+and serve as authoritative protocol references for designing the
+agent's Phase 2+ commands. None of them are committed or deployed.
+
+**Supersedes** the 2026-05-06-earlier "Validation architecture
+pivot — host-side capture + real-Xbox oracle path identified"
+entry below, on the specific point of the network-bridge
+implementation (XBDM → custom agent). The host-side capture
+direction and the diagnostic-XBE plan v2 architecture remain
+authoritative.
+
+**Next session.** See `handoff.md` "Next session priorities":
+oracle agent Phase 2 (mem.read, nv2a.read, screenshot, vram.read,
+runxbe), Mac-side Python client at
+`scripts/apple-silicon/oracle-client.py`, then wire into the
+diagnostic-XBE plan as the network protocol layer.
+
 ## 2026-05-06: Validation architecture pivot — host-side capture + real-Xbox oracle path identified
 
 **Context.** The 2026-05-05 SC2 Metal canonical-recipe replay
