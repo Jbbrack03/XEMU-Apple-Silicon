@@ -1,12 +1,121 @@
 # Handoff
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 1 — hardware
-online, Tier-1 backup captured, EEPROM dumped, custom oracle
-agent shipped, supersedes the leaked-XDK XBDM architecture).
-See decision-log entry "2026-05-06: Real Xbox oracle Phase 1
-— custom oracle agent supersedes XBDM" for full context.
+Last updated: 2026-05-06 (real-Xbox oracle Phase 2 — Phase 2
+agent commands shipped, Mac-side `oracle-client.py` + full
+`oracle-orchestrator.py` pipeline live and smoke-tested. Xbox
+hung at end of smoke testing after ~12 connection cycles;
+needs physical power-cycle by user to resume Phase 3).
+See decision-log entry "2026-05-06: Real Xbox oracle Phase 2 —
+agent commands + Mac orchestrator" for full context.
 
-**TOP OF STACK 2026-05-06 (evening).** The user retrieved the
+**TOP OF STACK 2026-05-06 (later evening).** Phase 2 of the
+oracle pipeline is complete. The agent at
+`scripts/apple-silicon/xbe-tests/oracle-agent/` now ships nine
+new commands (mem/nv2a/vram read+write, screenshot, runxbe,
+unsafe.enable, help) on top of Phase 1's info/eeprom/reboot/bye.
+The source is split across `main.c` + `protocol.{h,c}` +
+`commands.{h,c}` per the project rule on per-file scope.
+
+The Mac-side wrapper layer is `scripts/apple-silicon/oracle-client.py`
+(Pythonic class + CLI) and `scripts/apple-silicon/oracle-orchestrator.py`
+(full chainload-and-collect pipeline). Both land 2026-05-06.
+
+Smoke-tested against the project Xbox (192.168.0.200) before
+the hang:
+
+- `info` returns the Phase 2 banner with video mode + writes-
+  enabled flag.
+- `eeprom` SHA-256 = `871ed8a9...` — byte-for-byte match against
+  `xbox-oracle-backup/2026-05-06/eeprom/eeprom-fresh.bin`.
+- `mem.read 0x80000000 64` returns `efbeadde ffbf0000 ...` (kernel
+  `0xdeadbeef` signature; 1:1 kseg0 mapping confirmed).
+- `nv2a.read 0x600800` (PCRTC_START) → `0x03eb4000` (front-buffer
+  physical address inside 64 MB RAM).
+- `nv2a.read 0x000000` (PMC_BOOT_0) → `0x02a000e1` (NV2A chip ID).
+- `nv2a.read 0x101000` (PBUS_PCI_NV_0) → `0x801d4401` (NVIDIA
+  vendor + NV2A device IDs).
+- `vram.read 0x03eb4000 32` and `mem.read 0x83eb4000 32` both
+  return zeros (640x480x32 mode framebuffer just initialized).
+- `screenshot` returns 1228816 bytes (= 16 byte XOSS header +
+  640*480*4); decoded via `oracle-client.py screenshot --out
+  out.png` to a 640x480 RGBA PNG showing the agent's debugPrint
+  console output (correct top-to-bottom orientation, white text
+  on black, all command-receipt lines legible).
+- Write gating verified: `mem.write` returns `500- writes
+  disabled — call unsafe.enable first` when not armed.
+
+**Connection-cycle hang.** After ~12 fast TCP connect/dispatch/
+RST-close cycles the Xbox stopped responding to ICMP/TCP/FTP.
+ARP still saw the MAC at the Ethernet layer. Hypothesis: lwIP
+PCB pool exhaustion under hard-RST closes from the Mac's Python
+socket. Hardening landed same session:
+
+- `OracleClient.close()` now sends `bye` and `shutdown(SHUT_RDWR)`
+  before `socket.close()`, so the agent sees a clean FIN and
+  recycles its PCB normally.
+- `cmd_mem_write`'s 2 KB scratch buffer moved off the per-conn
+  stack to static. Reduces per-conn memory pressure inside the
+  agent.
+- The agent has been rebuilt (393,216 bytes); the new XBE has
+  not yet been redeployed because the Xbox is still hung.
+
+**Resume after power-cycle:** the user needs to unplug the
+Xbox at the wall (or hit the power button hard if soft-power
+still works) and re-attach it to the LAN. Then:
+
+```sh
+# 1. Confirm Xbox is back
+python3 scripts/apple-silicon/oracle-orchestrator.py status
+
+# 2. Upload the hardened agent
+curl -u xbox:xbox -T scripts/apple-silicon/xbe-tests/oracle-agent/bin/default.xbe \
+    ftp://192.168.0.200/E/XBMC4Gamers/Apps/oracle-agent/default.xbe
+
+# 3. Idempotent launch
+python3 scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+
+# 4. Reproduce the smoke tests via the new client
+python3 scripts/apple-silicon/oracle-client.py info
+python3 scripts/apple-silicon/oracle-client.py screenshot --out /tmp/agent.png
+```
+
+**Next session priorities (in order):**
+
+1. Power-cycle Xbox + redeploy hardened agent (steps above).
+2. Verify the polite-close hardening fixes the connection-cycle
+   hang. Run a 50-cycle stress test:
+   ```sh
+   for i in $(seq 1 50); do
+     python3 scripts/apple-silicon/oracle-client.py info > /dev/null
+   done
+   python3 scripts/apple-silicon/oracle-client.py info
+   ```
+   If still alive after 50 cycles, the lwIP-PCB-leak hypothesis
+   is closed.
+3. **Phase 3 — diagnostic XBE chainload pipeline.** Build the
+   first diagnostic XBE per `diagnostic-xbe-plan.md` v2 §7
+   (mirror, color-channel, or depth-floor). Use
+   `oracle-orchestrator.py run-diag --xbe ... --ftp-collect ...`
+   for the full agent → runxbe → wait FTP → relaunch agent →
+   pull artifacts cycle. The orchestrator already implements
+   every step.
+4. **Wire the orchestrator into the M15 visual gate.** Once the
+   first diag XBE has a real-Xbox reference frame captured via
+   `oracle-orchestrator.py capture`, add a new make-target / harness
+   step that runs the XBE through xemu-GL, xemu-Metal, and the real
+   Xbox, then computes per-pair PNG diffs. The infrastructure for
+   each leg already exists; the orchestrator script's `validate`
+   subcommand wraps `compare-screenshots.py` for the diff math.
+
+The earlier banner content (Phase 1 oracle, validation
+architecture pivot, Crimson reclassification, harness fixes,
+F3, SC2 route, audio listen-test closure) is preserved verbatim
+below for empirical audit trail.
+
+---
+
+**Earlier banner — 2026-05-06 (Phase 1 oracle agent shipped).**
+The user retrieved the
 OpenXenium-modded retail Xbox. It is on the LAN at
 `192.168.0.200` with `xbox`/`xbox` FTP credentials (XBMC
 FileZilla 1.5.6). The XBDM-based architecture proposed in

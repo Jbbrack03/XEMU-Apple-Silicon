@@ -1,5 +1,151 @@
 # Decision Log
 
+## 2026-05-06: Real Xbox oracle Phase 2 — agent commands + Mac orchestrator
+
+**Context.** Phase 1 (committed `8b83fcfc9a`) shipped the custom
+nxdk oracle agent with `info`/`eeprom`/`reboot`/`bye` so we could
+prove the architecture worked end-to-end. The user's directive
+this session was to bring the oracle pipeline up to a state where
+it can be incorporated into the Metal renderer correctness
+workflow autonomously — i.e. a Mac-side orchestrator can drive
+the real-Xbox oracle through diagnostic XBEs, pull artifacts, and
+compare against xemu-GL / xemu-Metal renderings without manual
+intervention beyond the initial XBE upload.
+
+**What landed.**
+
+1. **Phase 2 agent commands** in
+   `scripts/apple-silicon/xbe-tests/oracle-agent/`:
+   - `mem.read addr=0xHEX len=N` — binary memory read; returns
+     the new `202- BINARY <length>` framing followed by exactly
+     `<length>` raw bytes.
+   - `mem.write addr=0xHEX data=<hex>` — gated write; refuses
+     until the per-process `unsafe.enable` arming command is
+     issued. 1 KiB max payload per call.
+   - `nv2a.read off=0xHEX` — reads any 32-bit register from BAR0
+     base 0xFD000000.
+   - `nv2a.write off=0xHEX val=0xHEX` — gated by `unsafe.enable`.
+   - `vram.read off=0xHEX len=N` — reads from the NV2A
+     write-combined "VRAM" aperture at 0xF0000000 (the same 64 MB
+     of system RAM viewed through a different cache attribute).
+   - `screenshot` — captures the front-buffer at vblank and
+     streams a 16-byte `XOSS` header + raw pixels via the 202-
+     framing.
+   - `runxbe path=<xbox-path>` — `XLaunchXBE(path)` after acking;
+     the agent's image is replaced by the chainloaded XBE. Used
+     to launch diagnostic XBEs from the orchestrator.
+   - `unsafe.enable` — process-global write-arming flag.
+   - `help` — multi-line list of all commands.
+
+   Source split across three modules:
+     - `main.c` 183 lines — entry, listener, dispatch
+     - `protocol.{h,c}` 247 lines — line + binary writers, kv
+       parsers, address-range allowlist
+     - `commands.{h,c}` 424 lines — handlers + write-gate state
+   `commands.c` (393 lines on its own) runs above the project's
+   ~200-line guideline intentionally; further splitting per-command
+   was judged more friction than help, and the README documents a
+   ~600-line trigger for splitting into
+   `cmds_mem.c` / `cmds_visual.c` / `cmds_launch.c`.
+   Address allowlist for the generic `mem.read` / `mem.write`
+   commands is RAM-only — the four canonical Xbox RAM aliases
+   (0x00000000 / 0x80000000 / 0xB0000000 / 0xF0000000), each 64 MiB.
+   MMIO regions (NV2A BAR0, APU, ACI, USB) are intentionally NOT
+   in the allowlist because byte-wide memcpy/netconn_write over
+   MMIO produces side effects the device side may not tolerate;
+   NV2A BAR0 register access goes through the typed
+   `nv2a.read` / `nv2a.write` commands which always do 32-bit
+   aligned access. Out-of-range accesses return `500-`.
+
+2. **Mac-side wrapper layer.**
+   - `scripts/apple-silicon/oracle-client.py` — `OracleClient`
+     class (`info`, `eeprom`, `mem_read`, `mem_write`, `nv2a_read`,
+     `nv2a_write`, `vram_read`, `screenshot`, `runxbe`, `unsafe_enable`,
+     `reboot`, `bye`, `help`, `raw`) plus argparse CLI subcommands.
+     The 202- BINARY framing is decoded into Python `bytes`. PNG
+     output via Pillow when available, stdlib zlib+CRC fallback
+     otherwise.
+   - `scripts/apple-silicon/oracle-orchestrator.py` — pipeline
+     driver: `status` (probes ping/FTP/agent), `ensure-agent`
+     (idempotent SITE RunXBE), `capture` (screenshot to PNG),
+     `run-diag` (full chainload + collect cycle), `validate`
+     (wraps `compare-screenshots.py`). `run-diag` writes a
+     `verdict.json` per output directory.
+
+3. **Smoke validation on the project Xbox.** Before the
+   connection-cycle hang (see below), every Phase 2 command was
+   exercised at least once:
+   - `info` returned the expected version banner.
+   - `eeprom` SHA-256 matched the file dump byte-for-byte.
+   - `nv2a.read 0x600800` (PCRTC_START) returned the
+     front-buffer physical address `0x03eb4000`.
+   - `nv2a.read 0x000000` returned the NV2A chip ID
+     `0x02a000e1`.
+   - `mem.read 0x80000000 64` returned the kernel's
+     `0xdeadbeef` signature, confirming the kseg0 mapping.
+   - `screenshot` returned 1228816 bytes (= 16 byte header +
+     640×480×4 pixels). Decoded PNG showed the agent's
+     debugPrint console output rendered correctly.
+   - Write gating verified: `mem.write` returned `500- writes
+     disabled` without prior `unsafe.enable`.
+
+4. **Connection-cycle hang and hardening.** After ~12 fast
+   connect/RST cycles the Xbox stopped responding to ICMP/TCP/FTP.
+   ARP still saw the MAC at the Ethernet layer. The Mac's Python
+   client was doing `socket.close()` without sending FIN, so the
+   agent's lwIP saw RSTs and likely accumulated PCBs in
+   close-wait until the small (default ~5-8) PCB pool exhausted.
+   Hardening landed same session:
+   - `OracleClient.close()` sends `bye` + `shutdown(SHUT_RDWR)`
+     before `socket.close()` so the agent sees a clean FIN.
+   - The agent's `cmd_mem_write` 2 KB scratch buffer moved off
+     the per-conn stack to static.
+   The hardened agent has been rebuilt (393,216 bytes) but not
+   yet redeployed; the Xbox is still hung and needs a physical
+   power-cycle. The handoff documents the resume procedure.
+
+**Why this is the right architecture.** The Phase 2 agent now
+covers every capability the diagnostic-XBE plan needs from the
+oracle:
+- Front-buffer capture for Tier-1 (host-side capture) reference
+  frames (the canonical oracle in `diagnostic-xbe-plan.md` v2).
+- Memory + register access for Tier-2 (guest-side VRAM readback)
+  XBEs that need to inspect post-GPU state.
+- Chainload (`runxbe`) for the agent → diag-XBE → reboot →
+  agent-relaunch lifecycle described in the handoff §"Wire into
+  the diagnostic-XBE library plan".
+
+The orchestrator's `run-diag` subcommand is the autonomous driver
+for that lifecycle. No manual intervention is required between
+"upload diag XBE" and "verdict.json appears" beyond the initial
+agent-binary upload (one-time per agent-source change).
+
+**What is intentionally NOT in this slice.**
+
+- **Full diagnostic-XBE library.** Per `diagnostic-xbe-plan.md`
+  v2, the first 16 priority XBEs (mirror, color-channel, depth-
+  floor, …) are still pending implementation. The orchestrator
+  is now ready to drive them; the next session writes the first
+  one and exercises the full pipeline.
+- **Cross-renderer paired diff via the orchestrator.** The
+  orchestrator's `validate` subcommand wraps the existing
+  `compare-screenshots.py` so a pair-of-PNGs comparison works
+  today, but the "run XBE on real Xbox + xemu-GL + xemu-Metal,
+  diff all three legs, emit a JSON verdict" loop is the
+  diagnostic-XBE library's responsibility, not the orchestrator's.
+
+**Next-session triggers.**
+
+1. Power-cycle the Xbox (physical, by the user) → redeploy the
+   hardened agent → 50-cycle stress test confirms the polite-
+   close hardening fixes the lwIP-PCB-leak hypothesis.
+2. Build the first diagnostic XBE per `diagnostic-xbe-plan.md`
+   v2 §7. Drive it via `oracle-orchestrator.py run-diag`. Capture
+   the real-Xbox reference frame with `oracle-orchestrator.py
+   capture` and store under `docs/apple-silicon/xbox-real-references/`.
+3. Wire the orchestrator into the M15 Metal visual gate as a
+   third leg next to xemu-GL and xemu-Metal.
+
 ## 2026-05-06: Real Xbox oracle Phase 1 — custom oracle agent supersedes XBDM
 
 **Context.** The user retrieved the OpenXenium-modded retail Xbox

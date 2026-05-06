@@ -3096,19 +3096,154 @@ on the next boot).
 ### `scripts/apple-silicon/xbe-tests/oracle-agent/`
 
 Persistent nxdk XBE with a TCP listener on port 9001, replacing
-the leaked-XDK XBDM path. Phase 1 commands: `info`, `eeprom`,
-`reboot`, `bye`. Protocol: text lines with `200- single`,
-`201- OK ...\n.\n` multi, `500- error`. See the directory's
-`README.md` for the full protocol spec, deploy steps, and the
-Phase 2+ command roadmap. Quick smoke test:
+the leaked-XDK XBDM path. Source split across
+`main.c`/`protocol.{h,c}`/`commands.{h,c}` per project rule on
+keeping per-file scope under ~200 lines.
+
+**Phase 1 commands** (always present): `info`, `eeprom`, `reboot`,
+`bye`.
+
+**Phase 2 commands** (shipped 2026-05-06):
+
+| Command                              | Behavior                                       |
+| ------------------------------------ | ---------------------------------------------- |
+| `mem.read addr=0xHEX len=N`          | Binary memory read; 202- BINARY framing        |
+| `mem.write addr=0xHEX data=<hex>`    | Memory write; gated by `unsafe.enable`         |
+| `nv2a.read off=0xHEX`                | One 32-bit NV2A BAR0 register                  |
+| `nv2a.write off=0xHEX val=0xHEX`     | Write 32-bit BAR0 register; gated              |
+| `vram.read off=0xHEX len=N`          | Read NV2A 0xF0000000 VRAM aperture             |
+| `screenshot`                         | Front-buffer capture; binary `XOSS` header     |
+| `runxbe path=<xbox-path>`            | Chainload another XBE; agent terminates        |
+| `unsafe.enable`                      | Arm `mem.write` + `nv2a.write` for the session |
+| `help`                               | Multi-line list of all commands                |
+
+Protocol additions: `202- BINARY <length>` followed by exactly
+`<length>` raw bytes (no trailer). Used by `mem.read`, `vram.read`,
+`screenshot`. The agent's address allowlist for `mem.read` /
+`mem.write` covers RAM only — the four canonical Xbox RAM aliases
+(physical low-alias, kseg0, kseg1, write-combined VRAM aperture).
+MMIO regions (NV2A BAR0, APU, ACI, USB) are intentionally NOT in
+the allowlist; byte-wide memcpy over MMIO produces side effects
+that the device side may not tolerate. For NV2A BAR0 use the typed
+`nv2a.read` / `nv2a.write` commands which do 32-bit aligned
+access. Reads/writes outside the allowlist return `500-`. Lengths
+capped at 1 MiB per call; writes capped at 1024 bytes.
+
+The `screenshot` payload is `XOSS` magic + u32 width + u32 height +
+u32 stride, followed by `stride * height` raw pixel bytes (the
+stride already encodes bytes-per-pixel). Pixel format is the
+front-buffer's native layout — typically 32-bit X8R8G8B8
+little-endian (`B G R X` in memory). The Mac client converts to
+RGBA + PNG.
+
+Quick smoke test (Phase 1 + Phase 2 commands):
 
 ```sh
 ( printf 'info\nbye\n'; sleep 1 ) | nc -w 5 192.168.0.200 9001
+python3 scripts/apple-silicon/oracle-client.py info
+python3 scripts/apple-silicon/oracle-client.py screenshot --out /tmp/x.png
+python3 scripts/apple-silicon/oracle-client.py nv2a-read 0x600800
 ```
 
 The agent's `eeprom` command output is byte-for-byte identical to
 the file written by the eeprom-dump XBE — useful as a self-check
 when the agent is first deployed on a new console.
+
+### `scripts/apple-silicon/oracle-client.py`
+
+Mac-side wrapper around the agent protocol. Provides:
+
+- A `OracleClient` Python class for in-process scripting. The
+  filename `oracle-client.py` contains a hyphen so it isn't directly
+  importable; the orchestrator already handles this via
+  `importlib.util.spec_from_file_location(...)`, which is the same
+  pattern any in-tree consumer should use:
+
+  ```python
+  import importlib.util
+  from pathlib import Path
+  _spec = importlib.util.spec_from_file_location(
+      "oracle_client",
+      Path(__file__).resolve().parent / "oracle-client.py",
+  )
+  oc = importlib.util.module_from_spec(_spec)
+  _spec.loader.exec_module(oc)
+
+  with oc.OracleClient("192.168.0.200") as oracle:
+      info = oracle.info()
+      eeprom = oracle.eeprom()
+      val = oracle.nv2a_read(0x600800)              # PCRTC_START
+      data = oracle.mem_read(0x80000000, 64)        # kseg0 low RAM
+      pixels, w, h, stride = oracle.screenshot()
+      rgba = oc.bgrx_to_rgba(pixels, w, h, stride)
+      oc.save_screenshot_png(rgba, w, h, "out.png")
+  ```
+
+- A CLI for shell driver scripts:
+
+  ```sh
+  oracle-client.py info
+  oracle-client.py eeprom --out /tmp/eeprom.bin
+  oracle-client.py mem-read 0x80000000 64 --out /tmp/low.bin
+  oracle-client.py nv2a-read 0x600800
+  oracle-client.py vram-read 0x03eb4000 4096 --out /tmp/fb.bin
+  oracle-client.py screenshot --out /tmp/agent.png
+  oracle-client.py unsafe-enable
+  oracle-client.py mem-write 0x80020000 deadbeef
+  oracle-client.py runxbe 'C:\xboxdash.xbe'
+  oracle-client.py wait-ready --retries 30 --delay 1
+  oracle-client.py raw 'help'
+  ```
+
+The class's `__exit__` sends `bye` before closing so the agent's
+TCP state machine sees an orderly FIN, not a socket-level RST. This
+hardening landed 2026-05-06 after a connection-cycle hang surfaced
+during initial Phase 2 smoke testing (the agent's lwIP PCB pool
+appeared to wedge after ~12 fast connect/RST cycles; the polite-
+close path keeps PCBs reusable). Pillow is auto-detected for PNG
+encoding; falls back to a stdlib-only zlib+CRC encoder when Pillow
+is unavailable.
+
+Defaults read `ORACLE_HOST` / `ORACLE_PORT` from the env (override
+with `--host` / `--port`).
+
+### `scripts/apple-silicon/oracle-orchestrator.py`
+
+Pipeline driver that ties the agent + a diagnostic XBE + FTP
+artifact pull together into a single autonomous run. Subcommands:
+
+```sh
+# Probe Xbox + FTP + agent liveness; exit 0 if Xbox is responsive.
+oracle-orchestrator.py status
+
+# Idempotently launch the agent if it isn't already listening.
+oracle-orchestrator.py ensure-agent
+
+# Save a single front-buffer screenshot.
+oracle-orchestrator.py capture --out shots/now.png
+
+# Full chainload-and-collect cycle: agent → runxbe → wait FTP back
+# → relaunch agent → mirror artifacts → screenshot post-state.
+oracle-orchestrator.py run-diag \
+    --xbe   'E:\XBMC4Gamers\Apps\diag-mirror\default.xbe' \
+    --ftp-collect /E/XBMC4Gamers/Apps/diag-mirror \
+    --out   benchmark-runs/oracle-mirror
+
+# Compare a captured PNG against a reference oracle frame.
+oracle-orchestrator.py validate \
+    --captured  benchmark-runs/.../post.png \
+    --reference docs/apple-silicon/xbox-real-references/mirror/00.png
+```
+
+Defaults to host `$ORACLE_HOST` (`192.168.0.200`), agent path
+`Special://xbmc/Apps/oracle-agent/default.xbe`. The diagnostic XBE
+is responsible for capturing whatever it needs to its own `D:\`
+directory before rebooting; the orchestrator only knows where to
+look (`--ftp-collect`).
+
+`run-diag` writes a `verdict.json` to the output directory with
+status, timestamps, and pulled-artifact paths so it can be consumed
+by downstream pipeline steps.
 
 ### Standard recipe
 
@@ -3142,11 +3277,24 @@ the EEPROM dump path; do not commit).
 5. For the next geometry-shader exit slice, use PGR2 to confirm quad-family
    pressure first. Keep Rainbow Six 3 for line-family coverage and Crimson
    Skies for sustained flight/acceleration cross-checks.
-6. Real Xbox oracle (2026-05-06): Phase 2 of the oracle agent —
-   add `mem.read`, `nv2a.read`, `screenshot`, `vram.read`, `runxbe`
-   commands to `scripts/apple-silicon/xbe-tests/oracle-agent/main.c`
-   (split into multiple `.c` files when any one section grows past
-   ~200 lines). Then build the Mac-side Python client at
-   `scripts/apple-silicon/oracle-client.py` wrapping the protocol
-   into Pythonic methods (`oracle.info()`, `oracle.eeprom()`, ...).
-   Document the client here once it lands.
+6. Real Xbox oracle Phase 2 (2026-05-06): SHIPPED.
+   `mem.read` / `mem.write` / `nv2a.read` / `nv2a.write` /
+   `vram.read` / `screenshot` / `runxbe` / `unsafe.enable` / `help`
+   commands all live in `scripts/apple-silicon/xbe-tests/oracle-agent/`
+   (now split into `main.c` + `protocol.{h,c}` + `commands.{h,c}`).
+   Mac-side wrappers shipped: `oracle-client.py` (Python API + CLI)
+   and `oracle-orchestrator.py` (full diag-XBE chainload pipeline).
+   See the "Real Xbox oracle agent" section above for the protocol
+   spec, command tables, and CLI examples. Smoke-tested on the
+   project Xbox 2026-05-06: `info`, `help`, `eeprom` (SHA-256 byte-
+   for-byte match against the file dump), `mem.read`, `nv2a.read`,
+   `vram.read`, `screenshot` (640x480 RGBA PNG), and write-gating
+   verified — `mem.write` returns `500-` when not armed.
+7. Real Xbox oracle Phase 3 (next-session): wire the orchestrator
+   into the diagnostic-XBE library plan. Build the first
+   diag XBE (mirror, color-channel, or depth-floor per
+   `diagnostic-xbe-plan.md` §7 phase 1) and run an end-to-end
+   `oracle-orchestrator.py run-diag` against it. The XBE writes
+   its captures to `D:\` (the kernel-auto-mapped XBE dir), then
+   reboots; the orchestrator pulls them via FTP and computes a
+   PASS/FAIL JSON verdict.

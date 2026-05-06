@@ -1,25 +1,35 @@
 /*
- * xbox-oracle-agent v0.1
+ * xbox-oracle-agent v0.2 (Phase 2)
  *
  * A network-listening XBE that exposes the Xbox console as an oracle
  * for xemu correctness validation. Speaks a simple text-line RPC
- * protocol on TCP port 9001.
+ * protocol (with optional 202- BINARY length-prefixed payloads) on
+ * TCP port 9001.
  *
- * Phase 1 commands (this build):
- *   info                   - agent + Xbox info (single-line)
- *   eeprom                 - 256-byte EEPROM as hex (multi-line)
- *   reboot                 - reboot Xbox (no response, conn drops)
- *   bye                    - close connection
+ * Phase 1 commands (always present):
+ *   info, eeprom, reboot, bye
  *
- * Response format (XBDM/SMTP-inspired):
- *   200- <text>\r\n        single-line success
- *   201- OK\r\n            multi-line begin; lines follow; ends with .\r\n
- *   500- <text>\r\n        error
+ * Phase 2 additions (this build):
+ *   mem.read addr=0xHEX len=N
+ *   mem.write addr=0xHEX data=<hex>          (gated by unsafe.enable)
+ *   nv2a.read off=0xHEX
+ *   nv2a.write off=0xHEX val=0xHEX           (gated by unsafe.enable)
+ *   vram.read off=0xHEX len=N
+ *   screenshot                                (binary front-buffer capture)
+ *   runxbe path=<xbox-path>                  (chainload another XBE)
+ *   unsafe.enable                             (arm writes for this session)
+ *   help
  *
- * Built with nxdk; lwip TCP via the same pattern as the httpd sample.
- * Source lives at scripts/apple-silicon/xbe-tests/oracle-agent/ in
- * the xemu-fork tree (per project rule #5: in-tree tooling).
+ * Source layout (refactored 2026-05-06 evening):
+ *   main.c       — entry point, network bring-up, listener, dispatch
+ *   protocol.{h,c} — wire-protocol helpers (line + binary writers, parsers)
+ *   commands.{h,c} — Phase 1 + Phase 2 command implementations
+ *
+ * Built with nxdk; lwIP TCP via the same pattern as the httpd sample.
  */
+#include "commands.h"
+#include "protocol.h"
+
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <hal/xbox.h>
@@ -31,135 +41,122 @@
 #include <string.h>
 #include <windows.h>
 
-#define ORACLE_PORT       9001
-#define EEPROM_SMBUS_ADDR 0xA8
-#define EEPROM_SIZE       256
-#define VERSION_STR       "xbox-oracle-agent v0.1 (Phase 1: info/eeprom/reboot/bye)"
+#define ORACLE_PORT 9001
 
 extern struct netif *g_pnetif;
 
-static int read_eeprom(unsigned char *out)
+typedef int (*cmd_fn)(struct netconn *c, const char *args);
+
+struct cmd_entry {
+    const char *verb;
+    cmd_fn      fn;
+};
+
+static const struct cmd_entry s_cmds[] = {
+    { "info",          cmd_info          },
+    { "eeprom",        cmd_eeprom        },
+    { "mem.read",      cmd_mem_read      },
+    { "mem.write",     cmd_mem_write     },
+    { "nv2a.read",     cmd_nv2a_read     },
+    { "nv2a.write",    cmd_nv2a_write    },
+    { "vram.read",     cmd_vram_read     },
+    { "screenshot",    cmd_screenshot    },
+    { "runxbe",        cmd_runxbe        },
+    { "unsafe.enable", cmd_unsafe_enable },
+    { "reboot",        cmd_reboot        },
+    { "bye",           cmd_bye           },
+    { "help",          cmd_help          },
+    { NULL,            NULL              },
+};
+
+static int dispatch(struct netconn *c, char *line)
 {
-    for (unsigned int i = 0; i < EEPROM_SIZE; i++) {
-        ULONG val = 0;
-        NTSTATUS s = HalReadSMBusValue(EEPROM_SMBUS_ADDR, (UCHAR)i, FALSE, &val);
-        if (!NT_SUCCESS(s)) return -1;
-        out[i] = (unsigned char)(val & 0xFF);
+    int n = (int)strlen(line);
+    while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == '\n' ||
+                     line[n - 1] == ' '  || line[n - 1] == '\t')) {
+        line[--n] = 0;
     }
-    return 0;
-}
+    if (n == 0) return 0;
 
-static void send_line(struct netconn *c, const char *s)
-{
-    netconn_write(c, s, strlen(s), NETCONN_COPY);
-    netconn_write(c, "\r\n", 2, NETCONN_NOCOPY);
-}
+    debugPrint("rcv: %s\n", line);
 
-static void cmd_info(struct netconn *c)
-{
-    char line[256];
-    snprintf(line, sizeof(line),
-             "200- %s; ip=%s",
-             VERSION_STR,
-             ip4addr_ntoa(netif_ip4_addr(g_pnetif)));
-    send_line(c, line);
-}
-
-static void cmd_eeprom(struct netconn *c)
-{
-    unsigned char eeprom[EEPROM_SIZE];
-    memset(eeprom, 0, sizeof(eeprom));
-    if (read_eeprom(eeprom) != 0) {
-        send_line(c, "500- HalReadSMBusValue failed");
-        return;
+    /* Split verb / args at first whitespace. */
+    char *args = strpbrk(line, " \t");
+    if (args) {
+        *args++ = 0;
+        while (*args == ' ' || *args == '\t') args++;
+    } else {
+        args = "";
     }
-    send_line(c, "201- OK 256");
-    /* Hex-encode 32 bytes per line for readability */
-    char hex[64 * 2 + 4];
-    for (int row = 0; row < EEPROM_SIZE; row += 32) {
-        int p = 0;
-        for (int j = 0; j < 32 && (row + j) < EEPROM_SIZE; j++) {
-            p += snprintf(hex + p, sizeof(hex) - p, "%02X", eeprom[row + j]);
+
+    for (const struct cmd_entry *e = s_cmds; e->verb; e++) {
+        if (strcmp(line, e->verb) == 0) {
+            return e->fn(c, args);
         }
-        send_line(c, hex);
     }
-    send_line(c, ".");
-}
-
-static int cmd_dispatch(struct netconn *c, char *cmd)
-{
-    /* Trim trailing whitespace */
-    int n = (int)strlen(cmd);
-    while (n > 0 && (cmd[n - 1] == '\r' || cmd[n - 1] == '\n' ||
-                     cmd[n - 1] == ' '  || cmd[n - 1] == '\t')) {
-        cmd[--n] = 0;
-    }
-
-    debugPrint("rcv: %s\n", cmd);
-
-    if (strcmp(cmd, "info") == 0) {
-        cmd_info(c);
-        return 0;
-    }
-    if (strcmp(cmd, "eeprom") == 0) {
-        cmd_eeprom(c);
-        return 0;
-    }
-    if (strcmp(cmd, "bye") == 0) {
-        send_line(c, "200- bye");
-        return 1; /* drop connection */
-    }
-    if (strcmp(cmd, "reboot") == 0) {
-        send_line(c, "200- rebooting");
-        netconn_close(c);
-        Sleep(500);
-        HalReturnToFirmware(HalRebootRoutine);
-        /* not reached */
-        return 1;
-    }
-    if (strcmp(cmd, "") == 0) {
-        return 0;
-    }
-    char err[128];
-    snprintf(err, sizeof(err), "500- unknown command: %s", cmd);
-    send_line(c, err);
+    op_send_errf(c, "unknown command: %s", line);
     return 0;
 }
+
+/* Per-connection line buffer. Sized to fit the largest legitimate
+ * command line: `mem.write addr=0xHHHHHHHH data=<hex>\r\n` with the
+ * 1024-byte max payload encodes to 2 chars/byte = 2048 chars hex,
+ * plus ~32 chars verb + key + addr + delimiters. Round up to 4 KiB
+ * so the agent never silently truncates a max-sized write. Static
+ * because handle_client runs on a single thread (the main accept
+ * loop) — only one connection is being serviced at a time. */
+static char s_line_buf[4096];
 
 static void handle_client(struct netconn *c)
 {
     debugPrint("client connected\n");
-    send_line(c, "200- xbox-oracle-agent ready");
+    op_send_okf(c, "xbox-oracle-agent ready");
 
-    char buf[1024];
     int blen = 0;
+    int overflowed = 0;
 
-    while (1) {
-        struct netbuf *inbuf;
+    for (;;) {
+        struct netbuf *inbuf = NULL;
         if (netconn_recv(c, &inbuf) != ERR_OK) break;
 
-        char *data;
-        u16_t len;
-        netbuf_data(inbuf, (void **)&data, &len);
+        do {
+            char *data = NULL;
+            u16_t len = 0;
+            if (netbuf_data(inbuf, (void **)&data, &len) != ERR_OK) break;
 
-        for (u16_t i = 0; i < len; i++) {
-            char ch = data[i];
-            if (ch == '\n') {
-                buf[blen] = 0;
-                if (cmd_dispatch(c, buf)) {
-                    netbuf_delete(inbuf);
-                    netconn_close(c);
-                    netconn_delete(c);
-                    return;
+            for (u16_t i = 0; i < len; i++) {
+                char ch = data[i];
+                if (ch == '\n') {
+                    s_line_buf[blen] = 0;
+                    if (overflowed) {
+                        op_send_errf(c, "command line too long (max %u bytes)",
+                                     (unsigned)(sizeof(s_line_buf) - 1));
+                        overflowed = 0;
+                        blen = 0;
+                        continue;
+                    }
+                    int rc = dispatch(c, s_line_buf);
+                    blen = 0;
+                    if (rc != 0) {
+                        netbuf_delete(inbuf);
+                        netconn_close(c);
+                        netconn_delete(c);
+                        if (rc == 2) {
+                            /* Caller (runxbe / reboot) is shutting us down. */
+                        }
+                        return;
+                    }
+                } else if (blen < (int)sizeof(s_line_buf) - 1) {
+                    s_line_buf[blen++] = ch;
+                } else {
+                    /* Line too long; mark and continue swallowing
+                     * bytes until the next \n so we can report the
+                     * overflow as a 500- instead of silently
+                     * dropping. */
+                    overflowed = 1;
                 }
-                blen = 0;
-            } else if (blen < (int)sizeof(buf) - 1) {
-                buf[blen++] = ch;
-            } else {
-                /* line too long; reset */
-                blen = 0;
             }
-        }
+        } while (netbuf_next(inbuf) >= 0);
         netbuf_delete(inbuf);
     }
     netconn_close(c);
@@ -170,7 +167,7 @@ static void handle_client(struct netconn *c)
 int main(void)
 {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    debugPrint("\n%s\n", VERSION_STR);
+    debugPrint("\nxbox-oracle-agent v0.2 (Phase 2)\n");
     debugPrint("Bringing up network...\n");
 
     nxNetInit(NULL);
@@ -194,8 +191,8 @@ int main(void)
         return 1;
     }
 
-    while (1) {
-        struct netconn *client;
+    for (;;) {
+        struct netconn *client = NULL;
         if (netconn_accept(listener, &client) == ERR_OK) {
             handle_client(client);
         }
