@@ -72,6 +72,11 @@ oc = _imp.module_from_spec(_spec)  # type: ignore[arg-type]
 assert _spec and _spec.loader
 _spec.loader.exec_module(oc)  # type: ignore[union-attr]
 
+# `ftplib.all_errors` is a tuple of exception classes; combining it
+# with OSError requires explicit unpacking, since `(OSError, tuple)`
+# in an except clause is an invalid catch (TypeError at except time).
+_FTP_ERRORS = (OSError,) + tuple(ftplib.all_errors)
+
 DEFAULT_HOST = os.environ.get("ORACLE_HOST", "192.168.0.200")
 DEFAULT_FTP_USER = os.environ.get("ORACLE_FTP_USER", "xbox")
 DEFAULT_FTP_PASS = os.environ.get("ORACLE_FTP_PASS", "xbox")
@@ -154,7 +159,7 @@ def wait_for_ftp(host: str, retries: int = 60, delay: float = 2.0,
             ftp.login(user, password)
             ftp.quit()
             return True
-        except (OSError, ftplib.all_errors):
+        except _FTP_ERRORS:
             if i % 10 == 0:
                 _log(f"waiting for FTP at {host} (attempt {i + 1}/{retries})")
             time.sleep(delay)
@@ -182,9 +187,9 @@ def site_run_xbe(host: str, xbe_path: str,
         finally:
             try:
                 ftp.quit()
-            except (OSError, ftplib.all_errors):
+            except _FTP_ERRORS:
                 pass
-    except (OSError, ftplib.all_errors) as e:
+    except _FTP_ERRORS as e:
         # Connection-reset-by-peer is normal here.
         if not quiet:
             _log(f"SITE RunXBE: connection torn down (expected): {e}")
