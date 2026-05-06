@@ -1,0 +1,33 @@
+{
+  "id": "pipeline-smoke",
+  "title": "Orchestrator pipeline smoke test",
+  "purpose": "Validate the run-diag chainload-and-back cycle end-to-end with a CPU-painted Tier-4 oracle. Real Tier-1 NV2A-pipeline diag XBEs (mirror, color-channel, depth-floor) follow on top of this proven pipeline.",
+  "self_validation_tier": 4,
+  "oracle_priority": ["math-derived", "real-xbox"],
+  "duration_seconds": 4,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\pipeline-smoke-capture.bin",
+      "ftp_path": "/E/XBMC4Gamers/Apps/pipeline-smoke/pipeline-smoke-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\pipeline-smoke-done.txt",
+      "ftp_path": "/E/XBMC4Gamers/Apps/pipeline-smoke/pipeline-smoke-done.txt"
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

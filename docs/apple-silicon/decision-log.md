@@ -1,5 +1,142 @@
 # Decision Log
 
+## 2026-05-06: Real Xbox oracle Phase 3.0 — pipeline-smoke validates orchestrator end-to-end
+
+**Context.** Phase 2 of the oracle agent + orchestrator was
+re-validated end-to-end against the project Xbox after a
+power-cycle (200-cycle stress 0 failures, all Phase 2 commands
+clean). Phase 3 of the diagnostic-XBE plan calls for Tier-1
+NV2A-pipeline test XBEs (mirror / color-channel / depth-floor)
+that exercise the actual NV2A draw path. Building one of those
+requires a pbkit-based vertex/fragment shader pipeline plus
+the post-render capture mechanism, which is several days of
+work. Before committing to that, the orchestrator's
+chainload-and-back cycle itself needed an end-to-end proof
+distinct from `runxbe C:\xboxdash.xbe` (which is not a real
+diag-XBE flow because xboxdash doesn't exit cleanly back to
+the dashboard).
+
+**What landed: Phase 3.0 — `pipeline-smoke` diag XBE.**
+
+A minimal **Tier-4** (visual-only, CPU-painted, no NV2A
+pipeline) diag XBE whose only purpose is to prove the
+orchestrator's `run-diag` chainload-and-back-and-pull cycle
+works. Renders a deterministic single-pixel oracle (640×480
+opaque black + one white pixel at guest coord (320, 50)),
+writes the framebuffer to `D:\pipeline-smoke-capture.bin` in
+the same XOSS format the agent's `screenshot` command uses, and
+warm-resets via `HalReturnToFirmware(HalRebootRoutine)` so the
+orchestrator can FTP-pull the capture and relaunch the agent.
+
+**Files added in this slice.**
+
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/main.c` (~140
+  lines, no pbkit dependency).
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/Makefile`,
+  `.gitignore`, `README.md`.
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/manifest.json`
+  per `diagnostic-xbe-plan.md` §3.5 schema (declares Tier-4,
+  oracle priority math-derived → real-xbox, artifact paths,
+  expected_results = `expected.py:default`).
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/expected.py`
+  (math-derived 640×480 RGBA pixel buffer plus a CLI helper
+  that writes a PNG via the `oracle-client.py`'s stdlib-only
+  encoder).
+- `scripts/apple-silicon/xbe-tests/pipeline-smoke/bin/default.xbe`
+  pre-built artifact (~110 KB).
+- `docs/apple-silicon/xbox-real-references/pipeline-smoke/real-xbox.png`
+  — the captured + decoded framebuffer from the project Xbox,
+  byte-for-byte identical to the math-derived expected.
+
+**Bug surfaced and fixed in flight: orchestrator pull order.**
+
+`run_diag` was relaunching the oracle agent BEFORE pulling the
+diag XBE's artifacts via FTP. The agent suspends XBMC's FTP
+server, so the FTP pull failed with `ConnectionRefusedError`.
+Fix: pull artifacts first (XBMC running), then relaunch the
+agent (XBMC suspended, agent listening on TCP 9001) for the
+post-state screenshot. Also threaded `_FTP_ERRORS` into the
+pull-failure path so a real FTP error surfaces as a structured
+`ftp-pull-failed` verdict instead of an uncaught traceback.
+
+**End-to-end evidence.**
+
+Run timeline (`benchmark-runs/pipeline-smoke-run-2/verdict.json`):
+
+- `started_at` → `chainload_at` = 11.6 s (ensure-agent +
+  pre-screenshot).
+- `chainload_at` → `ftp_back_at` = 30.4 s (the diag XBE ran +
+  rebooted + Xbox came back to FTP).
+- `ftp_back_at` → `finished_at` = 12.4 s (FTP pull, relaunch
+  agent, post-screenshot).
+- 3 artifacts pulled: `default.xbe`,
+  `pipeline-smoke-capture.bin` (1228816 B = 16-byte XOSS
+  header + 640×480×4 raw BGRX pixels — exactly matching the
+  manifest declaration), `pipeline-smoke-done.txt`.
+- Captured framebuffer decoded via
+  `oracle-client.bgrx_to_rgba()` + `save_screenshot_png()` →
+  PNG SHA-256 = `66f1f332f0bec182be06a53447221047af250ca708bb3525ee842821197e34b4`.
+- Math-derived expected PNG SHA-256 = same value. Bit-perfect
+  match, every byte: alpha 0xFF everywhere, RGB (0,0,0)
+  everywhere except (320, 50) where it's (255, 255, 255).
+- `verdict.json` reports `status="ok"`.
+
+**Why this matters.**
+
+The orchestrator pipeline (status / ensure-agent / capture /
+**run-diag** / validate) is now proven end-to-end against the
+real Xbox. Future Tier-1 diag XBEs only need to plug their
+NV2A render path into the same skeleton:
+
+1. Issue NV2A draw commands.
+2. Sleep / wait for GPU completion.
+3. Read the front buffer (or call into `nv2a.read` /
+   `vram.read` via the agent's protocol if doing in-flight
+   capture; for chainload-and-collect, the post-render
+   front-buffer copy is sufficient).
+4. Write XOSS-format capture to `D:\`.
+5. `HalReturnToFirmware(HalRebootRoutine)`.
+
+**Project-rule alignment.**
+
+- Rule #1 (no guessing): every step of the pipeline produced
+  measured evidence (verdict.json + SHA-256 match). No
+  intuition.
+- Rule #5 (build tools when blocked): pipeline-smoke IS the
+  tool. Without it the orchestrator's chainload-and-back path
+  was unproven and the next session would have started
+  Tier-1 diag-XBE work on a possibly-broken pipeline.
+
+**What is intentionally NOT in this slice.**
+
+- **Tier-1 diag XBEs.** `mirror` (single-pixel oracle through
+  the NV2A pgraph pipeline, not CPU memcpy), `color-channel`,
+  `depth-floor`. Those are next-session work.
+- **The shared `xbe-tests/lib/` skeleton** described in
+  `diagnostic-xbe-plan.md` §3.1. pipeline-smoke is small
+  enough to live as a single-file XBE; the shared skeleton
+  pays for itself when there are 3+ XBEs sharing
+  pbkit/banner/capture boilerplate.
+- **Cross-renderer paired comparison.** This slice validated
+  the orchestrator + Xbox-real leg only. Adding xemu-GL +
+  xemu-Metal legs to the same diag XBE is meaningful for
+  Tier-1 XBEs (where the NV2A render path differs between
+  legs); for pipeline-smoke it would only test the CPU
+  framebuffer path which is identical across renderers.
+
+**Next-session triggers.**
+
+1. Build Tier-1 `mirror` diag XBE per
+   `diagnostic-xbe-plan.md` v2 §4.1. Use pbkit triangle
+   sample as the structural template; render single-pixel
+   triangle at (320, 50). Same XOSS-capture-then-reboot
+   pattern pipeline-smoke established.
+2. Run `oracle-orchestrator.py run-diag` against `mirror` →
+   compare against real-Xbox capture.
+3. Repeat for `color-channel` (§4.2) and `depth-floor`
+   (§4.3) — the three diag XBEs that catch the SC2 visual
+   symptoms.
+
 ## 2026-05-06: Phase 2 hardening confirmed; orchestrator FTP except-clause fix
 
 **Context.** After the user power-cycled the Xbox to recover from

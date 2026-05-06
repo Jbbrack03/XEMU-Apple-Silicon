@@ -1,16 +1,51 @@
 # Handoff
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 2 SHIPPED +
-post-power-cycle re-validation: 200-cycle stress 0 failures,
-all Phase 2 commands clean, orchestrator FTP except-clause
-bug fixed in flight; Phase 3 diagnostic-XBE library still
-pending). See decision-log entries
-"2026-05-06: Real Xbox oracle Phase 2 — agent commands + Mac
-orchestrator" and
-"2026-05-06: Phase 2 hardening confirmed; orchestrator FTP
-except-clause fix" for full context.
+Last updated: 2026-05-06 (real-Xbox oracle Phase 3.0 PASS —
+pipeline-smoke diag-XBE proves the orchestrator's chainload-
+and-back cycle end-to-end, captured framebuffer SHA-256 matches
+math-derived expected byte-for-byte. Tier-1 NV2A diag XBEs
+[mirror, color-channel, depth-floor] now build on top of this
+proven plumbing.) See decision-log entry
+"2026-05-06: Real Xbox oracle Phase 3.0 — pipeline-smoke
+validates orchestrator end-to-end" for full context.
 
-**TOP OF STACK 2026-05-06 (latest).** The Phase 2 pipeline is
+**TOP OF STACK 2026-05-06 (Phase 3.0 PASS).** End-to-end run-diag
+validated: SITE RunXBE → diag XBE writes capture → reboots →
+orchestrator FTP-pulls artifacts → PASS. Two bugs surfaced and
+fixed in flight:
+- Orchestrator was relaunching the agent BEFORE pulling FTP
+  artifacts, but the agent suspends XBMC's FTP server.
+  `run_diag` reordered to pull-then-relaunch.
+- (Earlier this session) `except (OSError, ftplib.all_errors):`
+  syntax error fixed via module-level `_FTP_ERRORS` tuple.
+
+**Phase 3.0 evidence:**
+- Diag XBE: `scripts/apple-silicon/xbe-tests/pipeline-smoke/`
+  (CPU-painted Tier-4 oracle: black 640x480 with single white
+  pixel at (320, 50); writes XOSS-format capture to D:\ then
+  reboots).
+- `verdict.json`: `status="ok"`, 3 artifacts pulled
+  (default.xbe, pipeline-smoke-capture.bin 1228816 B,
+  pipeline-smoke-done.txt). Chainload-to-FTP-back round-trip
+  measured at 30.4 s.
+- Captured framebuffer (decoded XOSS to PNG via
+  `oracle-client.bgrx_to_rgba` + `save_screenshot_png`)
+  SHA-256 = `66f1f332f0bec182be06a53447221047af250ca708bb3525ee842821197e34b4`,
+  byte-for-byte identical to the math-derived expected from
+  `expected.py:default()`.
+- Real-Xbox reference stashed at
+  `docs/apple-silicon/xbox-real-references/pipeline-smoke/real-xbox.png`.
+
+**Phase 3.0 caveat:** pipeline-smoke is **Tier-4** in the
+`diagnostic-xbe-plan.md` taxonomy because it CPU-paints the
+framebuffer. It validates the orchestrator pipeline plumbing,
+not the NV2A renderer. Real Tier-1 diag XBEs (mirror,
+color-channel, depth-floor) build on top of this same skeleton
+but use pbkit + NV2A pgraph draws.
+
+**Earlier banner — 2026-05-06 (Phase 2 hardening re-validated;
+SUPERSEDED by the Phase 3.0 banner above which exercises the full
+chainload-and-back roundtrip).** The Phase 2 pipeline is
 shipped and validated end-to-end on the real Xbox after a
 power-cycle:
 
@@ -37,10 +72,11 @@ power-cycle:
 - Orchestrator `runxbe` ack handshake validated:
   `[oracle] agent acked: launching C:\xboxdash.xbe` printed
   to the orchestrator log, then the agent self-terminated as
-  designed. The full chainload-roundtrip (`run-diag` →
-  diag-XBE → reboot → FTP back → relaunch agent → pull
-  artifacts) was NOT exercised because no real diagnostic
-  XBE exists yet — that's Phase 3.
+  designed. (At the time of this banner the full chainload-
+  roundtrip via `run-diag` was unproven because no real
+  diagnostic XBE existed; it has since been proven via the
+  `pipeline-smoke` Tier-4 diag XBE — see Phase 3.0 banner
+  above.)
 - One bug surfaced and shipped during the post-power-cycle
   deployment: `oracle-orchestrator.py` had
   `except (OSError, ftplib.all_errors):` which Python rejects
@@ -48,20 +84,20 @@ power-cycle:
   tuple. Fixed via a module-level `_FTP_ERRORS` tuple and
   pushed as commit `abac6b5017`.
 
-**Outcome of the `runxbe C:\xboxdash.xbe` test.** The agent
-acked the `runxbe` and self-terminated as designed. The Xbox
-did NOT come back to FTP within the orchestrator's 240 s
-window. `xboxdash.xbe` is the boot dashboard launched by
-iND-BiOS at cold start; calling `XLaunchXBE("C:\xboxdash.xbe")`
-from inside another XBE evidently does not produce the same
-clean dashboard return that a `HalReturnToFirmware(HalRebootRoutine)`
-warm reset would. Phase 3 diagnostic XBEs will use
+**Outcome of the `runxbe C:\xboxdash.xbe` test (preserved
+verbatim for audit).** The agent acked the `runxbe` and
+self-terminated as designed. The Xbox did NOT come back to FTP
+within the orchestrator's 240 s window. `xboxdash.xbe` is the
+boot dashboard launched by iND-BiOS at cold start; calling
+`XLaunchXBE("C:\xboxdash.xbe")` from inside another XBE
+evidently does not produce the same clean dashboard return that
+a `HalReturnToFirmware(HalRebootRoutine)` warm reset would.
+Phase 3 diagnostic XBEs use
 `HalReturnToFirmware(HalRebootRoutine)` at the end of their
 work (per `diagnostic-xbe-plan.md`), which is the correct
-pattern. The Xbox needs another physical power-cycle to
-resume.
+pattern; pipeline-smoke confirmed this end-to-end.
 
-**TOP OF STACK 2026-05-06 (later evening).** Phase 2 of the
+**Earlier banner — 2026-05-06 (later evening).** Phase 2 of the
 oracle pipeline is complete. The agent at
 `scripts/apple-silicon/xbe-tests/oracle-agent/` now ships nine
 new commands (mem/nv2a/vram read+write, screenshot, runxbe,
@@ -134,39 +170,34 @@ python3 scripts/apple-silicon/oracle-client.py screenshot --out /tmp/agent.png
 
 **Next session priorities (in order):**
 
-1. **(One-time recovery)** Power-cycle the Xbox once (it's
-   currently hung after the `runxbe C:\xboxdash.xbe` test that
-   was never going to return cleanly anyway). Then `python3
-   scripts/apple-silicon/oracle-orchestrator.py status` and
-   `ensure-agent` are enough to bring the pipeline back up.
-2. **Phase 3 — diagnostic XBE chainload pipeline.** Build the
-   first diagnostic XBE per `diagnostic-xbe-plan.md` v2 §7
-   (mirror, color-channel, or depth-floor). The XBE writes its
-   captures to its own `D:\` directory and finishes with
-   `HalReturnToFirmware(HalRebootRoutine)` so the Xbox warm-
-   resets back to XBMC4Gamers. Then drive it via:
-   ```sh
-   python3 scripts/apple-silicon/oracle-orchestrator.py run-diag \
-     --xbe   'E:\XBMC4Gamers\Apps\diag-mirror\default.xbe' \
-     --ftp-collect /E/XBMC4Gamers/Apps/diag-mirror \
-     --out   benchmark-runs/oracle-mirror
-   ```
-   That exercises the full agent → runxbe → wait FTP → relaunch
-   agent → pull artifacts cycle the orchestrator already
-   implements.
-3. **Wire the orchestrator into the M15 visual gate.** Once the
-   first diag XBE has a real-Xbox reference frame captured via
-   `oracle-orchestrator.py capture`, add a new make-target / harness
-   step that runs the XBE through xemu-GL, xemu-Metal, and the real
-   Xbox, then computes per-pair PNG diffs. The infrastructure for
-   each leg already exists; the orchestrator script's `validate`
-   subcommand wraps `compare-screenshots.py` for the diff math
-   with `--crop --out-dir --threshold` already threaded.
-
-The earlier 50-cycle stress and Phase 2 smoke-validation tasks
-listed in prior versions of this banner are **closed** — the
-post-power-cycle session ran 200 cycles + interleaved heavy
-commands cleanly, see TOP OF STACK above.
+1. **Phase 3.1 — first Tier-1 NV2A diag XBE.** Build `mirror`
+   per `diagnostic-xbe-plan.md` v2 §4.1: VS path through
+   pgraph, single-pixel triangle at guest coord `(320, 50)`,
+   surface scale 1, opaque-black back-buffer. Capture via
+   F1 flip-stall trigger or by writing the post-NV2A
+   framebuffer to D:\ and rebooting (same skeleton
+   pipeline-smoke uses). Reference oracle: real-Xbox capture
+   (canonical) + math-derived (audit). The orchestrator's
+   `run-diag` is already proven via Phase 3.0; this slice
+   adds the actual NV2A renderer test.
+2. **Phase 3.2 — `color-channel` and `depth-floor` diag XBEs**
+   (per `diagnostic-xbe-plan.md` §4.2 and §4.3). Same
+   skeleton; different render paths. After all three Tier-1
+   XBEs are gated, the SC2 visual symptoms (top-mirrored,
+   wrong colors, missing floor) become catchable via
+   automated diff against real-Xbox references.
+3. **Wire the diag XBEs into the M15 visual gate.** Add a
+   harness step that runs each diag XBE through xemu-GL,
+   xemu-Metal, and the real Xbox, then computes per-(renderer,
+   flag-recipe) PASS/FAIL via `oracle-orchestrator.py
+   validate` (which threads `--crop --out-dir --threshold`
+   into `compare-screenshots.py`).
+4. **(Optional) Build the shared `xbe-tests/lib/` skeleton.**
+   Per `diagnostic-xbe-plan.md` §3.1: `xbed_runtime`,
+   `xbed_capture`, `xbed_banner`, `xbed_vertex`,
+   `xbed_readback`. Refactor pipeline-smoke + the first three
+   Tier-1 XBEs onto it. Reduces per-XBE boilerplate going
+   forward; not on the critical path for Phase 3 wins.
 
 The earlier banner content (Phase 1 oracle, validation
 architecture pivot, Crimson reclassification, harness fixes,

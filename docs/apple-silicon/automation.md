@@ -3207,6 +3207,57 @@ is unavailable.
 Defaults read `ORACLE_HOST` / `ORACLE_PORT` from the env (override
 with `--host` / `--port`).
 
+### `scripts/apple-silicon/xbe-tests/pipeline-smoke/`
+
+**Tier-4 diag XBE that validates the orchestrator pipeline
+end-to-end.** Pixels are CPU-painted directly into the Xbox
+front-buffer (no pbkit / no NV2A pgraph), so this XBE doesn't
+test renderer behavior — it tests the orchestrator's
+chainload-and-back-and-pull plumbing.
+
+What it does at runtime:
+1. `XVideoSetMode(640, 480, 32)` and grab the front-buffer via
+   `XVideoGetFB()`.
+2. Paint every pixel `0xFF000000` (opaque black) except pixel
+   `(320, 50)` which is `0xFFFFFFFF` (opaque white). Single-
+   pixel deterministic oracle.
+3. `XVideoFlushFB()`, sleep 1.5 s for human spot-check.
+4. Write the framebuffer to `D:\pipeline-smoke-capture.bin` in
+   XOSS format (the same 16-byte header + raw BGRX pixels the
+   agent's `screenshot` command emits).
+5. Write `D:\pipeline-smoke-done.txt` as a liveness marker.
+6. `HalReturnToFirmware(HalRebootRoutine)` — warm-reset back to
+   dashboard.
+
+Drive end-to-end via `oracle-orchestrator.py run-diag`:
+
+```sh
+python3 scripts/apple-silicon/oracle-orchestrator.py run-diag \
+  --xbe   'E:\XBMC4Gamers\Apps\pipeline-smoke\default.xbe' \
+  --ftp-collect /E/XBMC4Gamers/Apps/pipeline-smoke \
+  --out   benchmark-runs/pipeline-smoke-run
+```
+
+The orchestrator pulls the capture .bin via FTP after the
+diag XBE reboots back; decode + compare to math-derived expected
+via:
+
+```sh
+python3 scripts/apple-silicon/xbe-tests/pipeline-smoke/expected.py /tmp/expected.png
+# decode the captured .bin to PNG via oracle-client's bgrx_to_rgba
+# (see scripts/apple-silicon/xbe-tests/pipeline-smoke/README.md)
+```
+
+A clean run produces a captured PNG whose SHA-256 matches
+`docs/apple-silicon/xbox-real-references/pipeline-smoke/real-xbox.png`
+byte-for-byte.
+
+The Tier-1 NV2A-pipeline diag XBEs (mirror, color-channel,
+depth-floor) build on top of this proven plumbing — they swap
+the CPU `memcpy` for a pbkit-driven NV2A draw, but reuse the
+XOSS-capture-then-reboot lifecycle and the orchestrator's
+`run-diag` driver unchanged.
+
 ### `scripts/apple-silicon/oracle-orchestrator.py`
 
 Pipeline driver that ties the agent + a diagnostic XBE + FTP

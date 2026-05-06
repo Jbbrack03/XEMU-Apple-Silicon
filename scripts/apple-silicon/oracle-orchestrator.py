@@ -10,10 +10,13 @@ Implements the diagnostic-XBE Phase 2/3 flow described in
   3. Optionally chainload a diagnostic XBE via `runxbe`.
   4. Wait for the Xbox to come back to FTP after the diag XBE
      reboots back to the dashboard.
-  5. SITE RunXBE the oracle agent again (it does not auto-relaunch).
-  6. Pull captured artifacts via FTP into a host-side run directory.
-  7. Optionally compare against a reference set (via the existing
-     `compare-screenshots.py`) and emit a JSON verdict.
+  5. Pull captured artifacts via FTP into a host-side run
+     directory while XBMC4Gamers' FTP server is still listening.
+  6. SITE RunXBE the oracle agent again (it does not auto-relaunch).
+     This step suspends FTP/21 — that's why step 5 must happen
+     before step 6.
+  7. Take a post-state screenshot through the agent and emit a
+     JSON verdict.
 
 This script is the bridge between the Mac-side correctness pipeline
 (xemu-GL + xemu-Metal benchmark + capture) and the real-Xbox oracle.
@@ -313,14 +316,19 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
       2. screenshot pre-state (informational)
       3. runxbe to chainload diagnostic XBE
       4. wait for FTP back (= diag XBE finished + rebooted)
-      5. relaunch the agent
-      6. pull artifacts from `ftp_collect` (or skip)
+      5. pull artifacts from `ftp_collect` (or skip) WHILE XBMC's
+         FTP server is up — relaunching the agent below suspends
+         FTP/21 and would make the pull fail with
+         ConnectionRefusedError, so order matters here.
+      6. relaunch the agent
       7. screenshot post-state (informational)
 
     Returns a dict suitable for JSON.verdict.json. The diagnostic XBE
     is responsible for capturing whatever it needs to disk under its
     own D:\\ directory before rebooting; the orchestrator only knows
-    where to look (`ftp_collect`).
+    where to look (`ftp_collect`). When `--ftp-collect` is supplied
+    but zero files are pulled, run_diag fails with status
+    "ftp-pull-empty" rather than masking it as "ok".
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     started_at = time.time()
@@ -392,18 +400,40 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
         return record
     record["ftp_back_at"] = time.time()
 
-    _log("relaunching agent for artifact collection")
-    if not ensure_agent(host=host, agent_path=agent_path, port=port):
-        record["status"] = "agent-relaunch-failed"
-        return record
-
+    # Order matters: pull artifacts via FTP FIRST, while XBMC4Gamers'
+    # FTP server is up. Once we relaunch the oracle agent below,
+    # XBMC suspends and FTP/21 stops listening, so any FTP-pull
+    # attempt then will fail with ConnectionRefusedError.
     if ftp_collect:
         artifact_dir = out_dir / "artifacts"
-        files = ftp_pull_directory(host, ftp_collect, artifact_dir)
+        try:
+            files = ftp_pull_directory(host, ftp_collect, artifact_dir)
+        except _FTP_ERRORS as e:
+            record["status"] = "ftp-pull-failed"
+            record["error"] = str(e)
+            return record
+        # An empty pull is suspicious: either --ftp-collect points at
+        # a wrong path, or the diag XBE finished without writing any
+        # artifacts. Either way it's a bug we want surfaced as a
+        # structured failure, not buried under status="ok".
+        if not files:
+            record["status"] = "ftp-pull-empty"
+            record["artifacts"] = []
+            record["error"] = (
+                f"--ftp-collect={ftp_collect} returned zero files. "
+                "Either the path is wrong on the Xbox, or the diag "
+                "XBE didn't write its outputs before rebooting."
+            )
+            return record
         record["artifacts"] = [str(p.relative_to(out_dir)) for p in files]
         _log(f"pulled {len(files)} files from {ftp_collect}")
     else:
         record["artifacts"] = []
+
+    _log("relaunching agent for post-state capture")
+    if not ensure_agent(host=host, agent_path=agent_path, port=port):
+        record["status"] = "agent-relaunch-failed"
+        return record
 
     post_png = out_dir / "post.png"
     capture_screenshot(host, post_png, port=port)
