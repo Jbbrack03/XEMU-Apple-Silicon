@@ -160,17 +160,28 @@ def _ping(host: str, count: int = 1, timeout_s: int = 2) -> bool:
 
 
 def wait_for_ftp(host: str, retries: int = 60, delay: float = 2.0,
-                 user: str = DEFAULT_FTP_USER, password: str = DEFAULT_FTP_PASS) -> bool:
+                 user: str = DEFAULT_FTP_USER,
+                 password: str = DEFAULT_FTP_PASS) -> bool:
+    """Block up to retries*delay seconds for FTP/21 to come up at host.
+    Returns True on success, False if the deadline elapses. Logs once
+    per 10 retries so a tail of stderr stays readable. Catches the
+    full ftplib + OSError tuple so a transient ICMP-unreachable on a
+    cold-booted Xbox doesn't propagate out as an unhandled exception."""
+    last_err: Optional[Exception] = None
     for i in range(retries):
         try:
             ftp = ftplib.FTP(host, timeout=4)
             ftp.login(user, password)
             ftp.quit()
             return True
-        except _FTP_ERRORS:
+        except _FTP_ERRORS as e:
+            last_err = e
             if i % 10 == 0:
-                _log(f"waiting for FTP at {host} (attempt {i + 1}/{retries})")
+                _log(f"waiting for FTP at {host} (attempt {i + 1}/{retries}); "
+                     f"last err: {e}")
             time.sleep(delay)
+    if last_err is not None:
+        _log(f"wait_for_ftp giving up after {retries}*{delay}s: {last_err}")
     return False
 
 
@@ -273,24 +284,59 @@ def site_run_xbe(host: str, xbe_path: str,
 
 def ensure_agent(host: str = DEFAULT_HOST, agent_path: str = DEFAULT_AGENT_PATH,
                  port: int = DEFAULT_AGENT_PORT,
-                 ready_timeout_s: float = 60.0) -> bool:
+                 ready_timeout_s: float = 60.0,
+                 max_relaunch_attempts: int = 2) -> bool:
     """If TCP/<port> is already listening, do nothing. Otherwise FTP-
-    `SITE RunXBE` the agent and wait for the listener to come up."""
+    `SITE EXEC` (or `SITE RunXBE`, auto-detected) the agent and wait
+    for the listener to come up.
+
+    Edge cases handled:
+      - Agent already listening: short-circuit (polite handshake).
+      - FTP unreachable: report immediately rather than spinning the
+        full ready_timeout_s.
+      - SITE EXEC succeeded but agent failed to bind (rare; usually
+        an agent crash on boot): retry SITE EXEC up to
+        max_relaunch_attempts times.
+      - Xbox is offline (no ping, no FTP): report and return False.
+    """
     if _tcp_oracle_alive(host, port, timeout=2.0):
         _log(f"agent already listening at {host}:{port}")
         return True
-    if not wait_for_ftp(host, retries=10, delay=1.0):
-        _log(f"FTP not reachable at {host}; cannot launch agent")
+    if not _ping(host, count=1, timeout_s=2):
+        _log(f"host {host} not pingable; Xbox may be off / unplugged")
         return False
-    site_run_xbe(host, agent_path)
-    deadline = time.monotonic() + ready_timeout_s
-    delay = 1.0
-    while time.monotonic() < deadline:
-        if _tcp_oracle_alive(host, port, timeout=2.0):
-            _log(f"agent ready at {host}:{port}")
-            return True
-        time.sleep(delay)
-    _log(f"agent did not come up within {ready_timeout_s}s")
+    if not wait_for_ftp(host, retries=10, delay=1.0):
+        _log(f"FTP not reachable at {host}; cannot launch agent. "
+             f"If the agent was just rebooted, give it ~30s to come "
+             f"back to the dashboard.")
+        return False
+
+    last_attempt_log = ""
+    for attempt in range(max_relaunch_attempts):
+        if attempt > 0:
+            _log(f"agent did not bind on attempt {attempt}; "
+                 f"retrying SITE EXEC ({attempt + 1}/{max_relaunch_attempts})")
+            # Short pause for the previous failed launch to fully exit.
+            time.sleep(2.0)
+            # FTP needs to be back for the relaunch to succeed.
+            if not wait_for_ftp(host, retries=20, delay=1.0):
+                _log("FTP not reachable for relaunch; giving up")
+                return False
+        try:
+            site_run_xbe(host, agent_path)
+        except _FTP_ERRORS as e:
+            last_attempt_log = f"site_run_xbe error: {e}"
+            continue
+        deadline = time.monotonic() + ready_timeout_s
+        delay = 1.0
+        while time.monotonic() < deadline:
+            if _tcp_oracle_alive(host, port, timeout=2.0):
+                _log(f"agent ready at {host}:{port}")
+                return True
+            time.sleep(delay)
+        last_attempt_log = (
+            f"agent did not come up within {ready_timeout_s}s on attempt {attempt + 1}")
+    _log(last_attempt_log or "agent did not come up after retries")
     return False
 
 
@@ -596,6 +642,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sub.add_parser("status", help="Probe FTP+agent liveness")
 
+    sub.add_parser("health-check",
+                   help="Structured JSON of every reachable layer "
+                        "(ping/ftp/agent/buffer-info/anchor-file). Used "
+                        "by oracle-smoke.sh and CI gates.")
+
     args = p.parse_args(argv)
 
     if args.cmd == "status":
@@ -607,7 +658,43 @@ def main(argv: Optional[List[str]] = None) -> int:
             "ping": ok_ping, "ftp": ok_ftp, "agent": ok_agent,
         }
         print(json.dumps(result, indent=2))
-        return 0 if (ok_ping and ok_ftp) else 1
+        # Status return-code expectation: green if EITHER FTP OR
+        # agent is up. Both up means "we're between operations";
+        # FTP-only means "agent is not running"; agent-only means
+        # "agent is running and FTP is suspended". Only PING + neither
+        # is bad.
+        return 0 if (ok_ping and (ok_ftp or ok_agent)) else 1
+
+    if args.cmd == "health-check":
+        result: dict = {
+            "host": args.host,
+            "port": args.port,
+            "ping": _ping(args.host),
+            "ftp": _tcp_open(args.host, 21, timeout=2.0),
+            "agent": _tcp_oracle_alive(args.host, args.port, timeout=2.0),
+        }
+        if result["agent"]:
+            try:
+                with oc.OracleClient(args.host, args.port, timeout=10) as cl:
+                    result["agent_info"] = cl.info()
+                    code, payload = cl.raw("controller.buffer-info")
+                    result["controller_buffer_info"] = (
+                        f"{code} {payload.decode('ascii', 'replace').strip()}")
+                    # Parse phys / magic / version for structured fields.
+                    text = payload.decode("ascii", "replace")
+                    for tok in text.split():
+                        for key in ("phys", "magic", "version", "size"):
+                            if tok.startswith(f"{key}="):
+                                result[f"buf_{key}"] = tok.split("=", 1)[1]
+            except oc.OracleError as e:
+                result["agent_error"] = str(e)
+        print(json.dumps(result, indent=2))
+        # Health-check verdict: ping AND (ftp OR agent), and if agent
+        # is up the buffer-info magic must be 'XCTR'.
+        ok = result["ping"] and (result["ftp"] or result["agent"])
+        if result.get("buf_magic") and result["buf_magic"] != "0x58435452":
+            ok = False
+        return 0 if ok else 1
 
     if args.cmd == "ensure-agent":
         ok = ensure_agent(host=args.host, agent_path=args.agent_path,

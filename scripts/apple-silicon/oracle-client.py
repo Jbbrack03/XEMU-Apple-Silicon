@@ -407,6 +407,35 @@ def bgrx_to_rgba(pixels: bytes, w: int, h: int, stride: int) -> bytes:
     return bytes(out)
 
 
+def decode_xoss_file(xoss_path: str, png_path: str) -> Tuple[int, int]:
+    """Decode a `D:\\<id>-capture.bin` XOSS-format dump into a PNG.
+
+    XOSS format (mirrors `xbed_capture.c::struct xoss_header`):
+        magic[4]  = 'X','O','S','S'
+        width     uint32 LE
+        height    uint32 LE
+        stride    uint32 LE   (bytes per scan line in the source buffer)
+        pixels    width*height*4 bytes BGRX (X8R8G8B8 little-endian)
+
+    Returns (width, height). Raises ValueError on malformed input.
+    """
+    with open(xoss_path, "rb") as f:
+        data = f.read()
+    if len(data) < 16 or data[:4] != b"XOSS":
+        raise ValueError(f"{xoss_path}: not a XOSS capture")
+    import struct as _struct
+    w, h, stride = _struct.unpack_from("<III", data, 4)
+    pixels = data[16:]
+    expected_min = stride * h
+    if len(pixels) < expected_min:
+        raise ValueError(
+            f"{xoss_path}: short pixel block "
+            f"{len(pixels)} < {expected_min}")
+    rgba = bgrx_to_rgba(pixels, w, h, stride)
+    save_screenshot_png(rgba, w, h, png_path)
+    return w, h
+
+
 def save_screenshot_png(rgba: bytes, w: int, h: int, path: str) -> None:
     """Write rgba bytes as a PNG. Uses Pillow if available, otherwise a
     minimal stdlib-only encoder via zlib + struct."""
@@ -513,7 +542,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     pwr.add_argument("--retries", type=int, default=60)
     pwr.add_argument("--delay", type=float, default=1.0)
 
+    pdx = sub.add_parser("decode-xoss",
+                         help="decode a D:\\<id>-capture.bin XOSS file → PNG")
+    pdx.add_argument("xoss")
+    pdx.add_argument("--out", required=True)
+
     args = p.parse_args(argv)
+
+    if args.cmd == "decode-xoss":
+        try:
+            w, h = decode_xoss_file(args.xoss, args.out)
+            print(f"decoded {args.xoss} → {args.out} ({w}x{h})")
+            return 0
+        except (OSError, ValueError) as e:
+            print(f"decode-xoss failed: {e}", file=sys.stderr)
+            return 1
 
     if args.cmd == "wait-ready":
         ok = wait_until_ready(args.host, args.port, args.retries, args.delay)

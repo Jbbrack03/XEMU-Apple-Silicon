@@ -303,7 +303,7 @@ def run_xemu(manifest: XbeManifest, renderer: str,
 def run_real_xbox(manifest: XbeManifest, work_dir: Path,
                   host: str = "192.168.0.200",
                   agent_path: str =
-                  "Special://xbmc/Apps/oracle-agent/default.xbe",
+                  "E:\\Apps\\oracle-agent\\default.xbe",
                   ftp_user: str = "xbox", ftp_pass: str = "xbox",
                   upload_xbe: bool = True) -> RunResult:
     """Deploy + chainload + collect on the real Xbox.
@@ -311,8 +311,9 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
     Steps:
       1. ensure_agent (FTP-launch the oracle agent if not already up).
       2. (optional, default ON) FTP-upload the diag XBE to its
-         standard slot under E:\\XBMC4Gamers\\Apps\\<id>\\default.xbe.
-         Requires the agent to be DOWN (XBMC's FTP server suspends
+         standard slot under E:\\Apps\\<id>\\default.xbe (dashboard-
+         independent path; was E:\\XBMC4Gamers\\Apps\\... pre 2026-05-07).
+         Requires the agent to be DOWN (UnleashX's FTP server suspends
          while the agent runs); if the agent is up we reboot first.
       3. oracle-orchestrator.py run-diag (chainload + collect).
       4. Decode the collected XOSS capture into a PNG.
@@ -347,8 +348,8 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
                              "\n".join(log_lines),
                              notes="xbe-upload-failed")
 
-    xbox_xbe_path = f"E:\\\\XBMC4Gamers\\\\Apps\\\\{manifest.id}\\\\default.xbe"
-    ftp_collect = f"/E/XBMC4Gamers/Apps/{manifest.id}"
+    xbox_xbe_path = f"E:\\\\Apps\\\\{manifest.id}\\\\default.xbe"
+    ftp_collect = f"/E/Apps/{manifest.id}"
     cmd = [
         sys.executable, str(ORACLE_ORCH_PATH),
         "--host", host, "--agent-path", agent_path,
@@ -441,11 +442,13 @@ def _wait_for_ftp(host: str, retries: int, delay: float,
 
 def _ftp_upload_xbe(host: str, xbe_id: str, src_xbe: Path,
                     user: str, password: str) -> Tuple[int, str]:
-    """Upload `src_xbe` to /E/XBMC4Gamers/Apps/<id>/default.xbe.
-    Creates the parent dir if missing. Returns (rc, log)."""
+    """Upload `src_xbe` to /E/Apps/<id>/default.xbe (dashboard-
+    independent path under UnleashX; was /E/XBMC4Gamers/Apps/<id>/
+    pre 2026-05-07). Creates the parent dir if missing. Returns
+    (rc, log)."""
     import ftplib
     log_lines: List[str] = []
-    target_dir = f"/E/XBMC4Gamers/Apps/{xbe_id}"
+    target_dir = f"/E/Apps/{xbe_id}"
     try:
         ftp = ftplib.FTP(host, timeout=15)
         ftp.login(user, password)
@@ -454,7 +457,7 @@ def _ftp_upload_xbe(host: str, xbe_id: str, src_xbe: Path,
                 ftp.cwd(target_dir)
             except ftplib.error_perm:
                 # mkd path components
-                ftp.cwd("/E/XBMC4Gamers/Apps")
+                ftp.cwd("/E/Apps")
                 try:
                     ftp.mkd(xbe_id)
                 except ftplib.error_perm as e:
