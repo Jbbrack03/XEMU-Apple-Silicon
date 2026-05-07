@@ -300,6 +300,30 @@ int main(void)
                     (unsigned long)xbed_input_synth_virt_addr());
             fprintf(df, "anchor_path=%s\n",
                     xbed_input_synth_anchor_path());
+            /* Detect vbuf vs persistent-buffer page collision: the
+             * diag's MmAllocateContiguousMemoryEx for s_vbuf might
+             * return a page that overlaps the agent's persistent
+             * controller buffer (which would corrupt buffer reads).
+             * Log s_vbuf's phys address so we can spot collisions. */
+            uintptr_t vbuf_phys =
+                (uintptr_t)MmGetPhysicalAddress((PVOID)s_vbuf);
+            fprintf(df, "vbuf_virt=%p vbuf_phys=0x%08lx\n",
+                    (void *)s_vbuf, (unsigned long)vbuf_phys);
+            uintptr_t synth_phys = xbed_input_synth_phys_addr();
+            int collision = 0;
+            if (synth_phys != 0 && vbuf_phys != 0) {
+                /* vbuf is at most 2 pages (4608 bytes rounds to 8KB);
+                 * synth is 1 page. Conservative collision: if their
+                 * 4KB-aligned ranges overlap. */
+                uintptr_t v_lo = vbuf_phys & ~0xFFFu;
+                uintptr_t v_hi = v_lo + 0x2000u;
+                uintptr_t s_lo = synth_phys & ~0xFFFu;
+                uintptr_t s_hi = s_lo + 0x1000u;
+                if (!(v_hi <= s_lo || s_hi <= v_lo)) {
+                    collision = 1;
+                }
+            }
+            fprintf(df, "vbuf_synth_collision=%d\n", collision);
             FILE *af = fopen(xbed_input_synth_anchor_path(), "rb");
             if (af) {
                 char abuf[256] = {0};
