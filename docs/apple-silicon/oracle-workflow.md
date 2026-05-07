@@ -159,40 +159,27 @@ explicitly call `xbed_input_synth_attach()`. Tier-2 (kernel-mode
 XInputGetState hook) is the path to retail-game gameplay validation;
 designed in `controller-injection-research.md`, not yet implemented.
 
-## Known gaps (close before declaring production-grade)
+## Production status
 
-As of 2026-05-07 (post-recovery) the **oracle pipeline's mainline
-visual gate is live-green** (m15-visual-gate.sh 5/5 PASS) but
-**FOUR named blockers (B1-B4) remain open** before the oracle can
-be declared "ready for production use". The full discussion +
-investigation directions + resume recipe live in `handoff.md`
-under "OPEN BLOCKERS"; the short version:
+As of 2026-05-07, the oracle pipeline is **production-ready** for
+pipeline use. The B1-B4 blockers are closed:
 
-- **B1**: `controller-roundtrip` non-zero pre-set state intermittent
-  stale-state read across `XLaunchXBE` chainload boundary (the
-  diag's read of `phys = anchor_recorded_phys` sometimes returns
-  a previous session's values). Tested PAGE_NOCACHE, atomic
-  anchor rename + NtFlushBuffersFile, `-DORACLE_CTRL_ALLOW_REATTACH`
-  — none restored consistency. Root cause not yet identified.
-  Smoke + harness pass because they use zero-state mode.
-- **B2**: `oracle-stress.sh` only ran 3 iterations; spec was 10.
-- **B3**: `oracle-seqlock-test.py` live mode never run; only the
-  offline `--selftest` (5/5 predicate cases PASS).
-- **B4**: `bin-reattach/default.xbe` built but never deployed-
-  and-run on the Xbox. Gap-7 exit criterion ("opt-in flag works
-  OR is removed") not satisfied.
+- `controller-roundtrip` non-zero pre-set state is fixed by using the
+  kseg0 identity-map alias as the agent's canonical controller-buffer
+  pointer plus CPU writeback/invalidate on writer completion.
+- `oracle-stress.sh --iterations 10` passed with non-zero
+  controller-roundtrip state in every iteration.
+- `oracle-seqlock-test.py --rounds 100 --workers 2 --readers 2`
+  passed live.
+- The untested opt-in reattach build was removed; production always
+  fresh-allocates the persistent page and verifies `anchor_ok=1`.
 
-Until all 4 close, treat the oracle as **"ready for development
-use, not yet ready for production"** — you can use it to
-validate Metal-renderer changes and catch regressions today (the
-mainline gate works), but do NOT cite a green oracle run as the
-unconditional M15 default-on go-ahead criterion until B1-B4 are
-resolved.
-
-The 8 prior-session gaps from 2026-05-07 evening are all closed
-code-side and the mainline validation paths are live-green; the
-4 blockers above are sub-items that surfaced during live
-validation.
+Use `./scripts/apple-silicon/oracle-validate.sh` as the production
+oracle-side gate. The default xbe-harness matrix covers renderer
+visual cells (`mirror`, `color-channel`, `depth-floor`); the
+real-Xbox-only `controller-roundtrip` input-integration oracle is
+validated by `oracle-validate` layer 3 and remains explicitly
+runnable with `--xbe controller-roundtrip`.
 
 ## Failure recovery playbook
 

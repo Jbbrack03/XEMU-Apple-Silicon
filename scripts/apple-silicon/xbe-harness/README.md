@@ -77,17 +77,18 @@ scripts/apple-silicon/
 ### real-xbox
 
 1. Probe the oracle agent (`scripts/apple-silicon/oracle-orchestrator.py
-   status`); if it's up, `reboot` it via the agent so XBMC's FTP
+   status`); if it's up, `reboot` it via the agent so dashboard FTP
    server comes back.
 2. FTP-upload the diag XBE binary to
-   `E:\XBMC4Gamers\Apps\<id>\default.xbe` (creates the dir if needed).
+   `E:\Apps\<id>\default.xbe` (creates the dir if needed).
 3. Invoke `oracle-orchestrator.py run-diag --xbe ... --ftp-collect ...
    --out ...` which:
-   a. Re-launches the agent if needed (`SITE RunXBE`).
+   a. Re-launches the agent if needed (auto-detected FTP launch verb:
+      `SITE EXEC` on UnleashX, `SITE RunXBE` fallback on XBMC4Gamers).
    b. Sends `runxbe` → agent chainloads the diag XBE.
    c. Waits for FTP to come back after the diag XBE reboots.
    d. FTP-pulls `<id>-capture.bin` + `<id>-done.txt` from
-      `/E/XBMC4Gamers/Apps/<id>/`.
+      `/E/Apps/<id>/`.
    e. Re-launches the agent for post-state inspection.
 4. Decode the pulled XOSS blob to PNG via the same
    `oracle-client.bgrx_to_rgba` + stdlib PNG encoder used by

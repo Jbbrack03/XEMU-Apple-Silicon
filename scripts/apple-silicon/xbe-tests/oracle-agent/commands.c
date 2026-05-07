@@ -323,14 +323,14 @@ int cmd_screenshot(struct netconn *c, const char *args)
 /* runxbe path=<xbox-path>
  *   Chainloads the named XBE. The kernel performs an in-place
  *   image swap: this oracle terminates and the named XBE takes
- *   over. The agent therefore does NOT auto-relaunch — XBMC has
- *   no startup-app concept, so the orchestrator on the Mac side
- *   must SITE RunXBE the agent again after the chainloaded XBE
- *   reboots back to the dashboard.
+ *   over. The agent therefore does NOT auto-relaunch — the
+ *   dashboard has no startup-app concept, so the orchestrator on
+ *   the Mac side must FTP-launch the agent again after the
+ *   chainloaded XBE reboots back to the dashboard.
  *
  *   Path examples:
  *     C:\\xboxdash.xbe
- *     E:\\XBMC4Gamers\\Apps\\diag-mirror\\default.xbe
+ *     E:\\Apps\\diag-mirror\\default.xbe
  *
  *   Caller must escape backslashes in JSON / shell layers.
  */

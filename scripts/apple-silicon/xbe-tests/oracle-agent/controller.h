@@ -167,11 +167,10 @@ struct __attribute__((packed)) oracle_ctrl_buffer {
 struct oracle_ctrl_buffer *oracle_ctrl_get(void);
 
 /* Initialize the controller-state buffer:
- *   1. Try to re-attach to a buffer published by a prior agent run via
- *      ORACLE_CTRL_ADDR_FILE. If the recorded virtual address still
- *      contains a valid magic, re-use it (no leak across agent restarts).
- *   2. Otherwise, allocate a fresh persistent contiguous page,
- *      write the persistence anchor, and zero the state. */
+ *   Allocate a fresh persistent contiguous page, write the persistence
+ *   anchor, and zero the state. A previous opt-in cross-restart
+ *   reattach build was removed because the anchor-recorded physical
+ *   page was not a sufficient allocator-ownership proof for production. */
 void oracle_ctrl_init(void);
 
 /* RPC handlers — same shape as cmd_*. */

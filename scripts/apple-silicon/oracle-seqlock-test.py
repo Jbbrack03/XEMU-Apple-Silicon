@@ -145,9 +145,9 @@ def _get_state(c, port: int) -> dict:
                     out["rstick_y"] = int(tok.split("=")[1])
         elif "seq=" in ln:
             for tok in ln.split():
-                if tok.startswith("seq="):
+                if tok.startswith("seq=") or tok.endswith(".seq=") or ".seq=" in tok:
                     try:
-                        out["seq"] = int(tok.split("=")[1])
+                        out["seq"] = int(tok.split("=", 1)[1])
                     except ValueError:
                         pass
     return out
@@ -231,21 +231,35 @@ def run_live_test(host: str, n_rounds: int, n_writers: int,
         errs.append(f"{odd_count} observed snapshots had odd seq "
                     f"(torn / mid-write read)")
 
-    # Sanity: at least the writer made progress.
+    # Sanity: at least the writer made progress. Readers can finish
+    # their sample window before a writer's first response is observed
+    # on a busy post-stress Xbox, so confirm final progress with one
+    # explicit get after all workers join.
+    final_seq = 0
+    try:
+        oc = _load_oc()
+        with oc.OracleClient(host, 9001, timeout=10.0) as c:
+            final_seq = _get_state(c, 0).get("seq", 0)
+    except Exception as e:
+        errs.append(f"final progress check exception: {e}")
+
     if not observed:
         errs.append("no snapshots observed — readers never ran or "
                     "agent unresponsive")
     else:
         max_seq = max(s.get("seq", 0) for s in observed)
-        if max_seq < 2:
-            errs.append(f"max observed seq={max_seq} (writer never "
-                        f"completed even one cycle)")
+        if max(max_seq, final_seq) < 2:
+            errs.append(f"max observed seq={max_seq}, final seq={final_seq} "
+                        f"(writer never completed even one cycle)")
 
     if errs:
         print(f"[live-test] FAIL ({len(errs)} issue(s))")
+        for e in errs:
+            print(f"  ERROR: {e}")
         return 1
     print(f"[live-test] PASS — every snapshot had even seq, "
-          f"max seq={max(s.get('seq', 0) for s in observed)}")
+          f"max seq={max(s.get('seq', 0) for s in observed)}, "
+          f"final seq={final_seq}")
     return 0
 
 

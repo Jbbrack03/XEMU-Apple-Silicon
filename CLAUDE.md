@@ -171,11 +171,11 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   pipeline driver: status / ensure-agent / capture / run-diag
   (full chainload-and-back-and-pull cycle with verdict.json
   output) / validate (wraps compare-screenshots.py with
-  --crop --out-dir --threshold). **NOTE (2026-05-06):** uses
-  `SITE RunXBE` for chainload, which is XBMC4Gamers-specific;
-  the project Xbox now boots UnleashX which uses `SITE EXEC`
-  instead. Update needed before next agent-launch operation.
-  Filed as task #13.
+  --crop --out-dir --threshold). Auto-detects the dashboard
+  launch verb (`SITE EXEC` on the current UnleashX dashboard,
+  `SITE RunXBE` fallback for XBMC4Gamers; `ORACLE_LAUNCH_VERB`
+  can override). Dashboard-independent agent launch is closed
+  and covered by the oracle production-readiness gate.
 - `scripts/apple-silicon/xbox-ftp-mirror.py` — Python recursive
   FTP mirror with SHA-256 manifest; used 2026-05-06 to capture
   the project Xbox's Tier-1 backup (1.5 GB). Reusable for any

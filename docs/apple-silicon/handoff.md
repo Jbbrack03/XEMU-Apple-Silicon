@@ -1,166 +1,55 @@
 # Handoff
 
-Last updated: 2026-05-07 (Xbox-recovered) — **ORACLE PIPELINE NOT
-YET PRODUCTION-READY.** The mainline visual-gate is live-green
-(`m15-visual-gate.sh` 5/5 PASS) but FOUR named blockers remain
-open before the oracle can be declared "ready for production use".
-The user's directive is explicit: these are blockers, not nice-
-to-haves; do not declare the system ready until all four are
-resolved.
+Last updated: 2026-05-07 (oracle production-ready) — **ORACLE
+PIPELINE PRODUCTION-READY.** The four post-recovery blockers
+B1-B4 are closed live on the project Xbox at `192.168.0.200`.
 
-## TOP OF STACK 2026-05-07 (post-recovery): partial-gate green, 4 blockers open
+## TOP OF STACK 2026-05-07: oracle production-ready
 
-What's GREEN today:
+What changed:
 
-```
-m15-visual-gate summary:  5 PASS   0 FAIL
-PASS  01 xemu binary present
-PASS  01b post-build M5 shader validation
-PASS  02 oracle-smoke: 12/12 layers green
-PASS  03 metal-canary-regress: PASS (counters green)
-PASS  04 xbe-harness Tier-1: ALL cells PASS (changed_pixels_pct < 1.0)
-```
+- **B1 fixed**: controller writes now use the same kseg0 identity-map
+  alias (`phys | 0x80000000`) as the chainloaded diag XBE, and writer
+  completion does a CPU writeback+invalidate. The agent also publishes
+  `anchor_ok=1` after direct write-and-readback verification of
+  `E:\Apps\oracle-agent\state\ctrl-addr.txt`.
+- **B2 closed**: full stress passed
+  `oracle-stress.sh --iterations 10` with non-zero
+  `controller-roundtrip` state in every iteration.
+- **B3 closed**: `oracle-seqlock-test.py --rounds 100 --workers 2
+  --readers 2` passed live; the test now checks final writer progress
+  after worker joins to avoid a reader-window race.
+- **B4 closed by removal**: the opt-in `bin-reattach/default.xbe`
+  path and `ORACLE_CTRL_ALLOW_REATTACH` implementation were removed.
+  Production uses fresh persistent allocations only.
 
-Plus:
+Validation evidence:
 
-- `oracle-stress.sh --iterations 3`: 3/3 PASS (but spec was 10).
-- `oracle-seqlock-test.py --selftest`: 5/5 predicate cases PASS.
-- `capture-composite-reference.sh --xbe-id mirror`: PASS at 0.0052%
-  changed_pixels_pct vs math-derived oracle.
-- Canonical `controller-roundtrip` real-Xbox zero-state PNG at
-  `docs/apple-silicon/xbox-real-references/controller-roundtrip/real-xbox-zero.png`
-  (byte-exact match to math-derived; SHA `ef65bcc6dc...`).
+- Full oracle validate run:
+  `benchmark-runs/oracle-validate-20260507T182615Z`
+  - PASS `oracle-smoke`: 12/12 layers green.
+  - PASS visual Tier-1 matrix: all Metal + real-Xbox visual cells.
+  - PASS `controller-roundtrip`: non-zero state byte-exact across
+    chainload.
+  - PASS `oracle-stress`: 10/10 smokes, no degraded state.
+  - Initial seqlock layer false-failed due a test race; fixed below.
+- Clean post-fix composite run:
+  `benchmark-runs/oracle-validate-20260507T194408Z`
+  - PASS smoke, visual matrix, controller-roundtrip, seqlock.
+  - Stress intentionally skipped there because the immediately prior
+    full run already completed 10/10 on the same deployed agent.
+- Standalone seqlock live run after the test fix:
+  `PASS — every snapshot had even seq, max seq=800, final seq=1200`.
+- Deployed production agent:
+  `scripts/apple-silicon/xbe-tests/oracle-agent/bin/default.xbe`
+  SHA-256 `8fefa8c516b52aabc28cb8191bb31287030b11813742d074d80af720309ef756`.
 
-## OPEN BLOCKERS — must resolve next session before "production-ready"
-
-### B1. controller-roundtrip non-zero pre-set state intermittent stale read
-
-**Symptom**: when the orchestrator does
-`controller.set port=0 buttons=0xNNN lt=NNN ...` then runxbe →
-diag chainload, the diag's `xbed_input_synth_read` sometimes
-returns a previous session's values instead of the current
-agent's writes (observed across many tests in this session).
-
-**What's been ruled out**:
-- Anchor file content correctness (NtFlushBuffersFile commits to
-  disk; FTP-pull confirms anchor matches buffer-info phys).
-- Cache coherency at the agent's allocation
-  (`PAGE_NOCACHE` did not change behavior).
-- Reattach vs fresh-allocate (`-DORACLE_CTRL_ALLOW_REATTACH`
-  did not change behavior).
-- vbuf-vs-persistent collision
-  (`vbuf_synth_collision=0` in diag.txt).
-- Diag's MmGetPhysicalAddress mismatch
-  (`MmGetPhysicalAddress(virt) == phys` validation passes).
-
-**Workaround currently in production**: zero-state mode only
-(no `controller.set` with values; or bare heartbeat;
-`controller.clear` works most of the time but is intermittent
-under back-to-back chainloads).
-
-**Why this is a blocker**: any future Tier-2 streamed-input or
-non-zero pre-set test needs this path correct. We cannot ship
-the oracle as "production-ready" with a known data-correctness
-intermittent in a public RPC surface.
-
-**Investigation directions for next session**:
-- Compare the `MmAllocateContiguousMemoryEx`-returned virt with
-  the kseg0-derived `phys | 0x80000000` virt — even though
-  MmGetPhysicalAddress reports the same phys for both, they may
-  resolve to different page-table entries with divergent
-  attributes. Try writing via the kseg0-derived virt explicitly.
-- Probe whether the kernel snapshots persistent pages at
-  `MmPersistContiguousMemory` time and serves the snapshot to
-  cross-XBE readers (xbox community kernel docs may clarify).
-- Try writing the buffer via `mem.write` (which uses raw kernel
-  virt) instead of via the agent's allocated pointer — if the
-  diag sees the mem.write but not the agent's set, the agent's
-  allocation virt is the suspect.
-- Rule out the diag's `xbed_input_synth_read` itself — have the
-  diag also dump 64 bytes from a fixed pattern at the same phys
-  written by `mem.write` immediately before runxbe.
-
-### B2. `oracle-stress.sh` full 10-iteration run
-
-**Spec**: `oracle-stress.sh --iterations 10` (10 cycles per the
-gap-5 plan). Today's session only ran 3.
-
-**Why this is a blocker**: the prior-session's transient "agent
-listening but RPCs return empty payloads" degraded state was
-observed once. 3 iterations passing isn't strong evidence the
-underlying issue (suspected lwIP PCB pool exhaustion) is solved
-— it just shows it didn't trigger this time.
-
-**Pass criterion**: 10/10 iterations PASS, OR if reproduced,
-the agent's PCB recycling is fixed and the rerun goes 10/10.
-
-### B3. `oracle-seqlock-test.py` live mode never run
-
-**Spec**: live concurrent set/get test against the agent's
-seqlock predicate. Today only the offline `--selftest` ran.
-
-**Why this is a blocker**: gap-6's whole point is end-to-end
-verification of the seqlock under contention via the wire
-protocol. Selftest is necessary but not sufficient.
-
-**Run**: `python3 scripts/apple-silicon/oracle-seqlock-test.py
---rounds 100 --workers 2 --readers 2`
-
-**Pass criterion**: zero observed odd-parity seq snapshots
-across 100+ rounds; max_seq advances; no transport errors.
-
-### B4. `bin-reattach/default.xbe` never deployed-and-run
-
-**Spec**: gap-7's "validate the opt-in re-attach path" requires
-deploying the `-DORACLE_CTRL_ALLOW_REATTACH` build, exercising
-launch → chainload pipeline-smoke (no clear/reset path) →
-re-launch agent → confirm re-attach to the SAME persistent buffer
-(buffer-info phys stable across the relaunch; controller.get
-returns prior synth state, not zeros).
-
-**Why this is a blocker**: today the binary is built and
-committed but never run on the Xbox. An untested opt-in code
-path is unmaintained dead code; gap-7's exit criterion is
-"opt-in flag either works as documented OR is removed".
-
-**Pass criterion**: re-attach demonstrably preserves buffer
-phys + state across one full agent restart cycle, OR the
-reattach code is removed from the codebase entirely.
-
-## Resume recipe (next session)
-
-```sh
-# 0. Confirm Xbox is alive
-ping -c 2 192.168.0.200
-
-# 1. Run the full 10-iteration stress (B2)
-./scripts/apple-silicon/oracle-stress.sh --iterations 10
-
-# 2. Run the seqlock live test (B3)
-python3 scripts/apple-silicon/oracle-seqlock-test.py \
-    --rounds 100 --workers 2 --readers 2
-
-# 3. Investigate + fix or document B1 (controller-roundtrip
-#    non-zero pre-set state). Pick from the investigation
-#    directions above; run controller-roundtrip with a fixed
-#    non-zero state and confirm diag.txt's state.* matches.
-
-# 4. Deploy + run B4 (reattach build)
-python3 -c "
-import ftplib
-ftp = ftplib.FTP('192.168.0.200', timeout=20); ftp.login('xbox','xbox')
-ftp.cwd('/E/Apps/oracle-agent')
-with open('scripts/apple-silicon/xbe-tests/oracle-agent/bin-reattach/default.xbe', 'rb') as f:
-    ftp.storbinary('STOR default.xbe', f)
-ftp.quit()
-"
-# Then test re-attach via two consecutive chainload + relaunch
-# cycles and verify buffer-info reports the same phys both times.
-
-# 5. After ALL FOUR blockers green, append decision-log entry
-#    "Oracle pipeline production-grade — all blockers resolved
-#    live-validated" and update this banner.
-```
+Operational status: use `./scripts/apple-silicon/oracle-validate.sh`
+as the production oracle-side gate. The default visual matrix now
+covers renderer-facing Tier-1 XBEs (`mirror`, `color-channel`,
+`depth-floor`); `controller-roundtrip` remains explicitly runnable
+and is covered by `oracle-validate` layer 3 because it is an input
+integration oracle, not a renderer visual cell.
 
 ## Earlier banner — preserved for audit
 

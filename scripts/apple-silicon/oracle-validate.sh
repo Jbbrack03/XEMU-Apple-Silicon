@@ -8,11 +8,13 @@
 # Layers (run in order; later layers depend on earlier success):
 #
 #   1. oracle-smoke (12 baseline RPC layers)
-#   2. xbe-harness Tier-1 matrix on Metal + real Xbox (8 cells minus
-#      `controller-roundtrip × Metal` skip = 7 expected PASS)
+#   2. xbe-harness Tier-1 visual matrix on Metal + real Xbox
+#      (`controller-roundtrip` is covered by layer 3 because it is a
+#      real-Xbox-only input-integration diag, not a renderer visual cell)
 #   3. controller-roundtrip diag pulls + diagnostic-file inspection
 #      (verifies the persistent buffer survived chainload byte-exact)
-#   4. oracle-stress 3-iteration burst (degraded-state reproduction)
+#   4. oracle-stress 10-iteration burst (degraded-state reproduction,
+#      with non-zero controller-roundtrip state)
 #   5. oracle-seqlock-test live mode (concurrent set/get tear check)
 #
 # Unlike m15-visual-gate.sh, this script focuses on the ORACLE side
@@ -21,8 +23,8 @@
 # scripts together cover the complete M15 default-on pre-conditions.
 #
 # Exit code is the OR of every layer. A non-zero exit means the
-# oracle is NOT yet production-grade; the report.md tells you which
-# layer failed.
+# production-readiness gate failed; report.md tells you which layer
+# needs attention.
 
 set -u
 set -o pipefail
@@ -31,7 +33,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 HOST="${ORACLE_HOST:-192.168.0.200}"
 OUT_DIR=""
 SKIP_STRESS=0
-STRESS_ITER=3
+STRESS_ITER=10
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -102,7 +104,7 @@ if [ "${goto_summary:-0}" -ne 1 ]; then
     # Pre-set a fixed state, run controller-roundtrip diag, pull
     # D:\controller-roundtrip-diag.txt, parse, verify it matches
     # the agent's pre-set state.
-    {
+    (
         STATE_BTN="0x55AA"
         STATE_LT="20000"
         STATE_RT="10000"
@@ -180,12 +182,14 @@ print('decoded $DIAG_OUT/decoded.png')
         echo "EXPECTED: buttons=$STATE_BTN lt=$STATE_LT rt=$STATE_RT"
         echo "OBSERVED: buttons=$OBSERVED_BTN lt=$OBSERVED_LT rt=$OBSERVED_RT"
 
-        if [ "$OBSERVED_BTN" = "$STATE_BTN" ] && [ "$OBSERVED_LT" = "$STATE_LT" ] && [ "$OBSERVED_RT" = "$STATE_RT" ]; then
+        if [ "$(printf '%s' "$OBSERVED_BTN" | tr 'A-F' 'a-f')" = "$(printf '%s' "$STATE_BTN" | tr 'A-F' 'a-f')" ] && \
+           [ "$OBSERVED_LT" = "$STATE_LT" ] && \
+           [ "$OBSERVED_RT" = "$STATE_RT" ]; then
             exit 0
         else
             exit 2
         fi
-    } > "$OUT_DIR/03-cr-diag.log" 2>&1
+    ) > "$OUT_DIR/03-cr-diag.log" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ]; then
         ok "03 controller-roundtrip diag: state byte-exact across chainload"
@@ -200,6 +204,8 @@ if [ "${goto_summary:-0}" -ne 1 ] && [ "$SKIP_STRESS" -eq 0 ]; then
     echo "--- 4. oracle-stress ($STRESS_ITER-iteration burst) ---"
     STRESS_OUT="$OUT_DIR/04-stress"
     if "$HERE/oracle-stress.sh" --host "$HOST" --iterations "$STRESS_ITER" \
+            --buttons 0xA5A5 --lt 16384 --rt 1234 \
+            --lx 12345 --ly -12345 --rx -32768 --ry 32767 \
             --out "$STRESS_OUT" \
             > "$OUT_DIR/04-oracle-stress.log" 2>&1; then
         ok "04 oracle-stress: $STRESS_ITER/$STRESS_ITER smokes PASS (no degraded state)"
@@ -215,7 +221,7 @@ if [ "${goto_summary:-0}" -ne 1 ]; then
     echo
     echo "--- 5. oracle-seqlock-test (concurrent set/get tear check) ---"
     if python3 "$HERE/oracle-seqlock-test.py" --host "$HOST" \
-            --rounds 50 --workers 2 --readers 2 \
+            --rounds 100 --workers 2 --readers 2 \
             > "$OUT_DIR/05-seqlock.log" 2>&1; then
         ok "05 oracle-seqlock: predicate + live test PASS"
     else

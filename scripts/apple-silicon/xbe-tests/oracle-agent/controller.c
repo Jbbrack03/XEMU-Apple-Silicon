@@ -17,9 +17,10 @@
 /* Pointer to the canonical synthetic-input buffer. Allocated from the
  * persistent contiguous memory pool (MmAllocateContiguousMemoryEx +
  * MmPersistContiguousMemory) so the buffer survives an XLaunchXBE
- * chainload. See controller.h for the cross-XBE re-attach scheme. */
+ * chainload. See controller.h for the cross-XBE anchor scheme. */
 static struct oracle_ctrl_buffer *g_oracle_ctrl_p;
 static uintptr_t                  g_oracle_ctrl_phys;
+static int                        g_oracle_ctrl_anchor_ok;
 
 /* Wall-clock helper. nxdk's xboxkrnl exports
  * `KeQueryPerformanceCounter` / `KeQueryPerformanceFrequency` as
@@ -37,6 +38,11 @@ static uint64_t now_us(void)
      * Xbox's perf-counter frequency is 3.375 MHz so 64-bit math
      * has plenty of headroom even at multi-decade uptime. */
     return ctr * 1000000ull / freq;
+}
+
+static inline void cache_writeback_invalidate(void)
+{
+    __asm__ __volatile__("wbinvd" ::: "memory");
 }
 
 /* ---- persistence anchor: state/ctrl-addr.txt ---------------------- */
@@ -62,9 +68,7 @@ static uint64_t now_us(void)
  * automount-d only mounts the launched-XBE's directory as D:; E: is not
  * auto-mounted, so writes to E:\Apps\... silently fail until we create
  * the symbolic link ourselves. Idempotent — `nxIsDriveMounted` short-
- * circuits if the link already exists (e.g. on a re-attach where a
- * prior agent process already mounted it but the kernel kept the
- * link).
+ * circuits if the link already exists from a prior agent process.
  *
  * Returns 1 if E: is usable after the call, 0 otherwise. */
 static int s_ensure_e_drive_mounted(void)
@@ -81,18 +85,6 @@ static int s_ensure_e_drive_mounted(void)
     return 0;
 }
 
-/* Write the anchor file atomically (Codex 2026-05-07). fopen("wb")
- * truncates the existing file before fprintf runs; if fprintf or
- * fclose fails (low E: disk space, FATX corruption, etc.) the prior
- * anchor is destroyed AND replaced with a malformed one. To
- * eliminate that hazard we write to a sibling temp file, validate
- * every step, then atomically rename over the canonical path.
- *
- * MoveFileEx with MOVEFILE_REPLACE_EXISTING gives us atomic rename
- * on FATX (the rename either fully completes or doesn't happen at
- * all from the file system's perspective). */
-#define ORACLE_CTRL_ADDR_FILE_TMP "E:\\Apps\\oracle-agent\\state\\ctrl-addr.tmp"
-
 static int s_write_anchor_file(uintptr_t phys, uintptr_t virt, size_t size)
 {
     if (!s_ensure_e_drive_mounted()) return -1;
@@ -104,203 +96,50 @@ static int s_write_anchor_file(uintptr_t phys, uintptr_t virt, size_t size)
     CreateDirectoryA("E:\\Apps\\oracle-agent", NULL);
     CreateDirectoryA(ORACLE_CTRL_STATE_DIR, NULL);
 
-    /* Pre-clean any leftover .tmp from a previous crashed write. */
-    DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
-
-    FILE *fp = fopen(ORACLE_CTRL_ADDR_FILE_TMP, "wb");
-    if (!fp) {
-        debugPrint("oracle_ctrl: fopen %s failed\n",
-                   ORACLE_CTRL_ADDR_FILE_TMP);
+    char expected[96];
+    int expected_n = snprintf(expected, sizeof(expected),
+                              "XCTR\n0x%08lx\n0x%08lx\n0x%08lx\n",
+                              (unsigned long)phys, (unsigned long)virt,
+                              (unsigned long)size);
+    if (expected_n <= 0 || expected_n >= (int)sizeof(expected)) {
         return -1;
     }
-    int n = fprintf(fp, "XCTR\n0x%08lx\n0x%08lx\n0x%08lx\n",
-                    (unsigned long)phys, (unsigned long)virt,
-                    (unsigned long)size);
-    int io_err = (n < 0) || ferror(fp);
+
+    /* Direct overwrite + readback verify. A previous tmp+rename path
+     * could leave the canonical FATX entry pointing at an older agent's
+     * persistent page. The anchor is tiny and written only during agent
+     * startup, before any chainload reader should open it, so the most
+     * robust production behavior is: overwrite canonical, flush/close,
+     * reopen, and byte-verify the exact published address. */
+    FILE *fp = fopen(ORACLE_CTRL_ADDR_FILE, "wb");
+    if (!fp) {
+        debugPrint("oracle_ctrl: fopen %s failed\n",
+                   ORACLE_CTRL_ADDR_FILE);
+        return -1;
+    }
+    size_t n = fwrite(expected, 1, (size_t)expected_n, fp);
+    int io_err = (n != (size_t)expected_n) || ferror(fp);
     if (fflush(fp) != 0) io_err = 1;
     if (fclose(fp) != 0) io_err = 1;
     if (io_err) {
         debugPrint("oracle_ctrl: anchor write/flush/close failed\n");
-        DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
         return -1;
     }
 
-    /* Atomic rename via NtSetInformationFile with ReplaceIfExists=TRUE.
-     * nxdk's MoveFileA hardcodes ReplaceIfExists=FALSE so it can't
-     * overwrite the existing canonical; the previous DeleteFileA +
-     * MoveFileA two-step was racy AND would silently leave the anchor
-     * stale if MoveFileA failed because the canonical still existed
-     * (e.g. DeleteFileA returned but the FATX directory entry hadn't
-     * been removed yet). The result was that diag XBEs read OLD
-     * anchor → mapped OLD persistent buffer → saw stale state.
-     * NtSetInformationFile with ReplaceIfExists is a single atomic op
-     * on FATX. Followed by NtFlushBuffersFile to commit the rename
-     * to disk before the agent can be killed by XLaunchXBE. */
-    {
-        ANSI_STRING src_str;
-        OBJECT_ATTRIBUTES srcAttr;
-        IO_STATUS_BLOCK iosb;
-        HANDLE handle = NULL;
-        NTSTATUS st;
-
-        RtlInitAnsiString(&src_str, ORACLE_CTRL_ADDR_FILE_TMP);
-        InitializeObjectAttributes(&srcAttr, &src_str,
-                                   OBJ_CASE_INSENSITIVE,
-                                   ObDosDevicesDirectory(), NULL);
-        st = NtOpenFile(&handle,
-                        DELETE | SYNCHRONIZE,
-                        &srcAttr, &iosb,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        FILE_SYNCHRONOUS_IO_NONALERT |
-                        FILE_OPEN_FOR_BACKUP_INTENT);
-        if (!NT_SUCCESS(st)) {
-            debugPrint("oracle_ctrl: NtOpenFile(tmp) failed 0x%08lx\n",
-                       (unsigned long)st);
-            DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
-            return -1;
-        }
-
-        /* FILE_RENAME_INFORMATION with ReplaceIfExists=TRUE. */
-        struct {
-            FILE_RENAME_INFORMATION header;
-            char extra_name_bytes[260];
-        } rename_buf;
-        memset(&rename_buf, 0, sizeof(rename_buf));
-        rename_buf.header.ReplaceIfExists = TRUE;
-        rename_buf.header.RootDirectory = ObDosDevicesDirectory();
-        RtlInitAnsiString(&rename_buf.header.FileName,
-                          ORACLE_CTRL_ADDR_FILE);
-        st = NtSetInformationFile(handle, &iosb,
-                                  &rename_buf,
-                                  sizeof(FILE_RENAME_INFORMATION) +
-                                      rename_buf.header.FileName.Length,
-                                  FileRenameInformation);
-        if (!NT_SUCCESS(st)) {
-            debugPrint("oracle_ctrl: NtSetInformationFile(rename) failed "
-                       "0x%08lx\n", (unsigned long)st);
-            NtClose(handle);
-            DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
-            return -1;
-        }
-
-        /* Force FATX metadata to disk before the kernel-image swap
-         * (XLaunchXBE / runxbe) can wipe in-memory state. */
-        IO_STATUS_BLOCK flush_iosb;
-        st = NtFlushBuffersFile(handle, &flush_iosb);
-        if (!NT_SUCCESS(st)) {
-            debugPrint("oracle_ctrl: NtFlushBuffersFile failed 0x%08lx "
-                       "(continuing; rename committed in-memory)\n",
-                       (unsigned long)st);
-        }
-
-        NtClose(handle);
+    char verify[sizeof(expected)] = {0};
+    fp = fopen(ORACLE_CTRL_ADDR_FILE, "rb");
+    if (!fp) {
+        debugPrint("oracle_ctrl: anchor verify reopen failed\n");
+        return -1;
+    }
+    size_t got = fread(verify, 1, (size_t)expected_n, fp);
+    int close_err = fclose(fp) != 0;
+    if (got != (size_t)expected_n || close_err ||
+        memcmp(verify, expected, (size_t)expected_n) != 0) {
+        debugPrint("oracle_ctrl: anchor verify mismatch\n");
+        return -1;
     }
     return 0;
-}
-
-/* Strict 0x-prefixed hex parser; returns 0 on success and 1 on failure. */
-static int s_parse_hex(const char *s, uintptr_t *out)
-{
-    if (!s || s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) return 1;
-    s += 2;
-    uintptr_t acc = 0;
-    int digits = 0;
-    while (*s) {
-        char c = *s;
-        if (c == '\r' || c == '\n') break;
-        int v;
-        if (c >= '0' && c <= '9') v = c - '0';
-        else if (c >= 'a' && c <= 'f') v = 10 + (c - 'a');
-        else if (c >= 'A' && c <= 'F') v = 10 + (c - 'A');
-        else return 1;
-        if (digits >= (int)(sizeof(uintptr_t) * 2)) return 1;
-        acc = (acc << 4) | (uintptr_t)v;
-        digits++;
-        s++;
-    }
-    if (digits == 0) return 1;
-    *out = acc;
-    return 0;
-}
-
-/* Re-attach to a previously-allocated persistent buffer.
- *
- * Safety analysis (Codex 2026-05-07).
- *
- * The kseg0 identity-map check (`MmGetPhysicalAddress(virt) == phys`)
- * is NOT a proof of allocator ownership — it's just confirming that
- * the kernel still maps that physical page into kseg0, which it
- * always does for the entire 64 MiB physical RAM window. RAM
- * contents on x86 are not reset by a soft reboot; a stale
- * ctrl-addr.txt file (which lives on persistent E: storage and
- * NEVER gets cleaned up across power cycles) plus surviving RAM
- * bits could pass our magic+version check by coincidence and let
- * us write into kernel-pool memory we no longer own.
- *
- * Mitigation: re-attach is OPT-IN via the
- * `ORACLE_CTRL_ALLOW_REATTACH` build flag. By default we always
- * fresh-allocate. Cost of fresh-allocate: one 4 KiB kernel-pool
- * page leaked per agent restart (the prior persistent buffer is
- * unreachable but stays MmPersistContiguousMemory-flagged in the
- * kernel pool). The Xbox has 64 MiB of RAM; this is acceptable
- * for the project's expected restart cadence (single-digit per
- * day on the project Xbox).
- *
- * If re-attach is enabled, we additionally cross-check a
- * session-nonce field (must match the one we wrote to the anchor
- * file) so a coincidence-XCTR-magic-survival is essentially
- * impossible. The session nonce is only correct across a single
- * quick-reboot path that DOESN'T zero RAM; even then the chance
- * of false match is 2^-32 per restart. */
-static struct oracle_ctrl_buffer *s_try_reattach(uintptr_t *out_phys)
-{
-#ifndef ORACLE_CTRL_ALLOW_REATTACH
-    /* Default: always fresh-allocate. Suppresses the unused-helper
-     * warnings by referencing the static helpers from the fresh-alloc
-     * path below. */
-    (void)out_phys;
-    return NULL;
-#else
-    if (!s_ensure_e_drive_mounted()) return NULL;
-    FILE *fp = fopen(ORACLE_CTRL_ADDR_FILE, "rb");
-    if (!fp) return NULL;
-    char buf[256] = {0};
-    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
-    int closed = fclose(fp);
-    if (n == 0 || closed != 0) return NULL;
-
-    /* Strict 4-line parse (Codex 2026-05-07): require ALL of XCTR +
-     * 0xPHYS + 0xVIRT + 0xSIZE; reject malformed/partial files. */
-    char *line[4] = {0};
-    int li = 0;
-    char *p = buf;
-    line[li++] = p;
-    while (*p && li < 4) {
-        if (*p == '\n') {
-            *p = 0;
-            if (p[1] != 0 && li < 4) line[li++] = p + 1;
-        }
-        p++;
-    }
-    if (li < 4 || strncmp(line[0], "XCTR", 4) != 0) return NULL;
-
-    uintptr_t phys = 0, virt_recorded = 0, size_recorded = 0;
-    if (s_parse_hex(line[1], &phys) != 0) return NULL;
-    if (s_parse_hex(line[2], &virt_recorded) != 0) return NULL;
-    if (s_parse_hex(line[3], &size_recorded) != 0) return NULL;
-    if (size_recorded < sizeof(struct oracle_ctrl_buffer) ||
-        size_recorded > 0x10000u) return NULL;
-    if (phys == 0 || phys >= 0x04000000u) return NULL;
-
-    struct oracle_ctrl_buffer *vp =
-        (struct oracle_ctrl_buffer *)(phys | 0x80000000u);
-    if ((uintptr_t)MmGetPhysicalAddress((PVOID)vp) != phys) return NULL;
-    if (vp->magic != ORACLE_CTRL_MAGIC) return NULL;
-    if (vp->version != ORACLE_CTRL_VERSION) return NULL;
-
-    *out_phys = phys;
-    return vp;
-#endif /* ORACLE_CTRL_ALLOW_REATTACH */
 }
 
 /* Allocate a fresh persistent contiguous buffer + write the anchor file.
@@ -332,14 +171,23 @@ static struct oracle_ctrl_buffer *s_allocate_fresh(uintptr_t *out_phys)
      * agent process exits. */
     MmPersistContiguousMemory(p, 0x1000u, TRUE);
 
-    struct oracle_ctrl_buffer *vp = (struct oracle_ctrl_buffer *)p;
+    /* Use the same kseg0 identity-map alias that chainloaded diag
+     * XBEs use. MmAllocateContiguousMemoryEx can return a virtual
+     * alias whose stores are not immediately visible through the
+     * diag's kseg0 mapping across XLaunchXBE; making kseg0 canonical
+     * keeps RPC writes and diag reads on the same page-table path. */
+    struct oracle_ctrl_buffer *vp =
+        (struct oracle_ctrl_buffer *)(phys | 0x80000000u);
     memset(vp, 0, sizeof(*vp));
     vp->magic = ORACLE_CTRL_MAGIC;
     vp->version = ORACLE_CTRL_VERSION;
+    cache_writeback_invalidate();
 
     /* Anchor the address so a chainloaded diag XBE / re-launched
      * agent can find it. */
-    if (s_write_anchor_file(phys, (uintptr_t)vp, 0x1000u) != 0) {
+    g_oracle_ctrl_anchor_ok =
+        (s_write_anchor_file(phys, (uintptr_t)vp, 0x1000u) == 0);
+    if (!g_oracle_ctrl_anchor_ok) {
         /* Anchor write failure is not fatal — the buffer is still
          * usable for in-process RPCs; cross-XBE discovery just won't
          * work this run. Log and continue. */
@@ -352,20 +200,12 @@ static struct oracle_ctrl_buffer *s_allocate_fresh(uintptr_t *out_phys)
 
 void oracle_ctrl_init(void)
 {
-    /* Re-attach path: if a prior agent run already published a live
-     * persistent buffer, just rebind to it. This avoids leaking pool
-     * pages every time the agent gets relaunched (we do that often
-     * — once per oracle-orchestrator run-diag cycle). */
-    g_oracle_ctrl_p = s_try_reattach(&g_oracle_ctrl_phys);
-    if (g_oracle_ctrl_p) {
-        debugPrint("oracle_ctrl: reattached to persistent buffer at "
-                   "phys=0x%08lx virt=%p\n",
-                   (unsigned long)g_oracle_ctrl_phys,
-                   (void *)g_oracle_ctrl_p);
-        return;
-    }
-
-    /* Fresh-allocation path. */
+    /* Always fresh-allocate. A previous opt-in reattach build tried to
+     * reuse the anchor-recorded physical page across agent restarts,
+     * but kseg0 identity mapping + magic/version was not a sufficient
+     * allocator-ownership proof for production. The predictable cost is
+     * one persistent 4 KiB page per agent restart until the Xbox is
+     * power-cycled; the stress gate bounds that behavior. */
     g_oracle_ctrl_p = s_allocate_fresh(&g_oracle_ctrl_phys);
     if (g_oracle_ctrl_p) {
         debugPrint("oracle_ctrl: allocated fresh persistent buffer at "
@@ -618,6 +458,7 @@ static inline void seq_end_write(struct oracle_ctrl_port_state *p)
     if ((s & 1u) == 0) s--;        /* defensive: someone called us out of order */
     p->timestamp_us = now_us();
     seq_store(p, s + 1u);
+    cache_writeback_invalidate();
 }
 
 /* Heartbeat: net seq bump of 2 (stable → unstable → stable) so a
@@ -825,13 +666,12 @@ int cmd_controller_clear(struct netconn *c, const char *args)
 int cmd_controller_buffer_info(struct netconn *c, const char *args)
 {
     (void)args;
-    /* Re-derive physical address each call so a stale `g_oracle_ctrl_phys`
-     * (e.g. agent re-launched and re-attached) doesn't lie to the
-     * client. MmGetPhysicalAddress is cheap. */
+    /* Re-derive physical address each call instead of trusting cached
+     * state. MmGetPhysicalAddress is cheap. */
     uintptr_t phys = (uintptr_t)MmGetPhysicalAddress((PVOID)oracle_ctrl_get());
     op_send_okf(c,
                 "addr=0x%08lx phys=0x%08lx size=%u magic=0x%08lx "
-                "version=%u ports=%u port_state_size=%u "
+                "version=%u ports=%u port_state_size=%u anchor_ok=%u "
                 "anchor=%s",
                 (unsigned long)(uintptr_t)oracle_ctrl_get(),
                 (unsigned long)phys,
@@ -840,6 +680,7 @@ int cmd_controller_buffer_info(struct netconn *c, const char *args)
                 (unsigned)oracle_ctrl_get()->version,
                 (unsigned)ORACLE_CTRL_NUM_PORTS,
                 (unsigned)sizeof(struct oracle_ctrl_port_state),
+                (unsigned)g_oracle_ctrl_anchor_ok,
                 ORACLE_CTRL_ADDR_FILE);
     return 0;
 }

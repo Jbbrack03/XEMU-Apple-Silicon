@@ -1,32 +1,30 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 3.0 PASS —
-`pipeline-smoke` Tier-4 diag XBE proves the orchestrator's
-`run-diag` chainload-and-back cycle end-to-end; captured
-framebuffer SHA-256 matches math-derived expected byte-for-byte.
-Tier-1 NV2A-pipeline diag XBEs (mirror / color-channel /
-depth-floor per `diagnostic-xbe-plan.md` v2 §4.1–§4.3) are
-next-session work and plug into the same skeleton. Earlier this
-session: Phase 1 (custom nxdk oracle agent on TCP 9001
-supersedes XBDM after iND-BiOS revision blocked the leaked
-`xbdm.dll` path); Phase 2 (mem/nv2a/vram read+write +
-screenshot + runxbe + unsafe.enable + help — nine new commands;
-Mac-side `oracle-client.py` + `oracle-orchestrator.py`
-shipped); 200-cycle stress test 0 failures after polite-close
-hardening. Earlier 2026-05-05: Crimson Metal "blocker"
-reclassified as config — Crimson now joins PGR2 / Rainbow /
-Halo / boot as a documented MSAA4 PASS canary when launched
-with the canonical M15 recipe (specifically
-`XEMU_METAL_FRONT_FB_FALLBACK=1`). Project is now in Phase 1
-(Translation Correctness, ACTIVE). **The user's stated 30/60
-FPS at 1080p / high-quality AA / correct-colors goals remain
-met today via the GL renderer** with `XEMU_GL_MSAA=4` +
+Last updated: 2026-05-07 (real-Xbox oracle production-ready).
+B1-B4 are closed: persistent controller state is canonicalized
+through the kseg0 alias with cache writeback/invalidate, the
+temporary reattach build was removed, the controller-roundtrip
+diag is isolated from the default visual matrix unless explicitly
+requested, and the live seqlock/concurrency gate is stable. The
+deployed production oracle agent on the project Xbox has SHA-256
+`8fefa8c516b52aabc28cb8191bb31287030b11813742d074d80af720309ef756`.
+Validation evidence is recorded in `benchmark-runs/`: full
+oracle validation through smoke / visual matrix /
+controller-roundtrip / 10-iteration stress, followed by a focused
+post-fix gate with smoke / visual matrix / controller-roundtrip /
+seqlock all passing. See `docs/apple-silicon/handoff.md` and
+`docs/apple-silicon/decision-log.md` for the production-readiness
+record. Earlier 2026-05-05: Crimson Metal "blocker" reclassified
+as config — Crimson now joins PGR2 / Rainbow / Halo / boot as a
+documented MSAA4 PASS canary when launched with the canonical M15
+recipe (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`). Project
+is now in Phase 1 (Translation Correctness, ACTIVE). **The user's
+stated 30/60 FPS at 1080p / high-quality AA / correct-colors goals
+remain met today via the GL renderer** with `XEMU_GL_MSAA=4` +
 `surface_scale=2`; Metal remains opt-in until M15 default-on
-visual-gate sweep passes — blocks on F3 cross-title rollout
-(PGR2 / Rainbow / SC2 each need recorded canary snapshots),
-SC2 input recording, and front-fb fallback default-on policy
-decision. Input slices N1+N2 also shipped via opt-in
-`XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend.)
+visual-gate sweep passes. Input slices N1+N2 also shipped via
+opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework
+backend.)
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run

@@ -1,6 +1,49 @@
 # Decision Log
 
+## 2026-05-07 (production-ready): Oracle blockers B1-B4 closed live
+
+The real-Xbox oracle is now production-ready for pipeline use.
+All four blockers from the post-recovery reassessment are closed:
+
+- **B1 fixed**: `controller-roundtrip` stale non-zero state was caused
+  by the agent writing through an allocation virtual alias while the
+  diag read through kseg0. The agent now makes the kseg0 alias
+  (`phys | 0x80000000`) canonical, performs CPU writeback/invalidate
+  on controller-buffer writer completion, and reports `anchor_ok=1`
+  after direct write/readback verification of
+  `E:\Apps\oracle-agent\state\ctrl-addr.txt`.
+- **B2 closed**: `oracle-stress.sh --iterations 10` passed with
+  non-zero `controller-roundtrip` state in every iteration.
+- **B3 closed**: live `oracle-seqlock-test.py --rounds 100 --workers 2
+  --readers 2` passed; the test now checks final writer progress after
+  joins to avoid a reader-window race.
+- **B4 closed by removal**: the untested opt-in
+  `bin-reattach/default.xbe` / `ORACLE_CTRL_ALLOW_REATTACH` path was
+  removed. Production fresh-allocates and verifies the anchor instead.
+
+Validation artifacts:
+
+- `benchmark-runs/oracle-validate-20260507T182615Z`: smoke PASS,
+  visual Tier-1 matrix PASS, controller-roundtrip non-zero PASS,
+  stress 10/10 PASS. Its seqlock layer false-failed due the test race
+  fixed above.
+- `benchmark-runs/oracle-validate-20260507T194408Z`: post-fix
+  composite PASS with stress skipped intentionally because the
+  immediately prior full run already completed 10/10 on the same
+  deployed agent.
+- Deployed production agent SHA-256:
+  `8fefa8c516b52aabc28cb8191bb31287030b11813742d074d80af720309ef756`.
+
+Operational decision: `oracle-validate.sh` is the production
+oracle-side gate. The default visual matrix covers renderer visual
+XBEs (`mirror`, `color-channel`, `depth-floor`). The real-Xbox-only
+`controller-roundtrip` input-integration oracle is validated by
+`oracle-validate` layer 3 and remains explicitly runnable via
+`xbe_orchestrator.py run --xbe controller-roundtrip --renderer real-xbox`.
+
 ## 2026-05-07 (production-grade reassessed): Oracle is partial-green, NOT yet ready
+
+(SUPERSEDED by the production-ready entry above.)
 
 Following user direction: prior entry's "production-grade" claim
 is REVISED. The oracle's mainline visual-gate is live-green and
@@ -9603,4 +9646,3 @@ worked first-divergent-draw triage example using both flags.
 `CLAUDE.md` adds entries under "Diagnostic toggles".
 `extract-perf-summary.sh` parses both `METAL_DRAW_RT_DUMPS` and
 `GL_DRAW_RT_DUMPS`.
-

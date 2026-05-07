@@ -5,14 +5,16 @@ oracle-orchestrator.py — drives the real-Xbox oracle pipeline end-to-end.
 Implements the diagnostic-XBE Phase 2/3 flow described in
 `docs/apple-silicon/handoff.md`:
 
-  1. SITE RunXBE the oracle agent via FTP.
+  1. FTP-launch the oracle agent with the dashboard's XBE launch verb
+     (`SITE EXEC` on the current UnleashX dashboard, `SITE RunXBE`
+     fallback on XBMC4Gamers).
   2. Wait for TCP/9001 to come up.
   3. Optionally chainload a diagnostic XBE via `runxbe`.
   4. Wait for the Xbox to come back to FTP after the diag XBE
      reboots back to the dashboard.
   5. Pull captured artifacts via FTP into a host-side run
-     directory while XBMC4Gamers' FTP server is still listening.
-  6. SITE RunXBE the oracle agent again (it does not auto-relaunch).
+     directory while dashboard FTP is still listening.
+  6. FTP-launch the oracle agent again (it does not auto-relaunch).
      This step suspends FTP/21 — that's why step 5 must happen
      before step 6.
   7. Take a post-state screenshot through the agent and emit a
@@ -46,9 +48,9 @@ Top-level subcommands
 
 Network preconditions:
   - Xbox is on the LAN at $ORACLE_HOST (default 192.168.0.200) with
-    XBMC4Gamers running and FTP enabled (xbox/xbox).
+    dashboard FTP enabled (xbox/xbox).
   - The oracle-agent default.xbe is uploaded at
-    /E/XBMC4Gamers/Apps/oracle-agent/default.xbe (per project layout).
+    /E/Apps/oracle-agent/default.xbe (per project layout).
 """
 from __future__ import annotations
 
@@ -517,9 +519,9 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
         return record
     record["ftp_back_at"] = time.time()
 
-    # Order matters: pull artifacts via FTP FIRST, while XBMC4Gamers'
-    # FTP server is up. Once we relaunch the oracle agent below,
-    # XBMC suspends and FTP/21 stops listening, so any FTP-pull
+    # Order matters: pull artifacts via FTP FIRST, while dashboard
+    # FTP is up. Once we relaunch the oracle agent below, dashboard
+    # FTP/21 stops listening, so any FTP-pull
     # attempt then will fail with ConnectionRefusedError.
     if ftp_collect:
         artifact_dir = out_dir / "artifacts"

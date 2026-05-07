@@ -137,8 +137,7 @@ xbed_input_synth_status_t xbed_input_synth_attach(void)
 
     /* kseg0 identity map: physical P maps to virtual P | 0x80000000.
      * The OG Xbox kernel identity-maps the entire 64 MiB of physical
-     * RAM at 0x80000000-0x83FFFFFF; this is the same convention used
-     * by the agent (`controller.c::s_try_reattach`). */
+     * RAM at 0x80000000-0x83FFFFFF. */
     uintptr_t virt = phys | 0x80000000u;
     struct shim_ctrl_buffer *vp = (struct shim_ctrl_buffer *)virt;
 

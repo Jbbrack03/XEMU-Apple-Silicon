@@ -1,21 +1,12 @@
 # Benchmark Automation
 
-Last updated: 2026-05-07 (post-recovery). **Oracle pipeline is
-mainline-green but NOT yet production-ready.** `m15-visual-gate.sh`
-exits 0 with 5/5 PASS (build + oracle-smoke + metal-canary-regress
-+ xbe-harness Tier-1 matrix), and the canonical zero-state real-
-Xbox references are captured for `controller-roundtrip` and
-`mirror`. **Four named blockers (B1-B4) still open** before the
-oracle can be declared "ready for production use" — see
-`handoff.md`'s "OPEN BLOCKERS" section for details and resume
-recipe. Summary: B1 = `controller-roundtrip` non-zero pre-set
-state intermittent stale-state read across `XLaunchXBE`
-chainload (root cause not yet identified after ruling out anchor
-atomicity, PAGE_NOCACHE, reattach, and vbuf collision); B2 =
-`oracle-stress.sh` only ran 3 iterations, not the spec's 10;
-B3 = `oracle-seqlock-test.py` live mode never run (only offline
-selftest); B4 = `bin-reattach/default.xbe` built but never
-deployed-and-run on the Xbox.
+Last updated: 2026-05-07 (oracle production-ready). The real-Xbox
+oracle is ready for production pipeline use. B1-B4 are closed:
+controller-roundtrip non-zero state is fixed via kseg0-canonical
+controller-buffer writes + CPU writeback/invalidate; the 10-iteration
+stress passed; live seqlock passed; and the untested reattach build
+was removed. Use `oracle-validate.sh` as the production oracle-side
+gate.
 
 Earlier session: Oracle gap-closure session:
 **xbe-harness QMP-socket-path fix + agent's atomic anchor rename**.
@@ -45,8 +36,9 @@ to commit FATX metadata to disk before the kernel image swap
 the transient agent degraded-state hypothesis), `oracle-seqlock-test.py`
 (predicate selftest + concurrent set/get tear check),
 `oracle-validate.sh` (5-layer composite oracle production-grade
-gate). **New build**: `bin-reattach/default.xbe` opt-in build of
-the agent with `-DORACLE_CTRL_ALLOW_REATTACH` for gap 7 testing.
+gate). The previous opt-in `bin-reattach/default.xbe` build was later
+removed before production because the anchor-recorded physical page
+was not a sufficient allocator-ownership proof.
 **New manifest field**: `real_xbox_only: true` (controller-roundtrip)
 makes the matrix runner skip non-real-xbox renderers cleanly with
 a `skip` status that doesn't count as failure. **New diagnostic**:
@@ -3749,13 +3741,13 @@ this finding to other consoles without re-verifying.
 | Welcome banner        | `220-XBMC FileZilla Server …`  | `220 UnleashX FTP Server ready.` |
 | Reboot                | `SITE REBOOT`                  | `SITE REBOOT` (same) |
 
-**`oracle-orchestrator.py` does not yet handle the
-`SITE RunXBE` → `SITE EXEC` change.** Until updated, the
-`ensure-agent` and `run-diag` subcommands will fail with
-`502 Command not implemented` against the new dashboard. Filed
-as task #13. Recommended approach: probe `HELP` on connect and
-pick the available command, OR just default to `SITE EXEC` and
-keep `SITE RunXBE` as a fallback.
+**`oracle-orchestrator.py` now handles the dashboard launch
+verb difference.** It auto-detects `SITE EXEC` on the current
+UnleashX dashboard and keeps `SITE RunXBE` as the XBMC4Gamers
+fallback; `ORACLE_LAUNCH_VERB` can still force a verb for
+debugging. The dashboard-independent `ensure-agent` /
+`run-diag` path is closed and covered by the oracle
+production-readiness gate.
 
 ## Next Automation Steps
 
@@ -4167,23 +4159,20 @@ XCTR
 0x<8-hex-size-bytes>          ; always 0x00001000 in v1
 ```
 
-The v1 anchor file is read by:
-- `oracle-agent::s_try_reattach` on agent re-launch (to find the
-  pre-existing kernel-pool buffer instead of leaking a new one).
-- `xbed_input_synth_attach` on diag XBE startup.
+The v1 anchor file is read by `xbed_input_synth_attach` on diag XBE
+startup. The previous agent reattach reader was removed before
+production; each agent launch fresh-allocates and republishes the
+anchor.
 
 A version mismatch (`XBED_INPUT_SYNTH_VERSION` ≠ buffer's
 `version` field) fails-loud rather than reading garbage.
 
-### Anchor write atomicity (2026-05-07)
+### Anchor write verification (2026-05-07)
 
-The agent's `s_write_anchor_file` originally used a racy
-`DeleteFileA(canonical) + MoveFileA(tmp, canonical)` two-step
-because nxdk's `MoveFileA` hardcodes `ReplaceIfExists=FALSE`. If
-DeleteFileA failed for any reason (FATX cache state, file
-recently-opened-by-FTP-server, etc.), MoveFileA then failed with
-"target exists" and `s_write_anchor_file` returned -1 — but the
-caller (`s_allocate_fresh`) only logged a warning and continued.
+The production agent writes the canonical anchor directly, flushes
+and closes it, then reopens and byte-verifies the exact published
+address. `controller.buffer-info` reports `anchor_ok=1` only after
+that readback verification succeeds.
 The on-disk anchor stayed at the OLD agent's phys; diag XBEs
 mapped that old persistent buffer and reported stale state.
 
@@ -4246,7 +4235,7 @@ Single-command "is the oracle production-grade?" gate. Composes:
    (verifies the persistent buffer survived chainload byte-exact;
    uses `D:\controller-roundtrip-diag.txt` written by the diag
    XBE's instrumented attach path).
-4. `oracle-stress.sh` 3-iteration burst.
+4. `oracle-stress.sh` 10-iteration burst.
 5. `oracle-seqlock-test.py` live mode.
 
 Exit 0 = oracle is production-grade; non-zero = `report.md`
@@ -4254,17 +4243,10 @@ records which layer failed. This is the "oracle side" complement
 to `m15-visual-gate.sh`'s "renderer side"; the two together cover
 the M15 default-on pre-conditions.
 
-### Opt-in re-attach build (2026-05-07)
+### Re-attach build removed (2026-05-07)
 
-`bin-reattach/default.xbe` is the agent built with
-`make CFLAGS="-DORACLE_CTRL_ALLOW_REATTACH"`. With this flag the
-agent's init path tries `s_try_reattach` first: if a prior agent
-left a persistent buffer with valid magic+version at the
-anchor-recorded phys, the new agent rebinds to that page instead
-of allocating fresh. Saves the ~4KB-per-restart kernel-pool page
-leak. Carries a security caveat (a stale anchor + RAM survival
-could let us write into kernel-pool memory we no longer own —
-see `controller.c::s_try_reattach`'s safety analysis); ships
-opt-in for that reason. Deploy with
-`STOR /E/Apps/oracle-agent/default.xbe` and run smoke + stress
-to validate before adopting as default.
+The opt-in `bin-reattach/default.xbe` /
+`ORACLE_CTRL_ALLOW_REATTACH` path was removed before production.
+Production always fresh-allocates the persistent controller page,
+writes the anchor directly, verifies it by readback (`anchor_ok=1`),
+and relies on the 10-iteration stress gate to bound restart behavior.

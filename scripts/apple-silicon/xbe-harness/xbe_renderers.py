@@ -342,18 +342,38 @@ def _pre_run_setup_real_xbox(manifest: XbeManifest, host: str,
         # XLaunchXBE; we don't know its state at run start (could be
         # non-zero from a prior session). controller-roundtrip's
         # `expected.py:default()` synthesizes the zero-state pattern,
-        # so we MUST clear the buffer before chainload.
-        log.append("[pre-run] ensuring agent up for controller.clear")
+        # so we MUST write and verify an explicit all-zero state before
+        # chainload. Use controller.set instead of controller.clear
+        # because set is the same path used by non-zero replay tests.
+        log.append("[pre-run] ensuring agent up for controller.set zero")
         if not _ensure_agent_via_orch(host, agent_path):
-            log.append("[pre-run] WARNING ensure-agent failed; skipping clear")
+            log.append("[pre-run] ERROR ensure-agent failed")
             return log
         try:
             oc = _load_oc()
             with oc.OracleClient(host, 9001, timeout=10.0) as c:
-                code, _ = c.raw("controller.clear port=0")
-            log.append(f"[pre-run] controller.clear port=0 -> {code}")
+                zero = ("controller.set port=0 buttons=0x0000 "
+                        "lt=0 rt=0 lx=0 ly=0 rx=0 ry=0")
+                code, payload = c.raw(zero)
+                log.append(f"[pre-run] {zero} -> {code} "
+                           f"{payload.decode(errors='replace')}")
+                if code != "200":
+                    log.append("[pre-run] ERROR zero-state set failed")
+                    return log
+                code, payload = c.raw("controller.get port=0")
+                text = payload.decode(errors="replace")
+                log.append(f"[pre-run] controller.get port=0 -> "
+                           f"{code}\n{text}")
+                required = [
+                    "buttons=0x0000",
+                    "triggers lt=0 rt=0",
+                    "lstick x=0 y=0",
+                    "rstick x=0 y=0",
+                ]
+                if code != "201" or any(tok not in text for tok in required):
+                    log.append("[pre-run] ERROR zero-state verify failed")
         except Exception as e:
-            log.append(f"[pre-run] controller.clear failed: {e}")
+            log.append(f"[pre-run] ERROR controller zero-state failed: {e}")
     return log
 
 
@@ -382,9 +402,19 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
     def log(s: str) -> None:
         log_lines.append(s)
 
+    def finish(status: str, notes: str = "",
+               extra: Optional[dict] = None) -> RunResult:
+        try:
+            (work_dir / "real-xbox.log").write_text(
+                "\n".join(log_lines) + "\n", errors="replace")
+        except OSError:
+            pass
+        return RunResult(status=status, captured_png=captured_png,
+                         log="\n".join(log_lines), notes=notes,
+                         extra=extra)
+
     if not manifest.xbe_path.exists():
-        return RunResult("infra-error", captured_png, "",
-                         notes=f"xbe not built: {manifest.xbe_path}")
+        return finish("infra-error", f"xbe not built: {manifest.xbe_path}")
 
     if upload_xbe:
         # Need FTP up. If agent is up, reboot first via the agent.
@@ -394,21 +424,19 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
         ok = _wait_for_ftp(host, retries=120, delay=2.0,
                            user=ftp_user, password=ftp_pass)
         if not ok:
-            return RunResult("infra-error", captured_png,
-                             "\n".join(log_lines),
-                             notes="ftp-not-back-after-reboot")
+            return finish("infra-error", "ftp-not-back-after-reboot")
         rc, out = _ftp_upload_xbe(host, manifest.id, manifest.xbe_path,
                                   user=ftp_user, password=ftp_pass)
         log(out)
         if rc != 0:
-            return RunResult("infra-error", captured_png,
-                             "\n".join(log_lines),
-                             notes="xbe-upload-failed")
+            return finish("infra-error", "xbe-upload-failed")
 
     # Per-XBE pre-run setup (e.g. controller-roundtrip needs
-    # controller.clear before chainload to land in zero state).
+    # a verified zero-state write before chainload).
     for line in _pre_run_setup_real_xbox(manifest, host, agent_path):
         log(line)
+    if any("[pre-run] ERROR" in line for line in log_lines):
+        return finish("infra-error", "pre-run-setup-failed")
 
     xbox_xbe_path = f"E:\\\\Apps\\\\{manifest.id}\\\\default.xbe"
     ftp_collect = f"/E/Apps/{manifest.id}"
@@ -426,8 +454,7 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
     log(proc.stdout)
     log(proc.stderr)
     if proc.returncode != 0:
-        return RunResult("fail", captured_png, "\n".join(log_lines),
-                         notes=f"run-diag-rc={proc.returncode}")
+        return finish("fail", f"run-diag-rc={proc.returncode}")
 
     # Locate the captured XOSS blob.
     artifacts_dir = work_dir / "orch" / "artifacts"
@@ -436,8 +463,7 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
         # Fallback: search for *-capture.bin
         candidates = list(artifacts_dir.glob("*-capture.bin"))
         if not candidates:
-            return RunResult("fail", captured_png, "\n".join(log_lines),
-                             notes="no-xoss-blob-pulled")
+            return finish("fail", "no-xoss-blob-pulled")
         capture_blob = candidates[0]
 
     # Decode to PNG.
@@ -445,12 +471,9 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
         from xbe_compare import decode_xoss_to_png
         decode_xoss_to_png(capture_blob, captured_png)
     except Exception as e:
-        return RunResult("fail", captured_png, "\n".join(log_lines),
-                         notes=f"xoss-decode-failed: {e}")
+        return finish("fail", f"xoss-decode-failed: {e}")
 
-    return RunResult(status="ok", captured_png=captured_png,
-                     log="\n".join(log_lines),
-                     extra={"xoss": str(capture_blob)})
+    return finish("ok", extra={"xoss": str(capture_blob)})
 
 
 # ---------- real-xbox helpers ----------

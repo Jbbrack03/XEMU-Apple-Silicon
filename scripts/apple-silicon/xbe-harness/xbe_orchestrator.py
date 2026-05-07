@@ -420,8 +420,10 @@ def cmd_capture_reference(args) -> int:
 def cmd_run(args) -> int:
     out_root = Path(args.out) if args.out else (
         DEFAULT_OUT_ROOT / time.strftime("xbe-harness-%Y%m%d-%H%M%S"))
-    xbe_ids = args.xbe or [m.id for m in xbe_discover.discover_all()
-                            if m.self_validation_tier == 1]
+    xbe_ids = args.xbe or [
+        m.id for m in xbe_discover.discover_all()
+        if m.self_validation_tier == 1 and not m.real_xbox_only
+    ]
     renderers = args.renderer or _autodetect_renderers(args.host)
     print(f"[xbe-harness] xbe_ids: {xbe_ids}", flush=True)
     print(f"[xbe-harness] renderers: {renderers}", flush=True)

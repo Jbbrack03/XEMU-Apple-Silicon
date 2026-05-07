@@ -71,22 +71,24 @@ declare the handler in `commands.h`, implement in `commands.c`.
 
 ## Deploy & run
 
-This assumes a softmodded Xbox running XBMC4Gamers with FTP enabled
-(`xbox`/`xbox`) and `SITE RunXBE` available (XBMC FileZilla 1.5.6's
-default).
+This assumes a softmodded Xbox with dashboard FTP enabled
+(`xbox`/`xbox`). The current project Xbox runs UnleashX and launches
+XBEs with `SITE EXEC`; older XBMC4Gamers setups use `SITE RunXBE`.
+Prefer `oracle-orchestrator.py ensure-agent`, which auto-detects the
+available launch verb.
 
 ```sh
 # upload (one-time)
 curl -u xbox:xbox \
-  --quote 'CWD /E/XBMC4Gamers/Apps' \
+  --quote 'CWD /E/Apps' \
   --quote 'MKD oracle-agent' \
   ftp://192.168.0.200/ -o /dev/null
 curl -u xbox:xbox -T bin/default.xbe \
-  ftp://192.168.0.200/E/XBMC4Gamers/Apps/oracle-agent/default.xbe
+  ftp://192.168.0.200/E/Apps/oracle-agent/default.xbe
 
 # launch (FTP connection drops as the kernel chainloads — that's normal)
 curl -u xbox:xbox \
-  --quote 'SITE RunXBE Special://xbmc/Apps/oracle-agent/default.xbe' \
+  --quote 'SITE EXEC E:\\Apps\\oracle-agent\\default.xbe' \
   ftp://192.168.0.200/ -o /dev/null
 
 # wait ~5 seconds for the agent's TCP listener to come up, OR use
@@ -214,11 +216,13 @@ image. To return to a state where the agent is listening again:
 
 1. The chainloaded XBE finishes its work and either returns to
    firmware (typically rebooting back to the dashboard) or exits in
-   any other way that leaves XBMC4Gamers running.
+   any other way that leaves dashboard FTP running.
 2. The Mac orchestrator polls FTP/21 for the dashboard to come back.
-3. The orchestrator `SITE RunXBE`s the agent again.
+3. The orchestrator FTP-launches the agent again using the detected
+   dashboard verb (`SITE EXEC` on UnleashX, `SITE RunXBE` on
+   XBMC4Gamers).
 
-Step 3 is required because XBMC4Gamers has no auto-launch concept —
+Step 3 is required because the dashboard has no auto-launch concept —
 nothing on the Xbox side relaunches the agent automatically.
 `oracle-orchestrator.py run-diag` automates this whole cycle.
 
