@@ -159,7 +159,11 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   pipeline driver: status / ensure-agent / capture / run-diag
   (full chainload-and-back-and-pull cycle with verdict.json
   output) / validate (wraps compare-screenshots.py with
-  --crop --out-dir --threshold).
+  --crop --out-dir --threshold). **NOTE (2026-05-06):** uses
+  `SITE RunXBE` for chainload, which is XBMC4Gamers-specific;
+  the project Xbox now boots UnleashX which uses `SITE EXEC`
+  instead. Update needed before next agent-launch operation.
+  Filed as task #13.
 - `scripts/apple-silicon/xbox-ftp-mirror.py` — Python recursive
   FTP mirror with SHA-256 manifest; used 2026-05-06 to capture
   the project Xbox's Tier-1 backup (1.5 GB). Reusable for any
@@ -169,6 +173,31 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   `oracle-orchestrator.py capture`. Today contains
   `pipeline-smoke/real-xbox.png` (640×480 RGBA, single white
   pixel oracle).
+- **`tools/xemu-capture/`** — native macOS Swift CLI bundled as
+  a `.app` (`com.xemu-macos.capture`, ad-hoc-codesigned for
+  stable TCC bundle ID). Drives any UVC capture device;
+  primary use case is the MacroSilicon MS2109 USB stick capturing
+  the real Xbox's composite-out for the third oracle leg
+  (math-derived ↔ agent-screenshot ↔ composite-capture). Build
+  via `make` in `tools/xemu-capture/`. CLI: `list / probe /
+  inputs / set-input / snapshot / sequence / serve`. See
+  `docs/apple-silicon/automation.md` "tools/xemu-capture/"
+  section for full usage.
+
+**Real Xbox dashboard (2026-05-06 onward): UnleashX.** Was
+XBMC4Gamers until today. Switched by replacing `/C/evoxdash.xbe`
+(empirically: the file this console's iND-BiOS launches at
+cold boot) with the UnleashX chainloader; previous XBMC
+chainloader preserved on Xbox at `/C/evoxdash.xbe.xbmc.bak`.
+Boot mechanism (verified ON THIS CONSOLE; do not generalize):
+the running BIOS launched `/C/evoxdash.xbe` regardless of
+`/C/ind-bios.cfg` edits — DASH1/DASH2/DASH3 entries had no
+effect on cold boot here, so they appear to be IGR (in-game
+reset) controller-button-combo alternates rather than the
+boot priority. Other iND-BiOS revisions / configs may behave
+differently. **FTP command difference:** UnleashX uses
+`SITE EXEC <xbox-path>` to chainload an XBE; XBMC4Gamers used
+`SITE RunXBE <xbox-path>`.
 
 Per-console state (EEPROM dump, Tier-1 backup, restore runbook,
 reference SDK extract) lives at

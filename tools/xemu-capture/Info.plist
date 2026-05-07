@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.xemu-macos.capture</string>
+    <key>CFBundleName</key>
+    <string>xemu-capture</string>
+    <key>CFBundleDisplayName</key>
+    <string>xemu Capture Tool</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>xemu-capture</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Apple Silicon xemu fork — diagnostic tooling</string>
+    <key>NSCameraUsageDescription</key>
+    <string>xemu-capture reads frames from a USB video capture device (such as the MacroSilicon MS2109 composite-to-USB stick attached to an Original Xbox) so the Apple Silicon xemu fork can compare emulator output against real-hardware reference frames.</string>
+</dict>
+</plist>

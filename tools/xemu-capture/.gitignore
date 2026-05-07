@@ -1,0 +1,10 @@
+# Swift Package Manager build cache and intermediates.
+.build/
+.swiftpm/
+Package.resolved
+
+# Codesign-replaced files written during signing.
+*.codesign-old
+
+# macOS finder turds.
+.DS_Store

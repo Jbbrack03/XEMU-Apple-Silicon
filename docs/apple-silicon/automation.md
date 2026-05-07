@@ -3319,6 +3319,162 @@ Cleanup-and-decommission steps live in
 (outside the repo because it documents per-console state including
 the EEPROM dump path; do not commit).
 
+## tools/xemu-capture/ — native macOS composite-out capture (2026-05-06)
+
+Mac-side Swift CLI bundled as a code-signed `.app` so macOS TCC
+tracks Camera permission by stable bundle ID
+`com.xemu-macos.capture`. Survives across Claude sessions, reboots,
+and project rebuilds. Drives any UVC-class video capture device
+(verified against the MacroSilicon MS2109 "AV TO USB2.0" stick
+attached to the project Xbox's composite-out).
+
+Build:
+
+```sh
+cd tools/xemu-capture && make
+# Produces dist/xemu-capture.app/Contents/MacOS/xemu-capture
+```
+
+CLI invocation:
+
+```sh
+./dist/xemu-capture.app/Contents/MacOS/xemu-capture <subcommand>
+
+  list                                  JSON list of all video capture devices.
+  probe DEVICE                          Supported formats / fps for a device.
+  inputs DEVICE                         Physical input sources (composite, S-Video).
+                                        MS2109 returns empty — its selector is a
+                                        UVC vendor extension AVFoundation does
+                                        not surface.
+  set-input DEVICE INPUT                Pick an active input by id or name.
+  snapshot DEVICE --out PATH            Single-frame PNG capture.
+                  [--width W --height H]   Force NTSC 720x480 or 640x480 (otherwise
+                                          sessionPreset picks PAL 720x576).
+                  [--warmup-frames N]      Drop N initial frames (default 5).
+                  [--timeout SECONDS]      Max wait for the chosen frame (default 10).
+                  [--input INPUT]          Switch active input first.
+  sequence DEVICE --out-prefix PFX --count N --interval SECS
+                                        Multi-frame sequence; useful for
+                                        signal-lock / unplug-replug tests.
+  serve [--port N]                      Long-running TCP daemon (default 8889).
+                                        Accepts JSON-line ops:
+                                        {"op":"snapshot","device":"…","out":"…"}
+                                        {"op":"inputs","device":"…"}
+                                        {"op":"set-input","device":"…","input":"…"}
+                                        {"op":"list"}
+                                        {"op":"shutdown"}
+  version                               Print version.
+```
+
+Device-name matching is substring-insensitive against the localized
+device name. For the MS2109 capture stick, `"USB2"` is enough.
+
+**Critical knob: format selection.** AVFoundation's default
+`sessionPreset = .high` picks the largest-area format the device
+advertises (the MS2109 reports both 720×480 NTSC @ 30 fps and
+720×576 PAL @ 25 fps; PAL has more pixels). With NTSC composite
+input, a PAL decode produces unusable captures. `xemu-capture`
+re-pins `device.activeFormat` AFTER `session.startRunning()` to
+work around this — pass `--width 720 --height 480` explicitly for
+NTSC content.
+
+**Verified MS2109 (vendor `0x534D` / product `0x0021`) format
+support:**
+
+| Width | Height | Standard | FPS  | Notes |
+|-------|--------|----------|------|-------|
+| 160   | 120    | NTSC     | 30   | Quarter |
+| 320   | 240    | NTSC     | 30   | Half |
+| 640   | 480    | NTSC     | 30   | Square-pixel NTSC |
+| 720   | 480    | NTSC     | 30   | Rec.601 NTSC, default for diag XBE captures |
+| 720   | 576    | PAL      | 25   | Avoid for NTSC sources |
+
+**Known stability quirk: USB power on the Mac Studio M2 Ultra
+front USB-C ports.** The ASMedia 3142 controller backing the front
+USB-C ports brown-outs intermittently when the MS2109 is plugged
+in via a USB-C adapter. The device enumerates then drops within
+2-3 seconds. Workaround: use the back USB-A ports (Apple's
+controller) or the rear USB-C (DRD controller `usb-drd4-port-hs`).
+The user's working configuration is rear USB-C via USB-A → USB-C
+adapter.
+
+**Known cosmetic limitation: NTSC pixel aspect.** Output PNGs are
+720×480 with non-square pixels (Rec.601 NTSC). Displayed at
+native 1.5:1 aspect in Preview rather than the 4:3 (1.33:1)
+aspect a CRT TV would show. For pixel-exact comparison against
+diag-XBE expected.py output (which assumes 720×480 square pixels),
+this is correct as-is. For human visual review, optional resize to
+640×480 square pixels would correct the ratio.
+
+**TCC permission model.** The app is ad-hoc-codesigned (`codesign
+-s -`) with `--identifier com.xemu-macos.capture` and includes
+`NSCameraUsageDescription` in `Info.plist`. The first invocation
+that touches AVFoundation's camera APIs (anything beyond `list`
+and `probe`) triggers macOS's "xemu-capture would like to access
+the Camera" prompt under System Settings → Privacy & Security →
+Camera. Once granted for a specific build of the app, the
+permission persists across Claude sessions, Mac reboots, and
+project rebuilds **as long as the binary's cdhash doesn't change**.
+
+Per Apple TN3127, ad-hoc signatures use a cdhash-only designated
+requirement. Rebuilding the binary changes the cdhash, which can
+re-trigger the macOS Camera prompt (TCC sees "different code,
+re-confirm"). The checked-in prebuilt
+`dist/xemu-capture.app/` keeps Camera permission while unchanged.
+If you `make clean && make` to rebuild, expect a one-time regrant
+prompt the first time the new binary opens a camera session.
+
+For truly stable permission across rebuilds, sign with a real
+Developer ID identity instead of ad-hoc (would require a
+Developer Program account); not worth the cost for the project's
+local-tool use case.
+
+The `--options runtime` (Hardened Runtime) flag is intentionally
+NOT used during signing. Per Apple's docs, Hardened Runtime
+requires resource-access entitlements (`com.apple.security.device.camera = true`)
+to be supplied via a separate entitlements plist; without them,
+even after a TCC grant the OS may deny camera access. For an
+ad-hoc local tool we use the simpler unhardened ad-hoc path.
+
+## Real Xbox dashboard: UnleashX (switched 2026-05-06)
+
+The project Xbox now boots UnleashX (was XBMC4Gamers until
+2026-05-06). Switch was performed by replacing
+`/C/evoxdash.xbe` (the file iND-BiOS unconditionally launches at
+cold boot) with a chainloader pointing to UnleashX. The previous
+XBMC4Gamers chainloader is preserved at `/C/evoxdash.xbe.xbmc.bak`
+on the Xbox; full Tier-1 backup at
+`/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/`.
+
+**iND-BiOS boot mechanism — empirically determined ON THIS
+CONSOLE.** With this console's running BIOS, the boot target
+was `/C/evoxdash.xbe` regardless of `/C/ind-bios.cfg` edits.
+We verified by setting `DASH1` directly to UnleashX's path on
+disk and rebooting; the existing XBMC4Gamers chainloader at
+`/C/evoxdash.xbe` still loaded XBMC. The swap that DID take
+effect was overwriting the chainloader file itself. Public
+iND-BiOS references may describe DASH1/2/3 as cold-boot
+priority for other BIOS revisions / config sources; on this
+console they appear to behave as IGR (in-game reset)
+controller-button-combo alternates instead. Do not generalize
+this finding to other consoles without re-verifying.
+
+**FTP command differences from XBMC4Gamers:**
+
+| Operation             | XBMC4Gamers (old)              | UnleashX (current)        |
+|-----------------------|--------------------------------|---------------------------|
+| Chainload an XBE      | `SITE RunXBE <path>`           | `SITE EXEC <path>`        |
+| Welcome banner        | `220-XBMC FileZilla Server …`  | `220 UnleashX FTP Server ready.` |
+| Reboot                | `SITE REBOOT`                  | `SITE REBOOT` (same) |
+
+**`oracle-orchestrator.py` does not yet handle the
+`SITE RunXBE` → `SITE EXEC` change.** Until updated, the
+`ensure-agent` and `run-diag` subcommands will fail with
+`502 Command not implemented` against the new dashboard. Filed
+as task #13. Recommended approach: probe `HELP` on connect and
+pick the available command, OR just default to `SITE EXEC` and
+keep `SITE RunXBE` as a fallback.
+
 ## Next Automation Steps
 
 1. Use the recorded retail gameplay routes as the main replay targets for the
@@ -3409,3 +3565,49 @@ the EEPROM dump path; do not commit).
    `changed_pixels_pct ≤ --max-changed-pct` (default 0.5%).
    See `scripts/apple-silicon/xbe-harness/README.md` for full
    layout, render-loop pattern, and per-XBE add-new-XBE recipe.
+
+10. **Mac-side composite-out capture leg (2026-05-06): SHIPPED.**
+    `tools/xemu-capture/` (Swift `.app`, bundle ID
+    `com.xemu-macos.capture`, code-signed for stable TCC).
+    Drives any UVC capture device; verified against MacroSilicon
+    MS2109 USB stick. CLI: `list / probe / inputs / set-input /
+    snapshot / sequence / serve`. See "tools/xemu-capture/" section
+    above for full usage. The third oracle leg complementing the
+    math-derived oracle (xbe-harness) and the agent-side
+    framebuffer-capture oracle (oracle-orchestrator).
+
+11. **Real Xbox dashboard switch XBMC4Gamers → UnleashX
+    (2026-05-06): SHIPPED.** See "Real Xbox dashboard: UnleashX"
+    section above. **Critical follow-up**: `oracle-orchestrator.py`
+    needs to switch from `SITE RunXBE` to `SITE EXEC` (task #13)
+    or every agent-launch will fail with 502 against the new
+    dashboard. Trivial diff in `oracle-orchestrator.py:177`.
+
+12. **Move oracle agent to `/E/Apps/oracle-agent/` (task #14)**
+    so the path is dashboard-independent (currently at
+    `/E/XBMC4Gamers/Apps/oracle-agent/` — leftover from when
+    XBMC4Gamers was the dashboard). After move, update
+    `DEFAULT_AGENT_PATH` in `oracle-orchestrator.py:86`.
+
+13. **Investigate pbkit + D:\\ fopen hang (task #9).** Tier-1
+    diag XBEs (mirror, color-channel, depth-floor) chainload +
+    reboot fine but never write `D:\<id>-capture.bin` —
+    pipeline-smoke (no pbkit) writes its blob fine, so the
+    issue is pbkit-specific fopen. Try: reduce render frame
+    count from 300 → 60, call `pb_kill()` before fopen, add
+    `fflush()` and check `fclose` rc. **Or sidestep entirely**:
+    use `tools/xemu-capture/ snapshot` to capture the diag XBE's
+    composite output directly during its render-loop hold (the
+    XBE just needs to render-and-hold, no D:\ write at all).
+    The composite path is now fully operational.
+
+14. **(Future / scoping idea)** Audio oracle via visual waveform.
+    Agents can't listen to audio, but the Xbox audio output
+    (RCA white/red) could be captured by a USB audio interface
+    and rendered to a visual waveform PNG (e.g. `ffmpeg
+    -filter_complex showwavespic` or amplitude-vs-time plots).
+    Differences between xemu's audio output (also captured the
+    same way) and the real-Xbox waveform would be visually
+    detectable. Real Xbox is empirically correct, so any delta
+    is on the emulator. Not on the critical path; documented
+    for future consideration.

@@ -1,5 +1,226 @@
 # Decision Log
 
+## 2026-05-06: xemu-capture native macOS Swift app for MS2109 composite oracle leg
+
+**Context.** The diagnostic-XBE library + xbe-harness shipped this
+morning give us math-derived oracle comparisons on xemu (no real
+hardware needed). To extend the validation chain with a third
+oracle leg — "what the TV actually saw on the real Xbox" via
+composite-out capture — we needed a Mac-side capture tool. Existing
+options:
+- `ffmpeg -f avfoundation`: works but TCC (Camera permission) is
+  tracked per-bundle-ID. The Claude session lives under
+  `code-server → node → zsh → claude` so its effective bundle ID
+  changes per session, and TCC denials don't survive across
+  sessions. Result: every fresh session would re-trigger a denial
+  cache and require manual permission grants the user can't drive
+  without a system-prompt UI.
+- ImageSnap or other CLI tools: same TCC problem (per-binary).
+
+**What landed: `tools/xemu-capture/`.** A small Swift CLI packaged
+as a proper macOS `.app` bundle so TCC tracks Camera permission by
+the stable bundle ID `com.xemu-macos.capture`. One-time grant via
+the system prompt; persists across Claude sessions, reboots, and
+project rebuilds.
+
+**Files added:**
+- `Sources/xemu-capture/main.swift` — single-file Swift CLI (~520
+  LOC). AVFoundation-based, supports JSON output for machine
+  consumption.
+- `Package.swift` — Swift Package Manager (macOS 14+, swift-tools
+  5.9).
+- `Info.plist` — bundle ID, version, `NSCameraUsageDescription`
+  for the TCC prompt.
+- `Makefile` — `swift build -c release` → bundle into
+  `dist/xemu-capture.app/` → ad-hoc codesign with stable identifier.
+- `README.md` (in-tree usage notes — to be added next session if
+  not in this commit).
+
+**CLI commands:**
+- `list` — JSON list of all video capture devices.
+- `probe DEVICE` — supported formats / fps for a device.
+- `inputs DEVICE` — physical input sources via AVFoundation
+  `inputSources` (returns empty for the MS2109, which uses a
+  vendor-specific UVC selector instead of standard UVC selector
+  unit).
+- `set-input DEVICE INPUT` — pick active input.
+- `snapshot DEVICE --out PATH [--width W --height H --warmup-frames
+  N --timeout SEC --input INPUT]` — single-frame PNG capture.
+- `sequence DEVICE --out-prefix PFX --count N --interval SECS` —
+  multi-frame sequence (useful for "watch the picture come in"
+  / signal-lock testing).
+- `serve [--port N]` — long-running TCP daemon mode for repeated
+  captures from automation.
+- `version` — print version.
+
+**Critical bug surfaced and fixed during validation: NTSC vs PAL
+format selection.** AVFoundation's `sessionPreset = .high` picks
+the largest-area format reported by the device. The MS2109
+advertises both 720×480 NTSC (30 fps) and 720×576 PAL (25 fps);
+"largest area" = PAL. With the Xbox sending NTSC composite, a
+PAL decoder produces unusable captures (wrong subcarrier, wrong
+pedestal, picture compressed into the bottom of the value range
+— histogram looks like noise even though real signal is present).
+Fix: re-pin `device.activeFormat` AFTER `session.startRunning()`,
+under `lockForConfiguration`, since `startRunning` reverts any
+format set during `beginConfiguration`. Verified empirically that
+the post-startRunning re-pin sticks for the duration of the
+capture session.
+
+**Validation evidence:**
+- Device enumerates correctly (`xemu-capture list` returns
+  `AV TO USB2.0` with vendor 21325 / product 33).
+- All 5 advertised formats probed cleanly.
+- Single-frame snapshot of XBMC4Gamers dashboard (the previous
+  default dashboard at the time of validation) at 720×480 NTSC
+  produced mean=116, stdev=75, max=255 — proper full-range
+  picture content. User visually confirmed the dashboard is
+  recognizable in the captured PNG.
+- TCC permission was not auto-prompted because the bundle was
+  ad-hoc-signed and the running Claude session inherits Camera
+  access from its parent app context. Production usage from a
+  fresh session may require a one-time grant.
+
+**Known limitation: MS2109 input selector not exposed.**
+AVFoundation's `inputSources` returns empty for the device; the
+composite-vs-S-Video switch is implemented via a vendor-specific
+UVC Extension Unit that AVFoundation doesn't surface. We
+sidestepped this because the user's physical setup has only the
+composite cable connected; the device auto-detects on signal
+sync. If a future setup needs both inputs accessible, a custom
+IOUSB control transfer would be required (out of scope).
+
+**Known cosmetic limitation: NTSC pixel aspect.** Captures are
+720×480 with non-square pixels; displayed at native 1.5:1 aspect
+in Preview rather than 4:3 (1.33:1) on a CRT. For pixel-exact
+oracle comparisons against diag-XBE expected.py output (which
+assumes 720×480 square pixels), this isn't an issue. For
+human visual review, optional resize to 640×480 square pixels
+would correct the ratio.
+
+**Status.** SHIPPED. Composite-capture oracle leg operational.
+The `xemu-capture snapshot` command is the Mac-side primitive
+that future "compare real-Xbox composite frame against xemu
+output" pipelines will call.
+
+## 2026-05-06: Real Xbox dashboard swapped XBMC4Gamers → UnleashX; iND-BiOS boot mechanism empirically determined
+
+**Context.** When attempting to capture the Xbox dashboard
+through the new `xemu-capture` pipeline (decision above), we
+saw heavy widescreen-anamorphic letterboxing and top/bottom
+content cropping. The dashboard at the time was XBMC4Gamers
+with the System9 skin, designed for 16:9 widescreen output via
+HD modes; rendered into a 4:3 NTSC composite frame the content
+extends past the visible area.
+
+Multiple attempted fixes in XBMC4Gamers's `guisettings.xml`
+(setting `<resolution>4</resolution>` = NTSC 4:3, setting
+`<aspect>0</aspect>` = 4:3 TV) had zero visible effect. XBMC
+reverted the changes back to autores+widescreen on every
+shutdown. The user proposed switching to a leaner dashboard
+(UnleashX preferred). They have full Tier-1 backups so we have
+license to make destructive changes.
+
+**Investigation: where does iND-BiOS actually pick the boot
+target?** Initial assumptions were wrong:
+- `/C/ind-bios.cfg`'s `DASH1` / `DASH2` / `DASH3` entries are
+  NOT the boot priority. They are alternative dashboards
+  triggered via the IGR (in-game reset) controller-button
+  combo at boot or during games.
+- `x2config.ini`'s `dashNName` entries are similarly not the
+  boot priority.
+
+We initially assumed `/C/evoxdash.xbe` and `/E/evoxdash.xbe`
+were byte-identical (both 65536 bytes, both pointed to UnleashX
+in `strings` output). That was a Python script bug — both pulls
+wrote to the same `/tmp/current_evoxdash.xbe` due to
+`os.path.basename` collapsing both `/C/` and `/E/` to
+`evoxdash.xbe`. Codex caught this from the backup manifest.
+
+**Empirical truth (verified via Codex-assisted research +
+direct FTP probes ON THIS CONSOLE'S iND-BiOS):**
+- The running BIOS on this console launched `/C/evoxdash.xbe`
+  at cold boot regardless of `/C/ind-bios.cfg` edits. Whether
+  that's hardcoded BIOS-side, a config the BIOS reads from
+  somewhere other than `/C/ind-bios.cfg`, or this iND-BiOS
+  build's specific behavior we did not exhaustively verify.
+- `/C/evoxdash.xbe` (and `/E/evoxdash.xbe`) are 64 KB
+  "shortcut.exe" chainloader binaries — generic XBEs that
+  XLaunch a single hardcoded XBE path baked into the binary.
+- Pre-swap state:
+  - `/C/evoxdash.xbe` SHA `2e736c45…` → embedded
+    `e:\XBMC4Gamers\default.xbe` → XBMC4Gamers booted
+  - `/E/evoxdash.xbe` SHA `5726ee3a…` → embedded
+    `e:\Dash\UnleashX\unleashx.xbe` (an unused alt chainloader)
+- `ind-bios.cfg` `DASH1=…UnleashX path` had no observed effect
+  — verified by a clean reboot that still loaded XBMC4Gamers.
+  Public iND-BiOS docs may describe DASH1/2/3 differently for
+  other BIOS revisions or other config sources; do not
+  generalize. Re-verify on any future console before relying
+  on `/C/ind-bios.cfg` edits to drive boot behavior.
+
+**What landed: chainloader swap.**
+- Backed up `/C/evoxdash.xbe` to `/C/evoxdash.xbe.xbmc.bak` on
+  the Xbox.
+- Copied `/E/evoxdash.xbe` (UnleashX chainloader) over
+  `/C/evoxdash.xbe`.
+- `/C/ind-bios.cfg` was also edited to set `DASH1=UnleashX,
+  DASH2=/C/evoxdash.xbe.xbmc.bak (XBMC fallback),
+  DASH3=EvolutionX`. The edit had no effect on boot order
+  (per the empirical finding above) but is a sensible
+  configuration if a future BIOS revision honors it; backed up
+  to `/C/ind-bios.cfg.pre-switch.bak`.
+
+**Validation evidence:**
+- After the chainloader swap reboot, FTP welcome banner was
+  `220 UnleashX FTP Server ready.` (was `220-XBMC FileZilla
+  Server` previously).
+- 92.2% of pixels in the post-swap composite capture differ
+  from the pre-swap XBMC4Gamers capture (vs 5.3% between two
+  XBMC captures).
+- User visually confirmed UnleashX is what's now displayed
+  (older-version UnleashX with System9 skin; layout differs
+  clearly from XBMC).
+- `xbmc.log` on the Xbox stops at the timestamp of the swap
+  reboot — no fresh boot entries since, confirming XBMC
+  is no longer being launched.
+
+**Known limitation: `oracle-orchestrator.py` still uses
+`SITE RunXBE` (XBMC-specific FTP command); UnleashX returns
+502 Command not implemented.** UnleashX uses `SITE EXEC
+<xbox-path>` — verified empirically: launching the agent via
+`SITE EXEC E:\\XBMC4Gamers\\Apps\\oracle-agent\\default.xbe`
+brought TCP 9001 up cleanly. Filed as task #13 — needs
+trivial change to `oracle-orchestrator.py:177`'s
+`site_run_xbe()` function.
+
+**Known limitation: agent path still XBMC4Gamers-relative.**
+The agent lives at `/E/XBMC4Gamers/Apps/oracle-agent/default.xbe`
+even though XBMC4Gamers is no longer the dashboard. Should
+move to `/E/Apps/oracle-agent/default.xbe` for dashboard-
+independence. Filed as task #14.
+
+**Known cosmetic: top-edge cropping in UnleashX captures.**
+UnleashX's System9 skin renders with overscan-compensated
+layout assuming a CRT TV's bezel hides the top ~10 rows. On
+our composite-capture-card setup that shows all 480 lines, the
+top border row is clipped off-screen. Doesn't affect diag-XBE
+oracle work (XBE-controlled content uses our own framebuffer
+layout, not the dashboard skin). Cosmetic; address via skin
+swap or `<Skin>` config edit if needed.
+
+**Status.** SHIPPED. UnleashX is the active dashboard.
+Production pipeline UNBLOCKED on the Xbox-side dashboard
+question; orchestrator-side fix (SITE EXEC) is the next
+critical work item.
+
+**Project rule alignment.** All four file changes (chainloader
+swap + ind-bios.cfg edit + their backups) are reversible from
+the on-Xbox `.bak` files. The full filesystem is also backed up
+under `xbox-oracle-backup/2026-05-06/`. User has explicitly
+authorized destructive changes for the duration of this Xbox
+serving as a development oracle.
+
 ## 2026-05-06: Diag XBE library Phase 3.1+3.2+harness — Tier-1 mirror/color-channel/depth-floor + xbe-harness production gate
 
 **Context.** Phase 3.0 (pipeline-smoke) proved the

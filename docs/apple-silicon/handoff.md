@@ -1,16 +1,166 @@
 # Handoff
 
-Last updated: 2026-05-06 (Phase 3.1+3.2+production-harness SHIPPED —
-three Tier-1 NV2A diag XBEs [mirror, color-channel, depth-floor]
-built on a new shared `xbe-tests/lib/` skeleton; new
-`xbe-harness/` Python orchestration runs the matrix of
-{XBE × renderer × flag-recipe} cells; xemu-Metal cells PASS
-3/3 against math-derived oracle.) See decision-log entry
-"2026-05-06: Diag XBE library Phase 3.1+3.2+harness — Tier-1
-mirror/color-channel/depth-floor + xbe-harness production gate"
-for full context.
+Last updated: 2026-05-06 (composite-capture leg + UnleashX dashboard
+switch SHIPPED — `tools/xemu-capture/` Swift `.app` provides
+TCC-stable native macOS capture from the MS2109 USB composite stick;
+real Xbox now boots UnleashX (not XBMC4Gamers) via swap of
+`/C/evoxdash.xbe` chainloader; iND-BiOS boot mechanism documented
+empirically. The `oracle-orchestrator.py` STILL uses `SITE RunXBE`
+which UnleashX rejects with 502 — first action next session is to
+update it to `SITE EXEC` so the agent can be launched again.) See
+decision-log entries "2026-05-06: xemu-capture native macOS Swift
+app for MS2109 composite oracle leg" + "2026-05-06: Real Xbox
+dashboard swapped XBMC4Gamers → UnleashX; iND-BiOS boot
+mechanism empirically determined" for full context.
 
-**TOP OF STACK 2026-05-06 (Phase 3.1+3.2+harness shipped).**
+**TOP OF STACK 2026-05-06 (xemu-capture + UnleashX shipped).**
+
+Today's session added the third oracle leg (Mac-side composite
+capture) and replaced the Xbox dashboard. Everything is set up for
+the next session to capture canonical real-Xbox reference frames
+for the Tier-1 diag XBEs once the small orchestrator fix lands.
+
+What landed:
+
+1. **`tools/xemu-capture/`** — native macOS Swift `.app` bundle
+   (`com.xemu-macos.capture`, ad-hoc-codesigned for stable TCC
+   bundle ID across sessions). CLI: `list / probe / inputs /
+   set-input / snapshot / sequence / serve / version`. AVFoundation
+   under the hood; supports `--width / --height` to force NTSC
+   720×480 (overrides session-preset's PAL-720×576 default), plus
+   a sidecar `serve --port 8889` daemon mode for long-running
+   capture sessions. Built via `make` in `tools/xemu-capture/`
+   (Swift 6.2, macOS 14+). UNCOMMITTED at session end — committing
+   in this same handoff push. See
+   `tools/xemu-capture/Sources/xemu-capture/main.swift` for the
+   complete CLI surface.
+
+2. **MS2109-family USB composite-capture stick characterized.**
+   "AV TO USB2.0" (vendor `0x534D` MacroSilicon, product `0x0021`).
+   UVC-class video, USB 2.0 / 480 Mbps, supports 160×120 / 320×240
+   / 640×480 / 720×480 NTSC @ 30 fps and 720×576 PAL @ 25 fps.
+   Two physical-line inputs (composite + S-Video) but no software
+   selector exposed via AVFoundation `inputSources` (vendor-
+   specific UVC extension we did not pursue). Composite is
+   selected by hardware sync detection — works auto when the only
+   active input has signal. Notable gotchas:
+   - The stick brown-outs flaky USB-C ports on the Mac Studio's
+     ASMedia 3142 controller; back USB-A or DRD-controller front
+     USB-C is more stable.
+   - `sessionPreset = .high` on macOS picks the largest-area
+     format (720×576 PAL) even when the Xbox is sending NTSC;
+     `xemu-capture` works around by re-pinning `device.activeFormat`
+     AFTER `session.startRunning()` (a single startRunning reverts
+     the format set during `beginConfiguration`).
+
+3. **Xbox default dashboard switched: XBMC4Gamers → UnleashX.**
+   The actual mechanism (empirically determined via Codex-assisted
+   research): iND-BiOS BIOS unconditionally launches
+   `/C/evoxdash.xbe`; that file is a 64 KB "shortcut.exe"
+   chainloader binary with one XBE path baked into it. The
+   previous `/C/evoxdash.xbe` (SHA `2e736c45…`) embedded
+   `e:\XBMC4Gamers\default.xbe`; the file at `/E/evoxdash.xbe`
+   (SHA `5726ee3a…`) embeds `e:\Dash\UnleashX\unleashx.xbe`.
+   Swapping `/C/evoxdash.xbe` to the UnleashX-targeting binary
+   instantly switched the boot dashboard. Backups saved on Xbox
+   at `/C/evoxdash.xbe.xbmc.bak`. Conclusively tested via the
+   FTP welcome banner: `220 UnleashX FTP Server ready.`
+
+4. **iND-BiOS boot mechanism — empirically determined ON THIS
+   CONSOLE.** With this console's specific iND-BiOS configuration,
+   `ind-bios.cfg`'s `DASH1`/`DASH2`/`DASH3` edits did NOT change
+   the cold-boot target — it stayed `/C/evoxdash.xbe`. Verified
+   by setting `DASH1` directly to the UnleashX path on disk and
+   rebooting; XBMC4Gamers still loaded, indicating the running
+   BIOS was either not reading `/C/ind-bios.cfg` or treats those
+   entries as IGR (in-game reset) controller-button-combo
+   alternates, not as the cold-boot priority. The
+   [DashSelector project](https://github.com/RetroBitsAndBytes/DashSelector)
+   docs and the [Avalaunch dashboard guide](https://avalaunch.net/docs/replace_evox.html)
+   describe a similar pattern (BIOSes typically launch a fixed
+   filename like `evoxdash.xbe`; that file is the chainloader
+   that makes the real selection). Public iND-BiOS references
+   may describe DASH1/2/3 differently for other configs / BIOS
+   revisions; do not generalize this finding to all iND-BiOS
+   installs without re-verifying.
+
+**Known limitation: `oracle-orchestrator.py` still uses
+`SITE RunXBE`, which UnleashX FTP rejects with 502.** UnleashX uses
+`SITE EXEC <xbox-path>` instead (verified empirically: launching
+the agent via `SITE EXEC E:\XBMC4Gamers\Apps\oracle-agent\default.xbe`
+brought TCP 9001 up cleanly). Until `oracle-orchestrator.py` is
+updated, `ensure-agent` and `run-diag` will both fail to launch
+the agent on the new dashboard. Filed as task #13 — see "Next
+session priorities" below.
+
+**Known limitation: agent path still `/E/XBMC4Gamers/Apps/…`.**
+With XBMC4Gamers no longer the dashboard, this path is just a
+leftover dependency. Should be moved to `/E/Apps/oracle-agent/`
+for dashboard-independence. Filed as task #14.
+
+**Known cosmetic issue: top-edge cropping in UnleashX captures.**
+UnleashX's System9 skin renders the dashboard with overscan-
+compensated layout assuming a CRT TV would hide the outer ~10
+rows. Our composite-capture-card setup shows all 480 lines, so
+the top border row is clipped off-screen. The blue side/bottom
+borders are visible normally. Cosmetic only; doesn't affect
+diag-XBE oracle work which uses captures of XBE-controlled
+content, not the dashboard chrome. Address via UnleashX skin
+swap (HeXEn-UX is included) or screen calibration if a clean
+dashboard reference becomes important.
+
+**Next session priorities (in order):**
+
+1. **Update `oracle-orchestrator.py`** to use `SITE EXEC` instead
+   of `SITE RunXBE`. Without this, every agent-launch operation
+   fails on the new dashboard. Likely a small change in
+   `oracle-orchestrator.py:177` (`site_run_xbe()` function) plus
+   maybe a config knob to handle other dashboards if needed.
+   Could also have the function probe `HELP` first and pick
+   `EXEC` vs `RunXBE` based on what the FTP server advertises.
+   Task #13.
+
+2. **Move oracle agent to `/E/Apps/oracle-agent/`** — XBMC-
+   independent path. Delete the `/E/XBMC4Gamers/Apps/oracle-agent/`
+   copy. Update `DEFAULT_AGENT_PATH` in
+   `oracle-orchestrator.py:86`. Task #14.
+
+3. **Investigate pbkit + D:\\ fopen hang (task #9).** Now that
+   the production capture pipeline is operational AND we have a
+   stable Xbox dashboard, this is the actual unblock for capturing
+   canonical real-Xbox reference frames for the three Tier-1 diag
+   XBEs (mirror, color-channel, depth-floor). See
+   `docs/apple-silicon/diagnostic-xbe-plan.md` v2 §2.2 for the
+   reference-oracle hierarchy. Approach: add `pb_kill()` before
+   the capture's fopen, reduce render-loop frame count to 60,
+   add `fflush()` + check `fclose` rc, OR use the new
+   `tools/xemu-capture/` to capture the diag XBE's composite
+   output directly (bypassing the D:\\ write entirely — the diag
+   XBE just renders, reboots after a hold; xemu-capture grabs
+   the post-render frame from the capture stick). The latter
+   path is much simpler and dovetails with the new infrastructure.
+
+4. **(Future / scoping idea)** Audio oracle via visual waveform.
+   Agents can't listen to audio, but the Xbox audio output (RCA
+   white/red) could be captured by a USB audio interface and
+   rendered as a visual waveform PNG (e.g., `ffmpeg -filter_complex
+   showwavespic`). Difference between xemu's audio output (also
+   captured the same way) and the real-Xbox waveform would be
+   visually detectable. Real Xbox is empirically correct, so any
+   delta is on the emulator. Not on the critical path; documented
+   for future consideration.
+
+5. **(Cosmetic, low priority)** Swap UnleashX skin or adjust
+   screen calibration to eliminate top-edge cropping. The
+   `/E/Dash/UnleashX/Skins/HeXEn-UX/` skin is installed. Or
+   tweak the `<Skin>` selection in `/E/Dash/UnleashX/config.xml`.
+
+The earlier (Phase 3.1+3.2+harness) banner content is preserved
+verbatim below for empirical audit trail.
+
+---
+
+**Earlier banner — 2026-05-06 (Phase 3.1+3.2+harness shipped).**
 The diagnostic-XBE library and its production orchestration
 ship today:
 
