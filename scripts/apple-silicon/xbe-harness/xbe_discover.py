@@ -30,6 +30,7 @@ class XbeManifest:
     duration_seconds: int
     capture_at_flip_stall_ordinal: Optional[int]
     expected_fail_renderers: List[str] = field(default_factory=list)
+    real_xbox_only: bool = False
     raw: dict = field(default_factory=dict)
     dir: Path = field(default=Path("."))
 
@@ -101,6 +102,7 @@ def _from_dict(data: dict, d: Path) -> XbeManifest:
         duration_seconds=int(data.get("duration_seconds", 4)),
         capture_at_flip_stall_ordinal=data.get("capture_at_flip_stall_ordinal"),
         expected_fail_renderers=list(data.get("expected_fail_renderers", [])),
+        real_xbox_only=bool(data.get("real_xbox_only", False)),
         raw=data,
         dir=d,
     )

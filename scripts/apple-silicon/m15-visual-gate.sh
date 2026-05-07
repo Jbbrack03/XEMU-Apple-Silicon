@@ -79,7 +79,7 @@ if [ -x "$XEMU_BIN" ]; then
     ok "01 xemu binary present at $XEMU_BIN"
     SHADER_LOG="$FORK/build/shader-validation-postbuild.log"
     if [ -s "$SHADER_LOG" ]; then
-        if grep -q "validated.*7/7\|all.*PASS" "$SHADER_LOG" 2>/dev/null; then
+        if grep -qE "7/7 passed, 0 failed|\[run-validation\] PASS:" "$SHADER_LOG" 2>/dev/null; then
             ok "01b post-build M5 shader validation: PASS"
         else
             info "01b post-build M5 shader log present but PASS marker not found — manual review needed"

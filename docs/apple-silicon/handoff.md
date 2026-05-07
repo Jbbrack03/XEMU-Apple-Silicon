@@ -1,5 +1,47 @@
 # Handoff
 
+Last updated: 2026-05-07 (late) — **oracle gap-closure session
+shipped CODE-SIDE for all 8 named gaps; LIVE re-validation
+pending Xbox manual power-cycle.** The RAM-scan diagnostic in
+this session (mem.read tight-loop across 64 MiB) crashed the
+Xbox; needs hard reset to resume. Code-side state below; the
+prior banner (with the 8-item gap-closure checklist) is
+preserved verbatim further down for audit trail.
+
+## Gap-closure status (CODE complete; LIVE pending Xbox)
+
+| # | Gap | Code | Live |
+|---|---|---|---|
+| 1 | m15-visual-gate end-to-end | Metal cells fixed (QMP socket path) | Pending Xbox |
+| 2 | m15-visual-gate --paired (Metal-vs-GL) | DONE | Pending Xbox |
+| 3 | xbe-harness matrix runner direct | Metal 3/3 PASS | Pending Xbox real-xbox |
+| 4 | capture-composite-reference | Already shipped earlier | Pending Xbox+MS2109 |
+| 5 | oracle-stress.sh (degraded state) | DONE | Pending Xbox |
+| 6 | oracle-seqlock-test.py | Selftest 5/5 PASS | Pending Xbox live |
+| 7 | reattach build | bin-reattach/default.xbe | Pending Xbox deploy |
+| 8 | controller-roundtrip canonical PNG | Diag XBE has new diagnostic | Pending Xbox + #3 |
+
+**To finish:**
+
+```sh
+# 1. Verify Xbox is alive
+ping -c 1 192.168.0.200
+# 2. Run the new composite gate (5 layers covering all 8 items)
+./scripts/apple-silicon/oracle-validate.sh
+# 3. Run the M15 gate end-to-end
+./scripts/apple-silicon/m15-visual-gate.sh
+# 4. If both exit 0, append decision-log entry "Oracle pipeline
+#    fully production-grade; all gaps closed; live-validated".
+```
+
+If `oracle-validate.sh` layer 3 (controller-roundtrip diag-file
+inspection) FAILS, pull `D:\controller-roundtrip-diag.txt` from
+the run output dir to see what the diag actually saw — the diag
+now writes anchor content + buffer hex dump + state values to
+that file before render.
+
+**Earlier banner — preserved for audit trail:**
+
 Last updated: 2026-05-07 (late evening) — **oracle pipeline is in-
 workflow ready for the validated paths AND has 8 named gaps that
 next session MUST close**. Tier-1 controller injection shipped end-

@@ -1,5 +1,43 @@
 # Benchmark Automation
 
+Last updated: 2026-05-07 (late). Oracle gap-closure session:
+**xbe-harness QMP-socket-path fix + agent's atomic anchor rename**.
+Three defects shipped in this round —
+(1) `xbe-harness` Metal cells were silently FAILING with
+"no-screenshot-captured" because the QMP UNIX-socket path inside
+`benchmark-runs/m15-gate-<UTC>/04-tier1-matrix/<xbe>/<renderer>/`
+exceeded macOS's 104-byte UNIX socket limit; fixed by relocating
+the socket to `/tmp/xq-<pid>-<rand>.sock`. Metal-only matrix now
+3/3 PASS (controller-roundtrip skipped per new `real_xbox_only`
+manifest field).
+(2) The oracle agent's anchor write
+(`E:\Apps\oracle-agent\state\ctrl-addr.txt`) used a racy
+DeleteFileA + MoveFileA two-step (because nxdk's `MoveFileA`
+hardcodes `ReplaceIfExists=FALSE`); when the canonical file
+couldn't be deleted (FATX cache state, file lock), the rename
+silently failed and the on-disk anchor stayed stale → diag XBEs
+mapped OLD persistent buffer pages and reported stale state.
+Fixed by calling `NtSetInformationFile` directly with
+`ReplaceIfExists=TRUE` plus `NtFlushBuffersFile` after the rename
+to commit FATX metadata to disk before the kernel image swap
+(XLaunchXBE / runxbe) can wipe in-memory state.
+(3) `m15-visual-gate.sh` shader-validation grep pattern
+("validated.*7/7|all.*PASS") didn't match the actual log line
+("summary: 7/7 passed, 0 failed"); fixed.
+**New scripts**: `oracle-stress.sh` (10-iteration smoke loop for
+the transient agent degraded-state hypothesis), `oracle-seqlock-test.py`
+(predicate selftest + concurrent set/get tear check),
+`oracle-validate.sh` (5-layer composite oracle production-grade
+gate). **New build**: `bin-reattach/default.xbe` opt-in build of
+the agent with `-DORACLE_CTRL_ALLOW_REATTACH` for gap 7 testing.
+**New manifest field**: `real_xbox_only: true` (controller-roundtrip)
+makes the matrix runner skip non-real-xbox renderers cleanly with
+a `skip` status that doesn't count as failure. **New diagnostic**:
+`controller-roundtrip` now writes `D:\controller-roundtrip-diag.txt`
+with the anchor file content + first 64 bytes of the attached
+buffer + the read state values; pulled automatically by
+`oracle-orchestrator.py run-diag`'s ftp_collect step. Earlier work:
+
 Last updated: 2026-05-07 (oracle pipeline next-tier tooling SHIPPED:
 agent v0.3 with `controller.*` synthetic-input protocol;
 `controller-replay.py` Mac-side CSV → agent driver;
@@ -4119,3 +4157,97 @@ The v1 anchor file is read by:
 
 A version mismatch (`XBED_INPUT_SYNTH_VERSION` ≠ buffer's
 `version` field) fails-loud rather than reading garbage.
+
+### Anchor write atomicity (2026-05-07)
+
+The agent's `s_write_anchor_file` originally used a racy
+`DeleteFileA(canonical) + MoveFileA(tmp, canonical)` two-step
+because nxdk's `MoveFileA` hardcodes `ReplaceIfExists=FALSE`. If
+DeleteFileA failed for any reason (FATX cache state, file
+recently-opened-by-FTP-server, etc.), MoveFileA then failed with
+"target exists" and `s_write_anchor_file` returned -1 — but the
+caller (`s_allocate_fresh`) only logged a warning and continued.
+The on-disk anchor stayed at the OLD agent's phys; diag XBEs
+mapped that old persistent buffer and reported stale state.
+
+Fix (2026-05-07): use `NtSetInformationFile` directly with
+`FILE_RENAME_INFORMATION.ReplaceIfExists = TRUE` for a single
+atomic replace operation, then call `NtFlushBuffersFile` to
+commit the FATX rename to disk before the kernel image swap
+(`XLaunchXBE` / `runxbe`) can wipe in-memory state. The earlier
+fopen + fflush + fclose into the `.tmp` sibling is unchanged.
+
+### `oracle-stress.sh` — repeated-smoke loop (2026-05-07)
+
+```sh
+./scripts/apple-silicon/oracle-stress.sh [--iterations N]
+```
+
+Runs `oracle-smoke.sh --tier1 mirror,color-channel,depth-floor,
+controller-roundtrip` in a `[1..N]` loop (default N=10) to
+reproduce the transient "agent listening but RPCs return empty
+payload" degraded state observed once on 2026-05-07 evening.
+Per-iteration logs go to
+`benchmark-runs/oracle-stress-<UTC>/iter-NNN.log`; on the first
+failure, the post-fail diagnostic snapshot (agent `info`,
+`controller.buffer-info`, `nv2a.read`, `mem.read 0x80000000`) is
+written to `iter-NNN-diag/post-fail.txt`. Exit 0 if all N
+iterations PASS (degraded state NOT reproduced); exit 1 + logs
+the first failing iteration if reproduced.
+
+### `oracle-seqlock-test.py` — concurrent set/get tear check (2026-05-07)
+
+```sh
+# Offline algorithmic check (no Xbox needed):
+python3 scripts/apple-silicon/oracle-seqlock-test.py --selftest
+
+# Live test (hammers controller.set + controller.get from
+# concurrent threads):
+python3 scripts/apple-silicon/oracle-seqlock-test.py \
+    --rounds 100 --workers 2 --readers 2
+```
+
+Validates the agent's per-port seqlock (`seq_begin_write` →
+parity-odd, `seq_end_write` → parity-even) catches torn reads
+end-to-end across the wire protocol. The selftest mode is a
+5-case unit test of the predicate logic — runs offline. The
+live test launches `--workers` concurrent writers and
+`--readers` concurrent readers against the agent for `--rounds`
+iterations each; PASSES iff every observed snapshot has even
+seq AND the writer made forward progress (max_seq > 0).
+
+### `oracle-validate.sh` — composite production-grade gate (2026-05-07)
+
+```sh
+./scripts/apple-silicon/oracle-validate.sh
+```
+
+Single-command "is the oracle production-grade?" gate. Composes:
+1. `oracle-smoke.sh` (12 baseline RPC layers).
+2. `xbe-harness Tier-1 matrix` on Metal + real Xbox.
+3. `controller-roundtrip` chainload + diagnostic-file inspection
+   (verifies the persistent buffer survived chainload byte-exact;
+   uses `D:\controller-roundtrip-diag.txt` written by the diag
+   XBE's instrumented attach path).
+4. `oracle-stress.sh` 3-iteration burst.
+5. `oracle-seqlock-test.py` live mode.
+
+Exit 0 = oracle is production-grade; non-zero = `report.md`
+records which layer failed. This is the "oracle side" complement
+to `m15-visual-gate.sh`'s "renderer side"; the two together cover
+the M15 default-on pre-conditions.
+
+### Opt-in re-attach build (2026-05-07)
+
+`bin-reattach/default.xbe` is the agent built with
+`make CFLAGS="-DORACLE_CTRL_ALLOW_REATTACH"`. With this flag the
+agent's init path tries `s_try_reattach` first: if a prior agent
+left a persistent buffer with valid magic+version at the
+anchor-recorded phys, the new agent rebinds to that page instead
+of allocating fresh. Saves the ~4KB-per-restart kernel-pool page
+leak. Carries a security caveat (a stale anchor + RAM survival
+could let us write into kernel-pool memory we no longer own —
+see `controller.c::s_try_reattach`'s safety analysis); ships
+opt-in for that reason. Deploy with
+`STOR /E/Apps/oracle-agent/default.xbe` and run smoke + stress
+to validate before adopting as default.

@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -172,7 +173,10 @@ def run_xemu(manifest: XbeManifest, renderer: str,
 
     cfg = _build_xemu_toml(work_dir, scratch_hdd, manifest.iso_path,
                            surface_scale)
-    qmp_sock = work_dir / "qmp.sock"
+    # QMP UNIX-socket paths cap at ~104 bytes on macOS; benchmark-runs
+    # nesting (m15-gate-<UTC>/04-tier1-matrix/<xbe>/<renderer>/) blows
+    # past that. Use /tmp directly with a short unique filename.
+    qmp_sock = Path("/tmp") / f"xq-{os.getpid()}-{secrets.token_hex(4)}.sock"
     log_path = work_dir / "xemu.log"
     screenshots_dir = work_dir / "screenshots"
     screenshots_dir.mkdir(exist_ok=True)
@@ -284,6 +288,15 @@ def run_xemu(manifest: XbeManifest, renderer: str,
 
     log_f.close()
 
+    # Best-effort QMP socket cleanup (xemu unlinks on graceful exit;
+    # cover the SIGKILL path too).
+    try:
+        qmp_sock.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
     # Pick the latest captured PNG. Prefer the .NNNN sequence form
     # from the Metal capture path; fall back to plain base_screenshot.
     pngs = sorted(screenshots_dir.glob("*.png"))
@@ -299,6 +312,50 @@ def run_xemu(manifest: XbeManifest, renderer: str,
 
 
 # ---------- real-xbox (oracle agent) ----------
+
+def _ensure_agent_via_orch(host: str, agent_path: str) -> bool:
+    """Spawn oracle-orchestrator.py ensure-agent. Returns True if the
+    agent ack'd. Used to bring the agent up between FTP upload and the
+    optional pre-run controller setup."""
+    cmd = [sys.executable, str(ORACLE_ORCH_PATH),
+           "--host", host, "--agent-path", agent_path,
+           "ensure-agent"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=120)
+        return proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _pre_run_setup_real_xbox(manifest: XbeManifest, host: str,
+                             agent_path: str) -> List[str]:
+    """Diag-XBE-specific setup that runs on the real Xbox AFTER the
+    XBE has been uploaded and BEFORE chainload. The agent must be up
+    on return; the caller's run-diag will see it as already up.
+
+    Returns a list of log lines describing what was done.
+    """
+    log: List[str] = []
+    if manifest.id == "controller-roundtrip":
+        # The persistent kernel-pool controller buffer survives across
+        # XLaunchXBE; we don't know its state at run start (could be
+        # non-zero from a prior session). controller-roundtrip's
+        # `expected.py:default()` synthesizes the zero-state pattern,
+        # so we MUST clear the buffer before chainload.
+        log.append("[pre-run] ensuring agent up for controller.clear")
+        if not _ensure_agent_via_orch(host, agent_path):
+            log.append("[pre-run] WARNING ensure-agent failed; skipping clear")
+            return log
+        try:
+            oc = _load_oc()
+            with oc.OracleClient(host, 9001, timeout=10.0) as c:
+                code, _ = c.raw("controller.clear port=0")
+            log.append(f"[pre-run] controller.clear port=0 -> {code}")
+        except Exception as e:
+            log.append(f"[pre-run] controller.clear failed: {e}")
+    return log
+
 
 def run_real_xbox(manifest: XbeManifest, work_dir: Path,
                   host: str = "192.168.0.200",
@@ -347,6 +404,11 @@ def run_real_xbox(manifest: XbeManifest, work_dir: Path,
             return RunResult("infra-error", captured_png,
                              "\n".join(log_lines),
                              notes="xbe-upload-failed")
+
+    # Per-XBE pre-run setup (e.g. controller-roundtrip needs
+    # controller.clear before chainload to land in zero state).
+    for line in _pre_run_setup_real_xbox(manifest, host, agent_path):
+        log(line)
 
     xbox_xbe_path = f"E:\\\\Apps\\\\{manifest.id}\\\\default.xbe"
     ftp_collect = f"/E/Apps/{manifest.id}"

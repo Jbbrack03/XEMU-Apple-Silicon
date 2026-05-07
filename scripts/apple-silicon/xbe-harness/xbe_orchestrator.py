@@ -143,6 +143,22 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
         for renderer in renderers:
             cell_dir = out_root / m.id / renderer
             cell_dir.mkdir(parents=True, exist_ok=True)
+            # Honor `real_xbox_only`: a diag XBE that depends on the
+            # real-Xbox kernel-pool controller buffer (or any other
+            # real-only resource) cannot run on xemu-GL/Metal. Skip
+            # those cells with an explicit "skip" status so the
+            # gate runner counts them as not-applicable rather than
+            # spurious failures.
+            if (m.real_xbox_only and
+                    renderer.lower() not in ("real-xbox", "real_xbox", "xbox")):
+                print(f"[xbe-harness] skipping {m.id} on {renderer} "
+                      f"(real_xbox_only=true)", flush=True)
+                report["results"].append({
+                    "xbe": m.id, "renderer": renderer,
+                    "status": "skip",
+                    "notes": "real_xbox_only",
+                })
+                continue
             print(f"[xbe-harness] running {m.id} on {renderer} ...",
                   flush=True)
             run_t0 = time.time()
@@ -419,11 +435,13 @@ def cmd_run(args) -> int:
                      upload_xbe=not args.no_upload)
     pass_count = sum(1 for c in rep["results"] if c["status"] == "pass")
     fail_count = sum(1 for c in rep["results"] if c["status"] == "fail")
+    skip_count = sum(1 for c in rep["results"] if c["status"] == "skip")
     err_count = sum(1 for c in rep["results"]
-                    if c["status"] not in ("pass", "fail"))
+                    if c["status"] not in ("pass", "fail", "skip"))
     print(f"[xbe-harness] {pass_count} pass, {fail_count} fail, "
-          f"{err_count} infra-error/skip", flush=True)
+          f"{skip_count} skip, {err_count} infra-error", flush=True)
     print(f"[xbe-harness] report: {out_root}/report.md", flush=True)
+    # Skips are not-applicable, not failures.
     return 0 if fail_count == 0 and err_count == 0 else 1
 
 

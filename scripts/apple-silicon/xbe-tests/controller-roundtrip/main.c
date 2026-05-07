@@ -287,6 +287,53 @@ int main(void)
         debugPrint("xbed_input_synth_attach failed: %d\n", (int)at);
     }
 
+    /* Diagnostic: dump anchor file content + first 64 bytes of the
+     * buffer at the attached phys to D:\controller-roundtrip-diag.txt
+     * so the orchestrator can pull it via FTP and reason about a
+     * mismatch between the captured render and what we expected. */
+    {
+        FILE *df = fopen("D:\\controller-roundtrip-diag.txt", "wb");
+        if (df) {
+            fprintf(df, "attach_status=%d\n", (int)at);
+            fprintf(df, "phys=0x%08lx virt=0x%08lx\n",
+                    (unsigned long)xbed_input_synth_phys_addr(),
+                    (unsigned long)xbed_input_synth_virt_addr());
+            fprintf(df, "anchor_path=%s\n",
+                    xbed_input_synth_anchor_path());
+            FILE *af = fopen(xbed_input_synth_anchor_path(), "rb");
+            if (af) {
+                char abuf[256] = {0};
+                size_t an = fread(abuf, 1, sizeof(abuf) - 1, af);
+                fclose(af);
+                fprintf(df, "anchor_bytes_read=%u\n", (unsigned)an);
+                fprintf(df, "anchor_content=<<<\n%s\n>>>\n", abuf);
+            } else {
+                fprintf(df, "anchor_open_failed\n");
+            }
+            if (at == XBED_INPUT_SYNTH_OK) {
+                /* Hex-dump first 64 bytes of the attached buffer. */
+                const uint8_t *b =
+                    (const uint8_t *)xbed_input_synth_virt_addr();
+                fprintf(df, "buffer_hex=");
+                for (int i = 0; i < 64; i++) {
+                    fprintf(df, "%02x", b[i]);
+                }
+                fprintf(df, "\n");
+                fprintf(df, "state.buttons=0x%04x\n",
+                        (unsigned)s_state.buttons);
+                fprintf(df, "state.ltrigger=%d\n", (int)s_state.ltrigger);
+                fprintf(df, "state.rtrigger=%d\n", (int)s_state.rtrigger);
+                fprintf(df, "state.lstick_x=%d\n", (int)s_state.lstick_x);
+                fprintf(df, "state.lstick_y=%d\n", (int)s_state.lstick_y);
+                fprintf(df, "state.rstick_x=%d\n", (int)s_state.rstick_x);
+                fprintf(df, "state.rstick_y=%d\n", (int)s_state.rstick_y);
+                fprintf(df, "state.seq=%u\n", (unsigned)s_state.seq);
+            }
+            fflush(df);
+            fclose(df);
+        }
+    }
+
     xbed_render_loop_then_capture(
         render_one, NULL, /*n_frames=*/300,
         "D:\\controller-roundtrip-capture.bin",

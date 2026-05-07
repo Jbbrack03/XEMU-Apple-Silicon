@@ -125,20 +125,75 @@ static int s_write_anchor_file(uintptr_t phys, uintptr_t virt, size_t size)
         return -1;
     }
 
-    /* Atomic-ish rename. nxdk's winapi does not export MoveFileExA
-     * with REPLACE_EXISTING; we approximate via DeleteFileA +
-     * MoveFileA. The window between the two calls is small (<1 ms)
-     * but technically a reader could observe a missing anchor file
-     * in that window. The reader's caller (`xbed_input_synth_attach`)
-     * already handles a missing anchor as `XBED_INPUT_SYNTH_NO_AGENT`,
-     * so the worst case is one diag XBE attach failing and the
-     * orchestrator retrying — better than the previous truncate-then-
-     * write window where the anchor existed but was corrupt. */
-    DeleteFileA(ORACLE_CTRL_ADDR_FILE);
-    if (!MoveFileA(ORACLE_CTRL_ADDR_FILE_TMP, ORACLE_CTRL_ADDR_FILE)) {
-        debugPrint("oracle_ctrl: anchor rename failed; tmp left at %s\n",
-                   ORACLE_CTRL_ADDR_FILE_TMP);
-        return -1;
+    /* Atomic rename via NtSetInformationFile with ReplaceIfExists=TRUE.
+     * nxdk's MoveFileA hardcodes ReplaceIfExists=FALSE so it can't
+     * overwrite the existing canonical; the previous DeleteFileA +
+     * MoveFileA two-step was racy AND would silently leave the anchor
+     * stale if MoveFileA failed because the canonical still existed
+     * (e.g. DeleteFileA returned but the FATX directory entry hadn't
+     * been removed yet). The result was that diag XBEs read OLD
+     * anchor → mapped OLD persistent buffer → saw stale state.
+     * NtSetInformationFile with ReplaceIfExists is a single atomic op
+     * on FATX. Followed by NtFlushBuffersFile to commit the rename
+     * to disk before the agent can be killed by XLaunchXBE. */
+    {
+        ANSI_STRING src_str;
+        OBJECT_ATTRIBUTES srcAttr;
+        IO_STATUS_BLOCK iosb;
+        HANDLE handle = NULL;
+        NTSTATUS st;
+
+        RtlInitAnsiString(&src_str, ORACLE_CTRL_ADDR_FILE_TMP);
+        InitializeObjectAttributes(&srcAttr, &src_str,
+                                   OBJ_CASE_INSENSITIVE,
+                                   ObDosDevicesDirectory(), NULL);
+        st = NtOpenFile(&handle,
+                        DELETE | SYNCHRONIZE,
+                        &srcAttr, &iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT |
+                        FILE_OPEN_FOR_BACKUP_INTENT);
+        if (!NT_SUCCESS(st)) {
+            debugPrint("oracle_ctrl: NtOpenFile(tmp) failed 0x%08lx\n",
+                       (unsigned long)st);
+            DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
+            return -1;
+        }
+
+        /* FILE_RENAME_INFORMATION with ReplaceIfExists=TRUE. */
+        struct {
+            FILE_RENAME_INFORMATION header;
+            char extra_name_bytes[260];
+        } rename_buf;
+        memset(&rename_buf, 0, sizeof(rename_buf));
+        rename_buf.header.ReplaceIfExists = TRUE;
+        rename_buf.header.RootDirectory = ObDosDevicesDirectory();
+        RtlInitAnsiString(&rename_buf.header.FileName,
+                          ORACLE_CTRL_ADDR_FILE);
+        st = NtSetInformationFile(handle, &iosb,
+                                  &rename_buf,
+                                  sizeof(FILE_RENAME_INFORMATION) +
+                                      rename_buf.header.FileName.Length,
+                                  FileRenameInformation);
+        if (!NT_SUCCESS(st)) {
+            debugPrint("oracle_ctrl: NtSetInformationFile(rename) failed "
+                       "0x%08lx\n", (unsigned long)st);
+            NtClose(handle);
+            DeleteFileA(ORACLE_CTRL_ADDR_FILE_TMP);
+            return -1;
+        }
+
+        /* Force FATX metadata to disk before the kernel-image swap
+         * (XLaunchXBE / runxbe) can wipe in-memory state. */
+        IO_STATUS_BLOCK flush_iosb;
+        st = NtFlushBuffersFile(handle, &flush_iosb);
+        if (!NT_SUCCESS(st)) {
+            debugPrint("oracle_ctrl: NtFlushBuffersFile failed 0x%08lx "
+                       "(continuing; rename committed in-memory)\n",
+                       (unsigned long)st);
+        }
+
+        NtClose(handle);
     }
     return 0;
 }

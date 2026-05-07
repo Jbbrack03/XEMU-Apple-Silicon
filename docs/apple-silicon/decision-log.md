@@ -1,5 +1,120 @@
 # Decision Log
 
+## 2026-05-07 (late): Oracle gap-closure session — atomic anchor rename + harness QMP socket fix + new validation tooling
+
+**Context.** The 2026-05-07 evening session left 8 named gaps that
+the user explicitly asked to close in the next session before
+declaring the oracle production-grade. This late session closes
+the code/build side of all 8; live re-validation of items
+1–4 + 7–8 is pending the project Xbox coming back online (the
+RAM-scan diagnostic in this session crashed it, requiring manual
+power-cycle).
+
+**Defects fixed.**
+
+1. **`xbe-harness` Metal cells silently FAIL with
+   "no-screenshot-captured".** The QMP UNIX-socket path under
+   `benchmark-runs/m15-gate-<UTC>/04-tier1-matrix/<xbe>/<renderer>/`
+   exceeded macOS's 104-byte UNIX socket limit (kernel returns
+   `EINVAL`). xemu logged "UNIX socket path '...' is too long.
+   Path must be less than 104 bytes" and exited immediately, so no
+   screenshot ever landed. **Fix**: `xbe_renderers.run_xemu` now
+   uses `/tmp/xq-<pid>-<rand>.sock` for the QMP socket and unlinks
+   it at end-of-run. Confirmed: Metal-only matrix
+   (`xbe_orchestrator.py run --renderer metal`) now 3/3 PASS
+   (controller-roundtrip skipped per #2 below).
+
+2. **`real_xbox_only` was not honored** by the matrix runner.
+   `controller-roundtrip` is fundamentally not testable on xemu-GL
+   or xemu-Metal (it depends on the real-Xbox kernel-pool buffer
+   semantics), but the harness ran it on Metal anyway, producing
+   spurious "no-screenshot-captured" failures. **Fix**: new
+   `real_xbox_only: true` manifest field; `run_matrix` skips
+   non-real-xbox cells with status `"skip"` (counted separately
+   from `"fail"` in the run-aggregate verdict).
+
+3. **Controller-roundtrip diag XBE renders STALE state across
+   chainload.** Mac side ran `controller.clear` (verified to zero
+   the buffer), then the orchestrator chainloaded the diag, yet
+   the diag rendered 0xA5A5 (an earlier session's set values).
+   **Root cause**: the agent's `s_write_anchor_file` used a racy
+   `DeleteFileA(canonical) + MoveFileA(tmp, canonical)` two-step
+   because nxdk's `MoveFileA` hardcodes `ReplaceIfExists=FALSE`.
+   When DeleteFileA failed for any reason (FATX cache state,
+   recent open by FTP server, etc.), MoveFileA then failed with
+   "target exists" and `s_write_anchor_file` returned -1 — but
+   the caller only logged a warning. The anchor file stayed at
+   the OLD agent's phys; the diag mapped that old persistent
+   buffer (still alive due to MmPersistContiguousMemory) and
+   reported its stale state. **Fix**: use `NtSetInformationFile`
+   directly with `FILE_RENAME_INFORMATION.ReplaceIfExists=TRUE`
+   for a single atomic replace, then `NtFlushBuffersFile` to
+   commit the FATX rename to disk before the kernel image swap
+   (`XLaunchXBE` / `runxbe`) can wipe in-memory state. New agent
+   binary deployed at
+   `scripts/apple-silicon/xbe-tests/oracle-agent/bin/default.xbe`
+   carries this fix; live re-validation pending Xbox recovery.
+
+4. **`m15-visual-gate.sh` shader-validation grep miss.** The
+   layer-1b grep pattern (`"validated.*7/7\|all.*PASS"`) didn't
+   match the actual log line (`"summary: 7/7 passed, 0 failed"`),
+   producing a false "manual review needed" INFO. **Fix**: changed
+   pattern to `"7/7 passed, 0 failed|\[run-validation\] PASS:"`.
+
+**New scripts shipped.**
+
+- `oracle-stress.sh` — repeated-smoke loop ([1..N], default 10) for
+  the transient agent degraded-state hypothesis. Exits 0 if all
+  iterations PASS; exits 1 + records post-fail diagnostic snapshot
+  if reproduced.
+- `oracle-seqlock-test.py` — selftest mode (5-case unit test of the
+  predicate logic) + live mode (concurrent set/get tear check
+  against the agent across N iterations).
+- `oracle-validate.sh` — composite production-grade gate: smoke +
+  Tier-1 matrix + controller-roundtrip diag-file inspection +
+  stress + seqlock = single-command "is the oracle production-grade?"
+- `bin-reattach/default.xbe` — agent built with
+  `-DORACLE_CTRL_ALLOW_REATTACH` for opt-in cross-restart buffer
+  reuse (gap 7).
+
+**Diagnostic instrumentation.**
+
+`controller-roundtrip` now writes `D:\controller-roundtrip-diag.txt`
+on attach with: anchor file content, attached buffer's first 64
+bytes (hex), parsed state values. The orchestrator's `run-diag
+--ftp-collect` step pulls it automatically. This unblocks
+diagnosing future cross-renderer state-mismatch cases without
+needing a debug serial cable on the Xbox.
+
+**Status of 8 named gaps from the prior session's plan:**
+
+| # | Gap | Code-side | Validation |
+|---|---|---|---|
+| 1 | m15-gate end-to-end | DONE (Metal cells fixed) | Pending Xbox |
+| 2 | m15-gate --paired | DONE | Pending Xbox |
+| 3 | xbe-harness matrix direct | DONE (Metal 3/3 PASS) | Pending Xbox real-xbox cells |
+| 4 | capture-composite-reference | Already shipped 2026-05-07 | Pending Xbox + MS2109 |
+| 5 | agent-stress (degraded state) | DONE (oracle-stress.sh) | Pending Xbox |
+| 6 | seqlock contention | DONE (predicate selftest 5/5 PASS; live mode ready) | Pending Xbox |
+| 7 | reattach build | DONE (bin-reattach/) | Pending Xbox |
+| 8 | controller-roundtrip canonical PNG | Pending #3 fix verification | Pending Xbox |
+
+**Reason for Xbox crash (lesson learned).** Issuing
+`mem.read addr=0x80NNNNNN` in a tight scan over the entire 64MB
+kseg0-mapped RAM range hit at least one address class the agent
+isn't allowlisted to read safely. Future RAM-scan tooling needs
+to bound the scan range to genuinely-allocatable physical pages
+(skip kernel reserved, skip MMIO mirrors). The agent's
+`op_addr_range_ok` already gates reads, but the scan triggered
+something in the read path or the network stack. Pending
+investigation when Xbox is back.
+
+**Next-session hard requirement.** Power-cycle the project Xbox
+to recover network. Then re-run `oracle-validate.sh` end-to-end;
+if all 5 layers green, the oracle is production-grade and the
+session can append "all gaps closed; production-ready" to this
+log.
+
 ## 2026-05-07 (evening): Oracle pipeline taken to "in-workflow ready" — Tier-1 controller injection + PCRTC capture fix + smoke-test + M15 gate runner
 
 **Context.** Earlier 2026-05-07 work shipped the controller.* RPC
