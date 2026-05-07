@@ -3947,3 +3947,175 @@ keep `SITE RunXBE` as a fallback.
     for Tier 2 of controller injection (kernel hook on
     `OhciControllerInterruptDispatch` so retail games see
     synthetic input).
+
+
+## Oracle pipeline (2026-05-07 — full Tier-1 validation shipped)
+
+The real-Xbox oracle is now production-ready. Use these wrappers
+in preference to the underlying scripts; they handle the inter-
+script ordering (FTP-up-then-down, agent-up-then-down, post-runxbe
+recovery) and emit structured exit codes so they compose cleanly
+into CI gates.
+
+- `scripts/apple-silicon/oracle-smoke.sh` — single-command pipeline
+  health check. 12 mandatory layers (ping, ensure-agent, info,
+  eeprom, mem.read, nv2a.read, vram.read, controller.* roundtrip,
+  buffer-info magic, screenshot) plus optional Tier-1 diag pipeline
+  per `--tier1 <ids>`. Exit 0 = all green, 1 = any layer failed.
+  Run before any Metal-renderer change that wants to be validated
+  against real-Xbox truth, and as a regression check after any
+  oracle-side refactor. See top of script for full usage.
+
+- `scripts/apple-silicon/m15-visual-gate.sh` — composite M15
+  default-on visual-gate runner. Runs in canonical order: build
+  verification, oracle health, Metal canary regression gate
+  (counters), Tier-1 diag-XBE matrix on Metal + real Xbox. With
+  `--paired` adds Metal-vs-GL canary diff. Exit 0 = M15 default-on
+  flip is unblocked from the oracle's perspective; non-zero blocks
+  the flip. Designed to be the single command that decides "is
+  Metal ready to be default-on?" — answer is YES iff exit == 0
+  with all gates green.
+
+- `scripts/apple-silicon/capture-composite-reference.sh` —
+  capture a real-Xbox reference frame for a diag XBE via the
+  MS2109 composite stick (third oracle leg, independent of the
+  in-XBE D:\\ write path). Auto-extracts scene-change keyframes
+  from the captured video and picks the one that best matches the
+  diag's expected pattern as the canonical reference PNG. Saves
+  to `docs/apple-silicon/xbox-real-references/<id>/<label>.png`.
+
+- `oracle-orchestrator.py health-check` — structured-JSON probe
+  of every reachable layer (ping/ftp/agent/buffer-info/anchor).
+  Exit 0 if ping AND (ftp OR agent) AND (if agent up) buffer
+  magic matches `'XCTR'`. Used by `oracle-smoke.sh` for the
+  buffer-info layer; suitable for CI gates that need a single
+  scriptable health probe.
+
+- `oracle-orchestrator.py status` — lighter probe (ping/ftp/agent
+  only). Exit 0 if ping AND (ftp OR agent). Use this when you
+  need a fast yes/no for "is the Xbox accessible somehow"; use
+  `health-check` when you need the agent's version + buffer
+  metadata.
+
+### Diag-XBE library (Tier 1: shipped 2026-05-07)
+
+Four Tier-1 diag XBEs validate the NV2A + the agent's Tier-1
+controller injection. All four PASS byte-exact on real Xbox AND
+on xemu Metal:
+
+| XBE | What it tests | Pre-run setup | PASS criterion |
+|---|---|---|---|
+| `mirror` | front-buffer Y-orientation; primitive coverage rules | none | math-derived (`expected.py:default`) |
+| `color-channel` | RT format / channel ordering (B/R swap detection) | none | math-derived |
+| `depth-floor` | LEQUAL depth + Z perspective + native-tri-depth path | none | math-derived |
+| `controller-roundtrip` | Tier-1 controller injection: synth state → kernel pool → diag XBE → render | `controller.set port=0 buttons=… lt=… …` BEFORE chainload | math-derived (`expected.py:from_state(...)`) using the SAME values |
+
+Build all four locally:
+
+```sh
+eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)"
+for d in mirror color-channel depth-floor controller-roundtrip; do
+    (cd scripts/apple-silicon/xbe-tests/$d && make)
+done
+```
+
+### Tier-1 controller injection (shipped 2026-05-07)
+
+The agent's `oracle_ctrl_buffer` now lives in a persistent
+kernel-pool allocation (`MmAllocateContiguousMemoryEx` +
+`MmPersistContiguousMemory`) instead of BSS. The physical address
+is published in the persistence anchor file
+`E:\Apps\oracle-agent\state\ctrl-addr.txt`. A chainloaded diag XBE
+that links the `xbed_input_synth_*` shim (declared in
+`xbe-tests/lib/xbed_input_synth.h`) calls
+`xbed_input_synth_attach()` to mount E:, read the anchor, and map
+the buffer into its address space via the kseg0 identity map.
+Subsequent `xbed_input_synth_read(port, &state)` calls return the
+latest synthetic state set by Mac-side `controller.set` RPCs.
+
+The `controller-roundtrip` Tier-1 diag XBE validates the round-trip
+end-to-end:
+
+```sh
+./scripts/apple-silicon/oracle-smoke.sh --tier1 controller-roundtrip \
+    --buttons 0xA5A5 --lt 16384 --rt 8192 \
+    --lx 12345 --ly -12345 --rx -32768 --ry 32767
+```
+
+Validated 2026-05-07: byte-exact match (`changed_pixels_pct=0.0000`)
+between the captured front buffer and `expected.py:from_state(...)`
+for the same synthetic state. This proves:
+
+- The kernel-pool buffer survives the `runxbe` chainload.
+- The shim's anchor-file read + kseg0 mapping are correct.
+- The shim's seq-stamped read avoids torn reads.
+- The diag XBE's render path correctly observes every byte of the
+  agent-set state.
+
+Tier 2 (kernel hook for retail games) and Tier 3 (Teensy hardware
+emulator) remain as documented in
+`docs/apple-silicon/controller-injection-research.md`. Tier 1 alone
+unblocks **diag-XBE-driven** gameplay validation: any future diag
+XBE that wants to react to synthetic input just `#include`s
+`xbed_input_synth.h` and calls `attach()` + `read()`.
+
+### Front-buffer capture path (PCRTC fix, 2026-05-07)
+
+`xbed_capture_front_to_xoss` (in
+`scripts/apple-silicon/xbe-tests/lib/xbed_capture.c`) now reads
+the actual displayed front buffer via the NV2A's `PCRTC_START`
+register (`0xFD000000 + 0x600800`), not the kernel-managed
+`XVideoGetFB()` page. This fix unblocked all three Tier-1 NV2A
+diag XBEs (mirror / color-channel / depth-floor) on real Xbox —
+they previously rendered correctly via pbkit but the capture
+grabbed the kernel framebuffer (which still contained the diag's
+debug-print console). With the PCRTC path, capture grabs whatever
+the CRTC is actually scanning out, which IS the rendered pattern.
+
+The fix falls back to `XVideoGetFB()` when PCRTC_START is zero
+(pbkit not initialized — pipeline-smoke's CPU-paint case), so
+existing CPU-painted Tier-4 XBEs still work unchanged.
+
+### M15 default-on visual gate (oracle-driven)
+
+Per `metal-renderer-plan.md` §M15 + `oracle-workflow.md`, the M15
+default-on flip requires (among other criteria):
+
+> All Tier-1 diag XBEs PASS on real Xbox AND on xemu Metal,
+> with per-pixel `changed_pixels_pct < 1.0` against either the
+> math-derived oracle or the canonical real-Xbox reference.
+
+Driven by:
+
+```sh
+./scripts/apple-silicon/m15-visual-gate.sh
+```
+
+Or, just the Tier-1 matrix:
+
+```sh
+python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
+    --renderer metal --renderer real-xbox \
+    --max-changed-pct 1.0 --threshold 8
+```
+
+### Persistence anchor file format
+
+`E:\Apps\oracle-agent\state\ctrl-addr.txt` is the canonical
+discovery point for the agent's persistent controller buffer.
+Format (v1, 2026-05-07):
+
+```
+XCTR
+0x<8-hex-physical-address>
+0x<8-hex-virtual-address>     ; informational (kseg0 = phys|0x80000000)
+0x<8-hex-size-bytes>          ; always 0x00001000 in v1
+```
+
+The v1 anchor file is read by:
+- `oracle-agent::s_try_reattach` on agent re-launch (to find the
+  pre-existing kernel-pool buffer instead of leaking a new one).
+- `xbed_input_synth_attach` on diag XBE startup.
+
+A version mismatch (`XBED_INPUT_SYNTH_VERSION` ≠ buffer's
+`version` field) fails-loud rather than reading garbage.

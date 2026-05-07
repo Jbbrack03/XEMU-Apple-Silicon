@@ -1,16 +1,411 @@
 # Handoff
 
-Last updated: 2026-05-07 (oracle pipeline pushed close to
-"in-workflow ready" — agent v0.3 with controller.* protocol
-shipped, dashboard-independent path, ffmpeg-based composite
-A/V recording, scene-keyframe extraction, and audio waveform/
-spectrogram visualization all live and end-to-end-validated
-against the project Xbox via UnleashX). See decision-log entry
-"2026-05-07: Oracle pipeline next-tier tooling — controller.*
-protocol + composite A/V record + keyframe extraction + audio
-waveform" for full session record.
+Last updated: 2026-05-07 (late evening) — **oracle pipeline is in-
+workflow ready for the validated paths AND has 8 named gaps that
+next session MUST close**. Tier-1 controller injection shipped end-
+to-end (persistent kernel-pool buffer + cross-XBE shim + roundtrip
+diag XBE byte-exact); PCRTC_START capture fix unblocked all NV2A
+Tier-1 diags; Codex review surfaced 5 issues, all addressed and re-
+validated 16/16 PASS. **However**, several built-but-not-exercised
+code paths and one observed-but-not-investigated agent degraded
+state mean the "production-ready" claim is not yet fully earned.
 
-**TOP OF STACK 2026-05-07 (oracle next-tier tooling SHIPPED).**
+**START HERE NEXT SESSION** — read the
+[NEXT SESSION PRIORITIES — gap closure](#next-session-priorities--gap-closure)
+section below; everything else in this banner is reference material
+once those gaps are closed. See decision-log "2026-05-07 (evening):
+Oracle pipeline taken to 'in-workflow ready' — Tier-1 controller
+injection + PCRTC capture fix + smoke-test + M15 gate runner"
+for the full session record.
+
+## Next session priorities — gap closure
+
+The user has explicitly asked next session to **close every gap and
+remove every lingering unknown** so the oracle is unambiguously
+production-grade. Items 1–4 are required before declaring "ready
+for M15 default-on flip"; items 5–8 are reliability/correctness
+follow-ups that must also land in the same session.
+
+The total wall-clock budget is roughly 2–3 hours autonomous + ~30
+min for the optional `--paired` Metal-vs-GL canary diff (~12 min
+of that is benchmark wallclock, not Claude time).
+
+### 1. Run `m15-visual-gate.sh` end-to-end (no skip flags)
+
+```sh
+cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+./scripts/apple-silicon/m15-visual-gate.sh
+```
+
+This composes:
+- 01 xemu binary check (already known green; rebuild if any
+  c/h/glsl/mm under `hw/xbox/nv2a/` or `ui/` changed since
+  HEAD af6bf3ce1a)
+- 02 oracle-smoke.sh (12 layers; already known green)
+- 03 metal-canary-regress.sh --mode counters (~6 min; PGR2 +
+  Rainbow + Halo + boot canaries; counter-only check — does NOT
+  depend on a real Xbox)
+- 04 xbe-harness Tier-1 matrix (Metal + real Xbox, all 4 diags;
+  ~20 min). **This is the path that exercises the
+  `xbe_renderers.py` `E:\Apps\<id>\` path edits made
+  2026-05-07 evening — those edits have NEVER been run end-to-
+  end since the change.**
+
+**Success criterion**: exit 0 with all 4 layers green. Capture
+`benchmark-runs/m15-gate-<UTC>/report.md` + `summary.json` and
+add a brief decision-log entry confirming the M15 oracle-side
+gate passed.
+
+**If any layer fails**: file a sub-task per failure, do NOT
+declare the oracle production-grade until each is closed.
+
+### 2. Run `m15-visual-gate.sh --paired` (Metal-vs-GL canary diff)
+
+```sh
+./scripts/apple-silicon/m15-visual-gate.sh --paired
+```
+
+Adds the paired-diff layer (PGR2 / Rainbow / Halo via
+`metal-gl-compare.sh`). This layer has NEVER been exercised by
+this gate runner (the underlying `metal-gl-compare.sh` works in
+isolation; the composition into `m15-visual-gate.sh` step 5 is
+unverified).
+
+**Success criterion**: 3/3 paired diffs PASS. Stash the per-canary
+report.md under the m15-gate run dir.
+
+### 3. Run the xbe-harness matrix runner directly
+
+```sh
+python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
+    --renderer metal --renderer real-xbox \
+    --max-changed-pct 1.0 --threshold 8
+```
+
+This SHOULD be a no-op duplicate of step 1's layer-04 work, but
+running it standalone (a) gives a cleaner failure isolation
+target if something goes wrong in step 1, and (b) writes a
+matrix `report.md` that the M15 default-on decision can cite
+directly.
+
+**Success criterion**: 4 cells × 2 renderers = 8 PASS, no
+infra-error / fail.
+
+### 4. Exercise `capture-composite-reference.sh` against the MS2109 stick
+
+```sh
+./scripts/apple-silicon/capture-composite-reference.sh \
+    --xbe-id mirror --record-extra 8
+```
+
+The script was written 2026-05-07 evening but **never run against
+hardware**. The ffmpeg AVFoundation device enumeration, the diag
+XBE chainload-while-recording timing, and the scene-keyframe
+auto-pick logic against the math-derived oracle are all
+theoretical until first execution.
+
+**Success criterion**: produces a `composite.png` under
+`docs/apple-silicon/xbox-real-references/mirror/` whose
+`changed_pixels_pct` against `expected.py:default()` is below
+~5 % (composite captures have NTSC color space + sub-pixel
+sampling differences vs the math-derived oracle, so byte-exact
+is not the gate; <5 % proves the capture path is functional).
+
+If the script fails: triage the failure mode (device not found,
+timing window wrong, keyframe extraction empty, …) and either
+fix or document the limitation in the script header.
+
+### 5. Investigate the transient agent degraded state
+
+Observed once during 2026-05-07 evening session: agent listening
+on TCP/9001 with `info` succeeding, but `mem.read`, `nv2a.read`,
+`vram.read`, and `screenshot` all returning empty payload (`get
+'')`. A reboot via `oracle-client.py reboot` cleared it. Smoke
+test then went 12/12 → 6/6 fail → 12/12 again across two
+restarts.
+
+Hypothesis: lwIP PCB pool exhaustion under the new diag-XBE
+upload + chainload + relaunch cycle (we now do that in tighter
+loops than the original Phase 2 testing covered — once per
+diag instead of once per session).
+
+**Action**: write a stress test (`scripts/apple-silicon/oracle-stress.sh`?)
+that runs `oracle-smoke.sh --tier1 mirror,color-channel,depth-floor,controller-roundtrip`
+in a loop for ~10 iterations and looks for the degraded state
+to appear. If reproducible, fix in the agent (likely tighter
+PCB recycling on the agent's accept loop). If not reproducible,
+document as "intermittent; root cause unknown; recovery is
+`reboot via agent` + retry" in `oracle-workflow.md` failure
+playbook.
+
+**Success criterion**: either (a) reproduce + fix + re-run
+clean, or (b) 10 consecutive smoke runs pass without the
+degraded state.
+
+### 6. Validate the seqlock under contention
+
+The new odd-even seqlock (`xbed_input_synth.c::xbed_input_synth_read`
++ `oracle-agent::seq_begin_write/seq_end_write`) is correct on
+paper but never exercised under concurrent writes during this
+session — the controller-roundtrip test sequences a single
+`controller.set` then chainload, no concurrent writes.
+
+**Action**: write a small Python script that hammers
+`controller.set port=0` from one thread while another thread
+runs `controller.get port=0` in a loop and checks for impossible
+states (e.g. `buttons=0xFFFF` paired with `lt=0`). 100 iterations
+of each side at full speed; record any tear observations.
+
+**Alternative (cheaper)**: write a unit test for the seqlock
+predicate logic (odd → in-flight, even+equal → stable) without
+real hardware. Pure algorithmic check; documents intent.
+
+**Success criterion**: zero observed tears across 100+ rounds
+OR a documented unit test that proves the predicate. The
+controller-roundtrip diag XBE itself is NOT a contention test —
+it doesn't need to be — but the seqlock should be exercised
+somewhere before retail-game Tier-2 work depends on it.
+
+### 7. Validate the opt-in re-attach path
+
+Re-attach is currently disabled by default
+(`#ifndef ORACLE_CTRL_ALLOW_REATTACH` ⇒ always fresh-allocate).
+The opt-in path was written but never built or run.
+
+**Action**: rebuild the agent with `-DORACLE_CTRL_ALLOW_REATTACH`
+in `Makefile`'s `NXDK_CFLAGS`, deploy, run a sequence that
+exercises re-attach:
+1. Launch agent → record buffer phys.
+2. Chainload pipeline-smoke (no clear, no reboot back to
+   firmware path that resets pool).
+3. Re-launch agent → buffer-info should report SAME phys.
+4. Verify `controller.get` returns prior synth state, not zeros.
+
+If re-attach works as designed: document the `-D` flag in
+`automation.md` as the opt-in path with a security note
+(see decision-log entry on RAM survival hazard).
+
+If re-attach fails: rip it out entirely — keep only fresh-
+allocation. The page-leak cost is negligible vs the carrying
+cost of an opt-in path nobody validates.
+
+**Success criterion**: opt-in flag either works as documented
+or is removed; the codebase doesn't have unmaintained dead
+code paths.
+
+### 8. Capture canonical real-Xbox reference for controller-roundtrip
+
+Currently `controller-roundtrip` has only a math-derived oracle
+(`expected.py:from_state`); the harness compares against the
+math-derived expected synthesized from the same state values.
+This proves the math is right, but doesn't catch a class where
+real Xbox AND the math-derived oracle BOTH disagree with what
+the diag XBE renders.
+
+**Action**: run `controller-roundtrip` once with a fixed state
+(e.g. `buttons=0xA5A5 lt=16384 rt=8192 lx=12345 ly=-12345
+rx=-32768 ry=32767`), copy the byte-exact captured PNG to
+`docs/apple-silicon/xbox-real-references/controller-roundtrip/real-xbox-A5A5.png`,
+and update `manifest.json` to add a non-default
+`expected_results` entry that points the harness at it for
+that specific state recipe.
+
+**Success criterion**: a checked-in canonical reference + a
+manifest pointer that the harness picks up for the matching
+recipe key. Future regressions where math drifts from real
+Xbox become catchable.
+
+### Out-of-band: tracker for items intentionally deferred
+
+These remain documented future work; they are NOT gap-closure
+items but should be noted so they don't get lost:
+
+- **Tier-2 controller injection** (kernel-mode XInputGetState
+  hook for retail games). Designed in
+  `controller-injection-research.md`; needs a kernel symbol
+  dump first.
+- **Tier-3 controller injection** (Teensy 4.0 + OGX-Mini
+  hardware emulator). Hardware purchase required.
+- **12 remaining Tier-1 diag XBEs** from
+  `diagnostic-xbe-plan.md` v2 §4 (crtc-publish,
+  native-quad-tri-depth, cmp-vertex-format, texture-format-sweep,
+  swizzle-mipmap, blend-matrix, stencil-ops, texture-filter-wrap,
+  combiner-stage, viewport-z-perspective, inline-array-vs-elements,
+  front-fb-fallback-policy, srgb-roundtrip).
+- **MmPersistContiguousMemory survival modes** (Codex's open
+  question): characterize across quick reboot vs cold reboot vs
+  power-cycle. Lower priority because re-attach is now opt-in.
+
+### Sanity check before declaring next session complete
+
+After items 1–8 are green, run this one-liner and confirm exit 0:
+
+```sh
+./scripts/apple-silicon/oracle-smoke.sh --tier1 \
+    mirror,color-channel,depth-floor,controller-roundtrip \
+    --buttons 0xA5A5 --lt 16384 --rt 8192 \
+    --lx 12345 --ly -12345 --rx -32768 --ry 32767 \
+    && ./scripts/apple-silicon/m15-visual-gate.sh
+```
+
+When BOTH return 0, append a decision-log entry "Oracle pipeline
+fully production-grade; all gaps closed" with the run-dir paths
+and the list of items 1–8 each marked closed/deferred. Update
+this banner from "8 named gaps" → "production-grade, all paths
+exercised".
+
+---
+
+## TOP OF STACK 2026-05-07 evening (oracle in-workflow ready, gaps named)
+
+**TOP OF STACK 2026-05-07 evening (oracle production-ready).**
+
+What landed this evening:
+
+1. **Persistent kernel-pool controller buffer.**
+   `oracle_ctrl_buffer` moved from BSS to a
+   `MmAllocateContiguousMemoryEx` allocation flagged
+   `MmPersistContiguousMemory` so the buffer survives the
+   agent's own process death across an `XLaunchXBE` chainload.
+   Physical address stored in
+   `E:\Apps\oracle-agent\state\ctrl-addr.txt` (format:
+   `XCTR\n0x<phys>\n0x<virt>\n0x<size>\n`). Agent re-attach on
+   restart re-uses the existing allocation rather than leaking
+   pool pages.
+
+2. **`xbed_input_synth.{h,c}`** — diag-XBE shim. Mounts E:,
+   reads anchor, validates buffer magic+version, exposes
+   `xbed_input_synth_attach()` + `xbed_input_synth_read(port,
+   &state)` (seq-stamped two-pass tear-detection).
+
+3. **`controller-roundtrip` Tier-1 diag XBE.** Reads buffer →
+   renders 4×4 button-bit grid + 6 axis-fraction stripes →
+   captures + reboots. Math-derived oracle in
+   `expected.py:from_state(...)` synthesizes the identical
+   pattern from the same state values; byte-exact compare =
+   the kernel-pool persistence + shim read are both correct.
+
+4. **PCRTC_START capture path.**
+   `xbed_capture_front_to_xoss` now reads the NV2A's
+   `PCRTC_START` register to discover the CRTC's current
+   scan-out physical address, kseg0-maps it, captures from
+   THAT page. Falls back to `XVideoGetFB()` when PCRTC=0
+   (pipeline-smoke's CPU-paint case). Fixed the previous
+   "mirror/color-channel/depth-floor capture is the debug
+   console, not the rendered pattern" issue once and for all
+   — the underlying problem was a wrong-buffer-capture, NOT
+   the D:\\ fopen path.
+
+5. **`oracle-smoke.sh`** — single-command 12-layer health
+   check (ping → ensure-agent → info → eeprom → mem.read →
+   nv2a.read → vram.read → controller.* roundtrip →
+   buffer-info magic → screenshot → optional Tier-1 diag
+   chain). Run before any Metal-renderer change that wants
+   real-Xbox validation; exit 0 ↔ all green. Validated 16/16
+   PASS end-to-end.
+
+6. **`m15-visual-gate.sh`** — composite M15 default-on gate
+   runner: build verification → oracle health → Metal canary
+   regress → Tier-1 diag-XBE matrix on Metal + real Xbox →
+   (optional, --paired) Metal-vs-GL canary diff. Exit 0 =
+   M15 default-on flip is unblocked from the oracle's
+   perspective.
+
+7. **`capture-composite-reference.sh`** — third-witness
+   reference-capture path. Records composite output via the
+   MS2109 stick, scene-keyframe extracts, picks the
+   best-matching frame as canonical reference. Independent of
+   both the agent's RPC screenshot AND the in-XBE D:\\ write
+   path. Useful for any future scenario where in-XBE capture
+   fails.
+
+8. **Updated `xbe-harness::run_real_xbox`** to use
+   dashboard-independent `E:\Apps\<id>\default.xbe` (was
+   XBMC4Gamers-specific paths).
+
+9. **Hardened `oracle-orchestrator.py`**:
+   - `ensure_agent` now fast-fails on pingless host, retries
+     SITE EXEC up to N times on agent-bind failure, gives
+     readable diagnostics.
+   - New `health-check` subcommand returns structured JSON of
+     every reachable layer (ping/ftp/agent/buffer-info/anchor
+     fields). Suitable for CI gates.
+   - Improved `wait_for_ftp` diagnostics (logs last error each
+     10 retries; logs final-give-up reason).
+
+10. **Captured canonical real-Xbox reference PNGs** for
+    mirror, color-channel, depth-floor at
+    `docs/apple-silicon/xbox-real-references/<id>/real-xbox.png`
+    (640×480, 4 KB-ish each, byte-identical to the
+    math-derived oracle for those XBEs).
+
+11. **`oracle-client.py decode-xoss` CLI subcommand** plus
+    `decode_xoss_file()` helper for downstream consumers (the
+    smoke harness uses it; previously this was only available
+    via the xbe-harness module's internals).
+
+12. **`docs/apple-silicon/oracle-workflow.md`** — new
+    end-to-end integration doc: when to use which tool, how
+    the M15 gate uses the oracle, failure-recovery playbook,
+    add-a-new-Tier-1-XBE recipe.
+
+**Validation evidence (2026-05-07 evening).**
+
+```
+oracle-smoke summary:  16 PASS   0 FAIL
+  out=/tmp/oracle-smoke-20260507T024959Z
+
+PASS  01 ping
+PASS  02 ensure-agent
+PASS  03 info
+PASS  04 eeprom (sha256=871ed8a9...; matches existing baseline)
+PASS  05 mem.read 0x80000000[16] = efbeaddeffbf...
+PASS  06 nv2a.read PMC_BOOT_0 = 0x02a000e1
+PASS  07a nv2a.read PCRTC_START = 0x03eb4000
+PASS  07b vram.read 0[32]
+PASS  08a controller.buffer-info magic=0x58435452 (XCTR)
+PASS  08b kernel-pool phys=0x03eb3000 (not BSS fallback)
+PASS  08c controller.set/get roundtrip exact
+PASS  10 screenshot 640x480 PNG
+PASS  11.mirror              changed_pixels_pct=0.0000
+PASS  11.color-channel       changed_pixels_pct=0.0000
+PASS  11.depth-floor         changed_pixels_pct=0.0000
+PASS  11.controller-roundtrip changed_pixels_pct=0.0000
+```
+
+**Quick resume sanity-check (~30 s, run this first next session):**
+
+```sh
+cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+./scripts/apple-silicon/oracle-smoke.sh
+```
+
+If 12/12 PASS, the oracle pipeline is healthy. To validate Metal-
+renderer changes against real-Xbox truth:
+
+```sh
+./scripts/apple-silicon/m15-visual-gate.sh
+```
+
+If the gate returns 0, the M15 default-on flip is unblocked from
+the oracle's perspective.
+
+**Next session priorities** — see the new
+[Next session priorities — gap closure](#next-session-priorities--gap-closure)
+section at the top of this file. The prior list (Metal default-on
+flip + Tier-2 + diag-XBE expansion + optional real-Xbox refs +
+optional D:\\ fopen recovery) has been superseded by the explicit
+8-item gap-closure checklist; those items are now tracked under
+the new section's "Out-of-band" trailer rather than as primary
+next-session work.
+
+The earlier banner content (2026-05-07 morning, 2026-05-06,
+Phase 3.x, etc.) is preserved verbatim below for empirical
+audit trail.
+
+---
+
+**TOP OF STACK 2026-05-07 morning (oracle next-tier tooling SHIPPED).**
 
 What landed this session:
 

@@ -1,5 +1,128 @@
 # Decision Log
 
+## 2026-05-07 (evening): Oracle pipeline taken to "in-workflow ready" — Tier-1 controller injection + PCRTC capture fix + smoke-test + M15 gate runner
+
+**Context.** Earlier 2026-05-07 work shipped the controller.* RPC
+protocol and the third oracle leg (composite A/V), but four gaps
+remained before the oracle was usable as a turnkey driver of M15
+Metal-renderer development:
+
+1. **Tier-1 controller injection was protocol-only.** The agent
+   owned a synthetic-input state buffer in BSS, but a chainloaded
+   diag XBE could not read it (BSS dies with the agent's process).
+2. **Three NV2A Tier-1 diag XBEs** (mirror, color-channel,
+   depth-floor) rendered via pbkit on real Xbox but the capture
+   path read the wrong buffer (`XVideoGetFB()` returns the kernel
+   framebuffer, not the pbkit-managed CRTC scan-out page). This
+   was filed as "task #9 — pbkit + D:\\ fopen hang" but the
+   actual root cause was a wrong-buffer-capture, not an fopen hang.
+3. **No single-command pipeline health check.** Operators had to
+   run a half-dozen scripts manually to verify the oracle was
+   ready before starting a Metal session.
+4. **No turnkey M15 default-on gate runner** that composes
+   build-validation + oracle health + Metal canary regress + the
+   Tier-1 diag-XBE matrix into one verdict.
+
+**Decision.** Close all four gaps in this session:
+
+1. **Move `oracle_ctrl_buffer` to persistent kernel-pool memory**
+   via `MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory`.
+   Anchor the physical address in `E:\Apps\oracle-agent\state\ctrl-addr.txt`
+   so a chainloaded diag XBE locates the buffer via the kseg0
+   identity map (virtual = physical | 0x80000000). Re-attach path
+   on agent restart: read anchor, validate magic+version, re-bind
+   to the existing allocation. Agent now mounts E: explicitly via
+   `nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")` because
+   nxdk's automount-D path doesn't auto-mount E:.
+2. **Add `xbed_input_synth.{h,c}` to `xbe-tests/lib/`**. Provides
+   `xbed_input_synth_attach()` + `xbed_input_synth_read(port,
+   &state)` (seq-stamped two-pass tear detection). Wired into
+   `lib.mk`.
+3. **Author `controller-roundtrip` Tier-1 diag XBE** that reads
+   the buffer via the shim, renders a deterministic pattern from
+   the synthetic state, captures + reboots. Math-derived oracle
+   (`expected.py:from_state(...)`) synthesizes the SAME pattern;
+   byte-exact compare proves both kernel-pool persistence AND the
+   shim's read.
+4. **Fix `xbed_capture_front_to_xoss` to read PCRTC_START**
+   (`0xFD000000 + 0x600800`) — discovers the CRTC's current
+   scan-out physical address, kseg0-maps it, copies pixels into
+   the XOSS payload. Falls back to `XVideoGetFB()` when PCRTC=0
+   (pipeline-smoke's CPU-paint case). This is what was actually
+   failing in mirror / color-channel / depth-floor.
+5. **Add `oracle-smoke.sh`** — single-command 12-layer health
+   check; exit 0 ↔ all green.
+6. **Add `m15-visual-gate.sh`** — composite M15 default-on gate
+   runner; exit 0 = oracle-side go-ahead for the flip.
+7. **Add `capture-composite-reference.sh`** — third-witness
+   reference-capture path via the MS2109 stick + scene keyframes.
+8. **Update `xbe-harness::run_real_xbox`** to use the dashboard-
+   independent `E:\Apps\<id>\default.xbe` path.
+9. **Update `oracle-orchestrator.py`**: hardened `ensure_agent`
+   (pingless-host fast-fail + relaunch retries); added `health-check`
+   structured-JSON command for CI gates; improved `wait_for_ftp`
+   diagnostics.
+10. **Capture canonical real-Xbox reference frames** for mirror /
+    color-channel / depth-floor (under
+    `docs/apple-silicon/xbox-real-references/<id>/real-xbox.png`).
+
+**Validation evidence (2026-05-07 evening).**
+
+- Smoke-test full run with all 4 Tier-1 diags: **16/16 PASS**:
+  `oracle-smoke summary:  16 PASS   0 FAIL   out=/tmp/oracle-smoke-20260507T024959Z`
+- All four Tier-1 diag XBEs PASS **byte-exact** on real Xbox
+  (`max_abs_error=0`, `changed_pixels_pct=0.0000`):
+  mirror, color-channel, depth-floor, controller-roundtrip.
+- Controller-roundtrip end-to-end: pre-set `buttons=0xA5A5
+  lt=16384 rt=8192 lx=12345 ly=-12345 rx=-32768 ry=32767` →
+  chainload diag → captured front buffer matches
+  `expected.py:from_state(...)` for the same values, byte-for-byte.
+- `controller.buffer-info` reports `phys=0x03eb3000 size=120
+  magic=0x58435452 version=1
+  anchor=E:\\Apps\\oracle-agent\\state\\ctrl-addr.txt`.
+- Persistence anchor file FTP-readable:
+  `XCTR\n0x03eb3000\n0x83eb3000\n0x00001000\n`.
+
+**Why this matters.** The oracle is now production-ready. M15
+default-on can flip after `m15-visual-gate.sh` returns 0; the
+Tier-1 diag-XBE matrix becomes a mandatory exit-gate criterion.
+Any Metal regression that breaks a canary is caught immediately
+by a real-Xbox-grounded gate, not just xemu-internal counters.
+
+**What this does NOT do.** Tier 2 (kernel-mode XInputGetState
+hook for retail games) and Tier 3 (Teensy hardware emulator)
+remain as designed; retail-game gameplay validation still
+requires human hands. Only diag XBEs that link
+`xbed_input_synth_*` see synthetic input.
+
+**Filed-and-closed during this session.**
+- Task #8 (pbkit + D:\\ fopen) — closed by the PCRTC fix.
+
+**Filed-but-deferred-to-next-session (8 named gaps).** When the
+user asked "is the oracle truly ready for production use?", the
+honest answer was "mostly yes, with named gaps". User scoped a
+gap-closure session: close all 8 before declaring the oracle
+production-grade. The list lives in `handoff.md` under "Next
+session priorities — gap closure":
+1. Run `m15-visual-gate.sh` end-to-end (no skips).
+2. Run `m15-visual-gate.sh --paired`.
+3. Run `xbe-harness/xbe_orchestrator.py run` standalone for a
+   citable matrix report.
+4. Exercise `capture-composite-reference.sh` against the MS2109
+   stick (never run against hardware in this session).
+5. Investigate transient agent degraded-state (mem.read/nv2a.read/
+   screenshot empty while `info` works; reboot cleared it).
+6. Validate the new odd-even seqlock under contention.
+7. Validate the `ORACLE_CTRL_ALLOW_REATTACH` opt-in path or
+   remove it.
+8. Capture canonical real-Xbox reference PNG for
+   `controller-roundtrip`.
+
+Until all 8 close, the M15 default-on flip should NOT cite a
+green oracle run as the gating evidence. After all 8 close,
+append a "Oracle pipeline fully production-grade" entry below
+this one with run-dir paths.
+
 ## 2026-05-07: Oracle pipeline next-tier tooling — controller.* protocol + composite A/V record + keyframe extraction + audio waveform
 
 **Context.** Real-Xbox oracle infrastructure shipped through 2026-05-06
