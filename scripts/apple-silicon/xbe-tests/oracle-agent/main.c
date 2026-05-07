@@ -28,6 +28,7 @@
  * Built with nxdk; lwIP TCP via the same pattern as the httpd sample.
  */
 #include "commands.h"
+#include "controller.h"
 #include "protocol.h"
 
 #include <hal/debug.h>
@@ -53,20 +54,26 @@ struct cmd_entry {
 };
 
 static const struct cmd_entry s_cmds[] = {
-    { "info",          cmd_info          },
-    { "eeprom",        cmd_eeprom        },
-    { "mem.read",      cmd_mem_read      },
-    { "mem.write",     cmd_mem_write     },
-    { "nv2a.read",     cmd_nv2a_read     },
-    { "nv2a.write",    cmd_nv2a_write    },
-    { "vram.read",     cmd_vram_read     },
-    { "screenshot",    cmd_screenshot    },
-    { "runxbe",        cmd_runxbe        },
-    { "unsafe.enable", cmd_unsafe_enable },
-    { "reboot",        cmd_reboot        },
-    { "bye",           cmd_bye           },
-    { "help",          cmd_help          },
-    { NULL,            NULL              },
+    { "info",                    cmd_info                    },
+    { "eeprom",                  cmd_eeprom                  },
+    { "mem.read",                cmd_mem_read                },
+    { "mem.write",               cmd_mem_write               },
+    { "nv2a.read",               cmd_nv2a_read               },
+    { "nv2a.write",              cmd_nv2a_write              },
+    { "vram.read",               cmd_vram_read               },
+    { "screenshot",              cmd_screenshot              },
+    { "runxbe",                  cmd_runxbe                  },
+    { "unsafe.enable",           cmd_unsafe_enable           },
+    { "controller.set",          cmd_controller_set          },
+    { "controller.get",          cmd_controller_get          },
+    { "controller.button",       cmd_controller_button       },
+    { "controller.axis",         cmd_controller_axis         },
+    { "controller.clear",        cmd_controller_clear        },
+    { "controller.buffer-info",  cmd_controller_buffer_info  },
+    { "reboot",                  cmd_reboot                  },
+    { "bye",                     cmd_bye                     },
+    { "help",                    cmd_help                    },
+    { NULL,                      NULL                        },
 };
 
 static int dispatch(struct netconn *c, char *line)
@@ -167,8 +174,13 @@ static void handle_client(struct netconn *c)
 int main(void)
 {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    debugPrint("\nxbox-oracle-agent v0.2 (Phase 2)\n");
+    debugPrint("\nxbox-oracle-agent v0.3 (Phase 2 + controller.*)\n");
     debugPrint("Bringing up network...\n");
+
+    /* Initialize the synthetic controller-state buffer up front so the
+     * `controller.buffer-info` and `controller.get` commands return
+     * sane values even before any client has called `controller.set`. */
+    oracle_ctrl_init();
 
     nxNetInit(NULL);
 

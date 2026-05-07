@@ -83,9 +83,14 @@ _FTP_ERRORS = (OSError,) + tuple(ftplib.all_errors)
 DEFAULT_HOST = os.environ.get("ORACLE_HOST", "192.168.0.200")
 DEFAULT_FTP_USER = os.environ.get("ORACLE_FTP_USER", "xbox")
 DEFAULT_FTP_PASS = os.environ.get("ORACLE_FTP_PASS", "xbox")
+# Default agent path is dashboard-independent under UnleashX
+# (current dashboard since 2026-05-06). Old XBMC-relative paths
+# `Special://xbmc/Apps/oracle-agent/default.xbe` and
+# `E:\\XBMC4Gamers\\Apps\\oracle-agent\\default.xbe` are still
+# accepted via $ORACLE_AGENT_PATH for legacy setups.
 DEFAULT_AGENT_PATH = os.environ.get(
     "ORACLE_AGENT_PATH",
-    "Special://xbmc/Apps/oracle-agent/default.xbe",
+    r"E:\Apps\oracle-agent\default.xbe",
 )
 DEFAULT_AGENT_PORT = int(os.environ.get("ORACLE_PORT", 9001))
 
@@ -174,19 +179,85 @@ def wait_for_agent(host: str, port: int = DEFAULT_AGENT_PORT,
     return oc.wait_until_ready(host, port, retries, delay)
 
 
+# XBE-launch FTP verb auto-detected from dashboard:
+#   - XBMC4Gamers (the project Xbox prior to 2026-05-06) used `SITE RunXBE`.
+#   - UnleashX (current dashboard) uses `SITE EXEC`. Verified via
+#     `SITE HELP` round-trip 2026-05-06: returns a tab-separated
+#     command table that includes EXEC and excludes RunXBE.
+# Override via env if a future dashboard or BIOS combination needs
+# something else. Auto-detect runs once per FTP session; we cache the
+# resolved verb on the FTP object via a sidecar attribute.
+DEFAULT_LAUNCH_VERB = os.environ.get("ORACLE_LAUNCH_VERB", "")
+
+
+def _read_site_help(ftp: ftplib.FTP) -> List[str]:
+    """Return the verbs advertised by `SITE HELP`. UnleashX returns a
+    multi-line tab-separated table without dash-continuation framing,
+    which Python's ftplib treats as a protocol error. Catch + parse
+    raw."""
+    verbs: List[str] = []
+    try:
+        ftp.putcmd("SITE HELP")
+        while True:
+            line = ftp.getmultiline()
+            stripped = line.strip()
+            # The terminal status line begins with three digits and a
+            # space (no dash). Anything else is a verb table row.
+            if (len(stripped) >= 4 and stripped[:3].isdigit()
+                    and stripped[3] == " "):
+                break
+            for tok in stripped.replace("\t", " ").split():
+                tok = tok.strip().upper()
+                if tok and tok.isalpha():
+                    verbs.append(tok)
+    except _FTP_ERRORS as e:
+        # On older firmware that doesn't speak SITE HELP cleanly,
+        # the protocol error itself often contains the table — Python
+        # raised it because the framing was non-standard. Mine the
+        # exception message for verbs so we don't have to fall back to
+        # a hard-coded default.
+        verbs.extend(
+            tok.strip().upper()
+            for tok in str(e).replace("\t", " ").split()
+            if tok.strip().isalpha()
+        )
+    return verbs
+
+
+def _detect_launch_verb(ftp: ftplib.FTP) -> str:
+    """Return the FTP verb the connected dashboard uses to chainload an
+    XBE. Honors $ORACLE_LAUNCH_VERB if set; otherwise probes
+    `SITE HELP`. Defaults to `EXEC` (UnleashX) — the project Xbox's
+    current dashboard — if probing fails."""
+    if DEFAULT_LAUNCH_VERB:
+        return DEFAULT_LAUNCH_VERB
+    verbs = _read_site_help(ftp)
+    # XBMC4Gamers's `RunXBE` outranks UnleashX's `EXEC` only when both
+    # are present (would only happen on a heavily customized setup;
+    # cheap tie-breaker that prefers the more specific verb).
+    if "RUNXBE" in verbs:
+        return "RunXBE"
+    if "EXEC" in verbs:
+        return "EXEC"
+    return "EXEC"
+
+
 def site_run_xbe(host: str, xbe_path: str,
                  user: str = DEFAULT_FTP_USER, password: str = DEFAULT_FTP_PASS,
                  quiet: bool = False) -> None:
-    """Issue `SITE RunXBE <path>` over FTP. The Xbox tears down FTP
-    immediately as the kernel chainloads the named XBE, so we expect
-    the connection to be reset; that is not an error."""
+    """Issue `SITE <verb> <path>` over FTP, where <verb> is auto-
+    detected from the dashboard's `SITE HELP` table (RunXBE on
+    XBMC4Gamers, EXEC on UnleashX). The Xbox tears down FTP immediately
+    as the kernel chainloads the named XBE, so we expect the connection
+    to be reset; that is not an error."""
     try:
         ftp = ftplib.FTP(host, timeout=8)
         ftp.login(user, password)
         try:
-            resp = ftp.sendcmd(f"SITE RunXBE {xbe_path}")
+            verb = _detect_launch_verb(ftp)
+            resp = ftp.sendcmd(f"SITE {verb} {xbe_path}")
             if not quiet:
-                _log(f"SITE RunXBE {xbe_path} → {resp}")
+                _log(f"SITE {verb} {xbe_path} → {resp}")
         finally:
             try:
                 ftp.quit()
@@ -195,7 +266,7 @@ def site_run_xbe(host: str, xbe_path: str,
     except _FTP_ERRORS as e:
         # Connection-reset-by-peer is normal here.
         if not quiet:
-            _log(f"SITE RunXBE: connection torn down (expected): {e}")
+            _log(f"SITE <launch>: connection torn down (expected): {e}")
 
 
 # ---------- agent lifecycle ----------

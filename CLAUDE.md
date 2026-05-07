@@ -106,12 +106,24 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
 
 - `scripts/apple-silicon/xbe-tests/oracle-agent/` — nxdk XBE,
   the persistent network-listening oracle. TCP 9001.
-  **Phase 1 + 2 SHIPPED**: info / eeprom / reboot / bye / help
-  / mem.read / mem.write (gated) / nv2a.read / nv2a.write
-  (gated) / vram.read / screenshot (XOSS-framed) / runxbe
-  (chainload another XBE) / unsafe.enable. Source split
-  across main.c + protocol.{h,c} + commands.{h,c}. RAM-only
-  allowlist for mem.read/write; typed nv2a.read/write for BAR0.
+  **Phase 1 + 2 + v0.3 controller.* SHIPPED**: info / eeprom /
+  reboot / bye / help / mem.read / mem.write (gated) / nv2a.read /
+  nv2a.write (gated) / vram.read / screenshot (XOSS-framed) /
+  runxbe (chainload another XBE) / unsafe.enable, plus (v0.3,
+  2026-05-07) controller.set / controller.get / controller.button
+  / controller.axis / controller.clear / controller.buffer-info.
+  Source: main.c + protocol.{h,c} + commands.{h,c} +
+  controller.{h,c}. RAM-only allowlist for mem.read/write; typed
+  nv2a.read/write for BAR0. Synthetic-input state buffer is
+  `oracle_ctrl_buffer` (magic=`'XCTR'`, version=1, 4×26-byte port
+  states = 120 bytes total — triggers are int16 0..32767 per
+  xemu's axis range, sticks are int16 -32768..32767, buttons mask
+  matches xemu's `CONTROLLER_BUTTON_*` byte-for-byte). Button/axis
+  vocabulary mirrors `ui/xemu-input.c:101-127`
+  so a `XEMU_RECORD_INPUT` CSV replays via
+  `scripts/apple-silicon/controller-replay.py` without translation.
+  Now lives at `/E/Apps/oracle-agent/default.xbe` (was
+  `/E/XBMC4Gamers/...` until 2026-05-07).
 - `scripts/apple-silicon/xbe-tests/eeprom-dump/` — nxdk XBE,
   one-shot 256-byte EEPROM capture (raw + decrypted info file).
 - `scripts/apple-silicon/xbe-tests/pipeline-smoke/` — **Phase

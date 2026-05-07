@@ -1,17 +1,284 @@
 # Handoff
 
-Last updated: 2026-05-06 (composite-capture leg + UnleashX dashboard
-switch SHIPPED — `tools/xemu-capture/` Swift `.app` provides
-TCC-stable native macOS capture from the MS2109 USB composite stick;
-real Xbox now boots UnleashX (not XBMC4Gamers) via swap of
-`/C/evoxdash.xbe` chainloader; iND-BiOS boot mechanism documented
-empirically. The `oracle-orchestrator.py` STILL uses `SITE RunXBE`
-which UnleashX rejects with 502 — first action next session is to
-update it to `SITE EXEC` so the agent can be launched again.) See
-decision-log entries "2026-05-06: xemu-capture native macOS Swift
-app for MS2109 composite oracle leg" + "2026-05-06: Real Xbox
-dashboard swapped XBMC4Gamers → UnleashX; iND-BiOS boot
-mechanism empirically determined" for full context.
+Last updated: 2026-05-07 (oracle pipeline pushed close to
+"in-workflow ready" — agent v0.3 with controller.* protocol
+shipped, dashboard-independent path, ffmpeg-based composite
+A/V recording, scene-keyframe extraction, and audio waveform/
+spectrogram visualization all live and end-to-end-validated
+against the project Xbox via UnleashX). See decision-log entry
+"2026-05-07: Oracle pipeline next-tier tooling — controller.*
+protocol + composite A/V record + keyframe extraction + audio
+waveform" for full session record.
+
+**TOP OF STACK 2026-05-07 (oracle next-tier tooling SHIPPED).**
+
+What landed this session:
+
+1. **`oracle-orchestrator.py` — auto-detects launch verb** between
+   XBMC4Gamers (`SITE RunXBE`) and UnleashX (`SITE EXEC`) by
+   probing the `SITE HELP` table. Falls back to `EXEC` (UnleashX,
+   the project's current dashboard) on probe failure. Override via
+   `$ORACLE_LAUNCH_VERB` if a future dashboard needs something
+   else. Closes task #13.
+
+2. **Oracle agent moved to `/E/Apps/oracle-agent/default.xbe`**
+   — dashboard-independent path. `DEFAULT_AGENT_PATH` updated to
+   `r"E:\Apps\oracle-agent\default.xbe"`. Old `/E/XBMC4Gamers/`
+   path still accepted via `$ORACLE_AGENT_PATH` for legacy setups.
+   Closes task #14. End-to-end validated:
+   `oracle-orchestrator.py ensure-agent` issues
+   `SITE EXEC E:\Apps\oracle-agent\default.xbe → 200 EXEC command
+   succeeded; agent ready at 192.168.0.200:9001`.
+
+3. **Oracle agent v0.3 — `controller.*` synthetic-input protocol.**
+   Added `scripts/apple-silicon/xbe-tests/oracle-agent/controller.{h,c}`.
+   New RPCs: `controller.set port=N [buttons=…] [lt=…] [rt=…]
+   [lx=…] [ly=…] [rx=…] [ry=…]`,
+   `controller.button port=N name=<id> value=<0|1>`,
+   `controller.axis port=N name=<id> value=<int>`,
+   `controller.get [port=N]`, `controller.clear [port=N]`,
+   `controller.buffer-info`. Backed by `oracle_ctrl_buffer`
+   (magic=`'XCTR'`, version=1, 4 ports of 26 bytes each = 120
+   total). **ABI matches xemu's ControllerState verbatim**
+   (post-2026-05-07 Codex review): button bits at the same
+   positions as `enum controller_state_buttons_mask`
+   (`ui/xemu-input.h:41-57`); triggers are int16 0..32767
+   (xemu axis range, NOT the post-`>> 7` Xbox HID-report u8);
+   sticks are int16 -32768..32767. So a `XEMU_RECORD_INPUT` CSV
+   replays through the agent without any value-domain
+   translation. Each port has `seq` + `timestamp_us` for
+   ordering / freshness. Phase 1 = protocol + state buffer only
+   (the buffer is in agent BSS). Tier 1 (cross-XBE shared kernel
+   pool) and Tier 2 (kernel-mode XInput hook) are designed but
+   not implemented — see `controller-injection-research.md`.
+   Built (`bin/default.xbe` = 401 408 bytes) and deployed to
+   `/E/Apps/oracle-agent/`; every command end-to-end validated
+   on the project Xbox (15-button bit audit confirms each
+   xemu-vocab name maps to the canonical bit; trigger value
+   32000 stored correctly without u8 saturation).
+
+4. **`scripts/apple-silicon/controller-replay.py`** — Mac-side
+   replay tool. Parses `XEMU_RECORD_INPUT` format CSVs
+   (`time_ms,control,value`, same vocabulary as `xemu-input.c`),
+   feeds each event through the agent at the original wall-clock
+   cadence (`--rate-multiplier` allows time warp). Reports per-event
+   jitter (mean / median / max / p95) so we can see how close to
+   real-time the network round-trip can drive the buffer. End-to-end
+   validated on a small synthetic CSV: 8 events delivered in 360 ms,
+   25.7 ms mean jitter (network RTT to Xbox over LAN). Will become
+   the production driver once Tier 1 / Tier 2 closes the
+   buffer→game-input loop.
+
+5. **`scripts/apple-silicon/composite-record.sh`** — wraps `ffmpeg
+   -f avfoundation` with NTSC 720x480 @ 30 fps + 48 kHz stereo
+   audio capture from the MS2109 USB stick. Resolves substring
+   device names → numeric indices via `-list_devices true`. Uses
+   `h264_videotoolbox` (HW-accelerated on Apple Silicon) + `aac`.
+   Emits `<benchmark-runs>/<UTC-stamp>-composite-<label>/{video.mp4,
+   capture-meta.json, capture-stderr.log}`. End-to-end validated:
+   10 s capture of UnleashX dashboard via composite cable produced
+   5.18 MB H.264 + AAC mp4 with `width=720 height=480 codec=h264`
+   (verified via `ffprobe`).
+
+6. **`scripts/apple-silicon/extract-keyframes.py`** — ffmpeg
+   `select=gt(scene,T)` scene-change keyframe extractor +
+   optional `fps=1/N` time-driven extractor. ARCHITECTURE NOTE:
+   an earlier draft chained `gt(t-prev_selected_t,N)` into the
+   select expression so ffmpeg would do min-gap filtering itself;
+   empirically that broke the `scene` metric (once a frame is
+   suppressed, the next frame's scene_score is computed against
+   the *previous emitted* frame instead of the prior input
+   frame). Fixed by letting ffmpeg emit every scene match and
+   applying min-gap as a Python post-filter, deleting suppressed
+   PNGs. Output: `<run>/keyframes/{scene/0001.png ...,
+   timed/0001.png ..., scene-timestamps.csv, manifest.json}`.
+   End-to-end validated on the 10 s composite capture: 1 scene
+   detection + 5 timed (every 2 s) keyframes.
+
+7. **`scripts/apple-silicon/audio-waveform.py`** — the audio
+   oracle leg. Demuxes mono 48 kHz s16 PCM via ffmpeg, then
+   renders (a) `waveform.png` via `showwavespic`, (b)
+   `spectrogram.png` via `showspectrumpic` (log-frequency, hann
+   window, legend enabled), (c) `audio-stats.json` (peak / RMS
+   / silencedetect intervals at -50 dBFS / clipping count via
+   direct WAV scan). Output bundle is the visual-PNG analog of
+   the agent's `screenshot` capture but for the audio path —
+   agents can pixel-compare the real-Xbox waveform.png against
+   xemu's waveform.png to catch dropouts, clipping, silence
+   regions, and pitch drift without listening. Validated on the
+   10 s composite capture: 1.58 s of audio extracted, peak
+   −7.84 dBFS, RMS −9.23 dBFS, 0 silence intervals, 0 clipping
+   samples — UnleashX dashboard chime detected cleanly.
+
+8. **`docs/apple-silicon/controller-injection-research.md`** —
+   honest design/feasibility doc for the rest of the controller
+   journey. Three tiers:
+   - **Tier 1 (RECOMMENDED NEXT):** shared-buffer + diag-XBE shim.
+     Move agent's buffer from BSS to `ExAllocatePoolWithTag` so
+     the physical address is stable across `XLaunchXBE`; add
+     `xbe-tests/lib/xbed_input_synth.{h,c}` so any diag XBE
+     opts in with two lines. Solves "validate gameplay scenes
+     in our own diag XBEs" — does NOT solve retail games.
+   - **Tier 2 (HARDER, FUTURE):** kernel hook on
+     `OhciControllerInterruptDispatch` (or nxdk-equivalent
+     symbol) so retail games see synthetic input. Risk
+     register R1–R5 included; needs a kernel symbol dump from
+     this iND-BiOS build first (use agent's `mem.read` to
+     walk the kernel's PE export table).
+   - **Tier 3 (FALLBACK):** Teensy 4.0 + `OGX-Mini` firmware
+     emulating an OG Xbox controller; Mac drives over serial.
+     ~$50 hardware, no Xbox-side code; works regardless of
+     iND-BiOS revision.
+
+**Key end-to-end smoke-test (validates the full pipeline):**
+
+```sh
+# 1. Bring the agent up at the new path via SITE EXEC
+python3 scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+# 2. Drive synthetic input
+python3 scripts/apple-silicon/controller-replay.py /tmp/test-replay.csv \
+    --rate-multiplier 1 --clear-on-start
+# 3. Record 10 s of composite output
+./scripts/apple-silicon/composite-record.sh --duration 10 --label demo
+# 4. Extract scene-change + timed keyframes
+python3 scripts/apple-silicon/extract-keyframes.py \
+    benchmark-runs/<latest>-composite-demo/video.mp4 \
+    --threshold 0.20 --every-s 2 --max-keyframes 15
+# 5. Render audio waveform + spectrogram + stats
+python3 scripts/apple-silicon/audio-waveform.py \
+    benchmark-runs/<latest>-composite-demo/video.mp4
+```
+
+This pipeline is the foundation for all future xemu-vs-real-Xbox
+gameplay-validation runs.
+
+**Known limitation: the controller buffer is not yet wired into a
+running game.** Phase 1 ships the protocol + state buffer + Mac
+replay. The "delivery to a running XBE's input subsystem" path is
+documented in `controller-injection-research.md` as Tier 1 (next
+session, ~1 session of work) and Tier 2 (~2-3 sessions). The
+oracle agent v0.3 RPCs are the input layer; the diag-XBE shim and
+the kernel hook are the output layers.
+
+**Known limitation (carried from 2026-05-06): pbkit + D:\\ fopen
+hang on real-Xbox Tier-1 diag XBEs.** Mirror, color-channel,
+depth-floor all chainload but don't write `D:\<id>-capture.bin`.
+The math-derived oracle is a fully valid Tier-1 reference per
+`diagnostic-xbe-plan.md` v2 §2.2; the missing real-Xbox capture
+just means we can't compare against what the Xbox actually
+rendered. Now that `composite-record.sh` exists, we can also
+validate Tier-1 diags via the composite capture leg (run the
+diag, capture the resulting render via the MS2109 stick, compare
+post-resolve PNG against the math-derived oracle). That bypasses
+the D:\\ write entirely.
+
+**Quick resume sanity-check (~30 s, run this first next session):**
+
+```sh
+# 1. Xbox alive + agent path under UnleashX
+python3 scripts/apple-silicon/oracle-orchestrator.py status      # ping/ftp green; agent may be 'false' (cold)
+python3 scripts/apple-silicon/oracle-orchestrator.py ensure-agent  # → "200 EXEC command succeeded; agent ready"
+
+# 2. Confirm v0.3 + post-Codex ABI is live
+python3 scripts/apple-silicon/oracle-client.py info               # expect "v0.3 (Phase 2 + controller.*)"
+python3 scripts/apple-silicon/oracle-client.py raw controller.buffer-info
+# → addr=0x... size=120 magic=0x58435452 version=1 ports=4 port_state_size=26
+#   (size=120 + port_state_size=26 confirms the post-Codex int16-trigger fix)
+
+# 3. End-to-end gameplay-style replay smoke
+python3 scripts/apple-silicon/controller-replay.py \
+    scripts/apple-silicon/input-scripts/pgr2-smoke.csv --rate-multiplier 100 --dry-run
+# → events_total > 0; no parse errors. (--rate-multiplier 100 collapses
+#   wall-clock so the dry-run finishes immediately.)
+```
+
+If anything in the sanity check fails, the Codex-validated diff in
+this commit is the source of truth — re-deploy
+`scripts/apple-silicon/xbe-tests/oracle-agent/bin/default.xbe` (built
+post-Codex; 401 408 bytes) to `/E/Apps/oracle-agent/default.xbe` via
+FTP and re-run `ensure-agent`.
+
+**Next session priorities (in order):**
+
+1. **Tier 1 controller injection — diag-XBE shim
+   (HIGHEST PRIORITY).** This closes the
+   loop for diag-XBE-driven gameplay validation. Concrete steps:
+   1. Move `oracle_ctrl_buffer` from BSS to a kernel-pool allocation
+      (`ExAllocatePoolWithTag(NonPagedPool, sizeof(...), 'XCTR')`)
+      so the physical address is stable across `XLaunchXBE`. Update
+      `controller.buffer-info` to report the kernel-pool address
+      (not the BSS address it returns today).
+   2. Add `xbe-tests/lib/xbed_input_synth.{h,c}` with two functions:
+      `xbed_input_synth_attach(port_index)` (locates the buffer via
+      a known kernel-pool tag walk) and
+      `xbed_input_synth_read(struct oracle_ctrl_port_state *out)`.
+      Wire into `lib.mk`.
+   3. Author `xbe-tests/controller-roundtrip/` Tier-1 diag XBE: each
+      frame, read the synthetic state and composite a per-event
+      color stripe to disk. The orchestrator pre-sets state via
+      `controller.set`, chainloads the diag, pulls the resulting
+      PNG, compares against a math-derived oracle.
+   4. Estimated effort: ~1 session.
+   - **Success criteria:** the roundtrip diag PASSES the xbe-harness
+     gate at `--max-changed-pct 1.0` against its math-derived
+     `expected.py`, and the buffer's physical address is stable
+     across two consecutive `runxbe` chainloads.
+   - **Reference:** `docs/apple-silicon/controller-injection-research.md`
+     §"Tier 1" and §"Cross-XBE persistence".
+
+2. **Kernel symbol dump from the project Xbox.** Use the agent's
+   `mem.read` to walk the kernel's PE export table (start at the
+   xboxkrnl base, read the DOS header → PE header → export
+   directory). Stash the full `<symbol_name, RVA>` table under
+   `/Users/jbbrack03/XEMU_MacOS/xbox-oracle-backup/2026-05-06/kernel-symbols/`
+   (per-console; keep OUT of repo per the existing `xbox-oracle-backup/`
+   policy). Cheap to do (~30 minutes), unblocks every future
+   kernel-mode work item including Tier 2 controller hooks.
+   - **Success criteria:** the dump captures
+     `OhciControllerInterruptDispatch` (or the nxdk-equivalent
+     symbol) with a stable RVA across two boots.
+
+3. **Run the full M15 default-on visual gate via xbe-harness.**
+   The dashboard, agent, oracle pipeline, and all three reference
+   legs (math-derived, agent screenshot, composite capture) are
+   operational. Drive the matrix runner across PGR2 / Rainbow /
+   Crimson / SC2 / one broader-sweep title and capture the
+   verdicts. Use math-derived as the Tier-1 reference if pbkit +
+   D:\\ remains blocked.
+   - **Command:** `python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py
+     run --renderer metal --max-changed-pct 1.0`
+   - **Success criteria:** every cell on Metal PASSES against
+     math-derived (or real-Xbox-canonical, whichever is recorded
+     for that XBE).
+
+4. **(Optional, lower priority) Recover the pbkit + D:\\ fopen
+   path** so Tier-1 diags can write canonical real-Xbox references
+   without composite capture. Now that composite-capture provides
+   an alternative reference path, this is no longer a hard
+   blocker — but the in-XBE D:\\ write is still the cleanest
+   Tier-1 oracle. Try: `pb_kill()` before `fopen`; reduce render
+   frame count 300 → 60; add `fflush()` + check `fclose` rc.
+
+5. **(Optional, opportunistic) Capture canonical real-Xbox
+   references for the three Tier-1 diag XBEs** (mirror,
+   color-channel, depth-floor) using `composite-record.sh`.
+   Boot the diag, hold the render loop, capture via the MS2109
+   stick, save under `docs/apple-silicon/xbox-real-references/<id>/`.
+   This unblocks the GL diag-XBE cells in the matrix (which
+   currently fail because the GL renderer has no in-renderer
+   screenshot path).
+
+**Track-B (Metal default-on flip) remains queued behind this
+session's items.** When all five items above are green, M15
+default-on can be considered for the flip. See
+`docs/apple-silicon/metal-renderer-plan.md` §M15 for the
+complete exit-gate criteria.
+
+The earlier banner content (xemu-capture, dashboard switch,
+Phase 3.x, Phase 2 hardening) is preserved verbatim below for
+empirical audit trail.
+
+---
 
 **TOP OF STACK 2026-05-06 (xemu-capture + UnleashX shipped).**
 

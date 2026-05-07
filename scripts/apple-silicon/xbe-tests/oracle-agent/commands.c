@@ -32,7 +32,7 @@
 
 #define EEPROM_SMBUS_ADDR  0xA8
 #define EEPROM_SIZE        256
-#define VERSION_STR        "xbox-oracle-agent v0.2 (Phase 2)"
+#define VERSION_STR        "xbox-oracle-agent v0.3 (Phase 2 + controller.*)"
 #define ORACLE_MAX_READ_LEN (1u * 1024u * 1024u) /* 1 MiB */
 #define ORACLE_MAX_WRITE_LEN 1024u
 #define NV2A_BAR0_BASE     0xFD000000u
@@ -385,6 +385,12 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "screenshot                            capture front buffer (XOSS+pixels)");
     op_send_line(c, "runxbe path=<xbox-path>               chainload another XBE");
     op_send_line(c, "unsafe.enable                         arm mem.write + nv2a.write");
+    op_send_line(c, "controller.set port=N [...]           update synthetic input state");
+    op_send_line(c, "controller.button port=N name=X value=V edit one button by xemu name");
+    op_send_line(c, "controller.axis   port=N name=X value=V edit one axis by xemu name");
+    op_send_line(c, "controller.get [port=N]               read back synthetic input state");
+    op_send_line(c, "controller.clear [port=N]             zero one or all ports");
+    op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
     op_send_line(c, "reboot                                reboot to dashboard");
     op_send_line(c, "bye                                   close connection");
     op_send_line(c, "help                                  this list");

@@ -1,16 +1,26 @@
 # Benchmark Automation
 
-Last updated: 2026-05-06 (real-Xbox oracle Phase 1 + Phase 2 +
-Phase 3.0 SHIPPED — orchestrator pipeline validated end-to-end
-against the project Xbox via the `pipeline-smoke` Tier-4 diag
-XBE. Captured framebuffer SHA-256 byte-for-byte matches
-math-derived expected. Mac-side wrappers `oracle-client.py` +
-`oracle-orchestrator.py` are live; agent ships nine commands
-(mem/nv2a/vram read+write, screenshot, runxbe, unsafe.enable,
-help) on top of Phase 1's info/eeprom/reboot/bye. See "Real
-Xbox oracle agent", "oracle-client.py", "oracle-orchestrator.py",
-and "pipeline-smoke" sections below for protocol + commands
-+ pipeline drive recipe; per-XBE READMEs for usage. Earlier
+Last updated: 2026-05-07 (oracle pipeline next-tier tooling SHIPPED:
+agent v0.3 with `controller.*` synthetic-input protocol;
+`controller-replay.py` Mac-side CSV → agent driver;
+`composite-record.sh` ffmpeg AVFoundation NTSC video+audio capture
+from MS2109; `extract-keyframes.py` scene-change keyframe
+extractor; `audio-waveform.py` audio oracle leg with waveform +
+spectrogram + stats. Orchestrator now auto-detects FTP launch
+verb so it works under both XBMC4Gamers (`SITE RunXBE`) and
+UnleashX (`SITE EXEC`); agent moved to dashboard-independent
+`/E/Apps/oracle-agent/`. Earlier 2026-05-06: real-Xbox oracle
+Phase 1 + Phase 2 + Phase 3.0 SHIPPED — orchestrator pipeline
+validated end-to-end against the project Xbox via the
+`pipeline-smoke` Tier-4 diag XBE. Captured framebuffer SHA-256
+byte-for-byte matches math-derived expected. Mac-side wrappers
+`oracle-client.py` + `oracle-orchestrator.py` are live; agent
+ships nine commands (mem/nv2a/vram read+write, screenshot,
+runxbe, unsafe.enable, help) on top of Phase 1's
+info/eeprom/reboot/bye. See "Real Xbox oracle agent",
+"oracle-client.py", "oracle-orchestrator.py", and
+"pipeline-smoke" sections below for protocol + commands +
+pipeline drive recipe; per-XBE READMEs for usage. Earlier
 2026-05-05: Crimson Metal "blocker" reclassified as
 config; three harness bugs fixed; F3 snapshot anchor partially
 proven; Quartz install documented. Crimson now joins PGR2 / Rainbow /
@@ -3121,6 +3131,38 @@ keeping per-file scope under ~200 lines.
 | `unsafe.enable`                      | Arm `mem.write` + `nv2a.write` for the session |
 | `help`                               | Multi-line list of all commands                |
 
+**Phase 2 + controller.* commands** (agent v0.3, shipped 2026-05-07):
+
+| Command                                                  | Behavior |
+| -------------------------------------------------------- | -------- |
+| `controller.set port=N [buttons=0xHHHH] [lt=N] [rt=N] [lx=N] [ly=N] [rx=N] [ry=N]` | Update one or more fields on port N (0..3). Missing keys keep current values. Bumps `seq` + `timestamp_us`. |
+| `controller.button port=N name=<id> value=<0|1>`        | Edit one button by xemu name (a, b, x, y, dpad_*, back, start, white, black, lstick_btn, rstick_btn, guide). |
+| `controller.axis port=N name=<id> value=<int>`          | Edit one axis (ltrigger, rtrigger, lstick_x/y, rstick_x/y). Triggers clamped int16 0..32767 (xemu axis range — XID u8 is `>> 7` at shim/hook layer); sticks clamped int16 -32768..32767. |
+| `controller.get [port=N]`                               | Multi-line readback of current state. Omit `port=` to dump all four ports. |
+| `controller.clear [port=N]`                             | Zero one or all ports. |
+| `controller.buffer-info`                                | Report buffer's virtual address, size, magic (`'XCTR'`=0x58435452), version (1), port count (4), per-port size (24). For future shim/kernel-hook consumers. |
+
+The state lives in agent BSS as a 120-byte `oracle_ctrl_buffer`
+(magic + version + reserved + 4 × 26-byte port states; see
+`controller.h`). Each port has `buttons` (16-bit OR of
+`ORACLE_BTN_*` bits — same VALUES as xemu's
+`CONTROLLER_BUTTON_*` masks at `ui/xemu-input.h:41-57`),
+`ltrigger` / `rtrigger` (i16 0..32767, xemu axis range — Xbox
+XID HID-report u8 0..255 is produced from this by `>> 7` at
+`hw/xbox/xid.c:108-109`; the future shim does the same),
+`lstick_x/y` + `rstick_x/y` (i16 -32768..32767), `seq`
+(monotonic per-port), and `timestamp_us` (xboxkrnl
+`KeQueryPerformanceCounter`-derived). **The buffer ABI matches
+xemu's `ControllerState.buttons` + `axis[]` byte-for-byte** so
+a `XEMU_RECORD_INPUT` CSV replays through the agent without any
+value-domain translation: `controller.button name=a value=1`
+sets bit 0 (== `CONTROLLER_BUTTON_A`); `controller.axis
+name=ltrigger value=32000` stores the int16 value directly.
+The buffer is only visible inside the agent process for now;
+cross-XBE access (so a chainloaded diag XBE can read what the
+agent wrote) is the "Tier 1" work documented in
+`docs/apple-silicon/controller-injection-research.md`.
+
 Protocol additions: `202- BINARY <length>` followed by exactly
 `<length>` raw bytes (no trailer). Used by `mem.read`, `vram.read`,
 `screenshot`. The agent's address allowlist for `mem.read` /
@@ -3436,6 +3478,191 @@ to be supplied via a separate entitlements plist; without them,
 even after a TCC grant the OS may deny camera access. For an
 ad-hoc local tool we use the simpler unhardened ad-hoc path.
 
+## Composite A/V recording — `composite-record.sh` (2026-05-07)
+
+ffmpeg-based capture wrapper around the MS2109 USB stick that
+records BOTH video and audio simultaneously into one synchronized
+.mp4. The MS2109 advertises a UAC (USB Audio Class) interface
+alongside its UVC video device — both labelled "AV TO USB2.0" —
+so a single capture stick provides the third oracle leg's
+full audiovisual signal.
+
+```sh
+./scripts/apple-silicon/composite-record.sh [flags]
+```
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--duration SECONDS`     | 15        | Capture length |
+| `--out-dir DIR`          | `benchmark-runs/<UTC-stamp>-composite` | Run directory |
+| `--device NAME`          | `USB2`    | Substring match against `ffmpeg -list_devices true` |
+| `--audio-device NAME`    | `USB2`    | UAC interface; same MS2109 stick by default |
+| `--width N --height N`   | 720 / 480 | NTSC default |
+| `--fps N`                | 30        | NTSC field-pair rate |
+| `--label NAME`           | (none)    | Tag baked into the run dir name |
+| `--no-audio`             | off       | Skip audio capture |
+| `--pixel-format FMT`     | uyvy422   | AVFoundation pixel format the device emits |
+
+Outputs under the run directory:
+- `video.mp4` — H.264 (`h264_videotoolbox`) + AAC, mp4 container.
+- `capture-meta.json` — device names, format, duration, ffmpeg
+  argv, observed video duration, exit code.
+- `capture-stderr.log` — raw ffmpeg stderr (debug failures).
+
+**Device-resolution note:** ffmpeg's AVFoundation driver ONLY
+accepts exact device names or numeric indices (xemu-capture's
+substring matcher does not apply). The script parses
+`ffmpeg -f avfoundation -list_devices true -i ""` once per run
+to map substring → numeric index, then uses the index. Indices
+are unstable across plug/unplug, but stable for the duration of
+one record session.
+
+**HW-accelerated encode:** `h264_videotoolbox` runs on Apple
+Silicon's Media Engine — no CPU encode cost, no battery drain.
+Bitrate target is 6 Mbit/s (more than enough for 720×480 @ 30 fps
+composite content).
+
+**Stability quirk:** see `tools/xemu-capture/` "Known stability
+quirk" — the MS2109 brown-outs flaky USB-C ports on Mac Studio's
+ASMedia 3142 controller. Use a back USB-A or DRD-controller front
+USB-C if `composite-record.sh` exits with `Input/output error`.
+
+## Keyframe extraction — `extract-keyframes.py` (2026-05-07)
+
+Industry-standard "agent-driven gameplay validation" pipeline
+step: capture a video, pick INTERESTING frames (scene cuts +
+periodic samples), pixel-diff each against xemu's rendering of
+the same scene. Without keyframe selection the diff cost
+balloons; with keyframes a 30-second gameplay segment compresses
+to ~10-30 PNGs to compare.
+
+```sh
+python3 scripts/apple-silicon/extract-keyframes.py VIDEO [flags]
+```
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--out-dir DIR`        | `<video-dir>/keyframes/` | |
+| `--threshold T`        | 0.30      | ffmpeg `gt(scene,T)` score in [0..1] |
+| `--min-gap-s N`        | 0.5       | Suppress matches closer than N s |
+| `--every-s N`          | 0 (off)   | Also emit a frame every N s (timed) |
+| `--max-keyframes N`    | 60        | Cap on emitted scene PNGs |
+| `--width N --height N` | (none)    | Resize during extraction |
+| `--manifest PATH`      | `<out>/manifest.json` | |
+
+Outputs:
+- `<out-dir>/scene/0001.png ... NNNN.png` — scene-change keys.
+- `<out-dir>/timed/0001.png ... NNNN.png` — fixed-cadence keys
+  (only when `--every-s` is set).
+- `<out-dir>/scene-timestamps.csv` — `kind,n,time_s,scene_score,png`.
+- `<out-dir>/manifest.json` — full run metadata + per-frame entries.
+
+**Architecture note (2026-05-07).** An earlier implementation of
+the script chained `gt(t-prev_selected_t,N)` into the `select`
+filter so ffmpeg would do min-gap filtering itself. Empirically
+that broke the `scene` metric — once a frame is suppressed by
+min-gap, the next frame's `scene_score` is computed against the
+*previous emitted* frame instead of the prior input frame,
+producing systematically wrong scores and missing real cuts. The
+fix is to let ffmpeg emit every scene match (one PNG per match
+above threshold) and apply min-gap as a Python post-filter,
+deleting suppressed PNGs. This costs a few extra ffmpeg encodes
+but keeps the scene metric correct. If you ever revisit this
+script, do NOT re-introduce a `prev_selected_t` clause.
+
+**showinfo + metadata=print ordering quirk:** with ffmpeg 8.0.1,
+the showinfo line emits BEFORE the corresponding
+`lavfi.scene_score=<val>` line for each emitted frame. The parser
+handles either order by attaching a score to the most recently
+appended frame whose score is still `None`.
+
+## Audio waveform oracle — `audio-waveform.py` (2026-05-07)
+
+The audio analog of the agent's `screenshot` capture: takes a
+recorded audio track and renders it as visual PNGs that an
+LLM agent can pixel-compare. Closes the "Future / scoping idea"
+item from 2026-05-06's automation list.
+
+```sh
+python3 scripts/apple-silicon/audio-waveform.py INPUT [flags]
+```
+
+`INPUT` can be any media file with an audio track (mp4, mkv, wav,
+mov...). The script demuxes via ffmpeg, then renders PNGs.
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--out-dir DIR`         | `<input-dir>/audio-analysis/` | |
+| `--width N --height N`  | 1600 / 300 | Render resolution |
+| `--silence-db N`        | -50.0 (dBFS) | `silencedetect` threshold |
+| `--colors STR`          | `0x4eb3ff\|0x208860` | `showwavespic` color list |
+
+Outputs:
+- `audio.wav` — extracted mono 48 kHz s16 PCM.
+- `waveform.png` — amplitude-vs-time via `showwavespic`.
+- `spectrogram.png` — log-frequency heatmap via `showspectrumpic`
+  (mode=combined, win_func=hann, legend enabled).
+- `audio-stats.json` — peak / RMS in dBFS via `astats`; silence
+  intervals via `silencedetect`; clipping count via direct s16
+  WAV scan; `silence_fraction` and per-channel field tables.
+- `manifest.json` — top-level summary tying it all together.
+
+**Why visual artifacts.** Agents (LLMs) cannot listen to audio,
+but the real-Xbox audio output is empirically authoritative. If
+we render the same audio from real Xbox and from xemu as
+identical-format PNGs, a per-pixel diff catches missing voices,
+audio dropouts, silence regions, clipping, and pitch drift —
+all of which produce visible artifacts in either the waveform
+or the spectrogram. The third oracle leg's audio twin.
+
+**Validation evidence (2026-05-07).** Run on a 10 s composite
+capture of UnleashX dashboard:
+- 1.58 s of audio extracted (the dashboard chime).
+- Peak −7.84 dBFS, RMS −9.23 dBFS.
+- 0 silence intervals, 0 clipping samples.
+- 1600×300 waveform PNG + 1884×428 spectrogram PNG generated.
+
+## Controller-input synthesis — `controller-replay.py` (2026-05-07)
+
+Mac-side replay tool that drives the agent's `controller.*` RPCs
+from a `XEMU_RECORD_INPUT`-format CSV. The same CSV that runs
+xemu via `XEMU_SCRIPTED_INPUT=path.csv` plays through the agent
+without translation: the button/axis vocabulary is identical
+(see `ui/xemu-input.c:101-127` and the agent's `controller.h`).
+
+```sh
+python3 scripts/apple-silicon/controller-replay.py CSV [flags]
+```
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--host H`              | 192.168.0.200 | `$ORACLE_HOST` overrides |
+| `--port P`              | 9001      | `$ORACLE_PORT` overrides |
+| `--port-index N`        | 0         | Xbox controller port (0..3) |
+| `--rate-multiplier M`   | 1.0       | Time-warp the replay |
+| `--start-at-ms N`       | 0         | Skip events before this ms mark |
+| `--stop-at-ms N`        | end-of-file | Skip events after this ms mark |
+| `--dry-run`             | off       | Parse + simulate; no RPC |
+| `--clear-on-start`      | off       | Send `controller.clear` first |
+
+Output: per-event status lines on stderr; final JSON summary on
+stdout (event count, jitter histogram, RPC errors).
+
+**Phase 1 status.** This tool drives the agent's synthetic-state
+buffer end-to-end. The buffer is NOT YET wired into a running
+game's input read path — see
+`docs/apple-silicon/controller-injection-research.md` for the
+Tier 1 (diag-XBE shared-buffer shim) and Tier 2 (kernel-mode
+XInput hook) plans. Until those land, controller-replay.py is
+useful for: (a) validating the CSV → agent → state-buffer
+round-trip, (b) measuring network jitter to the Xbox, (c)
+exercising the `controller.*` protocol surface area.
+
+**Validation evidence (2026-05-07).** 8-event smoke CSV
+delivered in 360 ms wall against the project Xbox. Mean
+jitter 25.7 ms (network RTT to Xbox over LAN). The `seq` and
+`timestamp_us` fields on each port advance correctly.
+
 ## Real Xbox dashboard: UnleashX (switched 2026-05-06)
 
 The project Xbox now boots UnleashX (was XBMC4Gamers until
@@ -3578,36 +3805,145 @@ keep `SITE RunXBE` as a fallback.
 
 11. **Real Xbox dashboard switch XBMC4Gamers → UnleashX
     (2026-05-06): SHIPPED.** See "Real Xbox dashboard: UnleashX"
-    section above. **Critical follow-up**: `oracle-orchestrator.py`
-    needs to switch from `SITE RunXBE` to `SITE EXEC` (task #13)
-    or every agent-launch will fail with 502 against the new
-    dashboard. Trivial diff in `oracle-orchestrator.py:177`.
+    section above. **Followup CLOSED 2026-05-07.**
+    `oracle-orchestrator.py` now auto-detects the FTP launch verb
+    by parsing `SITE HELP` (RunXBE on XBMC4Gamers; EXEC on
+    UnleashX, the project's current dashboard). Override via
+    `$ORACLE_LAUNCH_VERB`. Closes task #13.
 
-12. **Move oracle agent to `/E/Apps/oracle-agent/` (task #14)**
-    so the path is dashboard-independent (currently at
-    `/E/XBMC4Gamers/Apps/oracle-agent/` — leftover from when
-    XBMC4Gamers was the dashboard). After move, update
-    `DEFAULT_AGENT_PATH` in `oracle-orchestrator.py:86`.
+12. **Move oracle agent to `/E/Apps/oracle-agent/`.**
+    **CLOSED 2026-05-07.** Agent now lives at
+    `E:\Apps\oracle-agent\default.xbe`; `DEFAULT_AGENT_PATH` in
+    `oracle-orchestrator.py` updated to match. Old XBMC-relative
+    path still accepted via `$ORACLE_AGENT_PATH`. Closes task #14.
 
-13. **Investigate pbkit + D:\\ fopen hang (task #9).** Tier-1
+13. **Oracle agent v0.3 + `controller.*` synthetic-input protocol
+    (2026-05-07): SHIPPED.** New file
+    `scripts/apple-silicon/xbe-tests/oracle-agent/controller.{h,c}`
+    plus updates to `commands.h` / `main.c` / `Makefile`. RPCs:
+    `controller.set port=N [buttons=…] [lt=…] [rt=…] [lx=…]
+    [ly=…] [rx=…] [ry=…]`,
+    `controller.button port=N name=<id> value=<0|1>`,
+    `controller.axis port=N name=<id> value=<int>`,
+    `controller.get [port=N]`, `controller.clear [port=N]`,
+    `controller.buffer-info`. Backed by `oracle_ctrl_buffer`
+    (magic=`'XCTR'`=0x58435452, version=1, 4 ports of 26 bytes
+    each = 120 total; per-port size grew from 24 to 26 bytes
+    after the 2026-05-07 Codex review fixed triggers to int16).
+    Button/axis vocabulary matches
+    `ui/xemu-input.c:101-127` verbatim so a `XEMU_RECORD_INPUT`
+    CSV replays through the agent without translation.
+    `oracle_ctrl_init()` runs at agent boot. End-to-end validated
+    against the project Xbox: every command + help + smoke-tested
+    via `oracle-client.py raw`. Phase 1 = protocol + state buffer
+    only; the buffer is currently in agent BSS (not visible to a
+    chainloaded XBE). See `controller-injection-research.md`
+    for the Tier 1 / Tier 2 / Tier 3 plan to close the loop into
+    a running game's input read path.
+
+14. **`scripts/apple-silicon/controller-replay.py` (2026-05-07):
+    SHIPPED.** Replays a `XEMU_RECORD_INPUT` CSV through the
+    agent's `controller.*` RPCs at the original wall-clock cadence.
+    CLI: `controller-replay.py CSV [--host H] [--port P]
+    [--port-index N] [--rate-multiplier M] [--start-at-ms N]
+    [--stop-at-ms N] [--dry-run] [--clear-on-start]`. Reports
+    per-event jitter (mean/median/max/p95). End-to-end validated:
+    8 events delivered in 360 ms with 25.7 ms mean jitter (network
+    RTT to Xbox over LAN). Pairs with the existing
+    `scripts/apple-silicon/input-scripts/{pgr2,sc2,rainbow,crimson}-*.csv`
+    library so the same gameplay routes drive both engines.
+
+15. **`scripts/apple-silicon/composite-record.sh` (2026-05-07):
+    SHIPPED.** ffmpeg-based AVFoundation capture wrapper for the
+    MS2109 USB composite stick. Pins NTSC 720x480 @ 30 fps + 48
+    kHz stereo audio (the MS2109's UAC interface — same physical
+    stick provides both legs). Resolves substring device names →
+    numeric indices via `ffmpeg -list_devices true` (ffmpeg's
+    AVFoundation driver requires exact name or index, not the
+    substring matcher xemu-capture uses). Output:
+    `<benchmark-runs>/<UTC-stamp>-composite-<label>/{video.mp4,
+    capture-meta.json, capture-stderr.log}` — H.264 video
+    (`h264_videotoolbox`) + AAC audio. CLI flags:
+    `--duration / --out-dir / --device / --audio-device / --width
+    / --height / --fps / --label / --no-audio / --pixel-format`.
+    End-to-end validated: 10 s capture of UnleashX dashboard via
+    composite cable produced 5.18 MB H.264 + AAC mp4
+    (`width=720 height=480 codec=h264`).
+
+16. **`scripts/apple-silicon/extract-keyframes.py` (2026-05-07):
+    SHIPPED.** ffmpeg-based scene-change keyframe extractor +
+    optional fixed-cadence time-driven extractor. Implements the
+    standard agent-driven game-development workflow: capture
+    gameplay → extract interesting frames → diff against xemu's
+    rendering of the same scene. CLI: `extract-keyframes.py VIDEO
+    [--out-dir DIR] [--threshold T] [--min-gap-s N] [--every-s N]
+    [--max-keyframes N] [--width N --height N] [--manifest PATH]`.
+    Output: `<run>/keyframes/{scene/0001.png ...,
+    timed/0001.png ..., scene-timestamps.csv, manifest.json}`.
+    **Architecture note**: an earlier draft chained
+    `gt(t-prev_selected_t,N)` into the select expression so ffmpeg
+    would do min-gap filtering itself. Empirically that broke the
+    `scene` metric — once a frame is suppressed by min-gap, the
+    next frame's scene_score is computed against the *previous
+    emitted* frame instead of the prior input frame, producing
+    systematically wrong scores and missing real cuts. The fix
+    is to let ffmpeg emit every scene match (one PNG each) and
+    apply min-gap as a Python post-filter, deleting suppressed
+    PNGs. End-to-end validated on the 10 s composite capture: 1
+    scene match + 5 timed (every 2 s) keyframes.
+
+17. **`scripts/apple-silicon/audio-waveform.py` (2026-05-07):
+    SHIPPED.** Audio oracle leg — closes the "Future / scoping
+    idea" item from 2026-05-06. Demuxes mono 48 kHz s16 PCM via
+    ffmpeg, then renders (a) `waveform.png` via ffmpeg's
+    `showwavespic` filter, (b) `spectrogram.png` via
+    `showspectrumpic` (log-frequency, hann window, legend
+    enabled), (c) `audio-stats.json` (peak / RMS in dBFS via
+    `astats`; silence intervals via `silencedetect`; clipping
+    count via direct s16 WAV scan). Output bundle is the visual
+    PNG analog of the agent's `screenshot` capture but for the
+    audio path — agents can pixel-compare the real-Xbox
+    waveform.png against xemu's waveform.png to catch dropouts,
+    clipping, silence regions, and pitch drift WITHOUT
+    listening. CLI: `audio-waveform.py INPUT [--out-dir DIR]
+    [--width N --height N] [--silence-db N] [--colors STR]`.
+    Validated on the 10 s composite capture: 1.58 s of audio
+    extracted from UnleashX dashboard chime, peak −7.84 dBFS,
+    RMS −9.23 dBFS, 0 silence intervals, 0 clipping samples.
+
+18. **Investigate pbkit + D:\\ fopen hang (task #9).** Tier-1
     diag XBEs (mirror, color-channel, depth-floor) chainload +
     reboot fine but never write `D:\<id>-capture.bin` —
     pipeline-smoke (no pbkit) writes its blob fine, so the
-    issue is pbkit-specific fopen. Try: reduce render frame
-    count from 300 → 60, call `pb_kill()` before fopen, add
-    `fflush()` and check `fclose` rc. **Or sidestep entirely**:
-    use `tools/xemu-capture/ snapshot` to capture the diag XBE's
-    composite output directly during its render-loop hold (the
-    XBE just needs to render-and-hold, no D:\ write at all).
-    The composite path is now fully operational.
+    issue is pbkit-specific fopen. **No longer a hard blocker
+    as of 2026-05-07** — `composite-record.sh` provides an
+    alternative Tier-1 reference path: run the diag XBE,
+    capture its rendered output via the MS2109 stick during
+    the render-loop hold, compare post-resolve PNG against
+    math-derived oracle. The in-XBE D:\\ write path is still
+    desirable as the cleanest reference; investigate when
+    convenient. Try: `pb_kill()` before fopen, reduce render
+    frame count from 300 → 60, add `fflush()` + check `fclose`
+    rc, OR add explicit debugPrint after each fopen attempt
+    + run with TV attached to read the console output.
 
-14. **(Future / scoping idea)** Audio oracle via visual waveform.
-    Agents can't listen to audio, but the Xbox audio output
-    (RCA white/red) could be captured by a USB audio interface
-    and rendered to a visual waveform PNG (e.g. `ffmpeg
-    -filter_complex showwavespic` or amplitude-vs-time plots).
-    Differences between xemu's audio output (also captured the
-    same way) and the real-Xbox waveform would be visually
-    detectable. Real Xbox is empirically correct, so any delta
-    is on the emulator. Not on the critical path; documented
-    for future consideration.
+19. **Tier 1 of controller injection — diag-XBE shared-buffer
+    shim (NEXT SESSION).** Move `oracle_ctrl_buffer` from BSS
+    to `ExAllocatePoolWithTag(NonPagedPool, …, 'XCTR')` so the
+    physical address is stable across `XLaunchXBE`. Add
+    `xbe-tests/lib/xbed_input_synth.{h,c}` so any diag XBE
+    opts in by including `lib.mk`. Author one
+    `controller-roundtrip` Tier-1 diag XBE that reads the
+    buffer + composites a per-event color stripe to disk for
+    pixel-exact comparison. Closes the diag-XBE-driven
+    gameplay-validation loop. See `controller-injection-research.md`
+    for the full plan including Tier 2 (kernel hook) and Tier 3
+    (Teensy hardware emulator) tiers.
+
+20. **Take a kernel symbol dump from the project Xbox.** Use
+    the agent's `mem.read` to walk the kernel image's PE export
+    table and dump every exported symbol's address. Stash under
+    `xbox-oracle-backup/2026-05-06/kernel-symbols/`. Foundation
+    for Tier 2 of controller injection (kernel hook on
+    `OhciControllerInterruptDispatch` so retail games see
+    synthetic input).

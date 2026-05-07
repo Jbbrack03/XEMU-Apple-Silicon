@@ -1,5 +1,190 @@
 # Decision Log
 
+## 2026-05-07: Oracle pipeline next-tier tooling — controller.* protocol + composite A/V record + keyframe extraction + audio waveform
+
+**Context.** Real-Xbox oracle infrastructure shipped through 2026-05-06
+delivered the agent (Phases 1+2+3.0+3.1+3.2), the production xbe-harness,
+the third-leg composite-capture stick (`tools/xemu-capture/`), and the
+UnleashX dashboard switch. The remaining gaps to "use the oracle in
+workflows" — flagged by user 2026-05-07 — were:
+1. `oracle-orchestrator.py` still using XBMC4Gamers-specific
+   `SITE RunXBE`, broken under UnleashX (502).
+2. Agent path `/E/XBMC4Gamers/Apps/oracle-agent/` still XBMC-relative.
+3. No way to drive controller input on the real Xbox so recorded
+   gameplay automations could reach actual gameplay (only menus).
+4. No way to capture multi-second video AND extract keyframes for
+   xemu-vs-real-Xbox per-frame visual diffs.
+5. No audio oracle leg; agents can't listen to audio so the question
+   was always how to make audio empirical / pixel-comparable.
+
+**What landed.**
+
+1. **`oracle-orchestrator.py` auto-detects launch verb.** Probes
+   `SITE HELP` to see whether the dashboard advertises `RunXBE`
+   (XBMC4Gamers) or `EXEC` (UnleashX). Defaults to `EXEC` on probe
+   failure (UnleashX is the project's current dashboard). Override
+   via `$ORACLE_LAUNCH_VERB`. Closes task #13 from the 2026-05-06
+   handoff.
+
+2. **Oracle agent moved to `/E/Apps/oracle-agent/default.xbe`.**
+   FTP-deployed via the existing 393 216-byte v0.2 binary first to
+   validate the move + new path + auto-detect verb work end-to-end;
+   then the v0.3 binary (controller.* support) was uploaded over
+   the top. `DEFAULT_AGENT_PATH` updated. Closes task #14.
+   End-to-end: `oracle-orchestrator.py ensure-agent` issues
+   `SITE EXEC E:\Apps\oracle-agent\default.xbe → 200 EXEC command
+   succeeded; agent ready at 192.168.0.200:9001`.
+
+3. **Oracle agent v0.3 — `controller.*` synthetic-input protocol.**
+   Added `scripts/apple-silicon/xbe-tests/oracle-agent/controller.{h,c}`
+   (340 LOC). Six new RPCs (`controller.set / .get / .button / .axis
+   / .clear / .buffer-info`) backed by an in-process
+   `oracle_ctrl_buffer` (magic=`'XCTR'`, version=1, 4×26-byte ports
+   = 120 bytes total post-2026-05-07 trigger-int16 fix; was 24-byte
+   ports / 112 total in the initial Phase 1 ship).
+   Vocabulary mirrors `ui/xemu-input.c:101-127` so a
+   `XEMU_RECORD_INPUT` CSV replays through the agent without
+   translation. Each port has `seq` + `timestamp_us` for ordering.
+   Built (401 408 bytes) and validated against the project Xbox.
+   Phase 1 = protocol + state buffer only; the buffer is not yet
+   visible to a chainloaded XBE.
+
+4. **`controller-replay.py`** — Mac-side CSV-to-RPC driver.
+   `time_ms,control,value` rows replay at original wall-clock
+   cadence (with `--rate-multiplier` time-warp). Reports per-event
+   jitter histogram. Validated: 8 events delivered in 360 ms with
+   25.7 ms mean jitter (network RTT to Xbox over LAN).
+
+5. **`composite-record.sh`** — ffmpeg AVFoundation wrapper that
+   records BOTH video and audio simultaneously from the MS2109
+   stick. Critical discovery: the MS2109 advertises a UAC interface
+   alongside its UVC video (both labelled "AV TO USB2.0"), so a
+   single capture stick provides the full A/V signal — no separate
+   audio interface needed. Output: H.264 + AAC mp4 + meta JSON +
+   stderr log. Resolves substring device names → numeric indices
+   via `ffmpeg -list_devices true` (ffmpeg's AVFoundation driver
+   only accepts exact names or indices, not the substrings
+   `xemu-capture` matches). Validated: 10 s NTSC capture of UnleashX
+   produced 5.18 MB H.264 + AAC mp4 (`width=720 height=480 codec=h264`).
+
+6. **`extract-keyframes.py`** — ffmpeg `select=gt(scene,T)`
+   scene-change keyframe extractor + optional fixed-cadence
+   extractor. Important architecture note: an earlier draft chained
+   `gt(t-prev_selected_t,N)` into the select expression so ffmpeg
+   would do min-gap filtering. **Empirically that broke the `scene`
+   metric** — once a frame is suppressed, the next frame's
+   `scene_score` is computed against the *previous emitted* frame
+   rather than the prior input frame, producing systematically wrong
+   scores and missing real cuts. Fix: emit every scene match and
+   apply min-gap as a Python post-filter. Documented to prevent
+   regression in `automation.md` "Keyframe extraction" section.
+
+7. **`audio-waveform.py`** — closes the "Future / scoping idea"
+   from 2026-05-06's automation list. Demuxes mono 48 kHz s16 PCM,
+   then renders `waveform.png` via ffmpeg's `showwavespic` filter,
+   `spectrogram.png` via `showspectrumpic` (log-frequency, hann,
+   legend), and `audio-stats.json` (peak / RMS / silence intervals
+   / clipping count). The visual PNG analog of the agent's
+   `screenshot` capture, but for audio — agents can pixel-compare
+   real-Xbox waveform.png against xemu's waveform.png to catch
+   dropouts, clipping, silence, and pitch drift WITHOUT listening.
+   Validated on the same 10 s composite capture.
+
+8. **`controller-injection-research.md`** — honest design /
+   feasibility doc for the rest of the controller-input journey.
+   Three tiers:
+   - **Tier 1 (next session, ~1 session of work):** shared-buffer +
+     diag-XBE shim. Move agent buffer from BSS to
+     `ExAllocatePoolWithTag` (kernel pool, survives `XLaunchXBE`).
+     Add `xbe-tests/lib/xbed_input_synth.{h,c}`. Author one
+     `controller-roundtrip` Tier-1 diag XBE. Closes the loop for
+     diag-XBE-driven gameplay validation.
+   - **Tier 2 (~2-3 sessions):** kernel hook on
+     `OhciControllerInterruptDispatch` so retail games see synthetic
+     input. Risk register R1-R5 included; needs a kernel symbol
+     dump from this iND-BiOS build first.
+   - **Tier 3 (FALLBACK, ~$50 hardware):** Teensy 4.0 + `OGX-Mini`
+     firmware emulating an OG Xbox controller; Mac drives over
+     serial. No Xbox-side code; works regardless of iND-BiOS.
+
+**Validation evidence (2026-05-07, against project Xbox at
+192.168.0.200, UnleashX dashboard).**
+
+- Agent v0.3 deployed to `/E/Apps/oracle-agent/default.xbe`;
+  `oracle-orchestrator.py ensure-agent` → 200 EXEC + agent
+  ready at 9001.
+- Every `controller.*` command round-trips: `controller.set port=0
+  buttons=0x0010 lt=128 lx=-12345` → `seq=1`, then
+  `controller.button port=0 name=a value=1` → `buttons=0x0110 seq=2`,
+  then `controller.axis port=0 name=lstick_y value=32000` →
+  `seq=3`, then `controller.get port=0` returns the full state,
+  then `controller.clear` zeros all four ports.
+- `controller-replay.py /tmp/test-replay.csv --clear-on-start`
+  delivered 8 events in 360 ms with 25.7 ms mean jitter; final
+  state `seq=13` (cleared+8 events).
+- `composite-record.sh --duration 10` produced
+  `benchmark-runs/20260507-005238-composite-end2end-demo/video.mp4`
+  (5 179 328 bytes; ffprobe: H.264 720x480 + AAC 96 kHz stereo,
+  duration 10.000 s).
+- `extract-keyframes.py video.mp4 --threshold 0.20 --every-s 2
+  --max-keyframes 15` → 1 scene match + 5 timed PNGs.
+- `audio-waveform.py video.mp4` → waveform.png (1600x300) +
+  spectrogram.png (1884x428) + audio-stats.json (peak −7.84 dBFS,
+  RMS −9.23 dBFS, 0 silence intervals, 0 clipping).
+
+**Known limitations / followups.**
+
+- Controller buffer NOT yet wired to a running game's input read
+  path (Tier 1 / Tier 2 work above).
+- pbkit + D:\\ fopen hang on Tier-1 diag XBEs (task #9 from
+  2026-05-06) is no longer a hard blocker — `composite-record.sh`
+  provides an alternative Tier-1 reference path. The in-XBE D:\\
+  write would still be the cleanest reference; investigate when
+  convenient.
+- Network jitter on `controller-replay.py` (25-71 ms over LAN)
+  is fine for menu navigation but tight gameplay timing might
+  benefit from batching multiple events per RPC.
+
+**Codex review (2026-05-07).** Verdict: MAJOR ISSUES (4 findings,
+all addressed in the same session before commit):
+- HIGH: `ORACLE_BTN_*` bit values diverged from xemu's
+  `CONTROLLER_BUTTON_*` mask values despite the header claiming
+  they matched. `name=a` was setting bit 8 instead of bit 0. Fixed
+  by re-aligning every bit to xemu's enum at `ui/xemu-input.h:41-57`;
+  full 15-button audit verifies each xemu-vocab name now maps to
+  the canonical bit. ABI now byte-for-byte matches xemu's
+  `ControllerState.buttons`.
+- MEDIUM: Triggers were stored as u8 0..255 but xemu records them
+  as int16 0..32767 in the CSV; any recorded trigger value > 255
+  saturated to full-press. Fixed by switching trigger storage to
+  int16 (matches xemu's `axis[CONTROLLER_AXIS_LTRIG]` directly;
+  the `>> 7` to XID HID-report u8 happens at the eventual
+  shim/hook layer). Per-port size 24 → 26 bytes; total buffer
+  112 → 120 bytes. Validated end-to-end: trigger value 32000
+  now stores correctly.
+- LOW: Help text advertised `val=V` but handlers required
+  `value=V`. Fixed to match.
+- LOW: Replay tool conflated scheduling and delivery jitter.
+  Fixed: now reports both separately (schedule_jitter_ms covers
+  Python+OS scheduling drift only; delivery_jitter_ms includes
+  agent RPC round-trip — the metric a buffer-reader downstream
+  actually cares about).
+
+Codex's open question on whether the buffer should represent xemu
+ControllerState semantics or Xbox XID-report semantics was answered
+by the fixes: the buffer matches xemu byte-for-byte; XID conversion
+(triggers `>> 7`, button-bit reordering for the actual XID HID
+report layout) is deferred to the future shim/hook that consumes
+the buffer.
+
+**Status.** SHIPPED. The oracle pipeline is now in workflow-ready
+state for: (a) capturing real-Xbox composite A/V, (b) extracting
+keyframes for visual diff, (c) rendering audio as visual artifacts,
+(d) driving the agent's synthetic-input state buffer over the
+network. The remaining gap is the buffer→game-input delivery path
+(diag-XBE shim or kernel hook), with concrete plans documented in
+`controller-injection-research.md`.
+
 ## 2026-05-06: xemu-capture native macOS Swift app for MS2109 composite oracle leg
 
 **Context.** The diagnostic-XBE library + xbe-harness shipped this
