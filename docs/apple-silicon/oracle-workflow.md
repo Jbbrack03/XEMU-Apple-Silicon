@@ -161,38 +161,38 @@ designed in `controller-injection-research.md`, not yet implemented.
 
 ## Known gaps (close before declaring production-grade)
 
-As of 2026-05-07 evening the oracle pipeline is **in-workflow ready
-for the validated paths** but has 8 unresolved gaps that next
-session must close before the M15 default-on flip can cite the
-oracle as the gating evidence. The full checklist lives in
-`handoff.md` under "Next session priorities — gap closure"; the
-short version:
+As of 2026-05-07 (post-recovery) the **oracle pipeline's mainline
+visual gate is live-green** (m15-visual-gate.sh 5/5 PASS) but
+**FOUR named blockers (B1-B4) remain open** before the oracle can
+be declared "ready for production use". The full discussion +
+investigation directions + resume recipe live in `handoff.md`
+under "OPEN BLOCKERS"; the short version:
 
-1. Run `m15-visual-gate.sh` end-to-end (no skip flags) — exercises
-   the xbe-harness path edits made 2026-05-07 evening.
-2. Run `m15-visual-gate.sh --paired` (Metal-vs-GL canary diff,
-   3 titles).
-3. Run `xbe_orchestrator.py run --renderer metal --renderer
-   real-xbox` standalone to write a citable matrix report.
-4. Exercise `capture-composite-reference.sh` against the MS2109
-   stick (never run against hardware in the session it was
-   written).
-5. Investigate the transient agent degraded-state observed once
-   2026-05-07 evening (mem.read / nv2a.read / screenshot returning
-   empty while `info` worked; reboot cleared it). Likely a tighter
-   PCB-recycling path needed in the agent's accept loop.
-6. Validate the new odd-even seqlock under contention (current
-   tests are sequential-RPC-then-chainload; no concurrent writes).
-7. Validate the opt-in `ORACLE_CTRL_ALLOW_REATTACH` build path or
-   remove it.
-8. Capture a canonical real-Xbox reference PNG for
-   `controller-roundtrip` (currently math-derived only).
+- **B1**: `controller-roundtrip` non-zero pre-set state intermittent
+  stale-state read across `XLaunchXBE` chainload boundary (the
+  diag's read of `phys = anchor_recorded_phys` sometimes returns
+  a previous session's values). Tested PAGE_NOCACHE, atomic
+  anchor rename + NtFlushBuffersFile, `-DORACLE_CTRL_ALLOW_REATTACH`
+  — none restored consistency. Root cause not yet identified.
+  Smoke + harness pass because they use zero-state mode.
+- **B2**: `oracle-stress.sh` only ran 3 iterations; spec was 10.
+- **B3**: `oracle-seqlock-test.py` live mode never run; only the
+  offline `--selftest` (5/5 predicate cases PASS).
+- **B4**: `bin-reattach/default.xbe` built but never deployed-
+  and-run on the Xbox. Gap-7 exit criterion ("opt-in flag works
+  OR is removed") not satisfied.
 
-Until all 8 close, treat the oracle as **"ready for development
-use, not yet for blocking production gates"** — i.e. you can use
-it to validate Metal-renderer changes and catch regressions, but
-do NOT cite a green oracle run as the M15 default-on go-ahead
-criterion.
+Until all 4 close, treat the oracle as **"ready for development
+use, not yet ready for production"** — you can use it to
+validate Metal-renderer changes and catch regressions today (the
+mainline gate works), but do NOT cite a green oracle run as the
+unconditional M15 default-on go-ahead criterion until B1-B4 are
+resolved.
+
+The 8 prior-session gaps from 2026-05-07 evening are all closed
+code-side and the mainline validation paths are live-green; the
+4 blockers above are sub-items that surfaced during live
+validation.
 
 ## Failure recovery playbook
 

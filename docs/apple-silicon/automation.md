@@ -1,6 +1,23 @@
 # Benchmark Automation
 
-Last updated: 2026-05-07 (late). Oracle gap-closure session:
+Last updated: 2026-05-07 (post-recovery). **Oracle pipeline is
+mainline-green but NOT yet production-ready.** `m15-visual-gate.sh`
+exits 0 with 5/5 PASS (build + oracle-smoke + metal-canary-regress
++ xbe-harness Tier-1 matrix), and the canonical zero-state real-
+Xbox references are captured for `controller-roundtrip` and
+`mirror`. **Four named blockers (B1-B4) still open** before the
+oracle can be declared "ready for production use" — see
+`handoff.md`'s "OPEN BLOCKERS" section for details and resume
+recipe. Summary: B1 = `controller-roundtrip` non-zero pre-set
+state intermittent stale-state read across `XLaunchXBE`
+chainload (root cause not yet identified after ruling out anchor
+atomicity, PAGE_NOCACHE, reattach, and vbuf collision); B2 =
+`oracle-stress.sh` only ran 3 iterations, not the spec's 10;
+B3 = `oracle-seqlock-test.py` live mode never run (only offline
+selftest); B4 = `bin-reattach/default.xbe` built but never
+deployed-and-run on the Xbox.
+
+Earlier session: Oracle gap-closure session:
 **xbe-harness QMP-socket-path fix + agent's atomic anchor rename**.
 Three defects shipped in this round —
 (1) `xbe-harness` Metal cells were silently FAILING with
