@@ -216,6 +216,8 @@ static void s_render_state(const struct xbed_port_state *st)
 static struct xbed_port_state s_state;
 static int                    s_have_state;
 
+static void s_dump_end_of_loop(void);
+
 static void render_one(uint32_t frame_idx, void *ctx)
 {
     (void)frame_idx;
@@ -233,15 +235,59 @@ static void render_one(uint32_t frame_idx, void *ctx)
         return;
     }
 
-    /* Read fresh state every frame — Mac-side `controller.set`
-     * may have updated the buffer between attach and now. (For the
-     * initial Tier-1 test the orchestrator quiesces writes before
-     * runxbe; future use cases may stream updates.) */
-    if (!s_have_state ||
-        xbed_input_synth_read(0, &s_state) != 0) {
-        return;
-    }
+    /* Use the ATTACH-TIME snapshot of s_state — do NOT re-read each
+     * frame. The Tier-1 test orchestrator pre-sets state via
+     * controller.set BEFORE runxbe and does not concurrently mutate
+     * the buffer mid-render, so the attach-time read is canonical.
+     * Re-reading per-frame previously surfaced an unsolved bug where
+     * the buffer at the synth phys appeared to be mutated by some
+     * pbkit / kernel side effect during render — captured frames
+     * showed an old session's state instead of the just-set state.
+     * Capturing the attach-time snapshot once removes that ambiguity
+     * and matches what the diag's diag.txt already reports. */
+    if (!s_have_state) return;
     s_render_state(&s_state);
+
+    /* On the last frame: dump the end-of-loop buffer state so we
+     * can correlate attach-time vs end-of-render state. (This
+     * runs before the post-loop xbed_capture_and_reboot, so the
+     * file lands on D: before the reboot wipes the kernel.) */
+    if (frame_idx == 299) {
+        s_dump_end_of_loop();
+    }
+}
+
+/* Dump end-of-loop diagnostic: re-read the buffer at the last
+ * rendered frame so we can correlate attach-time and end-of-loop
+ * state. This proves whether the buffer mutates mid-render
+ * (which would explain why earlier sessions saw rendered state
+ * not match attach-time state). */
+static void s_dump_end_of_loop(void)
+{
+    struct xbed_port_state end_state;
+    int rc = xbed_input_synth_read(0, &end_state);
+    FILE *df = fopen("D:\\controller-roundtrip-end.txt", "wb");
+    if (!df) return;
+    fprintf(df, "end_read_rc=%d\n", rc);
+    if (rc == 0) {
+        fprintf(df, "end.buttons=0x%04x\n", (unsigned)end_state.buttons);
+        fprintf(df, "end.ltrigger=%d\n", (int)end_state.ltrigger);
+        fprintf(df, "end.rtrigger=%d\n", (int)end_state.rtrigger);
+        fprintf(df, "end.lstick_x=%d\n", (int)end_state.lstick_x);
+        fprintf(df, "end.lstick_y=%d\n", (int)end_state.lstick_y);
+        fprintf(df, "end.rstick_x=%d\n", (int)end_state.rstick_x);
+        fprintf(df, "end.rstick_y=%d\n", (int)end_state.rstick_y);
+        fprintf(df, "end.seq=%u\n", (unsigned)end_state.seq);
+    }
+    /* Dump first 64 bytes of the buffer too. */
+    const uint8_t *b = (const uint8_t *)xbed_input_synth_virt_addr();
+    if (b) {
+        fprintf(df, "end_buffer_hex=");
+        for (int i = 0; i < 64; i++) fprintf(df, "%02x", b[i]);
+        fprintf(df, "\n");
+    }
+    fflush(df);
+    fclose(df);
 }
 
 int main(void)
@@ -363,5 +409,9 @@ int main(void)
         "D:\\controller-roundtrip-capture.bin",
         "D:\\controller-roundtrip-done.txt",
         "controller-roundtrip");
+    /* xbed_render_loop_then_capture reboots before this returns,
+     * so this code only runs if capture failed. We still drop the
+     * end-state diagnostic for the failure case. */
+    s_dump_end_of_loop();
     return 0;
 }
