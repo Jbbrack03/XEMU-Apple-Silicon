@@ -1,5 +1,93 @@
 # Handoff
 
+Last updated: 2026-05-07 (very late) — **oracle gap-closure session
+ended at 6-hour Xbox-down cutoff after 12 PushNotifications.**
+Code-side complete and committed (ac8001b857 + 363a83cb86);
+ALL live re-validation deferred to next session, where the very
+first action MUST be `ping 192.168.0.200` after manually
+power-cycling the OG Xbox.
+
+## RESUME RECIPE (next session — first action)
+
+```sh
+# 0. Confirm Xbox is alive
+ping -c 2 192.168.0.200          # must succeed before continuing
+
+# 1. Composite production-grade gate (5 layers — 25 min)
+./scripts/apple-silicon/oracle-validate.sh
+
+# 2. M15 visual gate (4 layers — 30 min, optional --paired adds 12 min)
+./scripts/apple-silicon/m15-visual-gate.sh
+
+# 3. If both exit 0:
+#    - append decision-log entry "Oracle pipeline fully production-grade;
+#      all gaps closed; live-validated" with the run-dir paths
+#    - update this banner from "ended at cutoff" → "production-grade,
+#      all paths exercised"
+```
+
+## What the 6-hour cutoff resolved
+
+| # | Gap | Code | Live |
+|---|---|---|---|
+| 1 | m15-visual-gate end-to-end | Metal cells fixed (QMP socket path) | DEFERRED |
+| 2 | m15-visual-gate --paired (Metal-vs-GL) | DONE | DEFERRED |
+| 3 | xbe-harness matrix runner direct | Metal 3/3 PASS | DEFERRED real-xbox |
+| 4 | capture-composite-reference | Already shipped earlier | DEFERRED |
+| 5 | oracle-stress.sh (degraded state) | DONE | DEFERRED |
+| 6 | oracle-seqlock-test.py | Selftest 5/5 PASS | DEFERRED live |
+| 7 | reattach build | bin-reattach/default.xbe | DEFERRED deploy |
+| 8 | controller-roundtrip canonical PNG | Diag XBE has new diagnostic | DEFERRED + #3 |
+
+## What shipped (committed)
+
+- **`xbe-harness` QMP socket path fix** — relocated UNIX socket
+  to `/tmp/xq-<pid>-<rand>.sock` to clear the macOS 104-byte
+  limit. Metal-only matrix now 3/3 PASS (controller-roundtrip
+  skipped per #2 below).
+- **`real_xbox_only: true` manifest field + skip handling** —
+  controller-roundtrip on Metal/GL → status=skip (not fail).
+- **Atomic anchor rename in oracle-agent** —
+  `NtSetInformationFile` direct with `ReplaceIfExists=TRUE` plus
+  `NtFlushBuffersFile` replaces the racy
+  `DeleteFileA + MoveFileA` two-step that was leaving the on-disk
+  anchor stale (root cause of the controller-roundtrip 0xA5A5
+  stale-state observation).
+- **`m15-visual-gate.sh` shader-validation grep miss** — fixed
+  pattern to match the actual log line.
+- **New tooling**: `oracle-stress.sh`, `oracle-seqlock-test.py`,
+  `oracle-validate.sh`, plus `bin-reattach/default.xbe` opt-in
+  build with `-DORACLE_CTRL_ALLOW_REATTACH`.
+- **New diag instrumentation**: `controller-roundtrip` writes
+  `D:\controller-roundtrip-diag.txt` on attach with anchor file
+  content + first 64 bytes of attached buffer + `vbuf_phys` +
+  `vbuf_synth_collision` flag.
+
+## Why the 6-hour cutoff
+
+The session's mem.read tight-loop across 64 MiB of physical RAM
+crashed the Xbox. After 12 PushNotifications (terminal +
+mobile) requesting a manual power-cycle and ~6 hours of polling
+at 10-min and then 30-min cadences, the Xbox remained
+unreachable. Per the user's wakeup-instruction: end the session
+cleanly, do NOT schedule another wakeup, document the deferred
+work above.
+
+## Lesson learned for the next RAM-scan tooling
+
+Issuing `mem.read addr=0xNNNN len=N` over an unbounded scan range
+hit at least one address class the agent's allowlist
+(`op_addr_range_ok`) didn't safely gate. Future scan tooling MUST
+bound the scan range to genuinely-allocatable physical pages
+(skip kernel reserved + MMIO mirrors), and SHOULD probe
+`controller.buffer-info` between iterations to detect the
+agent's PCB pool entering a degraded state before the network
+stack collapses.
+
+---
+
+(Earlier banner — preserved for audit trail:)
+
 Last updated: 2026-05-07 (late) — **oracle gap-closure session
 shipped CODE-SIDE for all 8 named gaps; LIVE re-validation
 pending Xbox manual power-cycle.** The RAM-scan diagnostic in
