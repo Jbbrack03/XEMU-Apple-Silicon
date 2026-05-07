@@ -1,0 +1,45 @@
+{
+  "id": "controller-roundtrip",
+  "title": "Synthetic-input integration oracle (agent buffer ↔ chainloaded XBE)",
+  "purpose": "Validate that the oracle agent's persistent kernel-pool controller buffer survives an XLaunchXBE chainload byte-for-byte and is correctly read by the xbed_input_synth shim layer. Renders a deterministic pattern derived from the synthetic state set via Mac-side controller.set RPCs prior to chainload; the orchestrator compares the captured front buffer against expected.py:from_state(...) computed from the SAME state values.",
+  "catalog_ref": "Tier 1 controller injection (controller-injection-research.md)",
+  "self_validation_tier": 1,
+  "oracle_priority": ["math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\controller-roundtrip-capture.bin",
+      "ftp_path": "/E/Apps/controller-roundtrip/controller-roundtrip-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\controller-roundtrip-done.txt",
+      "ftp_path": "/E/Apps/controller-roundtrip/controller-roundtrip-done.txt"
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact",
+      "notes": "Default reference is the zero-state pattern (all opaque-black). For non-zero pre-set states, the runner should call expected.py:from_state(buttons=..., lt=..., ...) directly with the same values it passed to controller.set."
+    }
+  },
+  "expected_fail_renderers": [],
+  "real_xbox_only": true,
+  "preconditions": [
+    "oracle-orchestrator.py ensure-agent succeeded",
+    "controller.buffer-info reports a kernel-pool buffer at phys != 0",
+    "controller.set port=0 was called BEFORE this XBE was chainloaded",
+    "no concurrent controller.set during the chainload + render window"
+  ]
+}

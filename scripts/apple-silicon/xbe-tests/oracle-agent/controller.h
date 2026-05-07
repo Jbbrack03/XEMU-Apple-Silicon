@@ -91,6 +91,27 @@
 #define ORACLE_BTN_GUIDE      (1u << 14)  /* CONTROLLER_BUTTON_GUIDE (xemu ext.) */
 /* bit 15 reserved */
 
+/* Sequence-protocol convention (Codex 2026-05-07).
+ *
+ * Writers (cmd_controller_set/button/axis/clear in this file) update
+ * the seq field as a "seqlock":
+ *
+ *   1. seq = previous_seq + 1   (now ODD; "in-flight" marker)
+ *   2. <write all fields>
+ *   3. seq = previous_seq + 2   (now EVEN; "stable" marker)
+ *
+ * Readers (cmd_controller_get; xbed_input_synth_read; future
+ * kernel-mode hook) accept the snapshot only when the pre-copy and
+ * post-copy `seq` values are equal AND even. An odd or mismatched
+ * pre/post pair indicates an in-flight write; the reader retries
+ * (or, on its last retry, returns the most-recent stable value
+ * captured in an earlier iteration).
+ *
+ * Initial value is 0 (even, no writes yet). seq overflows on wrap;
+ * the wrap is harmless because both sides only test equality and
+ * parity. */
+#define ORACLE_CTRL_SEQ_BUSY(s) (((s) & 1u) != 0)
+
 /* One port's synthetic state. 26 bytes. Packed so the on-the-wire
  * binary format and the in-memory layout agree byte-for-byte across
  * the agent and any future shim.
@@ -119,10 +140,16 @@ struct __attribute__((packed)) oracle_ctrl_port_state {
     uint64_t timestamp_us;  /* xboxkrnl KeQueryPerformanceCounter at write */
 };
 
-/* Top-level synthetic-input state. 16 + 4*26 = 120 bytes. Lives in
- * the agent's BSS; for cross-XBE access (Tier 1/2 plans above) the
- * agent will publish a separate kernel-pool allocation in a future
- * change. */
+/* Top-level synthetic-input state. 16 + 4*26 = 120 bytes. Lives in a
+ * persistent kernel-pool allocation (MmAllocateContiguousMemoryEx +
+ * MmPersistContiguousMemory) so the buffer survives the agent's own
+ * process death across an `XLaunchXBE` chainload. The physical address
+ * of the allocation is stored in
+ * `E:\Apps\oracle-agent\state\ctrl-addr.txt`; a chainloaded diag XBE
+ * (`xbe-tests/lib/xbed_input_synth.c`) reads that file on startup,
+ * maps the same physical address via the kseg0 identity map (virtual
+ * = physical | 0x80000000), and reads this struct directly to consume
+ * synthetic controller input set by Mac-side controller.set RPCs. */
 struct __attribute__((packed)) oracle_ctrl_buffer {
     uint32_t magic;         /* ORACLE_CTRL_MAGIC */
     uint32_t version;       /* ORACLE_CTRL_VERSION */
@@ -130,7 +157,21 @@ struct __attribute__((packed)) oracle_ctrl_buffer {
     struct oracle_ctrl_port_state port[ORACLE_CTRL_NUM_PORTS];
 };
 
-/* Initialize the global state buffer (zero state on all four ports). */
+/* Path of the persistence anchor file. Diag XBEs use the same path
+ * to discover the buffer's physical address across an XLaunchXBE
+ * chainload. Format: "XCTR\n0x<HEX_PHYS_ADDR>\n0x<HEX_VIRT_ADDR>\n". */
+#define ORACLE_CTRL_ADDR_FILE "E:\\Apps\\oracle-agent\\state\\ctrl-addr.txt"
+
+/* Public accessor — returns the (kernel-pool) virtual base address of
+ * the controller buffer, or NULL if init has not run / failed. */
+struct oracle_ctrl_buffer *oracle_ctrl_get(void);
+
+/* Initialize the controller-state buffer:
+ *   1. Try to re-attach to a buffer published by a prior agent run via
+ *      ORACLE_CTRL_ADDR_FILE. If the recorded virtual address still
+ *      contains a valid magic, re-use it (no leak across agent restarts).
+ *   2. Otherwise, allocate a fresh persistent contiguous page,
+ *      write the persistence anchor, and zero the state. */
 void oracle_ctrl_init(void);
 
 /* RPC handlers — same shape as cmd_*. */

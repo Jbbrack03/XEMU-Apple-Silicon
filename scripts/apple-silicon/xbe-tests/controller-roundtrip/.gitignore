@@ -1,0 +1,4 @@
+*.obj
+*.exe
+*.c.d
+*.cpp.d

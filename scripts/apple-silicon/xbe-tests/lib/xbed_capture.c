@@ -16,10 +16,30 @@ struct xoss_header {
     uint32_t stride;
 };
 
+/* PCRTC_START register: the physical address the NV2A CRTC is currently
+ * scanning out from. When pbkit owns the screen (via pb_init +
+ * pb_show_front_screen), this is the pbkit-managed front buffer, NOT
+ * the kernel-managed `XVideoGetFB()` framebuffer.
+ *
+ * Reading PCRTC_START gives us the address of whatever pixels the user
+ * is actually seeing on the TV — which is what we want to capture.
+ *
+ * MMIO base for the NV2A is at virtual 0xFD000000 (a fixed Xbox kernel
+ * mapping); PCRTC_START lives at offset 0x600800 inside that. */
+#define NV2A_MMIO_BASE      0xFD000000u
+#define NV2A_PCRTC_START    0x00600800u
+
+static uint32_t s_read_pcrtc_start(void)
+{
+    volatile uint32_t *reg =
+        (volatile uint32_t *)(uintptr_t)(NV2A_MMIO_BASE + NV2A_PCRTC_START);
+    return *reg;
+}
+
 xbed_status_t xbed_capture_front_to_xoss(const char *xoss_path)
 {
-    /* Use kernel-reported video mode and front-buffer pointer; mirrors
-     * the agent's `cmd_screenshot` and pipeline-smoke. */
+    /* Use kernel-reported video mode for dimensions; pbkit's swap chain
+     * uses the same width/height/bpp as XVideoSetMode established. */
     VIDEO_MODE vm = XVideoGetMode();
     if (vm.width <= 0 || vm.height <= 0 || vm.bpp <= 0) {
         debugPrint("xbed_capture: bad video mode w=%d h=%d bpp=%d\n",
@@ -34,11 +54,51 @@ xbed_status_t xbed_capture_front_to_xoss(const char *xoss_path)
                    (unsigned long long)pixel_bytes);
         return XBED_FAIL_CAPTURE;
     }
-    uint8_t *fb = XVideoGetFB();
+
+    /* Resolve the actual currently-displayed front-buffer address.
+     *
+     * Strategy: read PCRTC_START (the physical scan-out address the
+     * NV2A is currently reading from); kseg0-map it to a virtual
+     * pointer (`virt = phys | 0x80000000`); copy `pixel_bytes` from
+     * there into the XOSS payload.
+     *
+     * Why this matters: pbkit's swap chain (pb_show_front_screen +
+     * pb_finished + back-buffer rotation) uses pbkit-allocated
+     * framebuffers, NOT the kernel's `XVideoGetFB()` framebuffer.
+     * Diag XBEs that render via pbkit therefore have their pixels in
+     * a different page than `XVideoGetFB()` returns, and an
+     * `XVideoGetFB()`-based capture would grab a stale or
+     * unrelated buffer.
+     *
+     * Fallback: if PCRTC_START reads as 0 (pbkit not initialized / no
+     * CRTC programming yet), fall back to `XVideoGetFB()` so
+     * CPU-painted XBEs (pipeline-smoke style) still capture
+     * correctly. */
+    uint32_t pcrtc = s_read_pcrtc_start();
+    uint8_t *fb;
+    const char *src_label;
+    /* PCRTC_START holds a non-zero physical address in the 64 MiB
+     * RAM window any time pbkit (or kernel D3D) has programmed the
+     * CRTC. Use it as long as it points anywhere into RAM (not just
+     * the upper 48 MiB, as a previous overly-restrictive check
+     * implied — Codex 2026-05-07). Fall back to XVideoGetFB() only
+     * when PCRTC is zero (CPU-paint scenarios like pipeline-smoke
+     * that never call pb_init / pb_show_front_screen). */
+    if (pcrtc != 0 && pcrtc < 0x04000000u) {
+        /* kseg0 identity-map: phys P → virtual P | 0x80000000. */
+        fb = (uint8_t *)(uintptr_t)(0x80000000u | (pcrtc & 0x03FFFFFFu));
+        src_label = "pcrtc";
+    } else {
+        fb = XVideoGetFB();
+        src_label = (pcrtc == 0) ? "kfb-pcrtc-zero" : "kfb-pcrtc-out-of-range";
+    }
     if (!fb) {
-        debugPrint("xbed_capture: XVideoGetFB returned NULL\n");
+        debugPrint("xbed_capture: no framebuffer pointer (pcrtc=0x%08lx)\n",
+                   (unsigned long)pcrtc);
         return XBED_FAIL_CAPTURE;
     }
+    debugPrint("xbed_capture: src=%s addr=%p pcrtc=0x%08lx\n",
+               src_label, (void *)fb, (unsigned long)pcrtc);
 
     /* Wait for vblank so the front-buffer scan-out doesn't tear our
      * capture across two presented frames. */
