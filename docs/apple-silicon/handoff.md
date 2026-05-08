@@ -408,10 +408,14 @@ Xbox become catchable.
 These remain documented future work; they are NOT gap-closure
 items but should be noted so they don't get lost:
 
-- **Tier-2 controller injection** (kernel-mode XInputGetState
-  hook for retail games). Designed in
-  `controller-injection-research.md`; needs a kernel symbol
-  dump first.
+- **Tier-2 controller injection** (kernel-mode retail input shim).
+  Kernel export dump and prior-art analysis are complete. The
+  project Xbox matches NKPatcher `patcher_5838`; the primary
+  candidate is the `KeRaiseIrqlToDpcLevel` export-slot hook at
+  `0x800104e8` with expected preinstall value `0x00003d04`.
+  Next session should run `tier2-shim-preflight.py`, then build a
+  no-op/counter hook before any input mutation. See
+  `tier2-kernel-shim-viability.md`.
 - **Tier-3 controller injection** (Teensy 4.0 + OGX-Mini
   hardware emulator). Hardware purchase required.
 - **12 remaining Tier-1 diag XBEs** from
@@ -630,10 +634,12 @@ What landed this session:
    sticks are int16 -32768..32767. So a `XEMU_RECORD_INPUT` CSV
    replays through the agent without any value-domain
    translation. Each port has `seq` + `timestamp_us` for
-   ordering / freshness. Phase 1 = protocol + state buffer only
-   (the buffer is in agent BSS). Tier 1 (cross-XBE shared kernel
-   pool) and Tier 2 (kernel-mode XInput hook) are designed but
-   not implemented — see `controller-injection-research.md`.
+   ordering / freshness. Tier 1 is shipped: the controller buffer
+   lives in persistent kernel memory and diag XBEs consume it
+   through `xbed_input_synth`. Tier 2 remains unimplemented, but
+   the viable path is now NKPatcher-style resident kernel shim
+   work, starting from `tier2-shim-preflight.py` and the
+   proof ladder in `tier2-kernel-shim-viability.md`.
    Built (`bin/default.xbe` = 401 408 bytes) and deployed to
    `/E/Apps/oracle-agent/`; every command end-to-end validated
    on the project Xbox (15-button bit audit confirms each
@@ -696,22 +702,18 @@ What landed this session:
 8. **`docs/apple-silicon/controller-injection-research.md`** —
    honest design/feasibility doc for the rest of the controller
    journey. Three tiers:
-   - **Tier 1 (RECOMMENDED NEXT):** shared-buffer + diag-XBE shim.
-     Move agent's buffer from BSS to `ExAllocatePoolWithTag` so
-     the physical address is stable across `XLaunchXBE`; add
-     `xbe-tests/lib/xbed_input_synth.{h,c}` so any diag XBE
-     opts in with two lines. Solves "validate gameplay scenes
-     in our own diag XBEs" — does NOT solve retail games.
-   - **Tier 2 (HARDER, FUTURE):** kernel hook on
-     `OhciControllerInterruptDispatch` (or nxdk-equivalent
-     symbol) so retail games see synthetic input. Risk
-     register R1–R5 included; needs a kernel symbol dump from
-     this iND-BiOS build first (use agent's `mem.read` to
-     walk the kernel's PE export table).
-   - **Tier 3 (FALLBACK):** Teensy 4.0 + `OGX-Mini` firmware
-     emulating an OG Xbox controller; Mac drives over serial.
-     ~$50 hardware, no Xbox-side code; works regardless of
-     iND-BiOS revision.
+   - **Tier 1 (SHIPPED):** persistent shared-buffer + diag-XBE
+     shim. Diag XBEs opt in via `xbed_input_synth`; this solves
+     synthetic input for our own diagnostics, not retail games.
+   - **Tier 2 (VIABLE, NOT SHIPPED):** resident kernel shim for
+     retail games. The kernel symbol dump is complete and
+     `tier2-shim-analyze.py` matched this Xbox to NKPatcher
+     `patcher_5838`; the primary candidate is the
+     `KeRaiseIrqlToDpcLevel` export-slot hook. First live step is
+     read-only `tier2-shim-preflight.py`, then a no-op/counter
+     hook, then `controller-readback` synthetic-state proof.
+   - **Tier 3 (FALLBACK / DEFERRED):** hardware controller
+     emulator. Hardware is unavailable for the current phase.
 
 **Key end-to-end smoke-test (validates the full pipeline):**
 
@@ -735,13 +737,14 @@ python3 scripts/apple-silicon/audio-waveform.py \
 This pipeline is the foundation for all future xemu-vs-real-Xbox
 gameplay-validation runs.
 
-**Known limitation: the controller buffer is not yet wired into a
-running game.** Phase 1 ships the protocol + state buffer + Mac
-replay. The "delivery to a running XBE's input subsystem" path is
-documented in `controller-injection-research.md` as Tier 1 (next
-session, ~1 session of work) and Tier 2 (~2-3 sessions). The
-oracle agent v0.3 RPCs are the input layer; the diag-XBE shim and
-the kernel hook are the output layers.
+**Known limitation: retail games are not yet wired into the
+synthetic controller buffer.** Tier 1 ships the protocol,
+persistent state buffer, Mac replay, and diag-XBE shim. Retail
+delivery is Tier 2: a resident NKPatcher-style kernel shim, now
+shown viable by `tier2-shim-analyze.py` but not yet installed.
+The next session should run `tier2-shim-preflight.py`, then build
+a no-op/counter hook and prove it with `controller-readback`
+before any mutating input override.
 
 **Known limitation (carried from 2026-05-06): pbkit + D:\\ fopen
 hang on real-Xbox Tier-1 diag XBEs.** Mirror, color-channel,

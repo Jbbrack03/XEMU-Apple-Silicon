@@ -3695,20 +3695,116 @@ python3 scripts/apple-silicon/controller-replay.py CSV [flags]
 Output: per-event status lines on stderr; final JSON summary on
 stdout (event count, jitter histogram, RPC errors).
 
-**Phase 1 status.** This tool drives the agent's synthetic-state
-buffer end-to-end. The buffer is NOT YET wired into a running
-game's input read path — see
-`docs/apple-silicon/controller-injection-research.md` for the
-Tier 1 (diag-XBE shared-buffer shim) and Tier 2 (kernel-mode
-XInput hook) plans. Until those land, controller-replay.py is
-useful for: (a) validating the CSV → agent → state-buffer
-round-trip, (b) measuring network jitter to the Xbox, (c)
-exercising the `controller.*` protocol surface area.
+**Important retail-game boundary.** This tool talks to the
+oracle agent over TCP/9001. Once the agent `runxbe`s a retail
+game, the agent process is gone, so live RPC replay cannot feed
+gameplay input. `controller-replay.py` is valid for agent-buffer
+testing and Tier-1 diag XBEs only; retail gameplay requires a
+proven title-facing backend (resident Tier-2 hook or hardware
+controller emulator).
+
+Tier 1 is shipped through the `xbed_input_synth` shared-buffer
+shim and validated by `controller-roundtrip`. Tier 2 remains a
+separate, higher-risk retail-game hook; see
+`docs/apple-silicon/controller-injection-research.md`.
 
 **Validation evidence (2026-05-07).** 8-event smoke CSV
 delivered in 360 ms wall against the project Xbox. Mean
 jitter 25.7 ms (network RTT to Xbox over LAN). The `seq` and
 `timestamp_us` fields on each port advance correctly.
+
+## Retail gameplay oracle — `retail-gameplay-oracle.py` (2026-05-07)
+
+Guarded end-to-end wrapper for the real-Xbox retail-game oracle
+workflow. It launches a retail XBE, records composite A/V, drives a
+title-facing input backend, appends the softmod IGR combo
+(`back+start+ltrigger+rtrigger`) to return to the dashboard, waits for
+FTP/dashboard recovery, then extracts keyframes and audio artifacts.
+
+```sh
+python3 scripts/apple-silicon/retail-gameplay-oracle.py \
+  --game-xbe 'F:\Games\Crimson Skies\default.xbe' \
+  --input-csv scripts/apple-silicon/input-scripts/crimson-gameplay.csv \
+  --input-backend hardware \
+  --input-evidence /path/to/input-evidence.json \
+  --exit-evidence /path/to/igr-evidence.json \
+  --input-driver-cmd '/path/to/hw-driver --csv {route_csv} --host {host}'
+```
+
+The command blocks by default unless both pieces of production
+evidence exist:
+
+- `title-facing-input-evidence`: JSON with `status=ok` or
+  `verdict=ok`, proving the chosen backend reaches the normal retail
+  input path. Agent RPC replay does not qualify after launch.
+- `autonomous-exit-evidence`: JSON with `status=ok` or `verdict=ok`,
+  proving the chosen backend can return from a running game to the
+  dashboard.
+
+Useful flags:
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--input-backend` | required | `tier2-hook` or `hardware` |
+| `--prelaunch-cmd` | none | For future resident-hook preload/setup |
+| `--input-driver-cmd` | none | Shell command that drives the route while the game runs |
+| `--launch-delay-s` | 3.0 | Delay after `runxbe` before the driver starts |
+| `--record-extra-s` | 15.0 | Recording tail after the route+exit combo |
+| `--exit-delay-ms` / `--exit-hold-ms` | 2000 / 3000 | IGR combo timing appended to the route |
+| `--allow-unproven` | off | Dangerous; only while physically supervising |
+
+Output lands under
+`benchmark-runs/retail-gameplay-oracle-<UTC>/`: `verdict.json`,
+`route-with-exit.csv`, `composite/video.mp4`, `keyframes/`,
+`audio/`, and `post-dashboard.png` when the dashboard returns.
+
+## Retail title scan — `xbe-inspect.py` (2026-05-07)
+
+Read-only XBE metadata and string scanner used to evaluate software-only
+retail input strategies without patching a title.
+
+```sh
+python3 scripts/apple-silicon/xbe-inspect.py /tmp/xemu-title-scan/halo/default.xbe --strings 40
+python3 scripts/apple-silicon/xbe-inspect.py /tmp/xemu-title-scan/soul-calibur-2/Default.xbe --strings 40
+python3 scripts/apple-silicon/xbe-inspect.py /tmp/xemu-title-scan/outrun2/default.xbe --strings 40
+```
+
+The scanner reports title ID, image bounds, debug path, linked libraries,
+kernel thunk metadata, and key strings around XInput/XID/controller/launch
+terms. It was added to make the software-only conclusion reproducible:
+agent RPC after `runxbe` is gone, LaunchData-only does not drive retail games,
+and generic title-level XInput patching is not stable enough to be the oracle
+backend. The remaining software path is the resident Tier-2 shim documented in
+`docs/apple-silicon/retail-gameplay-software-paths.md`.
+
+## Tier-2 shim prior-art analyzer — `tier2-shim-analyze.py` (2026-05-07)
+
+Read-only analyzer for the retail-input kernel shim. It compares the live
+annotated Xbox kernel export dump with an NKPatcher source checkout and
+reports whether this console matches a known NKPatcher IGR hook recipe.
+
+```sh
+python3 scripts/apple-silicon/tier2-shim-analyze.py \
+  --out-json benchmark-runs/tier2-shim-analysis-20260507T2310Z/summary.json \
+  --out-md benchmark-runs/tier2-shim-analysis-20260507T2310Z/report.md
+```
+
+Current result: `verdict=viable-prior-art-match`. The project Xbox matches
+NKPatcher `patcher_5838`; the relevant `KeRaiseIrqlToDpcLevel` export-slot VA
+is `0x800104e8`, and the expected preinstall slot value is `0x00003d04`.
+This makes the NKPatcher-style export-slot hook the primary Tier-2 candidate;
+see `docs/apple-silicon/tier2-kernel-shim-viability.md`.
+
+Use `tier2-shim-preflight.py` for the first live check before any future hook
+installer is allowed to write:
+
+```sh
+python3 scripts/apple-silicon/tier2-shim-preflight.py \
+  --analysis benchmark-runs/tier2-shim-analysis-20260507T2310Z/summary.json \
+  --out benchmark-runs/tier2-shim-preflight/summary.json
+```
+
+It only reads the export slot and requires the expected unhooked value.
 
 ## Real Xbox dashboard: UnleashX (switched 2026-05-06)
 
@@ -3882,11 +3978,11 @@ production-readiness gate.
     CSV replays through the agent without translation.
     `oracle_ctrl_init()` runs at agent boot. End-to-end validated
     against the project Xbox: every command + help + smoke-tested
-    via `oracle-client.py raw`. Phase 1 = protocol + state buffer
-    only; the buffer is currently in agent BSS (not visible to a
-    chainloaded XBE). See `controller-injection-research.md`
-    for the Tier 1 / Tier 2 / Tier 3 plan to close the loop into
-    a running game's input read path.
+    via `oracle-client.py raw`. Tier 1 later moved this buffer into
+    persistent kernel memory and shipped the `xbed_input_synth`
+    diag-XBE shim; Tier 2 is the remaining retail-game hook path.
+    See `controller-injection-research.md` and
+    `tier2-kernel-shim-viability.md`.
 
 14. **`scripts/apple-silicon/controller-replay.py` (2026-05-07):
     SHIPPED.** Replays a `XEMU_RECORD_INPUT` CSV through the

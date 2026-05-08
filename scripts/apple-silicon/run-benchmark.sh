@@ -639,6 +639,19 @@ if [[ "$VISUAL_ANALYSIS" == "1" ]]; then
     fi
 fi
 
+if [[ -n "$METAL_CAPTURE_PATH" ]]; then
+    METAL_CAPTURE_MANIFEST="${RUN_DIR}/metal-capture-manifest.json"
+    METAL_CAPTURE_MANIFEST_MD="${RUN_DIR}/metal-capture-manifest.md"
+    if ! python3 "${ROOT_DIR}/scripts/apple-silicon/metal-capture-manifest.py" \
+        --run-dir "$RUN_DIR" \
+        --capture "$METAL_CAPTURE_PATH" \
+        --out "$METAL_CAPTURE_MANIFEST" \
+        --out-md "$METAL_CAPTURE_MANIFEST_MD" \
+        > "${RUN_DIR}/metal-capture-manifest.log" 2>&1; then
+        echo "metal capture manifest incomplete; see ${RUN_DIR}/metal-capture-manifest.log" >&2
+    fi
+fi
+
 echo "Finished. Metadata: $META_FILE"
 echo "Log: $LOG_FILE"
 echo "Capture log: $CAPTURE_LOG"

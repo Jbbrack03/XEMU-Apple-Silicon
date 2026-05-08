@@ -28,22 +28,48 @@ risk vs reward, and records the design decisions for each.
 
 | Tier | Coverage | Path | Status |
 | ---- | -------- | ---- | ------ |
-| 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | Designed, ready to ship. ~1 session of work. |
-| 2    | Retail games | Kernel hook on `XInputGetState` + USB poll | Designed, NOT YET implemented. ~2-3 sessions of careful reverse-engineering + risk mitigation. |
+| 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | SHIPPED 2026-05-07. Production-validated by `controller-roundtrip`. |
+| 2    | Retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED 2026-05-07; hook NOT YET implemented. |
 | 3    | Generic / fallback | Hardware controller emulator (Mac → Xbox port) | Documented as alternative. Hardware project (Teensy + open-source firmware), out of scope for the current toolchain. |
 
 Tiers 1 and 2 are both software-only and use the same agent-side state
 buffer. Tier 3 is a hardware backstop if Tier 2 turns out to be too
 risky on a particular kernel / dashboard combination.
 
+## 2026-05-07 software-only verdict
+
+There is not a production-ready path to control a retail game after
+`runxbe` with the current shipped tooling. The oracle agent is the XBE
+that performs `runxbe`; once the retail title starts, the agent TCP
+server and live `controller.*` RPC path are gone.
+
+The viable software-only route remains Tier 2: install a resident
+kernel-level shim before launch, keep its code/data outside the agent
+XBE image, and have it feed the title-facing XInput/XID report path
+from the already-proven persistent controller buffer. See
+`retail-gameplay-software-paths.md` for the full matrix and required
+readback proof. See `tier2-kernel-shim-viability.md` for the prior-art
+survey and the current decision to start from NKPatcher's
+`KeRaiseIrqlToDpcLevel` export-slot hook.
+
+Two software shortcuts are now explicitly ruled out for production:
+
+- `LaunchData` can pass data only to cooperating XBEs. Retail games do
+  not know our route format, so launch data alone cannot drive input.
+- Generic title-level `XInputGetState` patching is not stable enough
+  for the oracle. Local scans of Halo, Soul Calibur 2, and OutRun 2
+  show different static XAPI/library layouts and inconsistent useful
+  strings.
+
 ---
 
-## Tier 1 — Shared-buffer + diag-XBE shim (RECOMMENDED NEXT STEP)
+## Tier 1 — Shared-buffer + diag-XBE shim (SHIPPED 2026-05-07)
 
 **Coverage:** any diagnostic XBE we author (`xbe-tests/<id>/`).
 **Risk:** very low. No kernel patching, no USB stack work; the diag
 XBE simply reads memory we already own.
-**Engineering:** ~1 session.
+**Engineering:** complete. See `oracle-workflow.md` and
+`automation.md` for the production validation commands.
 
 ### Architecture
 
@@ -89,31 +115,38 @@ This is enough for diag XBEs that exercise multiple gameplay branches
 (e.g. a `combiner-stage` diag that wants to render every NV2A combiner
 preset under both A-pressed and A-released states).
 
-### Phase 1 vs Phase 2 split
+### Shipped implementation
 
-What the agent **already does** (v0.3, this session):
+The agent now owns a persistent kernel-pool `oracle_ctrl_buffer`
+allocated with `MmAllocateContiguousMemoryEx` +
+`MmPersistContiguousMemory`. The physical address is published through
+`controller.buffer-info` and the persisted anchor at
+`E:\Apps\oracle-agent\state\ctrl-addr.txt`.
 
-- Owns the canonical `oracle_ctrl_buffer` (BSS-allocated, in-process).
-- Exposes `controller.set / .get / .button / .axis / .clear /
-  .buffer-info`.
-- Bumps `port[N].seq` and `port[N].timestamp_us` on every state change.
+Diag XBEs link `xbe-tests/lib/xbed_input_synth.{h,c}` through
+`lib.mk`, call `xbed_input_synth_attach()`, and read the latest
+seq-stamped state via `xbed_input_synth_read()`.
 
-What's left for Tier 1 (next session):
+The `controller-roundtrip` diag XBE validates the full path:
 
-- Move the buffer from BSS to a kernel-pool allocation
-  (`MmAllocateContiguousMemory` or `ExAllocatePoolWithTag` so the
-  physical address is stable and can be communicated cross-process).
-- Add `xbe-tests/lib/xbed_input_synth.{h,c}` so any diag XBE links
-  with `lib.mk` and gets `xbed_input_synth_attach()` /
-  `xbed_input_synth_read()` with two lines of code.
-- Author one Tier 1 diag XBE that demonstrates: e.g.
-  `controller-roundtrip` writes a known sequence via the agent,
-  chainloads, the diag reads each event from the buffer and
-  composites a per-event color stripe to disk; oracle compares
-  against a math-derived expected.png.
+1. Mac side sets a non-zero synthetic controller state through the
+   oracle agent.
+2. The agent writes that state into the persistent kernel-pool buffer.
+3. The oracle chainloads `controller-roundtrip`.
+4. The diag maps the buffer through the anchor file, reads the state,
+   and renders a math-comparable frame.
+5. `oracle-validate.sh` verifies the rendered frame is byte-exact
+   against the expected state.
 
-After that lands, every new diag XBE can opt into synthetic-input
-gating with no extra agent work.
+Production evidence as of 2026-05-07:
+
+- `oracle-validate-20260507T182615Z`: full validation run, including
+  10/10 stress.
+- `oracle-validate-20260507T194408Z`: clean post-fix composite run,
+  including smoke, visual matrix, controller-roundtrip, and seqlock.
+
+After this, every new diag XBE can opt into synthetic-input gating
+with no extra agent work.
 
 ### Cross-XBE persistence
 
@@ -128,13 +161,14 @@ pattern; the tag lets us locate the allocation post-chainload.
 
 ---
 
-## Tier 2 — Kernel hook for retail games (HARDER, FUTURE WORK)
+## Tier 2 — Kernel hook for retail games (PREP TOOLS SHIPPED; HOOK FUTURE WORK)
 
 **Coverage:** every retail Xbox game.
 **Risk:** moderate-to-high. A buggy hook crashes the kernel, and
 the user has to physically power-cycle the Xbox.
-**Engineering:** ~2-3 sessions of careful work, plus a test-bed
-diag XBE that exercises every code path before pointing it at retail.
+**Engineering:** safe readback/symbol tools are now in-tree; the unsafe hook
+still needs careful implementation and must pass the readback diag before any
+retail title is launched.
 
 ### How real games read controller state
 
@@ -156,8 +190,8 @@ report read) routed through the kernel's USB OHCI driver. Every game
 reads from the same underlying USB port, so a single hook covers
 every title.
 
-The reverse-engineering map (rough, requires verification against
-nxdk's xboxkrnl.h ordinal table + a kernel-symbol dump):
+The reverse-engineering map (rough, now backed by local tooling for
+verification against nxdk's xboxkrnl.h ordinal table + a kernel-symbol dump):
 
 ```
 Game code:     XInputGetState
@@ -167,12 +201,17 @@ Game code:     XInputGetState
                           → reads HID report from USB endpoint buffer
 ```
 
-The hook target is **`OhciControllerInterruptDispatch`** (or the
-nxdk-equivalent symbol) — the function that copies the HID report
-into the buffer the controller-handle's read endpoint hands back.
-The hook checks if the requesting endpoint's port has a synthetic
-state in `oracle_ctrl_buffer`; if yes, it returns the synthetic HID
-report instead of the device's real one.
+The original hook hypothesis was **`OhciControllerInterruptDispatch`**
+(or the nxdk-equivalent symbol) — the function that copies the HID
+report into the buffer the controller-handle's read endpoint hands
+back. The prior-art pass changed the ranking: this console's live
+kernel export dump exactly matches NKPatcher's `patcher_5838` IGR
+recipe, so the primary candidate is now the NKPatcher-style
+`KeRaiseIrqlToDpcLevel` export-slot hook at `0x800104e8`. That boundary
+has prior art for observing retail-game controller state and should be
+tested before deeper USB/OHCI internals. `IofCompleteRequest` and lower
+OHCI/XID routines remain fallbacks if the NKPatcher boundary misses
+required titles.
 
 ### Risk inventory (R1–R5)
 
@@ -184,26 +223,71 @@ report instead of the device's real one.
 | R4 | A real controller plugged in fights the synthetic state | The hook returns the synthetic state for any port where `port[N].seq > 0` (i.e. the agent has touched that port); otherwise it passes through to the real controller. Mac side issues `controller.clear port=N` to "release" a port back to its physical controller. |
 | R5 | Kernel hook breaks on agent-relaunch (re-applies on top of itself) | Hook installer checks for a sentinel (e.g. an ORACLE_HOOK_INSTALLED flag at a kernel-pool address); idempotent install. Uninstall happens on `unsafe.disable` or agent rebuild. |
 
-### Why this isn't shipped this session
+### Shipped Tier-2 prep tools
 
-- Reverse-engineering OHCI symbol locations on this specific iND-BiOS
-  build needs a kernel symbol dump that we haven't taken yet.
-- The hook needs at least one CPU-painted "controller readback" diag
-  XBE to validate against before we point it at a retail game.
+- `scripts/apple-silicon/xbe-tests/controller-readback/` — nxdk SDL XBE that
+  reads the normal title-facing controller path and writes
+  `D:\controller-readback.txt` + `D:\controller-readback-done.txt`.
+- `scripts/apple-silicon/controller-readback-validate.py` — Mac-side runner
+  that chainloads the readback XBE via the oracle orchestrator, mirrors
+  artifacts, parses key/value output, and can enforce `--expect key=value`
+  checks once a synthetic hook exists.
+- `scripts/apple-silicon/xbox-kernel-symbol-dump.py` — safe PE export dumper
+  for the running Xbox kernel. It probes only known base candidates and export
+  tables through `oracle-client.py mem.read`; it does not scan RAM.
+- `scripts/apple-silicon/xbox-kernel-export-annotate.py` — joins that
+  ordinal-only dump with nxdk's `xboxkrnl.exe.def`; current evidence names
+  366/366 exports and confirms useful primitives such as
+  `MmMapIoSpace@12` and `HalReturnToFirmware@4`.
+- `scripts/apple-silicon/xbe-inspect.py` — read-only XBE scanner for title,
+  certificate, library, thunk, debug-path, and key input/launch strings. It
+  documents why generic retail title patching is a research path, not the
+  default oracle backend.
+- `scripts/apple-silicon/retail-oracle-smoke.py` — production retail-game
+  smoke gate. It refuses to launch a retail XBE unless the run has evidence
+  for both a title-facing input backend and an autonomous return-to-dashboard
+  backend. A blocked result is the correct result until Tier 2 or Tier 3 is
+  proven.
+- `scripts/apple-silicon/retail-gameplay-oracle.py` — guarded launch →
+  route → capture → exit runner. It is intentionally blocked by evidence
+  gates until Tier 2 or another title-facing backend is proven.
+- `docs/apple-silicon/retail-gameplay-software-paths.md` — definitive
+  software-only control matrix and Tier-2 acceptance test.
+- `scripts/apple-silicon/tier2-shim-analyze.py` — read-only analyzer that
+  cross-checks the live kernel export dump against NKPatcher IGR recipes.
+  Current result: this console matches `patcher_5838` with
+  `KeRaiseIrqlToDpcLevel` export-slot VA `0x800104e8`.
+- `docs/apple-silicon/tier2-kernel-shim-viability.md` — Tier-2 prior-art
+  survey, candidate ranking, and proof ladder.
+
+Exit may not need to be expressed as controller input once Tier 2 exists. The
+running kernel exports `HalReturnToFirmware@4`, and nxdk exposes
+`HalQuickRebootRoutine` / `HalRebootRoutine`; a resident shim can test that as
+an autonomous dashboard-return path before combining it with input injection.
+
+The readback XBE uses nxdk SDL's Xbox controller backend. That is not the exact
+static Microsoft `XInputGetState` symbol a retail game links, but it is the
+right safe preflight for the USB/XID path before patching any kernel or title
+code.
+
+### Why the hook itself is not shipped yet
+
+- The next live step is a read-only `tier2-shim-preflight.py` run to verify
+  the `0x800104e8` export slot still contains the expected unhooked value.
+- The first hook must be no-op/counter only. It must prove the
+  `KeRaiseIrqlToDpcLevel` boundary is active during `controller-readback`
+  before any state mutation is attempted.
 - The user's Xbox is the project's only oracle hardware; bricking it
   with a buggy hook would block the entire validation pipeline. Slow
   is fast.
 
-Once a `controller-readback` diag XBE exists (writes to D:\\ what it
-reads from XInput, oracle compares against synthetic state we
-pre-set), the hook itself can land in a follow-up session with
-quantifiable progress: each hook attempt is a 30-second cycle of
-"set synthetic state → run readback diag → compare what landed in
-D:\\ to what we set".
+The hook itself can now land with quantifiable progress: each attempt is a
+short cycle of "set synthetic state → run readback diag → compare what landed
+in `D:\` to what we set".
 
 ---
 
-## Tier 3 — Hardware controller emulator (FALLBACK)
+## Tier 3 — Hardware controller emulator (FALLBACK / DEFERRED)
 
 **Coverage:** any Xbox, any title, any kernel.
 **Risk:** none on the Xbox side; the hardware just plugs in.
@@ -238,21 +322,22 @@ serial.
 
 ## Recommendation for next session
 
-1. **Build Tier 1 first.** Move the agent's buffer to kernel pool +
-   ship `xbed_input_synth` shim + author one validation diag XBE.
-   This unblocks the entire diag-XBE library for input-driven
-   validation without touching kernel-mode code.
-2. **Take a kernel symbol dump from the project Xbox** while Tier 1
-   is hot. The agent's `mem.read` already covers the kseg0 RAM image;
-   walking the kernel's PE export table is straightforward once the
-   loaded base address is known. Capture this proactively so Tier 2
-   has the symbol map it needs.
-3. **Author a `controller-readback` diag XBE** that exercises XInput
-   from the guest side and writes what it read to D:\\. This becomes
-   the validation gate for Tier 2.
-4. **Defer Tier 2 install** until items 1-3 are green. Slow is fast.
-5. **Order the Tier 3 hardware** ONLY if Tier 2 turns out to be
-   blocked by something we can't characterize cheaply.
+1. **Treat Tier 1 as closed.** Keep using `oracle-validate.sh` and
+   `m15-visual-gate.sh` to prove it stays closed.
+2. **Run the live Tier-2 preflight** with the oracle agent online:
+   `tier2-shim-preflight.py` must read `0x800104e8` and observe
+   little-endian `0x00003d04`.
+3. **Implement only a no-op/counter hook first.** It should use the
+   NKPatcher-style `KeRaiseIrqlToDpcLevel` export-slot boundary, refuse to
+   install if preflight fails, tail-jump to the original path, and expose a
+   counter/ring-buffer artifact.
+4. **Prove the no-op hook with `controller-readback`.** Require no crash and a
+   non-zero hook/context counter before any input mutation.
+5. **Implement the synthetic `XINPUT_STATE` override** only after item 4 is
+   green. The acceptance test is synthetic controller buffer state showing up
+   in `controller-readback.txt`.
+6. **Order Tier 3 hardware only if this boundary misses required retail
+   titles** or proves too brittle to characterize cheaply.
 
 ## Cross-references
 

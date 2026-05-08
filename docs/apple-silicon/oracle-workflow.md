@@ -155,9 +155,13 @@ Tier-1 controller injection (shipped 2026-05-07) closes that loop:
 
 **Limitation as of 2026-05-07:** retail games do NOT yet read from
 the synthetic buffer — the Tier-1 shim only attaches diag XBEs that
-explicitly call `xbed_input_synth_attach()`. Tier-2 (kernel-mode
-XInputGetState hook) is the path to retail-game gameplay validation;
-designed in `controller-injection-research.md`, not yet implemented.
+explicitly call `xbed_input_synth_attach()`. Tier-2 is the path to
+retail-game gameplay validation. It is not implemented, but it is now
+grounded in NKPatcher prior art: `tier2-shim-analyze.py` matched this
+Xbox to `patcher_5838`, making the `KeRaiseIrqlToDpcLevel` export-slot
+hook the primary candidate. Next step is read-only
+`tier2-shim-preflight.py`, then a no-op/counter hook proven by
+`controller-readback`.
 
 ## Production status
 
@@ -244,7 +248,8 @@ If the new XBE renders synthetic input, also include
 | `scripts/apple-silicon/xbe-tests/lib/xbed_runtime.{h,c}` | Common pbkit init / render / shader load |
 | `scripts/apple-silicon/xbe-tests/<id>/` | One Tier-1 diag XBE per directory |
 | `docs/apple-silicon/xbox-real-references/<id>/real-xbox.png` | Canonical real-Xbox reference frame for diag `<id>` |
-| `docs/apple-silicon/controller-injection-research.md` | Tier-1 (shipped) + Tier-2/3 (designed) controller injection plan |
+| `docs/apple-silicon/controller-injection-research.md` | Tier-1 shipped + Tier-2/3 controller injection plan |
+| `docs/apple-silicon/tier2-kernel-shim-viability.md` | Tier-2 NKPatcher prior-art match, hook candidate, and proof ladder |
 | `docs/apple-silicon/diagnostic-xbe-plan.md` | Diag-XBE library architecture + per-XBE specifications |
 | `docs/apple-silicon/real-xbox-oracle-feasibility.md` | Original feasibility study (superseded same-day by Phase 1+2+3.0) |
 

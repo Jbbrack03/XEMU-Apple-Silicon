@@ -1,5 +1,96 @@
 # Decision Log
 
+## 2026-05-07: Tier-2 kernel shim is viable enough to pursue via NKPatcher IGR boundary
+
+Before probing kernel memory, we checked prior art:
+
+- NKPatcher: in-memory retail Xbox kernel patcher with IGR support.
+- ENDGAME: useful shellcode/export-resolution/cache/IRQL reference, but not an
+  ongoing input hook.
+- XboxHD+ kpatch: modern production evidence that OG Xbox kernel patching is
+  still used, though public artifacts are less directly useful for input.
+
+Decision: Tier 2 should begin from NKPatcher's IGR strategy, not from blind
+OHCI/XID probing. `scripts/apple-silicon/tier2-shim-analyze.py` matched this
+console's live kernel exports to NKPatcher `patcher_5838`:
+
+- `KeRaiseIrqlToDpcLevel` ordinal 129: `0x80013d04`
+- export-slot VA to preflight/hook: `0x800104e8`
+- expected current slot value before install: `0x00003d04`
+- `HalReturnToFirmware`: `0x8001542d`
+- `LaunchDataPage`: `0x8003c360`
+
+Artifact:
+`benchmark-runs/tier2-shim-analysis-20260507T2310Z/report.md` records
+`verdict=viable-prior-art-match`. The durable design note is
+`docs/apple-silicon/tier2-kernel-shim-viability.md`.
+`scripts/apple-silicon/tier2-shim-preflight.py` is the first live read-only
+gate; today's run blocked with `Connection refused` because the oracle agent
+was not online.
+
+Next implementation must be a no-op/counter hook with a live preflight read,
+not a full mutating input override. The first mutating proof remains:
+synthetic controller buffer → resident hook → `controller-readback.txt` reports
+synthetic state.
+
+## 2026-05-07: Software-only retail-game control path narrowed to Tier 2 resident shim
+
+The answer to "can the oracle control a retail game once launched?" is no
+with the current shipped tooling. `runxbe` replaces the oracle agent XBE, so
+the TCP server and live `controller.*` RPC path are gone while the retail game
+runs.
+
+Definitive software-only findings:
+
+- Agent RPC replay after launch is ruled out.
+- LaunchData-only preload is ruled out for retail games because retail titles
+  do not consume the oracle route/script format.
+- Generic title-level `XInputGetState` patching is not production-generic.
+  Local scans with `scripts/apple-silicon/xbe-inspect.py` found different
+  static XAPI/library layouts and inconsistent useful input strings across
+  Halo, Soul Calibur 2, and OutRun 2.
+- The only viable software path is a resident kernel-level XID/XInput-boundary
+  shim that survives `XLaunchXBE`, consumes the existing persistent controller
+  buffer, and passes the `controller-readback` synthetic-state proof before any
+  retail title is launched.
+
+New durable artifact:
+`docs/apple-silicon/retail-gameplay-software-paths.md` records the path
+matrix, evidence, and production proof. Until that proof passes,
+`retail-oracle-smoke.py` and `retail-gameplay-oracle.py` must continue to
+block by default.
+
+## 2026-05-07: Retail-game oracle is not production-ready until input + exit pass
+
+The real-Xbox oracle's diagnostic-XBE pipeline remains production-green, but
+that does **not** mean the retail-game gameplay oracle is ready. A retail
+gameplay oracle requires launch → title-facing controller automation →
+composite/keyframe capture → autonomous return to dashboard. The first
+preflight for Crimson Skies intentionally blocked before launch:
+
+- `benchmark-runs/retail-oracle-smoke-20260507T220605Z`: route CSV parsed,
+  Xbox/dashboard reachable, AVFoundation composite capture device visible,
+  installed `/F/Games` titles enumerated.
+- Blocked because no proven backend injects the oracle synthetic controller
+  buffer into a retail game's XInput/XID read path.
+- Blocked because no proven autonomous exit path returns a retail game to the
+  dashboard without human intervention.
+
+Decision: do not label real-Xbox retail gameplay output as an autonomous
+oracle reference until `scripts/apple-silicon/retail-oracle-smoke.py` returns
+`verdict=ok` with evidence for both the input backend and the dashboard-return
+backend. Emulator-only route replay and agent-buffer replay are insufficient.
+
+Follow-up tooling shipped in this session:
+`scripts/apple-silicon/retail-gameplay-oracle.py` is the guarded runner for
+the full retail workflow once those evidence gates are green. It appends the
+project Xbox's softmod IGR combo (`back+start+ltrigger+rtrigger`) to the route,
+starts composite A/V capture, launches the game, drives the configured
+title-facing input backend, waits for FTP/dashboard return, and extracts
+keyframes plus audio artifacts. It blocks by default without production
+evidence because the agent dies on `runxbe`; live `controller.*` RPC replay is
+not a valid retail-game input path.
+
 ## 2026-05-07 (production-ready): Oracle blockers B1-B4 closed live
 
 The real-Xbox oracle is now production-ready for pipeline use.

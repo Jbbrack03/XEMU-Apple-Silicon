@@ -34,6 +34,15 @@ Every Apple Silicon-specific decision, benchmark, and handoff lives under
   triage flowchart, phase exit-gate procedures, triangulation appendix.
   Meta-doc that sits one level above the Metal track sub-list below;
   read after `handoff.md` at the start of any Metal-track session.
+- `docs/apple-silicon/tooling-gap-plan.md` — **(added 2026-05-07)**
+  tool/capability gap register for the Metal backend: Xcode MCP policy,
+  `.gputrace` interpretation, Tier-2 retail-game real-Xbox input,
+  session-start dashboard, and full M15 evidence bundle.
+  Start Metal sessions with
+  `scripts/apple-silicon/metal-feedback-dashboard.py` when you need a
+  fast measured state summary before choosing work. Use
+  `scripts/apple-silicon/metal-tools-readiness.sh --quick` to verify
+  the tooling surface itself before a long renderer/debugging session.
 
 Metal renderer track (added 2026-05-02; read after `handoff.md` when
 the task touches the Metal port):
@@ -124,6 +133,56 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   `scripts/apple-silicon/controller-replay.py` without translation.
   Now lives at `/E/Apps/oracle-agent/default.xbe` (was
   `/E/XBMC4Gamers/...` until 2026-05-07).
+- `scripts/apple-silicon/metal-capture-manifest.py` — sidecar generator
+  for `.gputrace` captures. `run-benchmark.sh --metal-capture` invokes it
+  automatically and writes `metal-capture-manifest.{json,md}` into the run
+  directory with capture provenance, size, start/stop log evidence, and
+  Metal-related perf/validation tail lines.
+- `scripts/apple-silicon/xbox-kernel-symbol-dump.py` — safe running-kernel
+  PE export dumper through the oracle agent. It probes known kernel base
+  candidates and reads export-table RVAs only; no broad RAM scan.
+- `scripts/apple-silicon/xbox-kernel-export-annotate.py` — joins the
+  ordinal-only live kernel export dump with nxdk's `xboxkrnl.exe.def`, writing
+  named annotated JSON/TSV under the per-console backup. Verified 2026-05-07:
+  366/366 exports named for base `0x80010000`.
+- `scripts/apple-silicon/xbe-tests/controller-readback/` plus
+  `scripts/apple-silicon/controller-readback-validate.py` — Tier-2
+  retail-input preflight. The XBE records what the title-facing SDL/XID
+  controller path sees to `D:\controller-readback.txt`; the validator
+  chainloads it, mirrors artifacts, parses key/value output, and can enforce
+  explicit expectations once a safe synthetic hook exists.
+- `scripts/apple-silicon/retail-oracle-smoke.py` — production gate for
+  the real-Xbox retail-game oracle workflow. It checks the requested game
+  route, input CSV, composite capture visibility, title-facing input backend,
+  and autonomous exit evidence, then writes `verdict.json` + `report.md`.
+  It deliberately refuses to launch a retail game when Tier-2 input and
+  dashboard-return paths are not both proven, because launching would tear
+  down the oracle agent and can strand the console in-game.
+- `scripts/apple-silicon/retail-gameplay-oracle.py` — guarded end-to-end
+  retail gameplay runner for the moment those gates are green. It appends the
+  softmod IGR combo (`back+start+ltrigger+rtrigger`) to the route CSV, records
+  composite A/V, launches the retail XBE, drives a supplied title-facing input
+  backend command, waits for dashboard FTP to return, then extracts keyframes
+  and audio artifacts. Do not use agent `controller.*` RPC replay as the
+  retail input backend: the agent process dies on `runxbe`.
+- `scripts/apple-silicon/xbe-inspect.py` — read-only XBE metadata/string
+  scanner used to evaluate whether a retail title has stable XInput/XID patch
+  hints. Local scans of Halo, Soul Calibur 2, and OutRun 2 support the current
+  decision that generic title-level patching is not the production backend.
+- `docs/apple-silicon/retail-gameplay-software-paths.md` — definitive
+  software-only control matrix. Current answer: no shipped software path can
+  control a retail title after launch; the viable path is a resident Tier-2
+  XID/XInput-boundary shim proven first by `controller-readback`.
+- `scripts/apple-silicon/tier2-shim-analyze.py` plus
+  `docs/apple-silicon/tier2-kernel-shim-viability.md` — read-only Tier-2
+  viability analyzer and prior-art note. Current result:
+  `verdict=viable-prior-art-match`; the project Xbox matches NKPatcher
+  `patcher_5838`, making the `KeRaiseIrqlToDpcLevel` export-slot hook
+  (`0x800104e8`, expected slot value `0x00003d04`) the primary software shim
+  candidate.
+- `scripts/apple-silicon/tier2-shim-preflight.py` — first live read-only gate
+  for Tier-2. It reads the candidate export slot and verifies the unhooked
+  value before any future unsafe installer may patch it.
 - `scripts/apple-silicon/xbe-tests/eeprom-dump/` — nxdk XBE,
   one-shot 256-byte EEPROM capture (raw + decrypted info file).
 - `scripts/apple-silicon/xbe-tests/pipeline-smoke/` — **Phase

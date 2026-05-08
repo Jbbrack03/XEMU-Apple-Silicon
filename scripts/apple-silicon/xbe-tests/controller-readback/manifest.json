@@ -1,0 +1,34 @@
+{
+  "id": "controller-readback",
+  "title": "Retail-controller readback preflight (SDL/XID path)",
+  "purpose": "Record what a downstream title-facing controller API sees on real Xbox after chainload. This is the Tier-2 preflight for retail-game input injection: it exercises the Xbox USB/XID controller route through nxdk SDL rather than the oracle agent's shared synthetic buffer.",
+  "catalog_ref": "Tier 2 retail game input injection (controller-injection-research.md)",
+  "self_validation_tier": 2,
+  "oracle_priority": ["real-xbox"],
+  "duration_seconds": 6,
+  "non_deterministic_regions": [],
+  "artifacts": {
+    "readback_txt": {
+      "xbox_path": "D:\\controller-readback.txt",
+      "ftp_path": "/E/Apps/controller-readback/controller-readback.txt",
+      "format": "key=value text"
+    },
+    "done_marker": {
+      "xbox_path": "D:\\controller-readback-done.txt",
+      "ftp_path": "/E/Apps/controller-readback/controller-readback-done.txt"
+    }
+  },
+  "expected_results": {
+    "real-xbox/physical/preflight": {
+      "kind": "record-only",
+      "notes": "Default mode records the physical controller state if present. A future kernel/XID hook can run this same XBE with explicit expected fields."
+    }
+  },
+  "expected_fail_renderers": [],
+  "real_xbox_only": true,
+  "preconditions": [
+    "oracle-orchestrator.py ensure-agent succeeded",
+    "XBE deployed at E:\\Apps\\controller-readback\\default.xbe",
+    "for physical preflight, a controller is connected before chainload"
+  ]
+}
