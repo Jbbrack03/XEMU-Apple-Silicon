@@ -96,30 +96,32 @@ Closed pieces:
   keyframes plus audio artifacts.
 - `scripts/apple-silicon/xbe-inspect.py` plus
   `docs/apple-silicon/retail-gameplay-software-paths.md` record the
-  software-only verdict: agent RPC after launch, LaunchData-only preload, and
-  generic retail title patching are not production backends. Tier-2 resident
-  XID/XInput-boundary injection is the remaining software path.
+  software-only verdict: agent RPC after launch and LaunchData-only preload
+  remain ruled out. One generic title patch is not production-generic, but
+  per-title XBE patching is now the accepted production path for the fixed
+  5-6 game oracle scope.
 - `scripts/apple-silicon/tier2-shim-analyze.py` plus
   `docs/apple-silicon/tier2-kernel-shim-viability.md` identify the primary
-  Tier-2 software path. This Xbox matches NKPatcher `patcher_5838`; the first
-  hook candidate is the `KeRaiseIrqlToDpcLevel` export slot at `0x800104e8`.
+  generic Tier-2 software path. This Xbox matches NKPatcher `patcher_5838`;
+  the first hook candidate is the `KeRaiseIrqlToDpcLevel` export slot at
+  `0x800104e8`, but the 2026-05-08 live install crashed and this path is now
+  research-only.
 - `scripts/apple-silicon/tier2-shim-preflight.py` is the first live read-only
   gate. It verifies the export slot still contains `0x00003d04` before any
   future unsafe installer may patch it.
 
 Remaining implementation piece:
 
-- Run `tier2-shim-preflight.py` with the oracle agent online.
-- Implement a Tier-2 no-op/counter hook behind an explicit unsafe gate in the
-  oracle agent. It must be idempotent, must refuse to install if the export
-  slot preflight fails, and must pass `controller-readback` without mutating
-  input before the synthetic override is attempted.
-- Implement the synthetic `XINPUT_STATE` override only after the counter/context
-  hook proves the NKPatcher boundary is active during `controller-readback`.
+- Build the first per-title patcher, starting with PGR2.
+- Prove autonomous dashboard return from the patched title before gameplay
+  input.
+- Prove one visible patched input event.
+- Run the existing PGR2 route through `retail-gameplay-oracle.py` with
+  title-patch input and autonomous-exit evidence.
 - Add successful `retail-oracle-smoke.py` evidence for at least one installed
   retail title before using real-Xbox footage as a gameplay oracle for Metal.
-- Keep the hardware-controller-emulator path as the fallback if the NKPatcher
-  export-slot boundary misses required retail titles.
+- Keep the hardware-controller-emulator path as the fallback if per-title
+  patching stalls or broader generic title coverage becomes necessary.
 
 ## Gap 3: session-start state visibility
 

@@ -47,6 +47,11 @@ extern struct netif *g_pnetif;
  * Only mem.write and nv2a.write check this. Resets on agent restart. */
 static int s_unsafe_writes_enabled = 0;
 
+int oracle_writes_enabled(void)
+{
+    return s_unsafe_writes_enabled;
+}
+
 /* Borrowed from Phase 1 — the EEPROM dump path. */
 static int read_eeprom(unsigned char *out)
 {
@@ -391,6 +396,11 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "controller.get [port=N]               read back synthetic input state");
     op_send_line(c, "controller.clear [port=N]             zero one or all ports");
     op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
+    op_send_line(c, "tier2.preflight                       read-only Tier-2 hook slot check");
+    op_send_line(c, "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)");
+    op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");
+    op_send_line(c, "tier2.uninstall                       restore Tier-2 hook slot (unsafe)");
+    op_send_line(c, "tier2.status                          read Tier-2 hook page + counters");
     op_send_line(c, "reboot                                reboot to dashboard");
     op_send_line(c, "bye                                   close connection");
     op_send_line(c, "help                                  this list");

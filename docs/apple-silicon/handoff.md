@@ -1,5 +1,81 @@
 # Handoff
 
+Last updated: 2026-05-08 (retail oracle strategy pivot) —
+**NEXT SESSION: PER-TITLE GAME PATCHING + AUTONOMOUS EXIT PROOF.**
+
+The production oracle-agent pipeline from 2026-05-07 remains valid for
+agent-resident diagnostics, but the new retail-game requirement is now
+scoped differently. The user accepted a **per-title patching strategy**
+for the current 5-6 retail canaries rather than requiring a generic
+software/hardware controller backend. The durable plan is
+`docs/apple-silicon/retail-title-patching-strategy.md`.
+
+The Tier-2 `KeRaiseIrqlToDpcLevel` export-slot preflight passed live
+(`slot=0x800104e8`, `observed_rva=0x00003d04`), but the first mutating
+no-op/counter install froze or crashed the project Xbox before the
+agent returned a response. After a manual restart, the revised
+`tier2.install-jump-only` rung also froze or crashed the Xbox before a
+response. Current last-known status at `192.168.0.200` after that test:
+`ping=false`, `ftp=false`, `agent=false`.
+
+Conclusion for the generic retail controller path: the implemented
+runtime kernel-hook path is **not viable for production**. No retail
+game was launched, no gameplay capture was attempted, and no
+autonomous in-game exit path was proven. This does not mathematically
+disprove every possible software-only Xbox input hook, but the only
+prior-art-backed path we had for this project crashed at the jump-only
+export-slot redirection rung.
+
+Conclusion for the oracle strategy: proceed with **per-title XBE
+patching** for PGR2, Crimson Skies, Rainbow Six 3, Soul Calibur 2,
+Halo CE, and one sixth broader-sweep title (OutRun 2 or Burnout 3).
+Each patch must include an autonomous dashboard-return path. The first
+live proof in the next session is **return-only**, before any gameplay
+route: launch patched PGR2, wait a short fixed interval, call
+`HalReturnToFirmware(HalQuickRebootRoutine)` or
+`HalReturnToFirmware(HalRebootRoutine)`, and require dashboard FTP
+recovery.
+
+Local follow-up code has already been hardened for the next live attempt:
+
+- `tier2.install-jump-only` installs only a resident tail-jump to the
+  original `KeRaiseIrqlToDpcLevel` implementation.
+- `tier2.install-noop` now preserves EFLAGS and uses a plain counter
+  increment instead of the crashed build's `lock inc`.
+- `controller-readback` reports Tier-2 hook code size and flags.
+
+Both revised XBEs build locally. The local agent build now guards the
+Tier-2 mutating install commands behind
+`confirm=crash-risk-20260508`, but that guarded build is not deployed
+because the jump-only test left the Xbox down. First action after a
+manual power-cycle:
+
+```sh
+ping -c 2 192.168.0.200
+python3 scripts/apple-silicon/oracle-orchestrator.py --host 192.168.0.200 status
+```
+
+After dashboard/FTP are back, upload the guarded local agent if needed,
+launch it, and run read-only `tier2.preflight` only. Do not run Tier-2
+install commands for the retail oracle pipeline. Then start the
+per-title patch ladder:
+
+1. Mirror PGR2's retail XBE to the Mac and fingerprint it with
+   `xbe-inspect.py`.
+2. Build a reproducible PGR2 patcher.
+3. Prove autonomous dashboard return from patched PGR2.
+4. Prove one visible patched input event.
+5. Run the existing `pgr2-gameplay.csv` route through
+   `retail-gameplay-oracle.py` with title-patch input and exit
+   evidence.
+6. Repeat for Crimson Skies, Rainbow Six 3, Soul Calibur 2, Halo CE,
+   then the chosen sixth title.
+
+Full Tier-2 crash evidence:
+`docs/apple-silicon/benchmarks/2026-05-08-tier2-noop-hook.md`.
+
+## Previous Production Oracle Banner
+
 Last updated: 2026-05-07 (oracle production-ready) — **ORACLE
 PIPELINE PRODUCTION-READY.** The four post-recovery blockers
 B1-B4 are closed live on the project Xbox at `192.168.0.200`.

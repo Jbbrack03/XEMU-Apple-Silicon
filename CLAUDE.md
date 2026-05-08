@@ -168,18 +168,21 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
 - `scripts/apple-silicon/xbe-inspect.py` — read-only XBE metadata/string
   scanner used to evaluate whether a retail title has stable XInput/XID patch
   hints. Local scans of Halo, Soul Calibur 2, and OutRun 2 support the current
-  decision that generic title-level patching is not the production backend.
+  decision that one generic title-level patch is not production-generic.
 - `docs/apple-silicon/retail-gameplay-software-paths.md` — definitive
-  software-only control matrix. Current answer: no shipped software path can
-  control a retail title after launch; the viable path is a resident Tier-2
-  XID/XInput-boundary shim proven first by `controller-readback`.
+  software-only control matrix. Current answer: no generic shipped software
+  path can control an arbitrary retail title after launch; for the fixed
+  canary scope, per-title XBE patching is now adopted.
+- `docs/apple-silicon/retail-title-patching-strategy.md` — **current
+  retail-oracle production plan (2026-05-08)**. Patch PGR2 / Crimson /
+  Rainbow / SC2 / Halo / one sixth title; prove autonomous dashboard return
+  before gameplay input; then run full captured routes.
 - `scripts/apple-silicon/tier2-shim-analyze.py` plus
   `docs/apple-silicon/tier2-kernel-shim-viability.md` — read-only Tier-2
-  viability analyzer and prior-art note. Current result:
-  `verdict=viable-prior-art-match`; the project Xbox matches NKPatcher
-  `patcher_5838`, making the `KeRaiseIrqlToDpcLevel` export-slot hook
-  (`0x800104e8`, expected slot value `0x00003d04`) the primary software shim
-  candidate.
+  viability analyzer and prior-art note. Current result: the read-only match
+  passed, but the 2026-05-08 live export-slot install crashed/froze the Xbox.
+  Tier-2 install commands are research-only and must not be used for the
+  retail oracle pipeline.
 - `scripts/apple-silicon/tier2-shim-preflight.py` — first live read-only gate
   for Tier-2. It reads the candidate export slot and verifies the unhooked
   value before any future unsafe installer may patch it.

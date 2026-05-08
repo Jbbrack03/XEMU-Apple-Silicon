@@ -30,6 +30,7 @@
 #include "commands.h"
 #include "controller.h"
 #include "protocol.h"
+#include "tier2.h"
 
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -70,6 +71,11 @@ static const struct cmd_entry s_cmds[] = {
     { "controller.axis",         cmd_controller_axis         },
     { "controller.clear",        cmd_controller_clear        },
     { "controller.buffer-info",  cmd_controller_buffer_info  },
+    { "tier2.preflight",         cmd_tier2_preflight         },
+    { "tier2.install-jump-only", cmd_tier2_install_jump_only },
+    { "tier2.install-noop",      cmd_tier2_install_noop      },
+    { "tier2.uninstall",         cmd_tier2_uninstall         },
+    { "tier2.status",            cmd_tier2_status            },
     { "reboot",                  cmd_reboot                  },
     { "bye",                     cmd_bye                     },
     { "help",                    cmd_help                    },
@@ -181,6 +187,7 @@ int main(void)
      * `controller.buffer-info` and `controller.get` commands return
      * sane values even before any client has called `controller.set`. */
     oracle_ctrl_init();
+    oracle_tier2_init();
 
     nxNetInit(NULL);
 

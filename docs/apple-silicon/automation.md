@@ -3717,18 +3717,26 @@ jitter 25.7 ms (network RTT to Xbox over LAN). The `seq` and
 
 Guarded end-to-end wrapper for the real-Xbox retail-game oracle
 workflow. It launches a retail XBE, records composite A/V, drives a
-title-facing input backend, appends the softmod IGR combo
-(`back+start+ltrigger+rtrigger`) to return to the dashboard, waits for
-FTP/dashboard recovery, then extracts keyframes and audio artifacts.
+title-facing input backend, waits for autonomous dashboard recovery,
+then extracts keyframes and audio artifacts.
+
+As of 2026-05-08 the next production backend is `title-patch`: a
+per-title patched XBE owns route playback and must call a proven
+dashboard-return path such as `HalReturnToFirmware` after the capture
+tail. The older softmod IGR combo (`back+start+ltrigger+rtrigger`) may
+remain useful for hardware-controller backends, but it is not the
+primary exit path for title-level input patches because title-level
+synthetic buttons do not necessarily reach the kernel/dashboard IGR
+observer.
 
 ```sh
 python3 scripts/apple-silicon/retail-gameplay-oracle.py \
   --game-xbe 'F:\Games\Crimson Skies\default.xbe' \
   --input-csv scripts/apple-silicon/input-scripts/crimson-gameplay.csv \
-  --input-backend hardware \
+  --input-backend title-patch \
   --input-evidence /path/to/input-evidence.json \
-  --exit-evidence /path/to/igr-evidence.json \
-  --input-driver-cmd '/path/to/hw-driver --csv {route_csv} --host {host}'
+  --exit-evidence /path/to/dashboard-return-evidence.json \
+  --input-driver-cmd '/path/to/title-patch-driver --csv {route_csv} --host {host}'
 ```
 
 The command blocks by default unless both pieces of production
@@ -3745,12 +3753,12 @@ Useful flags:
 
 | Flag | Default | Notes |
 | ---- | ------- | ----- |
-| `--input-backend` | required | `tier2-hook` or `hardware` |
-| `--prelaunch-cmd` | none | For future resident-hook preload/setup |
+| `--input-backend` | required | `title-patch`, `tier2-hook`, or `hardware` |
+| `--prelaunch-cmd` | none | For title patch staging or future resident-hook preload/setup |
 | `--input-driver-cmd` | none | Shell command that drives the route while the game runs |
 | `--launch-delay-s` | 3.0 | Delay after `runxbe` before the driver starts |
 | `--record-extra-s` | 15.0 | Recording tail after the route+exit combo |
-| `--exit-delay-ms` / `--exit-hold-ms` | 2000 / 3000 | IGR combo timing appended to the route |
+| `--exit-delay-ms` / `--exit-hold-ms` | 2000 / 3000 | IGR combo timing for hardware-style backends; title-patch exits should prove their own dashboard-return path |
 | `--allow-unproven` | off | Dangerous; only while physically supervising |
 
 Output lands under
@@ -3773,9 +3781,10 @@ The scanner reports title ID, image bounds, debug path, linked libraries,
 kernel thunk metadata, and key strings around XInput/XID/controller/launch
 terms. It was added to make the software-only conclusion reproducible:
 agent RPC after `runxbe` is gone, LaunchData-only does not drive retail games,
-and generic title-level XInput patching is not stable enough to be the oracle
-backend. The remaining software path is the resident Tier-2 shim documented in
-`docs/apple-silicon/retail-gameplay-software-paths.md`.
+and one generic title-level XInput patch is not stable enough for the full
+library. For the fixed canary scope, per-title XBE patching is now the
+production path documented in
+`docs/apple-silicon/retail-title-patching-strategy.md`.
 
 ## Tier-2 shim prior-art analyzer — `tier2-shim-analyze.py` (2026-05-07)
 

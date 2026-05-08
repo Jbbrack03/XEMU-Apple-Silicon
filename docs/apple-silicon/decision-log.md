@@ -1,5 +1,30 @@
 # Decision Log
 
+## 2026-05-08: Retail oracle pivots to per-title XBE patching
+
+The live Tier-2 kernel-hook experiment is no longer the production path. The
+read-only `KeRaiseIrqlToDpcLevel` export-slot preflight passed, but both the
+no-op/counter hook and the safer jump-only redirection froze or crashed the
+project Xbox before returning a response. The hardened installer commands stay
+in-tree behind `confirm=crash-risk-20260508` as research artifacts, but the
+retail oracle must not run Tier-2 install commands for production.
+
+Decision: for the current retail-game oracle scope, use **per-title XBE
+patching**. The target set is intentionally fixed: PGR2, Crimson Skies,
+Rainbow Six 3, Soul Calibur 2, Halo CE, and one sixth broader-sweep title
+such as OutRun 2 or Burnout 3. This is not a universal controller backend, but
+it is acceptable for proving the current canary set against real Xbox captures.
+
+Every patched title must prove autonomous dashboard return before gameplay
+input. The first next-session proof is a PGR2 return-only patch: launch the
+patched title, wait briefly, call `HalReturnToFirmware(HalQuickRebootRoutine)`
+or `HalReturnToFirmware(HalRebootRoutine)`, and require dashboard FTP
+recovery. Only after that should the patch synthesize one visible input event
+and then run the full `pgr2-gameplay.csv` route.
+
+Durable plan:
+`docs/apple-silicon/retail-title-patching-strategy.md`.
+
 ## 2026-05-07: Tier-2 kernel shim is viable enough to pursue via NKPatcher IGR boundary
 
 Before probing kernel memory, we checked prior art:
@@ -9737,3 +9762,41 @@ worked first-divergent-draw triage example using both flags.
 `CLAUDE.md` adds entries under "Diagnostic toggles".
 `extract-perf-summary.sh` parses both `METAL_DRAW_RT_DUMPS` and
 `GL_DRAW_RT_DUMPS`.
+
+## 2026-05-08: Tier-2 retail software controller path failed first mutating hook
+
+**Decision.** Do not treat the pure-software retail controller path as
+implemented. The current NKPatcher-style `KeRaiseIrqlToDpcLevel` export-slot
+counter hook is not production-safe as tested, and `retail-gameplay-oracle.py`
+must continue refusing retail launches until Tier-2 input and autonomous
+return are proven.
+
+**Evidence.**
+
+- Read-only gates passed on the project Xbox:
+  `tier2-shim-analyze.py` matched NKPatcher `patcher_5838`, and live
+  `tier2.preflight` reported `slot=0x800104e8 observed_rva=0x00003d04`.
+- First mutating installer failed safely when
+  `PAGE_EXECUTE_READWRITE` allocation returned null.
+- Second mutating installer using the known-good `PAGE_READWRITE`
+  allocation style timed out during `tier2.install-noop` after
+  `unsafe.enable`.
+- Immediately afterward the Xbox was unreachable:
+  `ping=false`, `ftp=false`, `agent=false`.
+
+**Rationale.** The preflight proves the static slot candidate is real, but the
+no-op/counter hook did not survive the first unsafe install. Since the failure
+occurred before `controller-readback`, there is no evidence yet that software
+input can run after a retail title launches, and no evidence that software IGR
+can return to dashboard.
+
+**Follow-up.** After the Xbox was manually restarted, the revised agent was
+uploaded and read-only preflight passed again. The safer
+`tier2.install-jump-only` rung also timed out and left the Xbox unreachable
+(`ping=false`, `ftp=false`, `agent=false`). Therefore the failure is at the
+resident export-slot redirection rung, not merely the counter operation. The
+local rebuilt agent now guards Tier-2 install commands behind
+`confirm=crash-risk-20260508`; upload that guarded build after the next
+power-cycle, and do not use the guarded override for the production retail
+oracle. Evidence note:
+`docs/apple-silicon/benchmarks/2026-05-08-tier2-noop-hook.md`.

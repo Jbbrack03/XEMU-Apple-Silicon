@@ -1,6 +1,6 @@
 # Retail Gameplay Oracle: Software-Only Input Paths
 
-Status: 2026-05-07
+Status: 2026-05-08
 
 This note records the definitive state of software-only control for retail
 Xbox games launched by the oracle. It exists to prevent a false-positive
@@ -9,19 +9,24 @@ but cannot yet drive the title-facing controller path.
 
 ## Current Answer
 
-There is no production-ready software path to control a retail game after
-`runxbe` today.
+There is no **generic** production-ready software path to control an arbitrary
+retail game after `runxbe` today.
 
-There is a plausible software path, but it is not the existing
-`controller.*` RPC path. The viable route is a resident kernel-level shim that
-survives `XLaunchXBE`, consumes the already-proven persistent controller
-buffer, and injects synthetic state into the title-facing XInput/XID path.
-The best-supported shim boundary is now the NKPatcher-style
-`KeRaiseIrqlToDpcLevel` export-slot hook documented in
-`tier2-kernel-shim-viability.md`.
-Until that shim passes the readback proof below, the retail gameplay oracle
-must remain gated by `retail-oracle-smoke.py` and
-`retail-gameplay-oracle.py`.
+For the current oracle scope, the accepted production path is now
+**per-title XBE patching** for the fixed 5-6 canary games. This is not a
+universal controller backend, but it is sufficient for the immediate goal:
+drive PGR2, Crimson Skies, Rainbow Six 3, Soul Calibur 2, Halo CE, and one
+sixth broader-sweep title on real hardware with captured gameplay and an
+autonomous dashboard return. The durable plan is
+`retail-title-patching-strategy.md`.
+
+The previously preferred resident kernel shim remains documented, but the live
+`KeRaiseIrqlToDpcLevel` export-slot implementation crashed the project Xbox at
+the jump-only rung. It is no longer the next production path.
+
+`retail-oracle-smoke.py` and `retail-gameplay-oracle.py` must still gate runs
+by evidence. A patched title qualifies only after it proves both title-facing
+input and autonomous dashboard return.
 
 ## Evidence
 
@@ -33,6 +38,8 @@ must remain gated by `retail-oracle-smoke.py` and
 - `oracle-client.py runxbe` kills the oracle agent process. Therefore
   Mac-side `controller.set`, `controller.button`, and `controller-replay.py`
   cannot keep driving input once a retail title is running.
+- Per-title XBE patches avoid that lifecycle problem by moving route playback
+  into the running title itself.
 - Live kernel export annotation shows useful primitives for a resident
   implementation: `PsCreateSystemThread`, timer/DPC exports, interrupt
   exports, `IofCallDriver`, and `IofCompleteRequest`.
@@ -46,6 +53,9 @@ must remain gated by `retail-oracle-smoke.py` and
   kernel exports to NKPatcher's `patcher_5838` IGR recipe. That is strong
   prior art for observing retail-game controller state through a kernel
   export-slot hook.
+- The 2026-05-08 live Tier-2 install attempt froze/crashed the Xbox even with
+  a jump-only export-slot redirection. That moves the resident hook path out
+  of production and into research.
 
 ## Software Path Matrix
 
@@ -53,9 +63,10 @@ must remain gated by `retail-oracle-smoke.py` and
 | --- | --- | --- |
 | Agent TCP `controller.*` after launch | Ruled out | The agent is the launched XBE; `runxbe` replaces it. There is no RPC server left while the retail game runs. |
 | LaunchData-only preload | Ruled out for retail games | `XLaunchXBEEx` can pass launch data, but retail titles do not know our format and will not read the persistent script buffer. |
-| Generic title-level XInput patch | Not production-generic | Retail titles statically link different XAPI builds and often do not expose stable `XInput*` strings or symbols. A per-title/OOVPA patcher is possible research, but it is not an easy oracle primitive. |
-| Resident kernel-level XID/XInput shim | Viable but unproven | It can sit below the title, survive title launch if code/data live in persistent memory, and target the 20-byte XID gamepad report / XInput state shape. It still needs a hardware validation run. |
-| Hardware controller emulator | Deferred | User explicitly said hardware is unavailable for this phase. |
+| One generic title-level XInput patch | Not production-generic | Retail titles statically link different XAPI builds and often do not expose stable `XInput*` strings or symbols. |
+| Per-title XBE patching | Adopted for current scope | Acceptable because the oracle needs a fixed 5-6 title set. Each title gets a reproducible patcher, route playback, and an autonomous exit proof. |
+| Resident kernel-level XID/XInput shim | Research only | It can sit below the title in theory, but the live export-slot implementation crashed the project Xbox. Do not use Tier-2 install commands for production. |
+| Hardware controller emulator | Fallback | OGX360 / microcontroller paths remain viable if per-title patching stalls or broader generic coverage becomes necessary. |
 
 ## Local Title Scan
 
@@ -75,47 +86,40 @@ Findings from the local XISOs:
 - Soul Calibur 2 and OutRun 2 link XAPILIB but do not expose comparable
   stable XInput call strings.
 - All three have different library mixes and build paths. This supports the
-  conclusion that title patching is a research track, not the default oracle
-  input backend.
+  conclusion that one generic title patch is not enough; per-title patchers
+  must verify each target title fingerprint and pattern independently.
 
 ## Required Production Proof
 
-The software-only Tier 2 path is complete only after this exact proof passes:
+The per-title software path is complete for a title only after this exact proof
+passes:
 
-1. Start the oracle agent and set a non-zero synthetic controller state in the
-   persistent buffer.
-2. Install a resident shim whose code and data are not owned by the agent XBE
-   image after launch.
-3. Chainload `controller-readback`.
-4. `controller-readback.txt` must report the synthetic buttons/axes, not the
-   physical controller's idle state.
-5. Launch at least one retail game with a short scripted route.
-6. Exit autonomously using either synthetic IGR
-   `back + start + left trigger + right trigger` or a proven resident
-   `HalReturnToFirmware`/dashboard-return path.
-7. `retail-gameplay-oracle.py` must capture composite keyframes and return to
-   dashboard FTP without manual intervention.
+1. Preserve the original XBE and generate a reproducible patched XBE from a
+   fingerprinted input.
+2. Prove a return-only patch first: launch the patched title, wait a short
+   fixed interval, call `HalReturnToFirmware(HalQuickRebootRoutine)` or
+   `HalReturnToFirmware(HalRebootRoutine)`, and require dashboard FTP recovery.
+3. Prove one visible synthetic input event through the patched title's normal
+   game/menu path.
+4. Run the full route with composite A/V capture.
+5. Provide `title-facing-input-evidence` and `autonomous-exit-evidence` JSON to
+   `retail-gameplay-oracle.py`.
+6. Save the run artifacts and patch fingerprint under
+   `benchmark-runs/retail-title-patch-<title>-<UTC>/`.
 
-Until step 4 passes, the answer to "can the oracle control a launched retail
-game through software?" is: not with the current shipped tooling.
+Until steps 2 and 3 pass for a title, the answer to "can the oracle control
+this launched retail game through software?" is: not yet.
 
 ## Most Likely Implementation
 
-The most promising implementation is not to patch each game. It is:
+The next implementation is a title-specific Mac-side patcher:
 
-- Persist a small executable resident blob with `MmAllocateContiguousMemoryEx`
-  and `MmPersistContiguousMemory`.
-- Keep route data in the existing persistent controller buffer, or extend that
-  buffer with a compact timed-event script.
-- Patch a kernel completion or input boundary from persistent code. The
-  candidate boundary is `IofCompleteRequest`/XID report completion, because
-  the XID gamepad input report is 20 bytes and maps directly into the original
-  Xbox `XINPUT_GAMEPAD` layout.
-- Make the shim self-uninstall or restore the patched bytes before reboot.
-- Prefer a resident `HalReturnToFirmware(HalQuickRebootRoutine)` exit test
-  before relying on the softmod IGR combo, because it avoids proving input
-  injection and dashboard return in the same first experiment.
-- Use the existing readback diagnostic as the first acceptance test.
+- Inspect and fingerprint the original XBE.
+- Locate per-title input-read call sites or XAPI patterns.
+- Inject a route player or redirect input reads to a route player.
+- Feed that route player from a compact version of the existing xemu CSV.
+- Call `HalReturnToFirmware` after route completion plus capture tail.
 
-This route is invasive, so it must remain gated behind an explicit evidence
-artifact before any retail gameplay workflow treats it as production.
+Do not rely on a title-level synthetic IGR button combo as the primary exit
+path. A title patch can make the game see those buttons without necessarily
+making the kernel/dashboard IGR hook see a physical controller report.

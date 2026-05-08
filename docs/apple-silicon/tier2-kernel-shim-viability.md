@@ -1,13 +1,23 @@
 # Tier-2 Kernel Shim Viability
 
-Status: 2026-05-07
+Status: 2026-05-08
 
 ## Verdict
 
-Tier 2 is viable enough to pursue. The strongest path is not a blind OHCI/USB
-probe. It is an NKPatcher-style export-slot hook at
-`KeRaiseIrqlToDpcLevel`, adapted from IGR detection into synthetic
-`XINPUT_STATE` override.
+Tier 2 remains the only **generic** software-only controller path with strong
+prior art, but the live mutating implementation is **not viable** for the
+retail oracle pipeline.
+
+The strongest candidate is still not a blind OHCI/USB probe. It is an
+NKPatcher-style export-slot hook at `KeRaiseIrqlToDpcLevel`, adapted from IGR
+detection into synthetic `XINPUT_STATE` override. However, the initial
+resident no-op/counter hook froze or crashed the project Xbox before it could
+return an install response. A safer jump-only redirection was then tested after
+a manual restart and also froze or crashed the Xbox before returning a
+response. This document is no longer a green-light to run Tier-2 install
+commands for production work. The production strategy has pivoted to per-title
+XBE patching for the current 5-6 game oracle scope; see
+`retail-title-patching-strategy.md`.
 
 This decision is data-driven:
 
@@ -19,6 +29,34 @@ This decision is data-driven:
   `HalReturnToFirmware`.
 - Our existing persistent controller buffer already survives `runxbe` and is
   read by cooperating diag XBEs.
+
+## 2026-05-08 Live Install Result
+
+Read-only gates passed:
+
+- `tier2-shim-analyze.py`: `verdict=viable-prior-art-match`
+- `tier2-shim-preflight.py`: slot `0x800104e8` contained expected
+  `0x00003d04`
+- oracle-agent `tier2.preflight`: `verdict=ok`
+
+The first mutating build failed safely because
+`MmAllocateContiguousMemoryEx(..., PAGE_EXECUTE_READWRITE)` returned null.
+The second build used `PAGE_READWRITE` and attempted
+`tier2.install-noop` after `unsafe.enable`. That command timed out, and the
+Xbox became unreachable (`ping=false`, `ftp=false`, `agent=false`).
+
+Local code was then revised offline to add a safer `tier2.install-jump-only`
+stage and to change the counter hook from `lock inc` to
+`pushfd; inc dword ptr [calls]; popfd; jmp original`. After a manual restart,
+the revised agent was uploaded, read-only preflight passed again, and
+`tier2.install-jump-only` was attempted. It also timed out and left the Xbox
+unreachable.
+
+Operational rule: after manual power-cycle, run only read-only preflight
+for Tier-2. Do not use Tier-2 install commands for the retail oracle pipeline.
+The local rebuilt agent guards those commands behind
+`confirm=crash-risk-20260508` only to preserve the research artifact behind an
+explicit hazard marker; upload that guarded build after the next power-cycle.
 
 ## Prior Art Checked
 
@@ -123,10 +161,11 @@ does not write memory.
 
 | Candidate | Confidence | Decision |
 | --- | --- | --- |
-| `KeRaiseIrqlToDpcLevel` export-slot hook | High | Primary path. Prior art on the same kernel family already uses it for retail-game controller IGR. |
-| `IofCompleteRequest` / IRP completion hook | Medium | Keep as fallback if KeRaise path misses some titles; no call-context proof yet. |
-| OHCI/XID internal routine hook | Medium-low | Closest to raw reports, but no exported symbol and higher crash risk. |
-| Per-title `XInputGetState` patch | Low | Not production-generic; local XBE scans show inconsistent static XAPI layouts. |
+| Per-title XBE patching | High for fixed canary scope | Current production path. Not generic, but acceptable for PGR2 / Crimson / Rainbow / SC2 / Halo / sixth-title oracle work. |
+| `KeRaiseIrqlToDpcLevel` export-slot hook | Research only | Prior-art-backed, but the live jump-only redirection crashed the project Xbox. |
+| `IofCompleteRequest` / IRP completion hook | Research only | Possible future generic path; no call-context proof and higher crash risk. |
+| OHCI/XID internal routine hook | Research only | Closest to raw reports, but no exported symbol and higher crash risk. |
+| One generic title-level `XInputGetState` patch | Low | Not production-generic; local XBE scans show inconsistent static XAPI layouts. |
 
 ## Proposed Hook Model
 
@@ -152,18 +191,23 @@ Do not start with retail gameplay. The safe ladder is:
    `verdict=viable-prior-art-match`.
 2. **Live preflight read:** verify `mem.read 0x800104e8 4` equals
    `04 3d 00 00`.
-3. **Install no-op hook:** patch the export slot to a resident hook that only
-   tail-jumps to the original and increments a counter.
-4. **Diag readback:** chainload `controller-readback`; require no crash and a
-   non-zero hook counter.
-5. **Context capture:** log candidate return/state pointers while running
+3. **Install jump-only hook:** patch the export slot to a resident hook that
+   only tail-jumps to the original. Require no crash, working status, and
+   successful uninstall.
+4. **Diag readback with jump-only:** chainload `controller-readback`; require
+   no crash and report that the hook slot remained installed.
+5. **Install counter hook:** only after jump-only survives, install the
+   EFLAGS-preserving counter hook and require no crash.
+6. **Diag readback with counter:** chainload `controller-readback`; require no
+   crash and a non-zero hook counter.
+7. **Context capture:** log candidate return/state pointers while running
    `controller-readback`; do not mutate state yet.
-6. **Synthetic override:** set a non-zero oracle controller buffer, mutate only
+8. **Synthetic override:** set a non-zero oracle controller buffer, mutate only
    the recognized `XINPUT_STATE`, and require `controller-readback.txt` to
    report the synthetic values.
-7. **Autonomous return:** prove resident `HalReturnToFirmware` or synthetic
+9. **Autonomous return:** prove resident `HalReturnToFirmware` or synthetic
    IGR returns to dashboard.
-8. **Retail smoke:** only then allow `retail-gameplay-oracle.py` to launch a
+10. **Retail smoke:** only then allow `retail-gameplay-oracle.py` to launch a
    retail game with Tier-2 evidence.
 
 ## Open Risks
@@ -182,6 +226,10 @@ Do not start with retail gameplay. The safe ladder is:
 
 ## Implementation Decision
 
-Proceed with Tier 2, but only as an evidence-gated hook ladder. The next code
-artifact should be a no-op/counter hook installer plus readback artifact, not a
-full input override.
+Stop using this Tier-2 export-slot path for the production retail oracle. The
+next production direction is **per-title XBE patching** with autonomous
+dashboard return, starting with PGR2. Tier 3 hardware controller emulation
+remains the fallback if per-title patching stalls or if the project later needs
+generic title coverage. Any future generic software approach must use a
+different hook boundary and must have its own read-only proof before any
+mutating install.

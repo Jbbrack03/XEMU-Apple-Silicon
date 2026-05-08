@@ -1,6 +1,6 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-07 (real-Xbox oracle production-ready).
+Last updated: 2026-05-08 (retail-game oracle strategy pivot).
 B1-B4 are closed: persistent controller state is canonicalized
 through the kseg0 alias with cache writeback/invalidate, the
 temporary reattach build was removed, the controller-roundtrip
@@ -14,7 +14,10 @@ controller-roundtrip / 10-iteration stress, followed by a focused
 post-fix gate with smoke / visual matrix / controller-roundtrip /
 seqlock all passing. See `docs/apple-silicon/handoff.md` and
 `docs/apple-silicon/decision-log.md` for the production-readiness
-record. Earlier 2026-05-05: Crimson Metal "blocker" reclassified
+record. The retail-game oracle is now pursuing per-title XBE patching
+for the fixed canary set; see
+`docs/apple-silicon/retail-title-patching-strategy.md`. Earlier
+2026-05-05: Crimson Metal "blocker" reclassified
 as config — Crimson now joins PGR2 / Rainbow / Halo / boot as a
 documented MSAA4 PASS canary when launched with the canonical M15
 recipe (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`). Project
@@ -190,6 +193,8 @@ visible regressions point first at the renderer.
 - `benchmarks/`: dated benchmark session notes and run templates.
 - `decision-log.md`: dated decisions and rationale.
 - `handoff.md`: current state and next-session checklist.
+- `retail-title-patching-strategy.md`: current retail-game oracle plan for
+  per-title XBE patches, including the autonomous dashboard-return requirement.
 - `metal-porting-workflow.md`: **(2026-05-04)** canonical operating
   playbook for the native Metal renderer port. Five-phase model
   (build & boot → translation correctness → visual parity → perf

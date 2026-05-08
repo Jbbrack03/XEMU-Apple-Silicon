@@ -1,11 +1,11 @@
 # Controller Injection — Feasibility & Design
 
-Last updated: 2026-05-07 (initial draft, alongside the v0.3 oracle
-agent's `controller.*` protocol commands. Two Codex review passes on
-the same day refined the agent's buffer ABI to match xemu's
-`ControllerState` byte-for-byte; this doc's Tier-1 plan continues to
-reference the post-fix ABI — int16 triggers, 26-byte ports, 120-byte
-buffer, button bits matching `CONTROLLER_BUTTON_*` exactly.)
+Last updated: 2026-05-08 (retail strategy pivot: Tier-2 live
+export-slot hook failed; per-title XBE patching adopted for the
+current 5-6 game oracle scope. The v0.3 agent buffer ABI still matches
+xemu's `ControllerState` byte-for-byte — int16 triggers, 26-byte
+ports, 120-byte buffer, button bits matching `CONTROLLER_BUTTON_*`
+exactly.)
 
 ## Problem statement
 
@@ -24,42 +24,48 @@ synthetic state visible to the running game's input-read code.
 This document inventories the feasible delivery paths, ranks them by
 risk vs reward, and records the design decisions for each.
 
-## Three implementation tiers
+## Implementation tiers
 
 | Tier | Coverage | Path | Status |
 | ---- | -------- | ---- | ------ |
 | 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | SHIPPED 2026-05-07. Production-validated by `controller-roundtrip`. |
-| 2    | Retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED 2026-05-07; hook NOT YET implemented. |
-| 3    | Generic / fallback | Hardware controller emulator (Mac → Xbox port) | Documented as alternative. Hardware project (Teensy + open-source firmware), out of scope for the current toolchain. |
+| 2A   | Fixed retail canary set | Per-title XBE patches that synthesize input and return to dashboard | ADOPTED 2026-05-08. Next production path. |
+| 2B   | Generic retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED; live export-slot implementation crashed 2026-05-08. Not production. |
+| 3    | Generic / fallback | Hardware controller emulator (Mac → Xbox port / OGX360 path) | Documented fallback. Hardware available, but deferred behind per-title patching. |
 
-Tiers 1 and 2 are both software-only and use the same agent-side state
-buffer. Tier 3 is a hardware backstop if Tier 2 turns out to be too
-risky on a particular kernel / dashboard combination.
+Tiers 1, 2A, and 2B are software paths. Tier 2A does not require a live
+agent after `runxbe`; each patched title owns its route playback and
+dashboard-return behavior. Tier 3 remains the generic backstop if the
+per-title approach stalls.
 
-## 2026-05-07 software-only verdict
+## 2026-05-08 software-only verdict
 
 There is not a production-ready path to control a retail game after
 `runxbe` with the current shipped tooling. The oracle agent is the XBE
 that performs `runxbe`; once the retail title starts, the agent TCP
 server and live `controller.*` RPC path are gone.
 
-The viable software-only route remains Tier 2: install a resident
-kernel-level shim before launch, keep its code/data outside the agent
-XBE image, and have it feed the title-facing XInput/XID report path
-from the already-proven persistent controller buffer. See
-`retail-gameplay-software-paths.md` for the full matrix and required
-readback proof. See `tier2-kernel-shim-viability.md` for the prior-art
-survey and the current decision to start from NKPatcher's
-`KeRaiseIrqlToDpcLevel` export-slot hook.
+The previously preferred generic software route was a resident
+kernel-level shim. Its read-only preflight passed, but the first live
+mutating export-slot redirection crashed the project Xbox, including a
+jump-only rung. That path is preserved as research, not production.
+
+The accepted production route for the current oracle scope is now
+**per-title XBE patching**. The fixed canary set makes title-specific
+patches acceptable: each patched retail title should synthesize input
+from a route buffer and autonomously return to the dashboard. See
+`retail-title-patching-strategy.md` for the target titles, patch
+model, and next-session ladder.
 
 Two software shortcuts are now explicitly ruled out for production:
 
 - `LaunchData` can pass data only to cooperating XBEs. Retail games do
   not know our route format, so launch data alone cannot drive input.
-- Generic title-level `XInputGetState` patching is not stable enough
-  for the oracle. Local scans of Halo, Soul Calibur 2, and OutRun 2
-  show different static XAPI/library layouts and inconsistent useful
-  strings.
+- One generic title-level `XInputGetState` patch is not stable enough
+  for the full library. Local scans of Halo, Soul Calibur 2, and OutRun
+  2 show different static XAPI/library layouts and inconsistent useful
+  strings. Per-title patches are acceptable only because the current
+  oracle scope is the fixed 5-6 game set.
 
 ---
 
@@ -161,7 +167,30 @@ pattern; the tag lets us locate the allocation post-chainload.
 
 ---
 
-## Tier 2 — Kernel hook for retail games (PREP TOOLS SHIPPED; HOOK FUTURE WORK)
+## Tier 2A — Per-title retail XBE patches (ADOPTED 2026-05-08)
+
+**Coverage:** the current fixed retail canary set.
+**Risk:** moderate. Patch bugs are title-local and reversible from FTP/HDD
+backup; they do not require live kernel export-slot mutation.
+**Engineering:** next production task. Full plan:
+`retail-title-patching-strategy.md`.
+
+This path accepts that a 5-6 title oracle does not need one universal input
+hook on day one. Each target title gets a reproducible Mac-side patcher that
+identifies the expected XBE, patches its input-read path or nearby XAPI call
+site, and feeds a compact route buffer derived from the existing xemu CSV.
+
+The patch must also own exit. The first proof for each title is a return-only
+patch that launches, waits a short interval, calls `HalReturnToFirmware`, and
+requires dashboard FTP recovery. Only after that proof passes should the patch
+synthesize gameplay input.
+
+The accepted title order is PGR2, Crimson Skies, Rainbow Six 3, Soul Calibur
+2, Halo CE, and one broader-sweep sixth title such as OutRun 2 or Burnout 3.
+
+---
+
+## Tier 2B — Kernel hook for generic retail games (RESEARCH ONLY)
 
 **Coverage:** every retail Xbox game.
 **Risk:** moderate-to-high. A buggy hook crashes the kernel, and
@@ -272,18 +301,17 @@ code.
 
 ### Why the hook itself is not shipped yet
 
-- The next live step is a read-only `tier2-shim-preflight.py` run to verify
-  the `0x800104e8` export slot still contains the expected unhooked value.
-- The first hook must be no-op/counter only. It must prove the
-  `KeRaiseIrqlToDpcLevel` boundary is active during `controller-readback`
-  before any state mutation is attempted.
-- The user's Xbox is the project's only oracle hardware; bricking it
-  with a buggy hook would block the entire validation pipeline. Slow
-  is fast.
+- The read-only `tier2-shim-preflight.py` rung passed live, but both the
+  no-op/counter install and a later jump-only install froze or crashed the
+  project Xbox.
+- The user's Xbox is the project's only oracle hardware; repeating mutating
+  Tier-2 install attempts is not justified for the retail oracle pipeline.
+- The hardened Tier-2 commands remain guarded as research artifacts behind
+  `confirm=crash-risk-20260508`; production work should not use them.
 
-The hook itself can now land with quantifiable progress: each attempt is a
-short cycle of "set synthetic state → run readback diag → compare what landed
-in `D:\` to what we set".
+The hook path is therefore superseded for production by Tier 2A per-title
+patching. Keep this section for prior-art context and for any future generic
+controller backend effort.
 
 ---
 
@@ -293,9 +321,8 @@ in `D:\` to what we set".
 **Risk:** none on the Xbox side; the hardware just plugs in.
 **Engineering:** small hardware project + a Mac-side serial driver.
 
-If Tier 2 turns out to be impossible on this kernel (e.g. the OHCI
-driver has anti-tamper baked in by iND-BiOS, or the symbol-resolution
-keeps drifting), Tier 3 closes the gap with a small hardware adapter:
+If per-title patching stalls or a future phase needs a generic controller
+backend, Tier 3 closes the gap with a small hardware adapter:
 
 - **Microcontroller:** Teensy 4.0 (USB Host + USB Device modes,
   ~$30) running the open-source `OGX-Mini` or `MaxLeechXC`
@@ -324,20 +351,20 @@ serial.
 
 1. **Treat Tier 1 as closed.** Keep using `oracle-validate.sh` and
    `m15-visual-gate.sh` to prove it stays closed.
-2. **Run the live Tier-2 preflight** with the oracle agent online:
-   `tier2-shim-preflight.py` must read `0x800104e8` and observe
-   little-endian `0x00003d04`.
-3. **Implement only a no-op/counter hook first.** It should use the
-   NKPatcher-style `KeRaiseIrqlToDpcLevel` export-slot boundary, refuse to
-   install if preflight fails, tail-jump to the original path, and expose a
-   counter/ring-buffer artifact.
-4. **Prove the no-op hook with `controller-readback`.** Require no crash and a
-   non-zero hook/context counter before any input mutation.
-5. **Implement the synthetic `XINPUT_STATE` override** only after item 4 is
-   green. The acceptance test is synthetic controller buffer state showing up
-   in `controller-readback.txt`.
-6. **Order Tier 3 hardware only if this boundary misses required retail
-   titles** or proves too brittle to characterize cheaply.
+2. **Recover the Xbox and run only read-only Tier-2 status checks.** Do not run
+   Tier-2 install commands.
+3. **Start Tier 2A with PGR2.** Mirror/fingerprint the retail XBE, write a
+   reproducible patcher, and preserve the original XBE.
+4. **Prove autonomous exit first.** A patched title must return to dashboard
+   on its own before gameplay capture. Prefer direct
+   `HalReturnToFirmware(HalQuickRebootRoutine)` /
+   `HalReturnToFirmware(HalRebootRoutine)` from injected code.
+5. **Prove one visible input event.** Only after dashboard return works should
+   the patch synthesize a small input sequence.
+6. **Run the full route and capture.** Use `retail-gameplay-oracle.py` with
+   title-patch input and autonomous-exit evidence.
+7. **Repeat the ladder** for Crimson Skies, Rainbow Six 3, Soul Calibur 2,
+   Halo CE, and the chosen sixth title.
 
 ## Cross-references
 
@@ -350,6 +377,8 @@ serial.
   `ui/xemu-input.c:140-275`.
 - Existing CSV library:
   `scripts/apple-silicon/input-scripts/{pgr2,sc2,rainbow,crimson}-*.csv`.
+- Current per-title retail strategy:
+  `docs/apple-silicon/retail-title-patching-strategy.md`.
 - Xbox kernel boot mechanism (relevant for Tier 2 symbol resolution):
   decision-log "2026-05-06: Real Xbox dashboard swapped XBMC4Gamers
   → UnleashX; iND-BiOS boot mechanism empirically determined".

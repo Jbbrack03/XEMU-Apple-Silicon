@@ -24,6 +24,7 @@ int cmd_vram_read(struct netconn *c, const char *args);
 int cmd_screenshot(struct netconn *c, const char *args);
 int cmd_runxbe(struct netconn *c, const char *args);
 int cmd_unsafe_enable(struct netconn *c, const char *args);
+int oracle_writes_enabled(void);
 int cmd_reboot(struct netconn *c, const char *args);
 int cmd_bye(struct netconn *c, const char *args);
 int cmd_help(struct netconn *c, const char *args);
