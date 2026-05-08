@@ -9800,3 +9800,65 @@ local rebuilt agent now guards Tier-2 install commands behind
 power-cycle, and do not use the guarded override for the production retail
 oracle. Evidence note:
 `docs/apple-silicon/benchmarks/2026-05-08-tier2-noop-hook.md`.
+
+## 2026-05-08 evening: Tier 3 hardware bridge staged via OGX360
+
+**Decision.** Stage the Tier 3 hardware controller emulator path
+(`controller-injection-research.md` §Tier 3) using the user's existing
+OGX360 hardware rather than the previously-planned Teensy-from-scratch
+build. Implement as a custom slot 1 master firmware on top of an
+unmodified Ryzee119 OGX360 slave on slot 2, with a Mac-side serial
+replay tool that mirrors the existing `controller-replay.py` CSV
+vocabulary. This gives the project a redundant injection path parallel
+to the in-progress Tier 2A per-title XBE patching ladder.
+
+**Evidence.**
+
+- User's OGX360 (Ryzee119/OGX360 v1.x, 4-Pro-Micro design) recovered
+  from storage. Slot 1's micro-USB connector destroyed pre-session;
+  trace exposure attempts further damaged the connector pad area.
+  Slot 1 Pro Micro physically desoldered.
+- Slot 2's Pro Micro intact; enumerates over USB as `0x045E:0x0289`
+  with the unmodified Ryzee119 slave firmware.
+- New USB-C Pro Micro (5V/16MHz ATmega32U4 variant, $17 for 3-pack)
+  ordered for slot 1 replacement; arrives 2026-05-09.
+- In-tree work landed at `scripts/apple-silicon/ogx360-bridge/`:
+  `firmware/master/master.ino` compiles clean against
+  `arduino:avr:leonardo` (23% flash, 18% RAM);
+  `mac-side/controller-replay-hardware.py` frame builder
+  unit-tested against four known controller states (neutral,
+  A+start+lstick, dpad+stick-sign, triggers) — all PASS, byte-exact
+  match against Ryzee119's `usbd_duke_in_t` struct layout.
+- Master/slave I²C protocol reverse-engineered byte-by-byte from
+  `vendor/OGX360/Firmware/src/{main.cpp,master.cpp,slave.cpp,usbd/usbd_xid.h}`
+  and documented at
+  `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md`.
+
+**Rationale.** Tier 2A per-title patching is the active production
+path for the fixed canary set (PGR2 / Crimson / Rainbow / SC2 / Halo +
+one broader-sweep) but is title-specific by definition. Tier 3 hardware
+bridge is generic — it works for any Xbox, any title, any kernel — and
+becomes the durable backstop if Tier 2A stalls on any specific title or
+when the project needs to drive titles outside the canary set. Building
+Tier 3 with the user's existing OGX360 plus one $17 part vs. a fresh
+$50+ Teensy build costs less hardware, less assembly time, and reuses
+the well-trodden Ryzee119 slave firmware — we only write the master
+side.
+
+**Follow-up.** Tomorrow's first hardware action is OGX360 bridge
+bring-up per
+`scripts/apple-silicon/ogx360-bridge/docs/integration-plan.md`.
+Pre-flash the new Pro Micro on the bench, install into slot 1, identify
+slot 2's I²C address (1, 2, or 3) via boot-time ping blink pattern,
+end-to-end test with a 2-line single-A.csv. Estimated 30-60 minutes
+from "Pro Micro arrives" to "Xbox responding to Mac input." Once that
+PASSes, run a representative input-script CSV (e.g. `crimson-skies-smoke.csv`)
+end-to-end and measure jitter to confirm the bridge is production-grade
+for the oracle pipeline.
+
+Slot 2 firmware backup attempted but skipped: Caterina bootloader entry
+could not be triggered via either OGX360 onboard reset (likely a
+power-cycle, not an RST-pin reset) or manual RST/GND pin short.
+Acceptable since the slave firmware is GPL-3.0 open source and
+reproducible from the cloned upstream via PlatformIO; the integration
+plan never reflashes slot 2.

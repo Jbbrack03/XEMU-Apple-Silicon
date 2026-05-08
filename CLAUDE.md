@@ -165,6 +165,23 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   backend command, waits for dashboard FTP to return, then extracts keyframes
   and audio artifacts. Do not use agent `controller.*` RPC replay as the
   retail input backend: the agent process dies on `runxbe`.
+- **`scripts/apple-silicon/ogx360-bridge/`** (Tier 3 hardware bridge,
+  staged 2026-05-08) — custom slot 1 master firmware + Mac-side
+  replay tool that turns a Ryzee119 OGX360 plus one new USB-C Pro
+  Micro into a Mac-driven OG Xbox controller emulator. The bridge
+  presents to the Xbox as an OG Xbox Controller (XID HID) sourced
+  from the unmodified Ryzee119 slave firmware on slot 2, with input
+  frames coming from the Mac over USB CDC into our custom slot 1
+  firmware which forwards via I²C using the existing OGX360
+  master/slave protocol. Reverse-engineered protocol spec at
+  `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md`;
+  integration plan at `.../docs/integration-plan.md`.
+  `firmware/master/master.ino` compile-tests at 23% flash / 18% RAM;
+  `mac-side/controller-replay-hardware.py` uses the same xemu CSV
+  vocabulary (`ui/xemu-input.c:101-127`) as the existing
+  `controller-replay.py` so the same input-script library drives both
+  engines. Pending hardware bring-up after the new USB-C Pro Micro
+  arrives 2026-05-09.
 - `scripts/apple-silicon/xbe-inspect.py` — read-only XBE metadata/string
   scanner used to evaluate whether a retail title has stable XInput/XID patch
   hints. Local scans of Halo, Soul Calibur 2, and OutRun 2 support the current

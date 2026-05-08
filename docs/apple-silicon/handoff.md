@@ -1,7 +1,98 @@
 # Handoff
 
-Last updated: 2026-05-08 (retail oracle strategy pivot) —
-**NEXT SESSION: PER-TITLE GAME PATCHING + AUTONOMOUS EXIT PROOF.**
+Last updated: 2026-05-08 (OGX360 hardware bridge staged + retail
+XInput patcher added) —
+**NEXT SESSION HAS TWO PARALLEL TRACKS:**
+
+**Track A (software):** POWER-CYCLE XBOX, THEN RUN THE PGR2
+PHYSICAL-DEVICE INPUT PROOF.
+
+**Track B (hardware, when the new Pro Micro arrives):** flash
+`scripts/apple-silicon/ogx360-bridge/firmware/master/master.ino` to the
+new USB-C Pro Micro, install into OGX360 slot 1, follow
+`scripts/apple-silicon/ogx360-bridge/docs/integration-plan.md`. The
+bridge's compile + Python tests already passed; tomorrow is hardware
+bring-up only.
+
+This session added reproducible retail XBE patch tooling:
+
+- `scripts/apple-silicon/retail-title-patcher.py`
+- `scripts/apple-silicon/retail-title-return-proof.py`
+- `scripts/apple-silicon/retail-title-automation-proof.py`
+
+Generated return-only probes for PGR2 / Crimson / Rainbow / SC2 / Halo /
+Burnout 3 / OutRun 2 under
+`benchmark-runs/retail-title-patches/return-only-20260508T033126Z/`.
+The patch model is entrypoint replacement: verify the source XBE fingerprint,
+extend the final section with a small wait-and-reboot stub, mark that section
+preload+executable, redirect the entrypoint, and write patch metadata.
+
+The corrected return-only probes were live-proven on the project Xbox after
+the manual restart. Evidence:
+
+| Target | Evidence dir | Result |
+| --- | --- | --- |
+| PGR2 | `benchmark-runs/retail-return-proof-20260508T131747Z` | `status=ok`, dashboard FTP returned |
+| Crimson Skies | `benchmark-runs/retail-return-proof-20260508T131956Z` | `status=ok`, dashboard FTP returned |
+| Rainbow Six 3 | `benchmark-runs/retail-return-proof-20260508T132051Z` | `status=ok`, dashboard FTP returned |
+| Soul Calibur 2 | `benchmark-runs/retail-return-proof-20260508T132147Z` | `status=ok`, dashboard FTP returned |
+| Halo CE | `benchmark-runs/retail-return-proof-20260508T132246Z` | `status=ok`, dashboard FTP returned |
+| Burnout 3 | `benchmark-runs/retail-return-proof-20260508T132343Z` | `status=ok`, dashboard FTP returned |
+| OutRun 2 | `benchmark-runs/retail-return-proof-20260508T132441Z` | `status=ok`, dashboard FTP returned |
+
+The same patcher now has `--mode input-proof` and `--mode route`. It embeds a
+compact XInput route player and patches static XAPI/XInput routines found via
+Cxbx-Reloaded XbSymbolDatabase OOVPA signatures. Generated current input-proof probes:
+
+```text
+benchmark-runs/retail-title-patches/input-proof-20260508T135352Z/
+```
+
+The first live PGR2 fake-device input proof is **not accepted**:
+`benchmark-runs/retail-automation-proof-20260508T134127Z/verdict.json`
+reports `status=fail`; dashboard FTP did not return, and the Xbox ended
+`ping=false`, `ftp=false`, `agent=false`. That build patched XInput device
+discovery/open plus state/capabilities/set-state. Treat the fake-device mode as
+crash-risk until it is narrowed further.
+
+A safer PGR2 physical-device input proof was generated but not launched because
+the fake-device attempt left the Xbox down:
+
+```text
+benchmark-runs/retail-title-patches/input-proof-20260508T135353Z/pgr2/default.xbe
+```
+
+It patches only `XInputGetState`, `XInputGetCapabilities`, and
+`XInputSetState`; it assumes the title already opened a real controller and
+then overrides the state read plus autonomous exit. First action after manual
+restart:
+
+```sh
+ping -c 2 192.168.0.200
+python3 scripts/apple-silicon/oracle-orchestrator.py --host 192.168.0.200 status
+
+python3 scripts/apple-silicon/retail-title-automation-proof.py \
+  benchmark-runs/retail-title-patches/input-proof-20260508T135353Z/pgr2/default.xbe \
+  --remote-xbe 'E:\Apps\oracle-patches\pgr2-input-proof-physical\default.xbe' \
+  --record-s 45
+```
+
+If that does not return, the next patch should avoid live XInput handle faking
+entirely and instead patch PGR2's already-opened gamepad state buffer or a
+title-specific menu/gameplay input consumer.
+
+Live PGR2 attempt #1 used the earlier
+`return-only-20260508T032455Z` probe and failed:
+`benchmark-runs/retail-return-proof-20260508T032523Z/verdict.json`
+reports `status=no-dashboard-return` after the agent acknowledged
+`runxbe`. The Xbox was not pingable afterward. Likely cause was the first
+probe's final-section flags: executable was set, but preload was not, so the
+entrypoint could jump into an unmapped tail section. The patcher now sets
+`flags |= 0x6`; regenerated PGR2 inspection shows `.XTLID` flags
+`0x0000003e` and entry `0x004b43a0`.
+
+Detailed note:
+`docs/apple-silicon/benchmarks/2026-05-08-retail-title-return-patcher.md`.
 
 The production oracle-agent pipeline from 2026-05-07 remains valid for
 agent-resident diagnostics, but the new retail-game requirement is now
@@ -73,6 +164,109 @@ per-title patch ladder:
 
 Full Tier-2 crash evidence:
 `docs/apple-silicon/benchmarks/2026-05-08-tier2-noop-hook.md`.
+
+## 2026-05-08 evening: OGX360 hardware bridge (Tier 3) staged
+
+Parallel to the retail-title patching work, this session built and
+compile-tested an alternate hardware-based controller-injection path —
+the Tier 3 hardware emulator from
+`docs/apple-silicon/controller-injection-research.md:318-347`. This is
+the durable fallback if the retail-title patching ladder stalls, and it
+also provides a generic backstop for titles outside the fixed canary
+set.
+
+The user's OGX360 hardware survey resolved as follows:
+
+- **Original OGX360** (Ryzee119/OGX360 v1.x, 4-Pro-Micro design)
+  recovered from storage. Slot 1's micro-USB connector was destroyed
+  pre-session and could not be rescued (resoldering attempts and trace
+  exposure damaged the connector pads + 22Ω termination resistor area
+  beyond practical repair). User physically desoldered the slot 1 Pro
+  Micro from the OGX360 PCB.
+- **Slot 2's Pro Micro** is intact and currently runs the unmodified
+  Ryzee119 OGX360 slave firmware. It enumerates over USB as
+  `0x045E:0x0289` (OG Xbox Controller S) when plugged into the Mac.
+- **Replacement Pro Micro with USB-C ordered**, $17 for 3-pack,
+  delivers tomorrow. Will go into the OGX360 slot 1 footprint.
+
+In-tree work landed at
+`scripts/apple-silicon/ogx360-bridge/`:
+
+- `firmware/master/master.ino` — custom slot 1 master firmware that
+  replaces the original Ryzee119 master role. Reads framed serial
+  packets from the Mac over USB CDC at 115200 baud, forwards each
+  frame's payload to slave Pro Micros via the existing OGX360 master/
+  slave I²C protocol. Compile-tested against `arduino:avr:leonardo`:
+  23% flash (6596/28672 B), 18% RAM (478/2560 B). Does **not** modify
+  slot 2's slave firmware — the unchanged Ryzee119 firmware reads our
+  I²C frames as if they came from a real Ryzee119 master.
+- `mac-side/controller-replay-hardware.py` — Mac-side replay tool
+  that opens slot 1's USB CDC serial port and translates xemu CSV
+  inputs (`time_ms,control,value` rows) into the bridge's wire format.
+  Vocabulary is identical to the existing
+  `scripts/apple-silicon/controller-replay.py` and
+  `ui/xemu-input.c:101-127`, so the same `input-scripts/*.csv`
+  library drives both the agent-RPC engine and the hardware-bridge
+  engine. Frame builder unit-tested against four known controller
+  states (neutral, A+start+lstick, dpad+stick-sign, triggers); all
+  PASS, byte-exact match against Ryzee119's `usbd_duke_in_t` struct
+  layout.
+- `docs/protocol-analysis.md` — reverse-engineered byte-level spec of
+  the master/slave I²C protocol from a direct read of
+  `vendor/OGX360/Firmware/src/{main.cpp,master.cpp,slave.cpp,usbd/usbd_xid.h}`.
+- `docs/integration-plan.md` — tomorrow's bring-up checklist with
+  pass/fail criteria at each step.
+- `docs/backup-runbook.md` — slot 2 firmware backup procedure (kept
+  for reference even though we couldn't trigger Caterina bootloader
+  entry on the existing slot 2 — see backup status below).
+
+### Slot 2 backup attempt: skipped (recoverable from source)
+
+Multiple bootloader-entry attempts on slot 2 failed:
+
+1. OGX360's onboard reset button — most likely a power-cycle (cuts
+   VBUS) rather than wired to the chip's RST pin. Caterina's
+   stay-in-bootloader detection requires external-pin resets, not
+   power-on resets.
+2. Manual short of slot 2's Pro Micro `RST → GND` header pins, twice
+   within ~750 ms — also did not trigger Caterina.
+
+Decided to stop probing rather than risk accidentally bridging RST
+to VCC (which would damage the chip). The slave firmware is GPL-3.0
+open source at `vendor/OGX360/` (kept out of git, per the bridge's
+`.gitignore`) and is reproducible via
+`pio run -e OGX360 --target upload` if slot 2 is ever bricked. The
+integration plan never reflashes slot 2, so this is not a tomorrow's
+blocker. Documented in
+`scripts/apple-silicon/ogx360-bridge/README.md` "Backup status".
+
+### Tomorrow's first action: OGX360 bridge bring-up
+
+Once the new USB-C Pro Micro arrives, follow the integration plan
+end-to-end:
+
+1. **Pre-flash** the new Pro Micro on the bench (USB-C → Mac
+   directly), verify it enumerates correctly, then solder it into
+   the OGX360 slot 1 footprint. This sidesteps the same kind of
+   reset-routing issue we hit with slot 2 backup.
+2. Plug slot 2 into the Xbox via the USB-A → Xbox-controller-port
+   adapter cable. Boot the Xbox.
+3. Identify slot 2's I²C address (1, 2, or 3) via the boot-time ping
+   blink pattern from `master.ino`.
+4. Mac-side smoke test: `controller-replay-hardware.py crimson-skies-smoke.csv`
+   in dry-run, then live.
+5. End-to-end: short `single-A.csv` test against a dashboard or any
+   input-responsive Xbox screen. Pass criterion: Xbox responds to a
+   single A press as if a physical controller pressed it.
+
+Estimated time from "new Pro Micro arrives" to "Xbox responding to
+Mac input": 30-60 minutes including soldering.
+
+If both Tier 3 (this hardware bridge) and Tier 2A (per-title XBE
+patching) prove out, the project has redundant injection paths for
+the oracle pipeline — Tier 2A for native gameplay capture inside
+each canary title, Tier 3 for any title outside the canary set or
+whenever the patched-XBE workflow stalls.
 
 ## Previous Production Oracle Banner
 

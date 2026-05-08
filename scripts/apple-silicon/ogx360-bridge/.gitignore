@@ -1,0 +1,12 @@
+# Local clone of Ryzee119 OGX360 source — GPL-3.0-or-later, kept out of
+# this repo to keep license boundary clean. Re-clone as needed:
+#   git clone --depth 1 https://github.com/Ryzee119/OGX360.git vendor/OGX360
+vendor/
+
+# Local Python virtualenv for the Mac-side replay tool. Recreate via:
+#   python3 -m venv mac-side/.venv && mac-side/.venv/bin/pip install pyserial
+mac-side/.venv/
+
+# Avrdude flash dumps go here. Backup is per-unit and not redistributable.
+firmware/slave-backup/*.hex
+firmware/slave-backup/*.eep

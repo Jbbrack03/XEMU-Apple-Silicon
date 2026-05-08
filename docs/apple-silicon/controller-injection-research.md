@@ -29,9 +29,9 @@ risk vs reward, and records the design decisions for each.
 | Tier | Coverage | Path | Status |
 | ---- | -------- | ---- | ------ |
 | 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | SHIPPED 2026-05-07. Production-validated by `controller-roundtrip`. |
-| 2A   | Fixed retail canary set | Per-title XBE patches that synthesize input and return to dashboard | ADOPTED 2026-05-08. Next production path. |
+| 2A   | Fixed retail canary set | Per-title XBE patches that synthesize input and return to dashboard | ADOPTED 2026-05-08. Active production path. |
 | 2B   | Generic retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED; live export-slot implementation crashed 2026-05-08. Not production. |
-| 3    | Generic / fallback | Hardware controller emulator (Mac → Xbox port / OGX360 path) | Documented fallback. Hardware available, but deferred behind per-title patching. |
+| 3    | Generic / fallback | Hardware controller emulator (Mac → OGX360 → Xbox controller port) | STAGED 2026-05-08 evening. Custom slot 1 master firmware + Mac-side replay tool compile + unit-test cleanly. Pending USB-C Pro Micro arrival for hardware bring-up. See `scripts/apple-silicon/ogx360-bridge/`. |
 
 Tiers 1, 2A, and 2B are software paths. Tier 2A does not require a live
 agent after `runxbe`; each patched title owns its route playback and
@@ -315,35 +315,101 @@ controller backend effort.
 
 ---
 
-## Tier 3 — Hardware controller emulator (FALLBACK / DEFERRED)
+## Tier 3 — Hardware controller emulator (STAGED 2026-05-08)
 
 **Coverage:** any Xbox, any title, any kernel.
 **Risk:** none on the Xbox side; the hardware just plugs in.
-**Engineering:** small hardware project + a Mac-side serial driver.
+**Engineering:** complete in-tree (firmware + Mac-side replay tool +
+docs) — pending hardware bring-up only.
 
-If per-title patching stalls or a future phase needs a generic controller
-backend, Tier 3 closes the gap with a small hardware adapter:
+The Tier 3 path is now an OGX360-based bridge rather than a Teensy
+build, because the user already had an OGX360 from a previous
+project. With the new USB-C Pro Micro arriving 2026-05-09 to replace
+the original master Pro Micro (whose micro-USB connector was destroyed
+pre-session and could not be rescued), the bridge is functionally a
+small custom-firmware spike on top of an existing 4-port board.
 
-- **Microcontroller:** Teensy 4.0 (USB Host + USB Device modes,
-  ~$30) running the open-source `OGX-Mini` or `MaxLeechXC`
-  firmware that emulates an OG Xbox controller (XID HID device).
-- **Mac side:** plug the Teensy into the Mac via USB; a
-  `controller-replay-hardware.py` translates `controller.set` calls
-  into serial commands (Teensy receives, generates the HID report,
-  Xbox sees a "real" controller).
-- **Xbox side:** plug the Teensy's USB output into one of the four
-  Xbox controller ports (via standard USB-to-Xbox adapter cable —
-  ~$5).
+**Architecture:**
 
-This is genuinely backward-compatible (the Xbox sees a normal
-controller), and entirely independent of any iND-BiOS / dashboard /
-kernel state. Trade-off: an additional ~$50 hardware purchase, an
-extra serial leg in the validation pipeline, and another physical
-device sitting on the project bench.
+```
+Mac Studio                            OGX360 PCB
+  +---------+     USB-C / CDC      +----------------------+
+  | xemu CSV| ----- slot 1 ------> | custom master FW      |
+  | replay  |   115200 / 8N1      |  (firmware/master/.ino)|
+  +---------+                     |       |                |
+                                  |       | I²C 400 kHz    |
+                                  |       v                |
+                                  |  slot 2 slave FW       |
+                                  | (Ryzee119, unmodified) |
+                                  |       |                |
+                                  +-------|----------------+
+                                          |
+                                          v USB / XID HID
+                                  USB-A → OG Xbox port adapter
+                                          |
+                                          v
+                                     Xbox controller port 1
+```
 
-If we go this route, the same `controller-replay.py` Mac tool covers
-both backends: an `--via hardware` flag swaps the agent RPC for
-serial.
+**Key design decisions:**
+
+- **Slot 1 firmware is custom; slot 2 firmware is unmodified Ryzee119
+  slave.** We replicate the master/slave I²C protocol exactly so the
+  unmodified slave receives our state as if it came from a real
+  Ryzee119 master. Byte-level protocol spec at
+  `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md`.
+
+- **No Teensy purchase, no second microcontroller for the bridge.**
+  The OGX360 already has 4 Pro Micro footprints; we only populate
+  slot 1 (master) and slot 2 (slave) for the oracle use case.
+
+- **Wire format from Mac to slot 1:** 25-byte serial frame
+  `[0xAB][0xCD][PORT 1..3][TYPE 1=DUKE][PAYLOAD 20 bytes][XOR cksum]`.
+  PAYLOAD is exactly the Ryzee119 `usbd_duke_in_t` struct — slot 1
+  unwraps the serial framing and re-frames for I²C with `0xF1` status
+  byte prefix.
+
+- **Mac-side script** is `controller-replay-hardware.py` — same CSV
+  vocabulary as the existing agent-RPC `controller-replay.py`. The
+  same `scripts/apple-silicon/input-scripts/*.csv` library drives
+  both engines. To switch from agent-RPC to hardware-bridge for any
+  given route, the user just runs the alternate script.
+
+**In-tree deliverables (2026-05-08 evening):**
+
+- `scripts/apple-silicon/ogx360-bridge/firmware/master/master.ino` —
+  custom slot 1 firmware. Compiles against `arduino:avr:leonardo` to
+  23% flash, 18% RAM. Plenty of headroom for future enhancements
+  (Steel Battalion support, rumble passback to Mac, etc.).
+- `scripts/apple-silicon/ogx360-bridge/mac-side/controller-replay-hardware.py`
+  — Mac-side replay tool. Frame builder unit-tested against four
+  known controller states; CSV parsing validated against the existing
+  input-script library.
+- `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md` —
+  reverse-engineered byte-level I²C protocol spec.
+- `scripts/apple-silicon/ogx360-bridge/docs/integration-plan.md` —
+  tomorrow's bring-up checklist with pass/fail criteria.
+- `scripts/apple-silicon/ogx360-bridge/docs/backup-runbook.md` —
+  slot 2 firmware backup procedure (kept for future reference; could
+  not run autonomously this session because Caterina bootloader entry
+  on slot 2 could not be triggered).
+
+**Status of slot 2 firmware backup:** skipped. The OGX360 onboard
+reset button appears to be a power-cycle (cuts VBUS) rather than wired
+to the chip's RST pin, and manual short of the slot 2 Pro Micro's
+RST/GND pin header pins did not trigger Caterina's stay-in-bootloader
+mode either. Acceptable: the slave firmware is GPL-3.0 open source and
+reproducible from `vendor/OGX360/` (kept out of git via the bridge's
+`.gitignore`) via PlatformIO. The integration plan never reflashes
+slot 2, so this is not a tomorrow's blocker — only a future-work
+consideration if slot 2 is ever bricked.
+
+**Tomorrow's first bring-up step:** pre-flash the new USB-C Pro Micro
+on the bench with `master.ino` (USB-C → Mac directly, factory Caterina
++ arduino-cli upload), verify it enumerates as USB CDC, then solder
+into slot 1 of the OGX360. End-to-end smoke test target: Xbox responds
+to a single A-button press driven from a `controller-replay-hardware.py`
+run with a 2-line CSV.
 
 ---
 
