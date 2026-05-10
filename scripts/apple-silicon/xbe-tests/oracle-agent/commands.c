@@ -342,10 +342,25 @@ int cmd_screenshot(struct netconn *c, const char *args)
 int cmd_runxbe(struct netconn *c, const char *args)
 {
     char path[260];
-    if (op_parse_kv_str(args, "path", path, sizeof(path)) != 0) {
+    const char *p = strstr(args, "path=");
+    if (!p) {
         op_send_errf(c, "usage: runxbe path=<xbox-path>");
         return 0;
     }
+    p += 5;
+    while (*p == ' ' || *p == '\t') p++;
+    size_t n = 0;
+    while (p[n] && n + 1 < sizeof(path)) n++;
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t' ||
+                     p[n - 1] == '\r' || p[n - 1] == '\n')) {
+        n--;
+    }
+    if (n == 0) {
+        op_send_errf(c, "usage: runxbe path=<xbox-path>");
+        return 0;
+    }
+    memcpy(path, p, n);
+    path[n] = 0;
     op_send_okf(c, "launching %s", path);
     /* Best effort: drain the netconn and close the listener before
      * blowing away our own image. */

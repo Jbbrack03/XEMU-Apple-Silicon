@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Drive the OGX360 bridge while running controller-readback on the Xbox."""
+"""Drive the OGX360 bridge while running controller-readback on the Xbox.
+
+Writes `verdict.json` when `--out-dir` is supplied. That JSON is usable as
+title-facing hardware-input evidence for `retail-gameplay-oracle.py`.
+"""
 from __future__ import annotations
 
-import argparse, os, sys, struct, time, threading, ftplib, io
+import argparse, os, sys, struct, time, threading, ftplib, io, json
 from pathlib import Path
 
 _VENV_PY = Path(__file__).resolve().parents[1] / "mac-side/.venv/bin/python"
@@ -52,7 +56,38 @@ def main():
     ap.add_argument('--transition-s', type=float, default=6.0,
                     help='toggle target/neutral after chainload so the Xbox '
                          'receives fresh interrupt reports')
+    ap.add_argument('--out-dir', type=Path,
+                    help='Directory for verdict.json and controller-readback.txt')
     args = ap.parse_args()
+    out_dir = args.out_dir
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    verdict = {
+        'schema': 'ogx360-bridge-readback-v1',
+        'started_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'host': args.host,
+        'device': args.device,
+        'xbe_path': args.xbe_path,
+        'expected': {
+            'has_controller': '1',
+            'vendor': '0x045e',
+            'product': '0x0289',
+            'button.a': '1',
+            'button.dpad_right': '1',
+            'axis.leftx': '25000',
+        },
+    }
+
+    def finish(status, rc, **extra):
+        verdict.update(extra)
+        verdict['finished_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        verdict['status'] = status
+        if out_dir:
+            (out_dir / 'verdict.json').write_text(
+                json.dumps(verdict, indent=2, sort_keys=True) + '\n',
+                encoding='utf-8',
+            )
+        return rc
 
     stop = threading.Event()
     sent = [0]
@@ -71,11 +106,17 @@ def main():
     print(f'[host] sender warmed up, sent so far: {sent[0]} frames')
 
     print('[host] chainloading XBE')
-    ftp = ftplib.FTP(args.host, timeout=10)
-    ftp.login('xbox','xbox')
-    print('  ', ftp.sendcmd('SITE EXEC ' + args.xbe_path))
-    try: ftp.quit()
-    except: pass
+    try:
+        ftp = ftplib.FTP(args.host, timeout=10)
+        ftp.login('xbox','xbox')
+        ack = ftp.sendcmd('SITE EXEC ' + args.xbe_path)
+        verdict['chainload_ack'] = ack
+        print('  ', ack)
+        try: ftp.quit()
+        except: pass
+    except Exception as exc:
+        stop.set(); t.join(timeout=2)
+        return finish('chainload-failed', 2, error=str(exc), frames_sent=sent[0])
 
     print(f'[host] toggling target/neutral for {args.transition_s:g}s')
     t0 = time.monotonic()
@@ -101,17 +142,23 @@ def main():
             ftp.login('xbox','xbox'); ftp.quit(); break
         except Exception: time.sleep(2)
     else:
-        print('  Xbox did not return'); return 3
+        print('  Xbox did not return')
+        return finish('no-dashboard-return', 3, frames_sent=sent[0])
     print('[host] Xbox back')
     time.sleep(1)
 
-    ftp = ftplib.FTP(args.host, timeout=10)
-    ftp.login('xbox','xbox')
-    buf = io.BytesIO()
-    ftp.retrbinary('RETR ' + args.report_remote, buf.write)
-    try: ftp.quit()
-    except: pass
+    try:
+        ftp = ftplib.FTP(args.host, timeout=10)
+        ftp.login('xbox','xbox')
+        buf = io.BytesIO()
+        ftp.retrbinary('RETR ' + args.report_remote, buf.write)
+        try: ftp.quit()
+        except: pass
+    except Exception as exc:
+        return finish('report-fetch-failed', 4, error=str(exc), frames_sent=sent[0])
     text = buf.getvalue().decode(errors='replace')
+    if out_dir:
+        (out_dir / 'controller-readback.txt').write_text(text, encoding='utf-8')
     print('=== controller-readback.txt ===')
     print(text)
     report = {l.split('=',1)[0].strip(): l.split('=',1)[1].strip()
@@ -119,7 +166,17 @@ def main():
     print('button.dpad_right=' + report.get('button.dpad_right','?'),
           'button.a=' + report.get('button.a','?'),
           'axis.leftx=' + report.get('axis.leftx','?'))
-    return 0
+    checks = {
+        key: {'expected': expected, 'actual': report.get(key),
+              'ok': report.get(key) == expected}
+        for key, expected in verdict['expected'].items()
+    }
+    status = 'ok' if all(c['ok'] for c in checks.values()) else 'fail'
+    return finish(status, 0 if status == 'ok' else 1,
+                  frames_sent=sent[0],
+                  report=report,
+                  checks=checks,
+                  report_remote=args.report_remote)
 
 if __name__ == '__main__':
     raise SystemExit(main())

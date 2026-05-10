@@ -34,6 +34,9 @@
 # ENVIRONMENT
 #   FFMPEG       path to ffmpeg (default: looked up via $PATH)
 #   FFMPEG_LOG   ffmpeg -loglevel value (default: info)
+#   CAPTURE_TIMEOUT_EXTRA
+#                seconds past --duration before killing a stuck ffmpeg
+#                process (default: 20)
 #
 # SAFETY
 #   - The MS2109 brown-outs flaky USB-C ports on Mac Studio's ASMedia
@@ -59,6 +62,7 @@ FPS=30
 LABEL=""
 INCLUDE_AUDIO=1
 PIXEL_FORMAT="uyvy422"
+TIMEOUT_EXTRA="${CAPTURE_TIMEOUT_EXTRA:-20}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -72,6 +76,7 @@ while [ $# -gt 0 ]; do
         --label)           LABEL="$2"; shift 2 ;;
         --no-audio)        INCLUDE_AUDIO=0; shift ;;
         --pixel-format)    PIXEL_FORMAT="$2"; shift 2 ;;
+        --timeout-extra)   TIMEOUT_EXTRA="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,40p' "${BASH_SOURCE[0]}" | sed -e 's/^# *//'
             exit 0 ;;
@@ -222,7 +227,30 @@ echo "[composite-record] cmd: ${CMD[*]}"
 echo "[composite-record] log: $LOG_OUT"
 
 set +e
-"${CMD[@]}" 2> "$LOG_OUT"
+"${CMD[@]}" 2> "$LOG_OUT" &
+CAPTURE_PID=$!
+CAPTURE_TIMED_OUT=0
+DEADLINE="$(python3 - "$DURATION" "$TIMEOUT_EXTRA" <<'PY'
+import sys, time
+print(time.time() + float(sys.argv[1]) + float(sys.argv[2]))
+PY
+)"
+while kill -0 "$CAPTURE_PID" 2>/dev/null; do
+    if python3 - "$DEADLINE" <<'PY'
+import sys, time
+raise SystemExit(0 if time.time() > float(sys.argv[1]) else 1)
+PY
+    then
+        CAPTURE_TIMED_OUT=1
+        echo "[composite-record] timeout; killing ffmpeg pid=$CAPTURE_PID" >&2
+        kill "$CAPTURE_PID" 2>/dev/null || true
+        sleep 2
+        kill -9 "$CAPTURE_PID" 2>/dev/null || true
+        break
+    fi
+    sleep 1
+done
+wait "$CAPTURE_PID"
 RC=$?
 set -e
 
@@ -240,14 +268,15 @@ if [ -f "$VIDEO_OUT" ]; then
 fi
 
 # Patch the metadata file with status + observed duration.
-python3 - "$META_OUT" "$RC" "$ELAPSED" "$ACTUAL_DURATION" <<'PY'
+python3 - "$META_OUT" "$RC" "$ELAPSED" "$ACTUAL_DURATION" "$CAPTURE_TIMED_OUT" <<'PY'
 import json, sys
-meta_path, rc, elapsed, actual = sys.argv[1:5]
+meta_path, rc, elapsed, actual, timed_out = sys.argv[1:6]
 with open(meta_path) as f:
     meta = json.load(f)
 meta["status"] = "ok" if rc == "0" else "ffmpeg-failed"
 meta["ffmpeg_rc"] = int(rc)
 meta["wall_elapsed_s"] = int(elapsed)
+meta["capture_timed_out"] = timed_out == "1"
 if actual:
     try:
         meta["video_duration_s"] = float(actual)

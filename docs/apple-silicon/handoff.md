@@ -1,37 +1,100 @@
 # Handoff
 
-Last updated: 2026-05-10 (OGX360 hardware bridge shipped end-to-end:
-Mac-side byte-exact validation PASS and Xbox-side controller-readback
-PASS after forcing a post-chainload input transition). Previous
-header retained below for the still-open Track A (PGR2 physical-device
-input proof).
+Last updated: 2026-05-10 (retail oracle workflow proven end-to-end:
+dashboard FTP launches Crimson Skies, OGX360 replays the route,
+approved macOS capture records reference frames, controller IGR returns
+to UnleashX, and dashboard FTP is back).
 
 ## NEXT SESSION — three priorities
 
-### 1. POWER-CYCLE THE XBOX
+### 1. RETAIL ORACLE WORKFLOW IS LIVE-PROVEN
 
-The 2026-05-09 OGX360 session ended with the Xbox hung after an
-oracle-agent `mem.read` stepped outside the agent's RAM allowlist.
-The agent crashed ungracefully instead of returning a 500 error,
-and the Xbox stopped responding to ICMP / FTP / TCP 9001. A hard
-power-cycle (eject button hold or unplug/replug power) is required
-before any other Xbox-side work.
+Use the workflow wrapper for normal real-Xbox gameplay captures:
 
-### 2. OGX360 BRIDGE IS SHIPPED; USE TRANSITION-BASED STARTUP
+```sh
+python3 scripts/apple-silicon/retail-oracle-workflow.py --title crimson
+```
 
-The OGX360 bridge is byte-exact through slot 2's XID HID emit and
-Xbox-side `controller-readback` now reports live bridge input:
-`button.a=1`, `button.dpad_right=1`, `axis.leftx=25000`.
+The decisive run:
+- `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/workflow.json`
+  reports `status=ok`.
+- `gameplay/verdict.json` reports `verdict=ok`,
+  `reference_frame_count=91`, `dashboard_returned=true`, and
+  `runxbe_ack="dashboard FTP launch issued for F:\Games\Crimson Skies\default.xbe"`.
+- `gameplay/composite/contact-sheet-all-frames.png` shows UnleashX,
+  Crimson boot/loading, title/menu flow, cutscene/game scene/plane
+  frames, UnleashX return, and final dashboard.
+- Final Xbox state after the run: `ping=true`, `ftp=true`,
+  `agent=false`.
+- Narrative record:
+  `docs/apple-silicon/benchmarks/2026-05-10-retail-oracle-workflow.md`.
 
-Important caveat: do not validate or launch a route by holding one
-constant state before chainload. Ryzee119's XID code suppresses
-duplicate interrupt reports, so the Xbox can see a valid controller
-with stale neutral input if no report changes after the XBE starts.
-Use `validation/bridge-readback-test.py`'s pattern: start neutral,
-chainload, toggle target/neutral to force fresh interrupt reports,
-then hold the target state.
+Important implementation facts:
+- Retail games launch from dashboard FTP `SITE EXEC`, not from
+  `oracle-agent runxbe`. Agent-runxbe acked but did not transition
+  the retail title reliably and left the agent screen visible.
+- `retail-gameplay-oracle.py` now checks/restores dashboard FTP before
+  a dashboard launch. If the agent is live, it sends the agent `reboot`
+  command and waits for FTP to return.
+- Post-dashboard screenshots are opt-in only because capturing them
+  relaunches the agent and suspends dashboard FTP.
+- Crimson's real-hardware boot/menu timing is slower than xemu, so the
+  title default applies `route_offset_ms=28000` before replaying the
+  xemu-recorded route.
 
-### 3. PGR2 PHYSICAL-DEVICE INPUT PROOF (still open from 2026-05-08)
+### 2. KEEP CAPTURE ON THE APPROVED MACOS APP IDENTITY
+
+The capture stick and cabling are working. The root cause of the earlier
+capture failure was macOS TCC identity: direct binary execution reported
+Camera authorization as `not_determined`, while the LaunchServices-
+launched app was already `authorized`.
+
+Evidence:
+- `/tmp/retail-workflow-capture-block/workflow.json` blocks at
+  `capture-preflight` from the old raw-binary path.
+- `benchmark-runs/capture-recovery-20260510T172927Z/launchservices-snapshot.png`
+  is a good LaunchServices capture of the TrueHexEn screensaver.
+
+Guardrail:
+- Use `scripts/apple-silicon/xemu-capture-app.py` or
+  `scripts/apple-silicon/bin/xemu-capture`; never call
+  `.build/release/xemu-capture` or
+  `dist/xemu-capture.app/Contents/MacOS/xemu-capture` directly for
+  camera operations.
+- The retail workflow now runs `auth` through the app wrapper and blocks
+  before game boot if macOS Camera approval is missing.
+- With the current ad-hoc signature, rebuilding the app changes cdhash
+  and can require a one-time Camera regrant. For permission that survives
+  arbitrary rebuilds, sign the app with a real Developer ID identity.
+
+### 3. OGX360 INPUT AND AGENT FIXES ARE DEPLOYED
+
+OGX360 bridge evidence:
+- `benchmark-runs/retail-oracle-workflow-crimson-dashboardftp-handofffix-20260510T182804Z/bridge-readback/verdict.json`
+  is reusable `status=ok` bridge evidence.
+- `benchmark-runs/retail-oracle-workflow-crimson-dashboardftp-handofffix-20260510T182804Z/igr-proof/verdict.json`
+  is reusable `verdict=ok` controller-IGR/dashboard-return evidence.
+
+Important caveat: use transition-based startup. Do not validate
+or launch a route by holding one constant state before chainload.
+Ryzee119's XID code suppresses duplicate interrupt reports, so the Xbox
+can see a valid controller with stale neutral input if no report changes
+after the XBE starts. The workflow uses the fixed pattern and hardware
+replay with `--time-origin zero`.
+
+`oracle-agent` previously parsed `runxbe path=<xbox-path>` with
+`op_parse_kv_str`, truncating paths at spaces. That made
+`F:\Games\Crimson Skies\default.xbe` become `F:\Games\Crimson`.
+`cmd_runxbe` now copies the whole `path=` tail and trims trailing
+whitespace. The rebuilt `bin/default.xbe` and `oracle-agent.iso` are
+checked in and the rebuilt `default.xbe` has been uploaded to
+`E:\Apps\oracle-agent\default.xbe`.
+
+Verification used a low-risk relaunch of the agent from a spaced path:
+`E:\Apps\oracle agent\default.xbe`; acknowledgement was
+`launching E:\Apps\oracle agent\default.xbe`, and the agent came back.
+
+### Historical: PGR2 physical-device input proof (pre-OGX360)
 
 After power-cycle (priority #1):
 

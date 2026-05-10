@@ -21,8 +21,9 @@ USAGE
     controller-replay-hardware.py CSV [--device PATH] [--port-index N]
                                        [--rate-multiplier M]
                                        [--start-at-ms N] [--stop-at-ms N]
+                                       [--time-origin {first-event,zero}]
                                        [--dry-run] [--clear-on-start]
-                                       [--list-devices]
+                                       [--neutral-on-exit] [--list-devices]
 
 DEVICE AUTODETECT
     --device defaults to the first /dev/cu.usbmodem* on macOS. The
@@ -262,10 +263,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Time-warp the replay (e.g. 2.0 = 2x speed); default 1.0")
     ap.add_argument("--start-at-ms", type=int, default=0)
     ap.add_argument("--stop-at-ms", type=int, default=None)
+    ap.add_argument("--time-origin", choices=("first-event", "zero"),
+                    default="first-event",
+                    help="Timing origin for replay. Default first-event preserves "
+                         "legacy behavior. Use zero for retail-oracle runs so "
+                         "xemu-recorded startup delays remain intact.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Parse + simulate; do not open serial or send frames.")
     ap.add_argument("--clear-on-start", action="store_true",
                     help="Send a neutral state frame before replay.")
+    ap.add_argument("--neutral-on-exit", action="store_true",
+                    help="Send and flush a neutral controller frame before closing.")
     ap.add_argument("--list-devices", action="store_true",
                     help="Print candidate serial devices and exit.")
     ap.add_argument("--frame-rate-hz", type=float, default=250.0,
@@ -315,13 +323,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     state = PortState()
 
-    base_t = events[0][0]
+    base_t = 0 if args.time_origin == "zero" else events[0][0]
     rate = max(args.rate_multiplier, 0.001)
     min_frame_interval = 1.0 / max(args.frame_rate_hz, 1.0)
 
     print(f"[replay] csv      : {csv_path}", file=sys.stderr)
     print(f"[replay] events   : {len(events)} "
-          f"(t={base_t}..{events[-1][0]} ms; rate={rate}x)", file=sys.stderr)
+          f"(origin={args.time_origin}; t={events[0][0]}..{events[-1][0]} ms; "
+          f"rate={rate}x)", file=sys.stderr)
     print(f"[replay] device   : {device_path or '(dry-run)'}", file=sys.stderr)
     print(f"[replay] port_idx : {port_idx}", file=sys.stderr)
     if args.dry_run:
@@ -371,12 +380,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (serial.SerialException, OSError) as e:
             errors.append(f"write failed: {e}")
 
+    def sleep_until(target_wall: float) -> None:
+        """Sleep in short slices so the bridge keeps seeing neutral/current
+        state frames during long startup gaps in xemu-recorded routes."""
+        while True:
+            now = time.monotonic()
+            if target_wall <= now:
+                return
+            maybe_send_frame()
+            time.sleep(min(target_wall - now, min_frame_interval))
+
     try:
         for idx, (t_ms, ctrl, val) in enumerate(events):
             target_wall = started_wall + (t_ms - base_t) / 1000.0 / rate
-            now = time.monotonic()
-            if target_wall > now:
-                time.sleep(target_wall - now)
+            sleep_until(target_wall)
             schedule_actual = time.monotonic()
             schedule_jitters_ms.append((schedule_actual - target_wall) * 1000.0)
 
@@ -402,6 +419,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"[replay] {idx + 1}/{len(events)} events "
                       f"({elapsed:.1f}s wall; avg jitter {avg:.2f} ms)",
                       file=sys.stderr)
+        if args.neutral_on_exit:
+            state = PortState()
+            maybe_send_frame(force=True)
         # Final flush.
         if ser is not None:
             ser.flush()
@@ -432,6 +452,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "frames_sent": sent,
         "wall_elapsed_s": round(elapsed_total, 3),
         "rate_multiplier": rate,
+        "time_origin": args.time_origin,
+        "neutral_on_exit": args.neutral_on_exit,
         "schedule_jitter_ms": jitter_summary(schedule_jitters_ms),
         "errors_first_5": errors[:5],
         "dry_run": args.dry_run,

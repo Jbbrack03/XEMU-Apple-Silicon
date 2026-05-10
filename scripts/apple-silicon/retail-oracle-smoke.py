@@ -141,9 +141,9 @@ def ftp_list_games(host: str, roots: list[str]) -> dict[str, Any]:
 
 
 def capture_device_probe() -> dict[str, Any]:
-    capture_tool = ROOT / "tools/xemu-capture/.build/release/xemu-capture"
+    capture_tool = ROOT / "scripts/apple-silicon/xemu-capture-app.py"
     if capture_tool.exists():
-        return run([str(capture_tool), "list"], timeout=15.0)
+        return run([sys.executable, str(capture_tool), "list"], timeout=15.0)
     ffmpeg = os.environ.get("FFMPEG", "ffmpeg")
     return run(
         [ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],

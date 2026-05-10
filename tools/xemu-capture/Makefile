@@ -7,9 +7,9 @@
 #   make build      swift build only
 #   make bundle     wrap the swift binary in an .app
 #   make sign       ad-hoc codesign with --identifier com.xemu-macos.capture
-#   make install    symlink dist/xemu-capture.app/Contents/MacOS/xemu-capture
-#                   into ../../scripts/apple-silicon/bin/xemu-capture so it's
-#                   on the project's tool path.
+#   make install    install/update a LaunchServices wrapper into
+#                   ../../scripts/apple-silicon/bin/xemu-capture so automation
+#                   uses the macOS-approved .app identity. Does not rebuild.
 #   make clean      remove .build/ and dist/
 
 APP_NAME      := xemu-capture
@@ -28,7 +28,7 @@ CODESIGN      ?= /usr/bin/codesign
 all: build bundle sign
 	@echo
 	@echo "[xemu-capture] Built: $(APP_DIR)"
-	@echo "[xemu-capture] Run:   ./$(BIN_PATH) list"
+	@echo "[xemu-capture] Run:   ../../scripts/apple-silicon/xemu-capture-app.py list"
 	@echo
 	@echo "  First run that hits the camera (snapshot, probe, serve) will"
 	@echo "  prompt for Camera permission. Once granted (per bundle ID"
@@ -66,20 +66,20 @@ sign:
 	$(CODESIGN) --verify --verbose=2 $(APP_DIR)
 	$(CODESIGN) --display --verbose=2 $(APP_DIR) 2>&1 | grep -E '(Identifier|TeamIdentifier|Authority)' | sed 's/^/  /'
 
-install: all
+install:
+	@test -d $(APP_DIR) || { echo "[xemu-capture] Missing $(APP_DIR); run 'make' first" >&2; exit 1; }
 	@mkdir -p $(WRAPPER_DIR)
 	@rm -f $(WRAPPER_PATH)
-	# Wrapper sits at xemu-fork/scripts/apple-silicon/bin/xemu-capture
-	# and the .app at xemu-fork/tools/xemu-capture/dist/.../xemu-capture.
-	# So the relative jump is ../../../tools/... (three levels up:
-	# bin/ -> apple-silicon/ -> scripts/ -> xemu-fork/).
-	@printf '#!/bin/sh\nexec "$$(dirname "$$(realpath "$$0")")"/../../../tools/$(APP_NAME)/$(BIN_PATH) "$$@"\n' > $(WRAPPER_PATH)
+	# Wrapper sits at xemu-fork/scripts/apple-silicon/bin/xemu-capture.
+	# It delegates to the LaunchServices app wrapper one directory up so
+	# TCC sees the same app identity the user approved in System Settings.
+	@printf '#!/bin/sh\nexec python3 "$$(dirname "$$(realpath "$$0")")"/../xemu-capture-app.py "$$@"\n' > $(WRAPPER_PATH)
 	@chmod +x $(WRAPPER_PATH)
 	@echo "[xemu-capture] Installed wrapper at $(WRAPPER_PATH)"
 
 test: all
 	@echo "[xemu-capture] Smoke: list devices"
-	@./$(BIN_PATH) list
+	@../../scripts/apple-silicon/xemu-capture-app.py list
 
 clean:
 	rm -rf .build dist

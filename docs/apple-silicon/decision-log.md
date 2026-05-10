@@ -1,5 +1,49 @@
 # Decision Log
 
+## 2026-05-10: Retail oracle workflow proven end-to-end on Crimson Skies
+
+**Decision.** The production retail oracle workflow is now
+dashboard-FTP launch + OGX360 hardware input + approved-app composite
+frame capture + controller IGR return. Retail titles should not launch
+through `oracle-agent runxbe`; that path acked but did not reliably
+transition Crimson and could leave the agent screen visible with FTP
+unavailable. Dashboard FTP `SITE EXEC` is the authoritative retail
+launch path.
+
+**What changed.**
+
+- Added `scripts/apple-silicon/retail-oracle-workflow.py` as the
+  top-level gate.
+- `retail-gameplay-oracle.py` now defaults to `--launch-backend
+  dashboard-ftp`, preflights/restores dashboard FTP before launching,
+  and leaves post-dashboard screenshots opt-in so it does not relaunch
+  the agent and suspend FTP between workflow phases.
+- Added `scripts/apple-silicon/capture-frame-sequence.py`, which
+  records `frame-*.png` through `scripts/apple-silicon/xemu-capture-app.py`
+  and therefore stays under the approved macOS TCC app identity.
+- Added repeated/longer controller IGR attempts and dashboard recovery
+  routing.
+- Crimson Skies has `route_offset_ms=28000` because the retail Xbox
+  reaches the title/menu later than xemu.
+
+**Evidence.**
+
+- `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/workflow.json`
+  reports `status=ok`.
+- `gameplay/verdict.json` reports `verdict=ok`,
+  `reference_frame_count=91`, `capture_rc=0`,
+  `input_driver_rc=0`, and `dashboard_returned=true`.
+- `gameplay/composite/contact-sheet-all-frames.png` shows dashboard,
+  Crimson boot/loading, title/menu, cutscene/game scene/plane frames,
+  UnleashX/dashboard return, and final dashboard.
+- Final Xbox state after validation: `ping=true`, `ftp=true`,
+  `agent=false`.
+
+**Follow-up.** Add/retune `route_offset_ms` per title as each route is
+validated against real hardware. The ffmpeg MP4/AAC backend remains
+available, but the default oracle capture path is PNG frame sequence via
+the approved `xemu-capture.app` identity.
+
 ## 2026-05-10: OGX360 bridge shipped end-to-end — Xbox-side input readback PASS
 
 **Decision.** Tier 3 OGX360 hardware controller bridge is now
@@ -824,8 +868,10 @@ options:
 **What landed: `tools/xemu-capture/`.** A small Swift CLI packaged
 as a proper macOS `.app` bundle so TCC tracks Camera permission by
 the stable bundle ID `com.xemu-macos.capture`. One-time grant via
-the system prompt; persists across Claude sessions, reboots, and
-project rebuilds.
+the system prompt; persists across Claude sessions and reboots while
+the signed app bundle remains unchanged. With the current ad-hoc
+signature, rebuilding changes cdhash and can require a one-time Camera
+regrant.
 
 **Files added:**
 - `Sources/xemu-capture/main.swift` — single-file Swift CLI (~520
@@ -842,6 +888,7 @@ project rebuilds.
 
 **CLI commands:**
 - `list` — JSON list of all video capture devices.
+- `auth [--request]` — report/request macOS Camera approval.
 - `probe DEVICE` — supported formats / fps for a device.
 - `inputs DEVICE` — physical input sources via AVFoundation
   `inputSources` (returns empty for the MS2109, which uses a
@@ -856,6 +903,14 @@ project rebuilds.
 - `serve [--port N]` — long-running TCP daemon mode for repeated
   captures from automation.
 - `version` — print version.
+
+Automation must invoke the tool through
+`scripts/apple-silicon/xemu-capture-app.py` or
+`scripts/apple-silicon/bin/xemu-capture`. Direct execution of
+`dist/xemu-capture.app/Contents/MacOS/xemu-capture` or
+`.build/release/xemu-capture` can bypass the LaunchServices app
+identity and report TCC `not_determined` even while the `.app` is
+authorized.
 
 **Critical bug surfaced and fixed during validation: NTSC vs PAL
 format selection.** AVFoundation's `sessionPreset = .high` picks

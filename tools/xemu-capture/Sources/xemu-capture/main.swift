@@ -60,6 +60,34 @@ func emitJSON(_ obj: Any, file: FileHandle = .standardOutput) {
     file.write(Data([0x0A]))
 }
 
+func cameraAuthorizationStatusString() -> String {
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized: return "authorized"
+    case .notDetermined: return "not_determined"
+    case .denied: return "denied"
+    case .restricted: return "restricted"
+    @unknown default: return "unknown"
+    }
+}
+
+func requestCameraAccessIfNeeded() -> Bool {
+    let status = AVCaptureDevice.authorizationStatus(for: .video)
+    if status == .authorized {
+        return true
+    }
+    if status != .notDetermined {
+        return false
+    }
+    let sem = DispatchSemaphore(value: 0)
+    var granted = false
+    AVCaptureDevice.requestAccess(for: .video) { ok in
+        granted = ok
+        sem.signal()
+    }
+    _ = sem.wait(timeout: .now() + 60)
+    return granted
+}
+
 // MARK: - Device enumeration
 
 struct DeviceInfo {
@@ -503,6 +531,21 @@ case "list":
         ]
     }
     emitJSON(["status": "ok", "devices": devs])
+
+case "auth":
+    let shouldRequest = args.contains("--request")
+    let before = cameraAuthorizationStatusString()
+    var granted: Bool? = nil
+    if shouldRequest {
+        granted = requestCameraAccessIfNeeded()
+    }
+    emitJSON([
+        "status": "ok",
+        "camera_authorization": cameraAuthorizationStatusString(),
+        "before": before,
+        "requested": shouldRequest,
+        "granted": granted as Any,
+    ])
 
 case "probe":
     guard args.count >= 2 else {

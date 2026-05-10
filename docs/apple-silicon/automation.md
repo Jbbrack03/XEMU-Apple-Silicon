@@ -3412,8 +3412,9 @@ the EEPROM dump path; do not commit).
 
 Mac-side Swift CLI bundled as a code-signed `.app` so macOS TCC
 tracks Camera permission by stable bundle ID
-`com.xemu-macos.capture`. Survives across Claude sessions, reboots,
-and project rebuilds. Drives any UVC-class video capture device
+`com.xemu-macos.capture`. Survives across Claude sessions and
+reboots while the signed app bundle remains unchanged. Drives any
+UVC-class video capture device
 (verified against the MacroSilicon MS2109 "AV TO USB2.0" stick
 attached to the project Xbox's composite-out).
 
@@ -3427,9 +3428,10 @@ cd tools/xemu-capture && make
 CLI invocation:
 
 ```sh
-./dist/xemu-capture.app/Contents/MacOS/xemu-capture <subcommand>
+scripts/apple-silicon/xemu-capture-app.py <subcommand>
 
   list                                  JSON list of all video capture devices.
+  auth [--request]                      Report/request macOS Camera approval.
   probe DEVICE                          Supported formats / fps for a device.
   inputs DEVICE                         Physical input sources (composite, S-Video).
                                         MS2109 returns empty — its selector is a
@@ -3454,6 +3456,24 @@ CLI invocation:
                                         {"op":"shutdown"}
   version                               Print version.
 ```
+
+**Important:** automation must invoke `xemu-capture` through
+`scripts/apple-silicon/xemu-capture-app.py` or the installed
+`scripts/apple-silicon/bin/xemu-capture` wrapper. Do not invoke
+`dist/xemu-capture.app/Contents/MacOS/xemu-capture` or
+`.build/release/xemu-capture` directly for camera operations. Direct
+binary execution can bypass the LaunchServices app identity that macOS
+approved, causing TCC to report `not_determined` while the `.app` is
+already authorized.
+
+`scripts/apple-silicon/capture-frame-sequence.py` is the retail oracle's
+default capture primitive. It repeatedly calls the LaunchServices app
+wrapper for `snapshot`, writes `frame-0001.png ...`, and records
+`capture-meta.json`. This keeps every camera-touching operation under
+the same macOS-approved app identity. The older ffmpeg MP4 path remains
+available via `--capture-backend ffmpeg`, but it is not the default for
+retail workflow validation because ffmpeg has its own TCC identity and
+can silently hang without a separate Camera grant.
 
 Device-name matching is substring-insensitive against the localized
 device name. For the MS2109 capture stick, `"USB2"` is enough.
@@ -3511,7 +3531,10 @@ re-trigger the macOS Camera prompt (TCC sees "different code,
 re-confirm"). The checked-in prebuilt
 `dist/xemu-capture.app/` keeps Camera permission while unchanged.
 If you `make clean && make` to rebuild, expect a one-time regrant
-prompt the first time the new binary opens a camera session.
+prompt the first time the new binary opens a camera session. Keep the
+checked-in `dist/xemu-capture.app/` unchanged during normal oracle runs;
+the retail workflow now preflights `auth` and blocks before booting a
+game if macOS Camera approval is missing.
 
 For truly stable permission across rebuilds, sign with a real
 Developer ID identity instead of ad-hoc (would require a
@@ -3713,30 +3736,82 @@ delivered in 360 ms wall against the project Xbox. Mean
 jitter 25.7 ms (network RTT to Xbox over LAN). The `seq` and
 `timestamp_us` fields on each port advance correctly.
 
-## Retail gameplay oracle — `retail-gameplay-oracle.py` (2026-05-07)
+## Retail gameplay oracle — `retail-oracle-workflow.py` (2026-05-10)
+
+The OGX360 bridge is now the production retail-game input backend. Use
+the workflow wrapper for normal real-Xbox gameplay captures:
+
+```sh
+python3 scripts/apple-silicon/retail-oracle-workflow.py --title crimson
+```
+
+The wrapper:
+
+1. validates the hardware path with `ogx360-bridge/validation/bridge-readback-test.py`
+   and writes reusable `status=ok` evidence;
+2. bootstraps a short hardware-controller IGR proof for dashboard return;
+3. launches the selected retail XBE from dashboard FTP (`SITE EXEC`);
+4. replays the xemu `XEMU_RECORD_INPUT` CSV through
+   `ogx360-bridge/mac-side/controller-replay-hardware.py`;
+5. records 720x480 composite reference PNGs through the approved
+   `xemu-capture.app` identity;
+6. sends the controller IGR route and requires dashboard FTP to return.
+
+Known title defaults are `crimson`, `rainbow`, `pgr2`, and `sc2`.
+Override paths with `--game-xbe` / `--input-csv` when the Xbox HDD
+layout differs. Output lands under
+`benchmark-runs/retail-oracle-workflow-<title>-<UTC>/` with
+`workflow.json`, per-step command logs, bridge evidence, IGR proof,
+and the final `gameplay/verdict.json`.
+
+Important timing details:
+- Retail workflow invokes hardware replay with `--time-origin zero`, so
+  xemu-recorded startup delays are preserved. The legacy hardware-replay
+  default remains `--time-origin first-event` for quick bench tests.
+- Crimson Skies applies a title default `route_offset_ms=28000` because
+  the real Xbox reaches the Crimson title/menu later than xemu. The
+  decisive offset run reached title/menu, cutscene/game scene, plane
+  frames, IGR return, and final UnleashX dashboard.
+- Override with `--route-offset-ms N` for title retuning.
+
+Validation evidence:
+- `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/workflow.json`
+  reports `status=ok`.
+- `gameplay/verdict.json` reports `verdict=ok`,
+  `reference_frame_count=91`, `capture_rc=0`,
+  `input_driver_rc=0`, and `dashboard_returned=true`.
+- `gameplay/composite/contact-sheet-all-frames.png` visually shows
+  dashboard -> Crimson boot/loading -> title/menu -> cutscene/game
+  scene/plane frames -> UnleashX/dashboard return.
+- Final console state after validation: `ping=true`, `ftp=true`,
+  `agent=false`.
+- Narrative record:
+  `docs/apple-silicon/benchmarks/2026-05-10-retail-oracle-workflow.md`.
+
+## Retail gameplay oracle primitive — `retail-gameplay-oracle.py` (2026-05-07)
 
 Guarded end-to-end wrapper for the real-Xbox retail-game oracle
-workflow. It launches a retail XBE, records composite A/V, drives a
-title-facing input backend, waits for autonomous dashboard recovery,
-then extracts keyframes and audio artifacts.
+workflow. It launches a retail XBE, records composite reference frames
+by default, drives a title-facing input backend, and waits for
+autonomous dashboard recovery. The older ffmpeg backend can still record
+composite A/V plus keyframes/audio when explicitly requested.
 
-As of 2026-05-08 the next production backend is `title-patch`: a
-per-title patched XBE owns route playback and must call a proven
-dashboard-return path such as `HalReturnToFirmware` after the capture
-tail. The older softmod IGR combo (`back+start+ltrigger+rtrigger`) may
-remain useful for hardware-controller backends, but it is not the
-primary exit path for title-level input patches because title-level
-synthetic buttons do not necessarily reach the kernel/dashboard IGR
-observer.
+As of 2026-05-10 the production backend is `hardware`: the Mac drives
+the OGX360 bridge over serial while slot 2 presents as a normal Xbox
+controller. The older `title-patch` line remains useful research
+context for software-only paths, but the workflow above is the default
+retail oracle path.
 
 ```sh
 python3 scripts/apple-silicon/retail-gameplay-oracle.py \
   --game-xbe 'F:\Games\Crimson Skies\default.xbe' \
   --input-csv scripts/apple-silicon/input-scripts/crimson-gameplay.csv \
-  --input-backend title-patch \
+  --input-backend hardware \
   --input-evidence /path/to/input-evidence.json \
   --exit-evidence /path/to/dashboard-return-evidence.json \
-  --input-driver-cmd '/path/to/title-patch-driver --csv {route_csv} --host {host}'
+  --launch-backend dashboard-ftp \
+  --capture-backend xemu-capture \
+  --hardware-device /dev/cu.usbmodem3101
 ```
 
 The command blocks by default unless both pieces of production
@@ -3753,18 +3828,27 @@ Useful flags:
 
 | Flag | Default | Notes |
 | ---- | ------- | ----- |
-| `--input-backend` | required | `title-patch`, `tier2-hook`, or `hardware` |
+| `--input-backend` | required | `tier2-hook` or `hardware` |
 | `--prelaunch-cmd` | none | For title patch staging or future resident-hook preload/setup |
-| `--input-driver-cmd` | none | Shell command that drives the route while the game runs |
-| `--launch-delay-s` | 3.0 | Delay after `runxbe` before the driver starts |
+| `--input-driver-cmd` | generated for `hardware` | Shell command that drives the route while the game runs |
+| `--hardware-device` / `--hardware-port-index` | autodetect / 1 | OGX360 bridge serial device and slot address |
+| `--launch-backend` | `dashboard-ftp` | Use dashboard FTP `SITE EXEC` for retail games; `agent-runxbe` is diagnostic/legacy only |
+| `--capture-backend` | `xemu-capture` | Approved-app PNG frame sequence; `ffmpeg` is optional MP4/AAC |
+| `--frame-interval-s` | 2.0 | PNG frame cadence for `xemu-capture` capture backend |
+| `--route-offset-ms` | 0 | Add title-specific real-hardware timing delay to every route event |
+| `--launch-delay-s` | 3.0 | Delay after launch before the driver starts |
 | `--record-extra-s` | 15.0 | Recording tail after the route+exit combo |
-| `--exit-delay-ms` / `--exit-hold-ms` | 2000 / 3000 | IGR combo timing for hardware-style backends; title-patch exits should prove their own dashboard-return path |
+| `--exit-delay-ms` / `--exit-hold-ms` | 5000 / 6000 | IGR combo timing for hardware-style backends |
+| `--exit-attempts` | 2 | Repeat IGR combo if the first attempt is missed |
+| `--post-dashboard-screenshot` | off | Optional; relaunches the agent after dashboard return, so workflow callers should normally leave it off |
 | `--allow-unproven` | off | Dangerous; only while physically supervising |
 
 Output lands under
 `benchmark-runs/retail-gameplay-oracle-<UTC>/`: `verdict.json`,
-`route-with-exit.csv`, `composite/video.mp4`, `keyframes/`,
-`audio/`, and `post-dashboard.png` when the dashboard returns.
+`route-with-exit.csv`, `composite/capture-meta.json`, and
+`composite/frame-*.png`. When `--capture-backend ffmpeg` is used,
+it additionally writes `composite/video.mp4`, `keyframes/`, and
+`audio/`.
 
 ## Retail title scan — `xbe-inspect.py` (2026-05-07)
 
