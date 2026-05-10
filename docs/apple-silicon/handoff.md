@@ -1,9 +1,10 @@
 # Handoff
 
-Last updated: 2026-05-09 (OGX360 hardware bridge bring-up: Mac-side
-byte-exact validated, slot 2 reflashed for byte-shift bug fix, Xbox-
-side input readback unresolved). Previous header retained below for
-the still-open Track A (PGR2 physical-device input proof).
+Last updated: 2026-05-10 (OGX360 hardware bridge shipped end-to-end:
+Mac-side byte-exact validation PASS and Xbox-side controller-readback
+PASS after forcing a post-chainload input transition). Previous
+header retained below for the still-open Track A (PGR2 physical-device
+input proof).
 
 ## NEXT SESSION — three priorities
 
@@ -16,36 +17,19 @@ and the Xbox stopped responding to ICMP / FTP / TCP 9001. A hard
 power-cycle (eject button hold or unplug/replug power) is required
 before any other Xbox-side work.
 
-### 2. CLOSE THE OGX360 BRIDGE XBOX-SIDE VALIDATION
+### 2. OGX360 BRIDGE IS SHIPPED; USE TRANSITION-BASED STARTUP
 
-The OGX360 bridge is now byte-exact through slot 2's XID HID emit
-(25/25 bench-validate.py PASS, see
-`scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md`).
-What remains: prove that slot 2's HID stream actually drives the
-Xbox's controller state.
+The OGX360 bridge is byte-exact through slot 2's XID HID emit and
+Xbox-side `controller-readback` now reports live bridge input:
+`button.a=1`, `button.dpad_right=1`, `axis.leftx=25000`.
 
-After power-cycle, run one of the three diagnostics from
-`scripts/apple-silicon/ogx360-bridge/README.md` "Next session — close
-the Xbox-side validation gap" — **the real-controller bisection is
-recommended first** because it definitively distinguishes a
-slot-2-to-Xbox issue from a XBE/SDL bug in a single test:
-
-1. Plug a real OG Xbox controller into Xbox controller port 1.
-2. Run `python3 scripts/apple-silicon/controller-readback-validate.py`
-   (or chainload `E:\Apps\controller-readback\default.xbe` directly
-   via FTP `SITE EXEC`).
-3. While the XBE polls (~5 s), physically hold A + START on the
-   real controller.
-4. If the report shows `button.a=1 button.start=1`, the XBE/SDL
-   path works → bridge has a slot-2-to-Xbox issue. If it still
-   reports zero, the XBE/SDL itself is broken on this Xbox and we
-   need a different validation harness.
-
-Once Xbox-side validation passes, finish the previously-planned
-follow-ups (move `controller-replay-hardware.py` into
-`scripts/apple-silicon/`, mark Tier 3 SHIPPED in
-`controller-injection-research.md`, append a decision-log entry,
-run the canary input scripts end-to-end through the bridge).
+Important caveat: do not validate or launch a route by holding one
+constant state before chainload. Ryzee119's XID code suppresses
+duplicate interrupt reports, so the Xbox can see a valid controller
+with stale neutral input if no report changes after the XBE starts.
+Use `validation/bridge-readback-test.py`'s pattern: start neutral,
+chainload, toggle target/neutral to force fresh interrupt reports,
+then hold the target state.
 
 ### 3. PGR2 PHYSICAL-DEVICE INPUT PROOF (still open from 2026-05-08)
 
@@ -92,16 +76,17 @@ OGX360 bridge bring-up summary:
   `scripts/apple-silicon/ogx360-bridge/validation/flash-slot2.sh` ran
   avrdude immediately when the bootloader CDC appeared. 26060 bytes
   flashed and verified.
-- BENCH VALIDATION: `validation/bench-validate.py` 25/25 PASS through
+- BENCH VALIDATION: `validation/bench-validate.py` expanded PASS through
   slot 2's XID HID emit (every wButtons bit, every analog button,
   both triggers, every stick at extremes, combo, rapid 100 Hz
   transitions, real CSV replay, 30 s randomized soak — all byte-
   exact with zero transport errors).
-- XBOX-SIDE: `controller-readback` XBE detects slot 2 with correct
-  vendor/product/SDL handle but reports zero input despite bridge
-  sender holding known values. Cause unknown — could be XBE/SDL
-  issue, hot-plug enumeration issue, or slot-2-to-Xbox cable issue.
-  See priority #2 above for the bisection plan.
+- XBOX-SIDE: `validation/bridge-readback-test.py` PASS. Constant-held
+  pre-chainload input produced a false zero-input result because the
+  Ryzee119 XID layer suppresses duplicate interrupt reports. The
+  fixed test starts neutral, chainloads `controller-readback`,
+  toggles target/neutral for fresh reports, then holds target; the
+  XBE reports `button.a=1`, `button.dpad_right=1`, `axis.leftx=25000`.
 - ALSO: MS2109 USB capture stick has been showing solid black during
   this session despite the Xbox rendering correctly (verified by
   oracle agent's own `screenshot` RPC of the Xbox framebuffer).

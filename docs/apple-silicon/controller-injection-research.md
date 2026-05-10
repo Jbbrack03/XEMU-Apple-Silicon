@@ -1,8 +1,9 @@
 # Controller Injection — Feasibility & Design
 
-Last updated: 2026-05-09 (Tier 3 OGX360 bridge bring-up:
-**Mac-side byte-exact validated**, slot 2 reflashed for byte-shift
-bug, Xbox-side input readback unresolved). Previous header retained
+Last updated: 2026-05-10 (Tier 3 OGX360 bridge shipped end-to-end:
+Mac-side byte-exact validated, slot 2 reflashed for byte-shift bug,
+Xbox-side input readback PASS with post-chainload input transition).
+Previous header retained
 for context: 2026-05-08 retail strategy pivot adopted per-title XBE
 patching for the current 5-6 game oracle scope; the v0.3 agent
 buffer ABI matches xemu's `ControllerState` byte-for-byte.
@@ -31,7 +32,7 @@ risk vs reward, and records the design decisions for each.
 | 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | SHIPPED 2026-05-07. Production-validated by `controller-roundtrip`. |
 | 2A   | Fixed retail canary set | Per-title XBE patches that synthesize input and return to dashboard | ADOPTED 2026-05-08. Active production path. |
 | 2B   | Generic retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED; live export-slot implementation crashed 2026-05-08. Not production. |
-| 3    | Generic / fallback | Hardware controller emulator (Mac → OGX360 → Xbox controller port) | **Mac-side byte-exact PROVEN 2026-05-09**, Xbox-side input readback unresolved. Slot 1 (new USB-C Pro Micro) flashed with our custom master firmware in-place via 1200-baud touch. Slot 2 reflashed with stock Ryzee119 firmware after diagnosing a byte-shift bug in its pre-existing build. `validation/bench-validate.py` 25/25 PASS through every Duke field. **OPEN:** controller-readback XBE detects slot 2 (correct VID/PID, SDL handle) but reports zero input despite bridge sender holding known values. See `scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md` and the project README's "Next session" section. |
+| 3    | Generic / fallback | Hardware controller emulator (Mac → OGX360 → Xbox controller port) | **SHIPPED 2026-05-10.** Slot 1 (new USB-C Pro Micro) runs custom master firmware; slot 2 runs stock Ryzee119 firmware after reflashing a byte-shifted pre-existing build. Expanded `validation/bench-validate.py` passes through every Duke field, Crimson smoke CSV replay, and randomized soak. Xbox-side `validation/bridge-readback-test.py` passes via the retail controller port: `button.a=1`, `button.dpad_right=1`, `axis.leftx=25000`. Caveat: force a post-chainload input transition; constant-held pre-chainload input can falsely read zero because duplicate XID reports are suppressed. |
 
 Tiers 1, 2A, and 2B are software paths. Tier 2A does not require a live
 agent after `runxbe`; each patched title owns its route playback and
@@ -315,12 +316,12 @@ controller backend effort.
 
 ---
 
-## Tier 3 — Hardware controller emulator (STAGED 2026-05-08)
+## Tier 3 — Hardware controller emulator (SHIPPED 2026-05-10)
 
 **Coverage:** any Xbox, any title, any kernel.
 **Risk:** none on the Xbox side; the hardware just plugs in.
-**Engineering:** complete in-tree (firmware + Mac-side replay tool +
-docs) — pending hardware bring-up only.
+**Engineering:** complete in-tree and validated end-to-end (firmware +
+Mac-side replay tool + docs + bench/Xbox readback validation).
 
 The Tier 3 path is now an OGX360-based bridge rather than a Teensy
 build, because the user already had an OGX360 from a previous
@@ -375,7 +376,7 @@ Mac Studio                            OGX360 PCB
   both engines. To switch from agent-RPC to hardware-bridge for any
   given route, the user just runs the alternate script.
 
-**In-tree deliverables (2026-05-08 evening):**
+**In-tree deliverables and validation status:**
 
 - `scripts/apple-silicon/ogx360-bridge/firmware/master/master.ino` —
   custom slot 1 firmware. Compiles against `arduino:avr:leonardo` to
@@ -388,28 +389,35 @@ Mac Studio                            OGX360 PCB
 - `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md` —
   reverse-engineered byte-level I²C protocol spec.
 - `scripts/apple-silicon/ogx360-bridge/docs/integration-plan.md` —
-  tomorrow's bring-up checklist with pass/fail criteria.
+  completed bring-up checklist / recovery runbook with pass/fail
+  criteria.
 - `scripts/apple-silicon/ogx360-bridge/docs/backup-runbook.md` —
   slot 2 firmware backup procedure (kept for future reference; could
   not run autonomously this session because Caterina bootloader entry
   on slot 2 could not be triggered).
+- `scripts/apple-silicon/ogx360-bridge/validation/bench-validate.py`
+  — expanded byte-exact bench validation. PASS 2026-05-10 against
+  production slot 1 + stock slot 2, including button sweeps, analog
+  ranges, rapid transitions, a Crimson CSV replay, randomized soak,
+  and final neutral.
+- `scripts/apple-silicon/ogx360-bridge/validation/bridge-readback-test.py`
+  — Xbox-side readback validation. PASS 2026-05-10 after switching to
+  the transition-based startup pattern: start neutral, chainload the
+  readback XBE, toggle target/neutral to force a fresh interrupt
+  report, then hold target.
 
-**Status of slot 2 firmware backup:** skipped. The OGX360 onboard
-reset button appears to be a power-cycle (cuts VBUS) rather than wired
-to the chip's RST pin, and manual short of the slot 2 Pro Micro's
-RST/GND pin header pins did not trigger Caterina's stay-in-bootloader
-mode either. Acceptable: the slave firmware is GPL-3.0 open source and
-reproducible from `vendor/OGX360/` (kept out of git via the bridge's
-`.gitignore`) via PlatformIO. The integration plan never reflashes
-slot 2, so this is not a tomorrow's blocker — only a future-work
-consideration if slot 2 is ever bricked.
+**Slot 2 firmware backup/reflash status:** the original backup was
+skipped, but slot 2 was later reflashed successfully with stock
+Ryzee119 firmware after the 2026-05-09 byte-shift bug was isolated.
+Use the bridge README's slot 2 recovery section if this ever needs to
+be repeated.
 
-**Tomorrow's first bring-up step:** pre-flash the new USB-C Pro Micro
-on the bench with `master.ino` (USB-C → Mac directly, factory Caterina
-+ arduino-cli upload), verify it enumerates as USB CDC, then solder
-into slot 1 of the OGX360. End-to-end smoke test target: Xbox responds
-to a single A-button press driven from a `controller-replay-hardware.py`
-run with a 2-line CSV.
+**Important validation note:** do not validate Xbox-side input by
+holding one constant state before chainload. Ryzee119's XID sender
+suppresses duplicate interrupt reports, so an XBE that starts polling
+after the last transition can see a valid controller at neutral. The
+2026-05-10 proof uses a neutral start followed by post-chainload
+target/neutral transitions and then a target hold.
 
 ---
 

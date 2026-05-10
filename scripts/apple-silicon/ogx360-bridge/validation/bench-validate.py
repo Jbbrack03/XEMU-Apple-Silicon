@@ -23,24 +23,32 @@ keep macOS polling (the slave's sendReport only fires on data change, so the
 host must drive interrupt polling for every change to land).
 
 PASS = byte-exact match between every sent state and the next observed HID
-report. Original bring-up session passed 25/25 + 100-toggle stress + 30s soak
-+ 38-event canary CSV replay.
+report. The 2026-05-10 production run passed the expanded suite: field sweeps,
+100 Hz transitions, Crimson CSV replay at 20x, randomized soak, and final
+neutral.
 """
 from __future__ import annotations
-import os, sys, struct, time, threading
+import argparse, os, random, sys, struct, time, threading
+from pathlib import Path
+
+_VENV_PY = Path(__file__).resolve().parents[1] / "mac-side/.venv/bin/python"
+if _VENV_PY.exists() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
 os.environ.setdefault('DYLD_FALLBACK_LIBRARY_PATH', '/opt/homebrew/lib')
 import usb.core, usb.util, serial
 
 
-def open_bridge():
-    ser = serial.Serial('/dev/cu.usbmodem3101', 115200, timeout=0, write_timeout=2.0)
+def open_bridge(device, vid, pid):
+    ser = serial.Serial(device, 115200, timeout=0, write_timeout=2.0)
     time.sleep(0.3)
-    dev = usb.core.find(idVendor=0x045E, idProduct=0x0289)
+    dev = usb.core.find(idVendor=vid, idProduct=pid)
     if dev is None:
         ser.close()
-        raise SystemExit('slot 2 not on Mac (VID 0x045E PID 0x0289). '
+        raise SystemExit(f'slot 2 not on Mac (VID 0x{vid:04X} PID 0x{pid:04X}). '
                          'Move slot 2 USB to the Mac before running this.')
+    try: dev.set_configuration()
+    except Exception: pass
     try: dev.detach_kernel_driver(0)
     except Exception: pass
     usb.util.claim_interface(dev, 0)
@@ -61,27 +69,92 @@ def make_frame(port, **kw):
     return bytes([0xAB, 0xCD]) + body + bytes([cksum & 0xFF])
 
 
+BUTTON_TO_WB = {
+    'dpad_up': 0x01,
+    'dpad_down': 0x02,
+    'dpad_left': 0x04,
+    'dpad_right': 0x08,
+    'start': 0x10,
+    'back': 0x20,
+    'lstick_btn': 0x40,
+    'rstick_btn': 0x80,
+}
+
+BUTTON_TO_ANALOG = {
+    'a': 'A',
+    'b': 'B',
+    'x': 'X',
+    'y': 'Y',
+    'black': 'BLACK',
+    'white': 'WHITE',
+}
+
+AXIS_TO_FIELD = {
+    'lstick_x': 'lx',
+    'lstick_y': 'ly',
+    'rstick_x': 'rx',
+    'rstick_y': 'ry',
+}
+
+
+def pack_payload(**kw):
+    return struct.pack('<BBHBBBBBBBBhhhh', 0, 20, kw.get('wB', 0),
+                       kw.get('A', 0), kw.get('B', 0), kw.get('X', 0),
+                       kw.get('Y', 0), kw.get('BLACK', 0),
+                       kw.get('WHITE', 0), kw.get('L', 0), kw.get('R', 0),
+                       kw.get('lx', 0), kw.get('ly', 0),
+                       kw.get('rx', 0), kw.get('ry', 0))
+
+
+def parse_csv_events(path):
+    events = []
+    with path.open() as f:
+        for line_no, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            for sep in (',', '\t'):
+                line = line.replace(sep, ' ')
+            parts = line.split()
+            if len(parts) != 3:
+                raise ValueError(f'{path}:{line_no}: expected time,control,value')
+            events.append((int(parts[0]), parts[1].lower(), int(parts[2])))
+    events.sort(key=lambda e: e[0])
+    return events
+
+
+def read_control_report(dev):
+    try:
+        return bytes(dev.ctrl_transfer(0xA1, 0x01, 0x0100, 0, 20, timeout=500))
+    except Exception as e:
+        return f'GET_REPORT failed: {e}'
+
+
 def main():
-    ser, dev = open_bridge()
-    latest = {'data': None}
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--device', default='/dev/cu.usbmodem3101',
+                    help='slot 1 CDC serial device')
+    ap.add_argument('--port-index', type=int, default=1,
+                    help='I2C slave address to drive; default 1')
+    ap.add_argument('--slot2-vid', type=lambda x: int(x, 0), default=0x045E)
+    ap.add_argument('--slot2-pid', type=lambda x: int(x, 0), default=0x0289)
+    args = ap.parse_args()
+
+    ser, dev = open_bridge(args.device, args.slot2_vid, args.slot2_pid)
+    latest = {'data': None, 'errors': 0}
     stop = threading.Event()
 
     def reader():
         while not stop.is_set():
             try: latest['data'] = bytes(dev.read(0x81, 64, timeout=50))
-            except usb.core.USBError: pass
+            except usb.core.USBError: latest['errors'] += 1
 
     t = threading.Thread(target=reader, daemon=True); t.start()
     time.sleep(0.5)
 
     def send_and_verify(label, **kw):
-        target = struct.pack('<BBHBBBBBBBBhhhh', 0, 20, kw.get('wB', 0),
-                             kw.get('A', 0), kw.get('B', 0), kw.get('X', 0), kw.get('Y', 0),
-                             kw.get('BLACK', 0), kw.get('WHITE', 0),
-                             kw.get('L', 0), kw.get('R', 0),
-                             kw.get('lx', 0), kw.get('ly', 0),
-                             kw.get('rx', 0), kw.get('ry', 0))
-        frame = make_frame(1, **kw)
+        target = pack_payload(**kw)
+        frame = make_frame(args.port_index, **kw)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 0.25:
             ser.write(frame); ser.flush()
@@ -93,7 +166,22 @@ def main():
             if d is not None and bytes(d) == target:
                 matched = True; break
             time.sleep(0.005)
-        print(f'  {label:35s} -> {"PASS" if matched else "FAIL"}')
+        status = "PASS" if matched else "FAIL"
+        print(f'  {label:35s} -> {status}')
+        if not matched:
+            interrupt = latest['data']
+            control = read_control_report(dev)
+            if isinstance(interrupt, bytes):
+                interrupt_s = interrupt.hex(' ')
+            else:
+                interrupt_s = '(none)'
+            if isinstance(control, bytes):
+                control_s = control.hex(' ')
+            else:
+                control_s = control
+            print(f'      expected : {target.hex(" ")}')
+            print(f'      interrupt: {interrupt_s} (timeouts={latest["errors"]})')
+            print(f'      control  : {control_s}')
         return matched
 
     ok = True
@@ -126,10 +214,67 @@ def main():
 
     print('\n=== 5. Rapid transitions (100 toggles @ 100Hz) ===')
     for i in range(100):
-        ser.write(make_frame(1, wB=0x0001 if (i & 1) else 0x0002))
+        ser.write(make_frame(args.port_index, wB=0x0001 if (i & 1) else 0x0002))
         ser.flush()
         time.sleep(0.010)
     ok &= send_and_verify('post-rapid neutral')
+
+    print('\n=== 6. Real CSV replay (crimson-skies-smoke.csv @ 20x) ===')
+    csv_path = (Path(__file__).resolve().parents[2] /
+                'input-scripts/crimson-skies-smoke.csv')
+    state = {'wB': 0, 'A': 0, 'B': 0, 'X': 0, 'Y': 0,
+             'BLACK': 0, 'WHITE': 0, 'L': 0, 'R': 0,
+             'lx': 0, 'ly': 0, 'rx': 0, 'ry': 0}
+    csv_ok = True
+    events = parse_csv_events(csv_path)
+    base_t = events[0][0]
+    start = time.monotonic()
+    for t_ms, control, value in events:
+        target_time = start + (t_ms - base_t) / 1000.0 / 20.0
+        if target_time > time.monotonic():
+            time.sleep(target_time - time.monotonic())
+        if control in BUTTON_TO_WB:
+            if value:
+                state['wB'] |= BUTTON_TO_WB[control]
+            else:
+                state['wB'] &= ~BUTTON_TO_WB[control]
+        elif control in BUTTON_TO_ANALOG:
+            state[BUTTON_TO_ANALOG[control]] = 0xFF if value else 0
+        elif control == 'ltrigger':
+            state['L'] = max(0, min(255, value >> 7))
+        elif control == 'rtrigger':
+            state['R'] = max(0, min(255, value >> 7))
+        elif control in AXIS_TO_FIELD:
+            state[AXIS_TO_FIELD[control]] = max(-32768, min(32767, value))
+        elif control == 'guide':
+            pass
+        else:
+            raise ValueError(f'{csv_path}: unsupported control {control}')
+        csv_ok &= send_and_verify(f'csv {t_ms}ms {control}={value}', **state)
+    ok &= csv_ok
+
+    print('\n=== 7. Randomized soak (234 states) ===')
+    rng = random.Random(0x0A6A360)
+    soak_ok = True
+    for i in range(234):
+        state = {
+            'wB': rng.randrange(0, 0x100),
+            'A': rng.randrange(0, 0x100),
+            'B': rng.randrange(0, 0x100),
+            'X': rng.randrange(0, 0x100),
+            'Y': rng.randrange(0, 0x100),
+            'BLACK': rng.randrange(0, 0x100),
+            'WHITE': rng.randrange(0, 0x100),
+            'L': rng.randrange(0, 0x100),
+            'R': rng.randrange(0, 0x100),
+            'lx': rng.randrange(-32768, 32768),
+            'ly': rng.randrange(-32768, 32768),
+            'rx': rng.randrange(-32768, 32768),
+            'ry': rng.randrange(-32768, 32768),
+        }
+        soak_ok &= send_and_verify(f'soak #{i:03d}', **state)
+    soak_ok &= send_and_verify('post-soak neutral')
+    ok &= soak_ok
 
     stop.set(); t.join(timeout=1.0)
     ser.close()

@@ -45,20 +45,20 @@ ogx360-bridge/
 ├── docs/
 │   ├── protocol-analysis.md     # reverse-engineered I2C protocol notes
 │   ├── backup-runbook.md        # how to dump slot 2's firmware
-│   └── integration-plan.md      # tomorrow's bring-up checklist
+│   └── integration-plan.md      # completed bring-up checklist / runbook
 └── vendor/
     └── OGX360/                  # cloned reference (GPL-3.0-or-later)
 ```
 
 ## Status
 
-**Mac-side bridge SHIPPED 2026-05-09.** Byte-exact validation passes
-end-to-end from Mac CSV through slot 2's XID HID emit. Xbox-side
-final validation (slot 2 → Xbox controller port → SDL) is still
-**unresolved**; the readback XBE detects slot 2 as a controller
-(VID 0x045E PID 0x0289) but reports zero input. See
-`docs/2026-05-09-bringup-results.md` for the full session log
-(symptoms, diagnostics, and the next-session plan).
+**Bridge SHIPPED 2026-05-10.** Byte-exact validation passes
+end-to-end from Mac CSV through slot 2's XID HID emit, and Xbox-side
+`controller-readback` now sees the bridge as live controller input
+through the retail Xbox controller port. The key Xbox-side fix was
+forcing a post-chainload input transition; a constant-held state can
+falsely read as zero because the OGX360 slave only emits interrupt
+reports when the XID report changes.
 
 - [x] Arduino toolchain installed (`arduino-cli`, `avrdude`)
 - [x] Working directory laid out
@@ -83,7 +83,7 @@ final validation (slot 2 → Xbox controller port → SDL) is still
       via RST→GND header short → Caterina bootloader → avrdude.
       `validation/flash-slot2.sh` is the watcher script that
       caught the bootloader CDC and ran avrdude.
-- [x] **2026-05-09:** Bench validation byte-exact 25/25 PASS through
+- [x] **2026-05-10:** Bench validation byte-exact PASS through
       slot 2's XID HID emit (every wButtons bit, every analog
       button, both triggers, every stick at extremes, combo, rapid
       100Hz transitions, real CSV replay, 30s soak — see
@@ -91,11 +91,12 @@ final validation (slot 2 → Xbox controller port → SDL) is still
 - [skip] Slot 2 firmware backup — original (broken) firmware not
       preserved; slot 2 is now running stock Ryzee119 which is
       reproducible from `vendor/OGX360/`.
-- [ ] **OPEN:** Xbox-side input validation. `controller-readback`
-      XBE sees slot 2 (correct VID/PID) but reports zero input
-      while bridge sender holds known values. See bring-up results
-      doc for diagnostic options (real-controller bisection, listen
-      for UnleashX nav clicks, reboot-then-retry).
+- [x] **2026-05-10:** Xbox-side input validation PASS.
+      `validation/bridge-readback-test.py` starts neutral, chainloads
+      `controller-readback`, toggles target/neutral for fresh XID
+      interrupt reports, then holds target. The XBE reports
+      `button.a=1`, `button.dpad_right=1`, and `axis.leftx=25000`
+      for slot 2 (`VID 0x045E PID 0x0289`).
 
 ## Quick reference — wire format
 
@@ -145,7 +146,7 @@ Working autonomously through the user-approved plan, as of 2026-05-08:
 10. Wrote `docs/backup-runbook.md` for the slot 2 firmware backup
     (cannot run autonomously — requires the user to physically tap
     slot 2's reset button to enter the bootloader).
-11. Wrote `docs/integration-plan.md` — tomorrow's bring-up checklist.
+11. Wrote `docs/integration-plan.md` — completed bring-up checklist.
 
 ## What needs the user
 
@@ -188,52 +189,45 @@ pio run -e OGX360 --target upload
 This uploads via the same Caterina-bootloader path we couldn't trigger
 in our backup attempts — but it's only needed if the slave firmware
 itself is broken, in which case we'd be debugging the bootloader entry
-anyway. Tomorrow's integration never reflashes slot 2, so this is a
-future-work consideration rather than a tomorrow's-blocker.
+anyway. Normal route integration does not reflash slot 2, so this is
+a future-work recovery consideration rather than a production blocker.
 
-## Next session — close the Xbox-side validation gap
+## Xbox-side validation
 
-The Mac-side bridge is byte-exact through slot 2's XID HID emit.
-What's left: prove the Xbox actually receives and acts on bridge
-input. The 2026-05-09 readback test (chainload `controller-readback`
-XBE → SDL detects slot 2 with correct VID/PID → all axes/buttons
-read 0) failed inputs but succeeded enumeration. Three diagnostic
-paths, in order of preference:
+The Xbox-side proof is:
 
-1. **Real-controller bisection** (fastest definitive answer). Power-
-   cycle the Xbox, plug a real OG controller into Xbox port 1
-   instead of the OGX360 adapter, run `controller-readback` while
-   physically holding A+START. If the XBE reports the buttons,
-   the issue is bridge-specific to the slot-2-to-Xbox path. If it
-   reports zero, the XBE/SDL itself is broken on this Xbox and we
-   need a different validation harness (e.g. raw nxdk USB read
-   instead of `SDL_GameController`).
-2. **UnleashX click audit.** With slot 2 reconnected to the Xbox
-   adapter, ask the user to listen on the Xbox AV cable for
-   UnleashX cursor-move click sounds while
-   `mac-side/controller-replay-hardware.py` sends sustained
-   dpad_down. Audible click = bridge end-to-end proven without any
-   visual or programmatic capture. Cheap, no code needed.
-3. **Reboot-then-retry.** The 2026-05-09 readback ran on a
-   hot-plugged slot 2 (slot 2 was disconnected and re-connected
-   while UnleashX was running). UnleashX may not enumerate
-   hot-plugged controllers correctly. Fresh Xbox boot with slot 2
-   already attached might enumerate cleanly. Quickest retry.
+```sh
+scripts/apple-silicon/ogx360-bridge/validation/bridge-readback-test.py \
+  --host 192.168.0.200 \
+  --device /dev/cu.usbmodem3101
+```
 
-Once Xbox-side validation passes, finish the previously-planned
-follow-ups:
+Expected final report includes:
 
-- Move `mac-side/controller-replay-hardware.py` into
-  `xemu-fork/scripts/apple-silicon/` so it sits alongside its
-  software-side sibling `controller-replay.py`.
-- Update `xemu-fork/docs/apple-silicon/controller-injection-research.md`
-  to flip Tier 3 from "Mac-side proven" to "shipped".
-- Append a decision-log entry recording the validation date and
-  any jitter / reliability numbers from a full route replay.
+```text
+has_controller=1
+vendor=0x045e
+product=0x0289
+axis.leftx=25000
+button.a=1
+button.dpad_right=1
+```
+
+Do not validate Xbox-side input by holding one constant state before
+chainload. That can produce a false zero-input report because the
+Ryzee119 XID code suppresses duplicate interrupt reports. The
+readback test intentionally toggles target/neutral after chainload,
+then holds the target state so SDL sees a fresh report.
+
+Remaining production follow-ups are integration exercises, not bridge
+bring-up blockers:
+
 - Run the canary input scripts (PGR2 / Crimson / Rainbow / SC2 /
-  Halo / Burnout 3 / OutRun 2) end-to-end through the bridge to
-  confirm production-grade readiness as the Tier-3 fallback for
-  the retail-game oracle pipeline.
+  Halo / Burnout 3 / OutRun 2) end-to-end through the bridge and log
+  route-level jitter / reliability for the retail-game oracle pipeline.
+- Optionally promote `mac-side/controller-replay-hardware.py` to
+  `scripts/apple-silicon/controller-replay-hardware.py` once the
+  retail pipeline starts invoking the hardware backend directly.
 
 ## Recovery — slot 2 reflash procedure (used 2026-05-09)
 
@@ -255,13 +249,20 @@ CDC to appear and runs avrdude immediately when it does.
 
 ## Diagnostic + validation scripts
 
-- `validation/bench-validate.py` — exhaustive byte-exact bench
-  validation (slot 2 must be on the Mac via micro-USB).
-  25/25 PASS on 2026-05-09 against the freshly reflashed slot 2.
-- `validation/bridge-readback-test.py` — sends a known controller
-  state via the bridge while chainloading the
-  `controller-readback` XBE on the Xbox, then FTPs the report
-  back. Output diagnoses Xbox-side reception.
+- `validation/bench-validate.py` — expanded byte-exact bench
+  validation (slot 2 must be on the Mac via micro-USB). PASS on
+  2026-05-10 against production slot 1 + stock slot 2: `wButtons`
+  sweep, analog buttons/triggers, stick extremes, combo, 100 Hz rapid
+  transition, `crimson-skies-smoke.csv` at 20x, 234 randomized soak
+  states, and final neutral.
+- `validation/bridge-readback-test.py` — Xbox-side validation driver.
+  Starts neutral, chainloads `controller-readback`, toggles
+  target/neutral after chainload to force fresh interrupt reports,
+  holds target, then FTPs the report back. PASS on 2026-05-10 with
+  `has_controller=1`, `vendor=0x045e`, `product=0x0289`,
+  `axis.leftx=25000`, `button.a=1`, and `button.dpad_right=1`.
+- `validation/flash-slot1.sh` — slot 1 compile/upload helper for
+  production or diagnostic master firmware.
 - `validation/flash-slot2.sh` — bootloader watcher + avrdude.
 - `diag/master_echo/master_echo.ino` — diagnostic master firmware
   variant. Echoes every I²C transmit's exact bytes back over CDC

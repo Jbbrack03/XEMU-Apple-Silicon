@@ -1,8 +1,11 @@
-# Integration Plan — Tomorrow's Checklist
+# Integration Plan — Bring-up Checklist (completed 2026-05-10)
 
-When the new USB-C Pro Micro arrives, this is the sequence to bring up
-the bridge end-to-end. Each step has a clear pass/fail criterion so
-problems get caught early.
+This was the original sequence for bringing up the USB-C Pro Micro
+replacement and OGX360 bridge end-to-end. Keep it as a recovery/runbook
+reference: the bridge is now shipped as of 2026-05-10, with slot 1 on
+production master firmware, slot 2 on stock Ryzee119 firmware, Mac-side
+byte-exact validation passing, and Xbox-side `controller-readback`
+passing via the transition-based validation pattern.
 
 ## Pre-flight checks (do these before installing anything)
 
@@ -29,10 +32,12 @@ bench test but not recommended for shipping.
 ### 2. Slot 2 firmware backup — SKIPPED
 
 We attempted this and could not trigger Caterina bootloader entry on
-slot 2 (see README.md "Backup status" section for the attempts and
-their failure modes). Accepted skip: the slave firmware is reproducible
-from source at `vendor/OGX360/` (GPL-3.0), and tomorrow's plan never
-reflashes slot 2.
+slot 2 during the original backup attempt (see README.md "Backup
+status" section for the attempts and their failure modes). Accepted
+skip: the slave firmware is reproducible from source at `vendor/OGX360/`
+(GPL-3.0). In the later 2026-05-09 bring-up, slot 2 was intentionally
+reflashed with stock Ryzee119 firmware after a byte-shifted pre-existing
+firmware build was isolated.
 
 If you want to retry the backup later (e.g. after consulting Pro Micro
 schematics specific to your board's revision), `backup-runbook.md`
@@ -188,18 +193,18 @@ path. The same path drives any input CSV from
   Caterina bootloader. Re-flash the bootloader from the Arduino IDE
   via ICSP — out of scope for this runbook.
 
-## Once it works
+## Current status after bring-up
 
-- Capture a short video / screenshot of the Xbox responding to Mac
-  input as proof of working bridge.
-- Add an entry to the project decision log:
-  `docs/apple-silicon/decision-log.md` "2026-05-XX: Tier 3 hardware
-  bridge — OGX360-based Mac→Xbox controller injection working."
-- Move the Mac-side script into `scripts/apple-silicon/`:
-  `scripts/apple-silicon/controller-replay-hardware.py` (copy or move
-  from the bridge work directory). Update
-  `controller-injection-research.md` Tier 3 status from "documented
-  fallback" to "implemented".
+The bridge is shipped end-to-end as of 2026-05-10. Slot 1 production
+firmware is restored, slot 2 is on stock Ryzee119 firmware, Mac-side
+byte-exact bench validation passes, and Xbox-side `controller-readback`
+reports the forced target state (`A`, `dpad_right`, `leftx=25000`).
+
+The remaining work is route-level oracle integration, not bridge
+bring-up:
+
 - Test against PGR2 / Crimson / Rainbow / SC2 / Halo input scripts and
-  measure jitter and reliability over a full route to confirm the
-  bridge is production-grade for the oracle pipeline.
+  measure jitter and reliability over a full route.
+- Optionally move the Mac-side script into
+  `scripts/apple-silicon/controller-replay-hardware.py` once the
+  retail oracle pipeline invokes the hardware backend directly.

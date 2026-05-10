@@ -52,6 +52,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+_VENV_PY = Path(__file__).resolve().parent / ".venv/bin/python"
+if _VENV_PY.exists() and Path(sys.executable) != _VENV_PY:
+    os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
+
 try:
     import serial  # pyserial
 except ImportError:

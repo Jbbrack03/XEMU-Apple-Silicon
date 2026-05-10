@@ -1,12 +1,50 @@
 # Decision Log
 
-## 2026-05-09: OGX360 bridge bring-up — Mac-side proven, slot-2 reflashed for byte-shift bug, Xbox-side input readback unresolved
+## 2026-05-10: OGX360 bridge shipped end-to-end — Xbox-side input readback PASS
+
+**Decision.** Tier 3 OGX360 hardware controller bridge is now
+working end-to-end and can be used as the generic retail-game oracle
+input backend. The previous Xbox-side zero-input readback was a
+validation-method false negative: the sender held a constant report
+before chainload, while Ryzee119's XID implementation suppresses
+duplicate interrupt reports. If the XBE starts polling after the
+last report transition, SDL can see a valid controller with stale
+neutral input.
+
+**Evidence.**
+
+- Slot 1 I2C diagnostic firmware: slot 2 ACKed 100% at I2C address 1
+  (`boot_ping=0,2,2`, `tx_status=0,2,2`).
+- Slot 1 echo diagnostic: Mac serial frame parsed correctly and
+  exact I2C bytes transmitted with ACK, e.g.
+  `F10014AA55CC33445566778899D2042EFBA861589E`.
+- Slot 2 Mac-side XID readback matched that payload byte-for-byte via
+  GET_REPORT and interrupt reports.
+- Production `master.ino` restored; expanded
+  `validation/bench-validate.py` PASS: wButtons sweep, analog
+  buttons/triggers, stick extremes, combo, 100 Hz rapid transition,
+  `crimson-skies-smoke.csv` at 20x, 234 randomized soak states, and
+  final neutral.
+- Xbox-side `validation/bridge-readback-test.py` now starts neutral,
+  chainloads `controller-readback`, toggles target/neutral after
+  chainload to force fresh interrupt reports, then holds target. The
+  XBE reports `has_controller=1`, `vendor=0x045e`, `product=0x0289`,
+  `axis.leftx=25000`, `button.a=1`, and `button.dpad_right=1`.
+
+**Follow-up.** Use the transition-based validation pattern whenever a
+new XBE or retail route starts after the bridge has already been
+sending. Do not treat constant-held pre-chainload input as a reliable
+Xbox-side proof.
+
+## 2026-05-09: OGX360 bridge bring-up — Mac-side proven, slot-2 reflashed for byte-shift bug, Xbox-side readback false negative later resolved
 
 User soldered the new USB-C Pro Micro (slot 1) into the OGX360 PCB
 overnight. This session brought the bridge from "compile-tested
 staging" to **byte-exact validated through slot 2's XID HID emit** on
-the Mac side, and to **partially validated** on the Xbox side
-(controller enumeration succeeds; live input readback returns zero).
+the Mac side. Xbox-side enumeration succeeded, but the original
+constant-held readback method returned zero input; the 2026-05-10
+follow-up above resolves that as a validation-method false negative
+and records the end-to-end PASS.
 
 **Slot 1 in-place flash worked** — `firmware/master/master.ino` was
 flashed via 1200-baud touch + arduino-cli upload despite slot 1 being
@@ -79,12 +117,12 @@ allowlist range.
 Files changed / added this session:
 
 - `scripts/apple-silicon/ogx360-bridge/README.md` — status section,
-  recovery procedure, next-session validation paths, diagnostic
+  recovery procedure, Xbox-side validation pattern, diagnostic
   scripts index.
 - `scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md`
   — full session log: in-place slot-1 flash, byte-shift bug
-  diagnosis, slot-2 reflash, 25/25 bench-validate.py PASS,
-  Xbox-side controller-readback failure analysis.
+  diagnosis, slot-2 reflash, original bench-validate.py PASS,
+  Xbox-side false-negative analysis, and 2026-05-10 follow-up PASS.
 - `scripts/apple-silicon/ogx360-bridge/diag/master_echo/master_echo.ino`
   — diagnostic master variant: echoes every I²C transmit's exact 21
   wire bytes back over CDC. Used to confirm master.ino is sending
@@ -107,10 +145,9 @@ Files changed / added this session:
 remains gitignored per existing policy. Same for the platformio
 install in `mac-side/.venv/`.
 
-Tier 3 status in `controller-injection-research.md` flips from
-"staged" to **"Mac-side byte-exact proven; Xbox-side input readback
-unresolved"**. Full SHIPPED designation pending the next-session
-Xbox-side bisection.
+Tier 3 status in `controller-injection-research.md` was Mac-side
+byte-exact proven at the end of this session, then flipped to
+**SHIPPED** by the 2026-05-10 transition-based Xbox-side proof.
 
 ## 2026-05-08: Retail oracle pivots to per-title XBE patching
 

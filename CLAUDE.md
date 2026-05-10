@@ -166,7 +166,7 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   and audio artifacts. Do not use agent `controller.*` RPC replay as the
   retail input backend: the agent process dies on `runxbe`.
 - **`scripts/apple-silicon/ogx360-bridge/`** (Tier 3 hardware bridge,
-  Mac-side BYTE-EXACT PROVEN 2026-05-09) — custom slot 1 master
+  SHIPPED end-to-end 2026-05-10) — custom slot 1 master
   firmware + Mac-side replay tool that turns a Ryzee119 OGX360 plus
   one new USB-C Pro Micro into a Mac-driven OG Xbox controller
   emulator. The bridge presents to the Xbox as an OG Xbox Controller
@@ -178,14 +178,16 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   slot 2 reflashed with stock Ryzee119 firmware after the existing
   slave fw was diagnosed with a byte-shift bug that hard-locked
   `wButtons` at `0x0014`; `validation/bench-validate.py` now passes
-  25/25 byte-exact (every wButtons bit, all analog buttons, both
-  triggers, all 4 sticks at extremes, combo, rapid 100 Hz, real CSV
-  replay, 30 s soak — zero transport errors). **OPEN:** Xbox-side
-  input readback — `controller-readback` XBE detects slot 2
-  (correct VID/PID) but reports zero input despite bridge holding
-  known values during the poll window. Next-session diagnostic
-  paths in `scripts/apple-silicon/ogx360-bridge/README.md`. See
-  also `.../docs/2026-05-09-bringup-results.md` for the full
+  expanded byte-exact coverage (every wButtons bit, all analog buttons,
+  both triggers, all 4 sticks at extremes, combo, rapid 100 Hz, real
+  Crimson smoke CSV replay, randomized soak — zero transport errors).
+  **2026-05-10 Xbox-side PASS:** `validation/bridge-readback-test.py`
+  starts neutral, chainloads `controller-readback`, toggles
+  target/neutral to force fresh XID interrupt reports, then holds
+  target; the XBE reports `button.a=1`, `button.dpad_right=1`, and
+  `axis.leftx=25000`. Do not validate with constant-held
+  pre-chainload input because duplicate XID reports are suppressed.
+  See `.../docs/2026-05-09-bringup-results.md` for the full
   session log + byte-shift diagnosis.
 - `scripts/apple-silicon/xbe-inspect.py` — read-only XBE metadata/string
   scanner used to evaluate whether a retail title has stable XInput/XID patch

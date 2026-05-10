@@ -6,8 +6,11 @@ The new USB-C Pro Micro arrived 2026-05-09 and was soldered into the
 OGX360 slot 1 footprint by the user. Working autonomously from there,
 this session brought the bridge from "staged but never run" to
 **Mac-side byte-exact validated** (25/25 PASS through slot 2's XID HID
-emit) and partially validated Xbox-side (controller enumerates with
-correct VID/PID, but readback XBE reports zero input).
+emit) and partially validated Xbox-side during the original session
+(controller enumerated with correct VID/PID, but readback XBE reported
+zero input). The 2026-05-10 follow-up at the end of this document
+resolves that zero-input result as a validation-method false negative
+and records an Xbox-side PASS.
 
 The session also discovered and corrected a slot 2 firmware bug: the
 slave firmware that shipped on this OGX360 had a non-standard byte
@@ -15,10 +18,10 @@ mapping that hard-locked `wButtons` at `0x0014` (= bLength echoed at
 the wrong offset). Slot 2 was reflashed with stock Ryzee119 firmware
 and now passes byte-exact bench validation.
 
-Xbox-side end-to-end validation (Mac CSV → bridge → Xbox dashboard
-visible response) is **unresolved**. Causes are documented below;
-next-session diagnostic options are in the project root README's
-"Next session" section.
+Xbox-side end-to-end validation (Mac CSV → bridge → Xbox controller
+port → nxdk SDL readback) is **resolved as PASS in the 2026-05-10
+follow-up**. The original unresolved notes are preserved below as
+historical context.
 
 ## Slot 1: in-place flash via 1200-baud touch
 
@@ -217,24 +220,11 @@ After the crash the Xbox stopped responding to ICMP / FTP / TCP 9001.
 A hard power-cycle is required to recover. **Do not repeat this
 test until the agent's allowlist + error handling is hardened.**
 
-## Open question and next-session validation path
+## Resolved follow-up
 
-The Mac-side bridge is conclusively proven. The Xbox-side question
-is: **does slot 2's HID input actually drive the Xbox's controller
-state, or is something between slot 2 and SDL silently dropping
-the data?**
-
-Three viable next-session approaches are documented in the project
-root `README.md` "Next session — close the Xbox-side validation gap"
-section:
-
-1. Real-controller bisection (definitive but requires the user to
-   physically hold buttons during the 5 s XBE poll window).
-2. UnleashX click-sound audit (cheap, no code needed; ear test).
-3. Reboot-then-retry with slot 2 attached from cold boot.
-
-Recommend running #1 first because it definitively isolates the
-problem (XBE/SDL bug vs. bridge-to-Xbox path) in a single test.
+The Xbox-side question above is resolved by the 2026-05-10 follow-up
+below. The bridge drives the Xbox controller state when validation
+forces a fresh input transition after chainload.
 
 ## Files added this session
 
@@ -253,3 +243,46 @@ ogx360-bridge/
 The vendor/OGX360 clone (with its submodules) is gitignored per
 existing policy. The mac-side/.venv install of platformio is also
 gitignored.
+
+## 2026-05-10 follow-up: Xbox-side PASS
+
+The 2026-05-09 zero-input Xbox-side result was a false negative in the
+validation method, not a bridge failure. The sender held one constant
+state before and during chainload; Ryzee119's `XID_::sendReport`
+sends an interrupt report only when the report bytes differ from the
+slave's local cached copy, so SDL could open after chainload without
+receiving a fresh input transition.
+
+Follow-up diagnostics:
+
+- Slot 1 I2C diag firmware reported slot 2 ACKing 100% at I2C address
+  1 (`boot_ping=0,2,2`, `tx_status=0,2,2`).
+- Slot 1 echo firmware proved exact Mac frame parsing and exact I2C
+  transmit bytes, e.g. `F10014AA55CC33445566778899D2042EFBA861589E`.
+- Slot 2 GET_REPORT and interrupt reads matched that payload byte for
+  byte while attached to the Mac.
+- Production `master.ino` was restored and
+  `validation/bench-validate.py` passed the expanded suite:
+  wButtons, analog buttons/triggers, stick extremes, combo, 100 Hz
+  rapid transitions, `crimson-skies-smoke.csv` at 20x, 234 randomized
+  soak states, and final neutral.
+- With slot 2 moved to the Xbox adapter, the patched
+  `validation/bridge-readback-test.py` starts neutral, chainloads
+  `controller-readback`, toggles target/neutral for fresh interrupt
+  reports, then holds target. The XBE reported:
+
+```text
+status=ok
+frames=300
+has_controller=1
+player_index=1
+vendor=0x045e
+product=0x0289
+axis.leftx=25000
+button.a=1
+button.dpad_right=1
+```
+
+Verdict: Tier 3 OGX360 bridge is working end-to-end from Mac serial
+frames through the OGX360 I2C bus, slot 2 XID HID, the retail Xbox
+controller port, and nxdk SDL controller readback.
