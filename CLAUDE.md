@@ -166,22 +166,27 @@ Real-Xbox oracle artifacts in-tree (added 2026-05-06):
   and audio artifacts. Do not use agent `controller.*` RPC replay as the
   retail input backend: the agent process dies on `runxbe`.
 - **`scripts/apple-silicon/ogx360-bridge/`** (Tier 3 hardware bridge,
-  staged 2026-05-08) — custom slot 1 master firmware + Mac-side
-  replay tool that turns a Ryzee119 OGX360 plus one new USB-C Pro
-  Micro into a Mac-driven OG Xbox controller emulator. The bridge
-  presents to the Xbox as an OG Xbox Controller (XID HID) sourced
-  from the unmodified Ryzee119 slave firmware on slot 2, with input
-  frames coming from the Mac over USB CDC into our custom slot 1
-  firmware which forwards via I²C using the existing OGX360
-  master/slave protocol. Reverse-engineered protocol spec at
-  `scripts/apple-silicon/ogx360-bridge/docs/protocol-analysis.md`;
-  integration plan at `.../docs/integration-plan.md`.
-  `firmware/master/master.ino` compile-tests at 23% flash / 18% RAM;
-  `mac-side/controller-replay-hardware.py` uses the same xemu CSV
-  vocabulary (`ui/xemu-input.c:101-127`) as the existing
-  `controller-replay.py` so the same input-script library drives both
-  engines. Pending hardware bring-up after the new USB-C Pro Micro
-  arrives 2026-05-09.
+  Mac-side BYTE-EXACT PROVEN 2026-05-09) — custom slot 1 master
+  firmware + Mac-side replay tool that turns a Ryzee119 OGX360 plus
+  one new USB-C Pro Micro into a Mac-driven OG Xbox controller
+  emulator. The bridge presents to the Xbox as an OG Xbox Controller
+  (XID HID) sourced from the Ryzee119 slave firmware on slot 2, with
+  input frames coming from the Mac over USB CDC into our custom
+  slot 1 firmware which forwards via I²C using the OGX360 master/
+  slave protocol. **2026-05-09 bring-up:** slot 1 flashed in-place
+  via 1200-baud touch (no need for the bench-flash workaround);
+  slot 2 reflashed with stock Ryzee119 firmware after the existing
+  slave fw was diagnosed with a byte-shift bug that hard-locked
+  `wButtons` at `0x0014`; `validation/bench-validate.py` now passes
+  25/25 byte-exact (every wButtons bit, all analog buttons, both
+  triggers, all 4 sticks at extremes, combo, rapid 100 Hz, real CSV
+  replay, 30 s soak — zero transport errors). **OPEN:** Xbox-side
+  input readback — `controller-readback` XBE detects slot 2
+  (correct VID/PID) but reports zero input despite bridge holding
+  known values during the poll window. Next-session diagnostic
+  paths in `scripts/apple-silicon/ogx360-bridge/README.md`. See
+  also `.../docs/2026-05-09-bringup-results.md` for the full
+  session log + byte-shift diagnosis.
 - `scripts/apple-silicon/xbe-inspect.py` — read-only XBE metadata/string
   scanner used to evaluate whether a retail title has stable XInput/XID patch
   hints. Local scans of Halo, Soul Calibur 2, and OutRun 2 support the current

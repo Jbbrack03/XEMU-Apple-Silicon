@@ -1,8 +1,121 @@
 # Handoff
 
-Last updated: 2026-05-08 (OGX360 hardware bridge staged + retail
-XInput patcher added) —
-**NEXT SESSION HAS TWO PARALLEL TRACKS:**
+Last updated: 2026-05-09 (OGX360 hardware bridge bring-up: Mac-side
+byte-exact validated, slot 2 reflashed for byte-shift bug fix, Xbox-
+side input readback unresolved). Previous header retained below for
+the still-open Track A (PGR2 physical-device input proof).
+
+## NEXT SESSION — three priorities
+
+### 1. POWER-CYCLE THE XBOX
+
+The 2026-05-09 OGX360 session ended with the Xbox hung after an
+oracle-agent `mem.read` stepped outside the agent's RAM allowlist.
+The agent crashed ungracefully instead of returning a 500 error,
+and the Xbox stopped responding to ICMP / FTP / TCP 9001. A hard
+power-cycle (eject button hold or unplug/replug power) is required
+before any other Xbox-side work.
+
+### 2. CLOSE THE OGX360 BRIDGE XBOX-SIDE VALIDATION
+
+The OGX360 bridge is now byte-exact through slot 2's XID HID emit
+(25/25 bench-validate.py PASS, see
+`scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md`).
+What remains: prove that slot 2's HID stream actually drives the
+Xbox's controller state.
+
+After power-cycle, run one of the three diagnostics from
+`scripts/apple-silicon/ogx360-bridge/README.md` "Next session — close
+the Xbox-side validation gap" — **the real-controller bisection is
+recommended first** because it definitively distinguishes a
+slot-2-to-Xbox issue from a XBE/SDL bug in a single test:
+
+1. Plug a real OG Xbox controller into Xbox controller port 1.
+2. Run `python3 scripts/apple-silicon/controller-readback-validate.py`
+   (or chainload `E:\Apps\controller-readback\default.xbe` directly
+   via FTP `SITE EXEC`).
+3. While the XBE polls (~5 s), physically hold A + START on the
+   real controller.
+4. If the report shows `button.a=1 button.start=1`, the XBE/SDL
+   path works → bridge has a slot-2-to-Xbox issue. If it still
+   reports zero, the XBE/SDL itself is broken on this Xbox and we
+   need a different validation harness.
+
+Once Xbox-side validation passes, finish the previously-planned
+follow-ups (move `controller-replay-hardware.py` into
+`scripts/apple-silicon/`, mark Tier 3 SHIPPED in
+`controller-injection-research.md`, append a decision-log entry,
+run the canary input scripts end-to-end through the bridge).
+
+### 3. PGR2 PHYSICAL-DEVICE INPUT PROOF (still open from 2026-05-08)
+
+After power-cycle (priority #1):
+
+```sh
+ping -c 2 192.168.0.200
+python3 scripts/apple-silicon/oracle-orchestrator.py --host 192.168.0.200 status
+
+python3 scripts/apple-silicon/retail-title-automation-proof.py \
+  benchmark-runs/retail-title-patches/input-proof-20260508T135353Z/pgr2/default.xbe \
+  --remote-xbe 'E:\Apps\oracle-patches\pgr2-input-proof-physical\default.xbe' \
+  --record-s 45
+```
+
+If that does not return, the next patch should avoid live XInput
+handle faking entirely and instead patch PGR2's already-opened
+gamepad state buffer or a title-specific menu/gameplay input
+consumer.
+
+**Detail of the 2026-05-09 OGX360 work** (move to its own session
+doc; rest of the original handoff body follows below):
+
+OGX360 bridge bring-up summary:
+
+- Slot 1 (new USB-C Pro Micro, soldered into OGX360 by user) was
+  flashed in-place with `firmware/master/master.ino` via 1200-baud
+  touch + arduino-cli upload. Cleanly enumerates as Arduino Leonardo
+  at `/dev/cu.usbmodem3101`.
+- Master ↔ slave I²C confirmed working: 100 % ACK rate at
+  I²C address 1 over 3000+ transactions. Diagnostic at
+  `scripts/apple-silicon/ogx360-bridge/diag/master_i2c_diag/`.
+- BUG DISCOVERED: the slave firmware that shipped on slot 2 had a
+  non-standard byte mapping that hard-locked `wButtons` at `0x0014`
+  (= bLength echoed at the wrong struct offset). The slot-2 firmware
+  shifted master payload[3..18] to struct[4..19], dropped payload[2]
+  entirely, and held struct[2..3] at constant `(0x14, 0x00)`. Result:
+  digital buttons (D-pad, Start, Back, LS/RS clicks) were
+  uncontrollable from any master.
+- FIX: reflashed slot 2 with stock Ryzee119 firmware. Built via
+  PlatformIO (installed in `scripts/apple-silicon/ogx360-bridge/mac-side/.venv/`).
+  User shorted slot 2's RST→GND header pins twice within ~750 ms to
+  enter the Caterina double-tap bootloader window;
+  `scripts/apple-silicon/ogx360-bridge/validation/flash-slot2.sh` ran
+  avrdude immediately when the bootloader CDC appeared. 26060 bytes
+  flashed and verified.
+- BENCH VALIDATION: `validation/bench-validate.py` 25/25 PASS through
+  slot 2's XID HID emit (every wButtons bit, every analog button,
+  both triggers, every stick at extremes, combo, rapid 100 Hz
+  transitions, real CSV replay, 30 s randomized soak — all byte-
+  exact with zero transport errors).
+- XBOX-SIDE: `controller-readback` XBE detects slot 2 with correct
+  vendor/product/SDL handle but reports zero input despite bridge
+  sender holding known values. Cause unknown — could be XBE/SDL
+  issue, hot-plug enumeration issue, or slot-2-to-Xbox cable issue.
+  See priority #2 above for the bisection plan.
+- ALSO: MS2109 USB capture stick has been showing solid black during
+  this session despite the Xbox rendering correctly (verified by
+  oracle agent's own `screenshot` RPC of the Xbox framebuffer).
+  Either the composite cable came loose during the slot-2 swap or
+  the MS2109 itself needs re-plug. Worth checking when on-site.
+
+---
+
+**(Pre-2026-05-09 handoff content below — kept for context on still-
+open retail-game-patching work; the OGX360 hardware-bridge track has
+moved past its 2026-05-08 staging notes to the 2026-05-09 results
+above.)**
+
+Original 2026-05-08 header retained here for context:
 
 **Track A (software):** POWER-CYCLE XBOX, THEN RUN THE PGR2
 PHYSICAL-DEVICE INPUT PROOF.
@@ -12,7 +125,7 @@ PHYSICAL-DEVICE INPUT PROOF.
 new USB-C Pro Micro, install into OGX360 slot 1, follow
 `scripts/apple-silicon/ogx360-bridge/docs/integration-plan.md`. The
 bridge's compile + Python tests already passed; tomorrow is hardware
-bring-up only.
+bring-up only. **(SUPERSEDED 2026-05-09 — see priority #2 above.)**
 
 This session added reproducible retail XBE patch tooling:
 

@@ -1,5 +1,117 @@
 # Decision Log
 
+## 2026-05-09: OGX360 bridge bring-up — Mac-side proven, slot-2 reflashed for byte-shift bug, Xbox-side input readback unresolved
+
+User soldered the new USB-C Pro Micro (slot 1) into the OGX360 PCB
+overnight. This session brought the bridge from "compile-tested
+staging" to **byte-exact validated through slot 2's XID HID emit** on
+the Mac side, and to **partially validated** on the Xbox side
+(controller enumeration succeeds; live input readback returns zero).
+
+**Slot 1 in-place flash worked** — `firmware/master/master.ino` was
+flashed via 1200-baud touch + arduino-cli upload despite slot 1 being
+already soldered into the OGX360. The factory Caterina bootloader
+honors 1200-baud touch via its USB CDC stack (not the physical RST
+pin), so OGX360-PCB-level RST routing concerns documented in
+`docs/integration-plan.md` did not apply to the first flash.
+
+**Slot 2's pre-existing slave firmware was non-standard.** While slot
+2 was Mac-attached (so its XID HID interrupt-in could be read via
+pyusb), bench testing exposed a consistent byte-shift bug: master
+payload[2] is dropped, payload[3..18] land at struct[4..19], and
+struct[2..3] (= `wButtons` per the OG Duke spec) is hard-locked at
+`(0x14, 0x00)`. The Xbox would have always seen `wButtons = 0x0014`
+= bits 4 (START) + 2 (DLEFT) constantly pressed. Digital buttons
+were uncontrollable from any master.
+
+The diagnostic was definitive — `diag/master_echo/master_echo.ino`
+echoed every I²C transmit's exact bytes back over CDC, confirming
+the master.ino-side bytes were correct, AND the slave's HID readback
+plus control GET_REPORT both showed the shift. The upstream
+Ryzee119 `i2c_get_data` is a plain `for (i = 0; i < rxlen; i++)
+rxbuf[i] = Wire.read()` with no shift, so this OGX360's slot 2 was
+running an older/modified firmware build, not stock.
+
+**Slot 2 was reflashed with stock Ryzee119.** The slave firmware has
+`-DDISABLE_CDC` so 1200-baud touch is unavailable; the user shorted
+slot 2's RST→GND header pins twice within ~750 ms (the standard
+Caterina double-tap reset). `validation/flash-slot2.sh` was waiting
+on `/dev/cu.usbmodem*` and ran `avrdude -c avr109 -p atmega32u4 ...`
+immediately when the bootloader CDC appeared. 26060 bytes flashed
+and verified. Build: PlatformIO (installed in `mac-side/.venv/`)
+target `OGX360` with submodules pulled. After reflash slot 2 passed
+**25/25 byte-exact bench validation** through every Duke field
+(every wButtons bit, all analog buttons, both triggers, all four
+sticks at extremes, combo, rapid 100 Hz transitions, real CSV
+replay, 30 s randomized soak — zero transport errors throughout).
+
+**Xbox-side validation still open.** With slot 2 reconnected to the
+Xbox controller adapter, the `controller-readback` XBE detected
+slot 2 (correct VID 0x045E / PID 0x0289, SDL handle, `frames=300`
+indicating a full poll loop) but every axis and button read zero
+even with the bridge sender holding known values continuously
+during the poll window. Cause unknown — could be XBE/SDL issue,
+UnleashX hot-plug enumeration not refreshing kernel state when slot
+2 was disconnected and re-connected, or a slot-2-to-Xbox path
+issue. The next-session real-controller bisection (plug a real OG
+controller, hold A+START during the readback poll) is the cleanest
+single-test diagnostic.
+
+**MS2109 capture also broke during this session.** The composite
+USB capture stick has been showing solid-black PNGs even though
+the oracle agent's own `screenshot` RPC of the Xbox framebuffer
+returns crisp 640×480 (the Xbox is rendering correctly). Either
+the composite cable came loose during the slot-2 swap or the
+MS2109 itself needs re-plug. Resolution deferred to the next
+on-site session.
+
+**Also during this session, an oracle-agent crash hung the Xbox.**
+A `mem.read(0x80610000, 65536)` call (intended to scan low RAM for
+a unique bridge signature, bypassing the SDL/XBE layer) tripped
+outside the agent's RAM allowlist. The agent crashed
+ungracefully instead of returning a 500 error, and the Xbox
+stopped responding to ICMP / FTP / TCP 9001. The session ended
+with the Xbox awaiting a hard power-cycle. Hardening the agent's
+allowlist enforcement and out-of-range error handling is a
+follow-up — for now, never request RAM outside the documented
+allowlist range.
+
+Files changed / added this session:
+
+- `scripts/apple-silicon/ogx360-bridge/README.md` — status section,
+  recovery procedure, next-session validation paths, diagnostic
+  scripts index.
+- `scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md`
+  — full session log: in-place slot-1 flash, byte-shift bug
+  diagnosis, slot-2 reflash, 25/25 bench-validate.py PASS,
+  Xbox-side controller-readback failure analysis.
+- `scripts/apple-silicon/ogx360-bridge/diag/master_echo/master_echo.ino`
+  — diagnostic master variant: echoes every I²C transmit's exact 21
+  wire bytes back over CDC. Used to confirm master.ino is sending
+  the correct payload.
+- `scripts/apple-silicon/ogx360-bridge/diag/master_i2c_diag/master_i2c_diag.ino`
+  — diagnostic master variant: prints boot-time per-address ACK
+  status and lifetime ACK counters at 2 Hz over CDC. Used to
+  confirm slot 2 ACKs 100 % of master transmits at I²C addr 1.
+- `scripts/apple-silicon/ogx360-bridge/validation/bench-validate.py`
+  — exhaustive byte-exact bench validation (slot 2 must be on the
+  Mac via micro-USB).
+- `scripts/apple-silicon/ogx360-bridge/validation/bridge-readback-test.py`
+  — Xbox-side validation driver: spawns a sustained sender thread,
+  chainloads `controller-readback` via FTP, FTPs the report back.
+- `scripts/apple-silicon/ogx360-bridge/validation/flash-slot2.sh`
+  — bootloader watcher + avrdude runner for the slot 2 reflash
+  procedure.
+
+`vendor/OGX360` (with submodules) was cloned for the build but
+remains gitignored per existing policy. Same for the platformio
+install in `mac-side/.venv/`.
+
+Tier 3 status in `controller-injection-research.md` flips from
+"staged" to **"Mac-side byte-exact proven; Xbox-side input readback
+unresolved"**. Full SHIPPED designation pending the next-session
+Xbox-side bisection.
+
 ## 2026-05-08: Retail oracle pivots to per-title XBE patching
 
 The live Tier-2 kernel-hook experiment is no longer the production path. The

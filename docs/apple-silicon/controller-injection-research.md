@@ -1,11 +1,11 @@
 # Controller Injection — Feasibility & Design
 
-Last updated: 2026-05-08 (retail strategy pivot: Tier-2 live
-export-slot hook failed; per-title XBE patching adopted for the
-current 5-6 game oracle scope. The v0.3 agent buffer ABI still matches
-xemu's `ControllerState` byte-for-byte — int16 triggers, 26-byte
-ports, 120-byte buffer, button bits matching `CONTROLLER_BUTTON_*`
-exactly.)
+Last updated: 2026-05-09 (Tier 3 OGX360 bridge bring-up:
+**Mac-side byte-exact validated**, slot 2 reflashed for byte-shift
+bug, Xbox-side input readback unresolved). Previous header retained
+for context: 2026-05-08 retail strategy pivot adopted per-title XBE
+patching for the current 5-6 game oracle scope; the v0.3 agent
+buffer ABI matches xemu's `ControllerState` byte-for-byte.
 
 ## Problem statement
 
@@ -31,7 +31,7 @@ risk vs reward, and records the design decisions for each.
 | 1    | Our own diag XBEs | Shared-buffer + `xbed_input_synth` shim | SHIPPED 2026-05-07. Production-validated by `controller-roundtrip`. |
 | 2A   | Fixed retail canary set | Per-title XBE patches that synthesize input and return to dashboard | ADOPTED 2026-05-08. Active production path. |
 | 2B   | Generic retail games | Kernel/XID hook, validated by SDL/XID readback | PREP TOOLS SHIPPED; live export-slot implementation crashed 2026-05-08. Not production. |
-| 3    | Generic / fallback | Hardware controller emulator (Mac → OGX360 → Xbox controller port) | STAGED 2026-05-08 evening. Custom slot 1 master firmware + Mac-side replay tool compile + unit-test cleanly. Pending USB-C Pro Micro arrival for hardware bring-up. See `scripts/apple-silicon/ogx360-bridge/`. |
+| 3    | Generic / fallback | Hardware controller emulator (Mac → OGX360 → Xbox controller port) | **Mac-side byte-exact PROVEN 2026-05-09**, Xbox-side input readback unresolved. Slot 1 (new USB-C Pro Micro) flashed with our custom master firmware in-place via 1200-baud touch. Slot 2 reflashed with stock Ryzee119 firmware after diagnosing a byte-shift bug in its pre-existing build. `validation/bench-validate.py` 25/25 PASS through every Duke field. **OPEN:** controller-readback XBE detects slot 2 (correct VID/PID, SDL handle) but reports zero input despite bridge sender holding known values. See `scripts/apple-silicon/ogx360-bridge/docs/2026-05-09-bringup-results.md` and the project README's "Next session" section. |
 
 Tiers 1, 2A, and 2B are software paths. Tier 2A does not require a live
 agent after `runxbe`; each patched title owns its route playback and
