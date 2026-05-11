@@ -249,4 +249,17 @@ echo "================================================================"
     done
 } > "$OUT_DIR/report.md"
 
+python3 - <<PY
+import json
+payload = {
+    "schema": "oracle-validate-v1",
+    "pass": $PASS,
+    "fail": $FAIL,
+    "verdict": "ok" if $FAIL == 0 else "fail",
+    "out_dir": "$OUT_DIR",
+}
+with open("$OUT_DIR/summary.json", "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2, sort_keys=True)
+PY
+
 [ "$FAIL" -eq 0 ] || exit 1

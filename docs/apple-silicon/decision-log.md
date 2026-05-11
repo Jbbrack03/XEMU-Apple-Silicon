@@ -1,5 +1,52 @@
 # Decision Log
 
+## 2026-05-11: M15 bundle status is now checklist-gated; default-on remains blocked
+
+**Decision.** Do not declare the M15 Metal default-on bundle closed yet.
+The real-Xbox oracle side is production-ready for the stable retail trio, but
+the title-level Metal-vs-GL visual/perf bundle still has hard evidence gaps and
+new failures.
+
+**Evidence.**
+
+- `benchmark-runs/oracle-validate-m15-20260511Ttargeted/summary.json` reports
+  `pass=4`, `fail=0` for oracle smoke, Tier-1 XBE matrix, controller-roundtrip,
+  and seqlock; stress was intentionally skipped for the targeted gate.
+- `scripts/apple-silicon/m15-bundle-status.py` now reports
+  `verdict=incomplete ok=5 fail=4 missing=6` after the capture/static-canary
+  correction.
+- PGR2/Rainbow latest paired passes are not gameplay parity evidence:
+  `benchmark-runs/20260511-152831-metal-gl-compare-pgr2/summary.json`
+  captured a black/boot-ish frame, and
+  `benchmark-runs/20260511-153506-metal-gl-compare-rainbow/summary.json`
+  captured a loading screen. The status script marks these missing until
+  matched gameplay keyframes are present.
+- PGR2 still fails the p99 jitter bundle using the latest parseable paired
+  perf data: `gl=40.87ms`, `metal=300.87ms`.
+- Crimson's latest paired diff remains failed:
+  `benchmark-runs/20260505-115225-metal-gl-compare-crimson/summary.json`
+  reports `changed_pct=14.7560`.
+- SC2 and Halo paired gameplay diffs are still missing from the full
+  five-title M15 bundle, and cold shader compile proof plus front-fb fallback
+  policy remain open.
+
+**Tooling finding.** QMP framebuffer capture is not available in the current
+xemu app build: QMP `screendump` returns "command not found", and HMP
+`screendump` through `human-monitor-command` returns `unknown command:
+'screendump'`. `qmp-capture.py` now detects this honestly and supports
+flip-stall sentinel mode for builds where screendump is present. The paired
+diff harness now uses `XEMU_GL_SCREENSHOT_PATH` for the `--trigger flip` GL leg
+and `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for the Metal leg; the remaining
+tooling gap is sequence-based gameplay capture and content-aligned keyframe
+comparison.
+
+**Next closure move.** Build/run the gameplay visual evidence path first:
+controller-driven GL/Metal/oracle routes, multiple gameplay keyframes, visual
+content alignment, and triptychs/contact sheets before any parity claim. Then
+rerun PGR2/Rainbow/Halo and the SC2/Crimson route diffs with frame logging. Do
+not decide the `XEMU_METAL_FRONT_FB_FALLBACK` default until those paired
+visual/perf artifacts exist.
+
 ## 2026-05-10: Retail oracle workflow proven end-to-end on Crimson Skies
 
 **Decision.** The production retail oracle workflow is now
@@ -10066,3 +10113,147 @@ power-cycle, not an RST-pin reset) or manual RST/GND pin short.
 Acceptable since the slave firmware is GPL-3.0 open source and
 reproducible from the cloned upstream via PlatformIO; the integration
 plan never reflashes slot 2.
+
+## 2026-05-11 afternoon: GL paired capture moved in-renderer for flip-trigger runs
+
+**Decision.** Treat `metal-gl-compare.sh --trigger flip` GL screenshots as
+renderer-native evidence. The GL renderer now honors `XEMU_GL_SCREENSHOT_PATH`
+and writes a display-framebuffer PNG at the same shared flip-stall trigger
+used by Metal. The harness uses `XEMU_BENCH_SCREENSHOT_BACKEND=none` for the
+GL leg in flip mode, so macOS window capture is no longer in the trusted
+paired-diff path.
+
+**Evidence.**
+
+- Build and signing passed:
+  `./build.sh -a arm64`, post-build Metal shader validation `7/7 passed`,
+  and `codesign --verify --deep --strict --verbose=2 dist/xemu.app`.
+- First trusted PGR2 rerun:
+  `benchmark-runs/20260511-150043-metal-gl-compare-pgr2/summary.json`.
+  It produced one GL PNG and one Metal PNG, both `1280x960`, with no resize.
+  GL log confirms `gl_screenshot_written`; Metal log confirms
+  `metal_screenshot_written`; both used flip-stall ordinal 30.
+- The PGR2 result remains FAIL, but the failure is now renderer evidence:
+  `changed_pct=5.6656` against the 1% gate. Perf also regressed:
+  p99 `GL=40.87ms`, `Metal=300.87ms`.
+
+**Rationale.** The previous paired GL leg depended on macOS window capture,
+which could include title/menu chrome and scaling artifacts. QMP/HMP
+`screendump` is still absent in the current app build, but the new GL
+in-renderer path removes that blocker for flip-trigger paired diffs without
+waiting on QMP display plumbing.
+
+**Follow-up.** Diagnose the remaining PGR2 visual/perf shortfall from
+`20260511-150043-metal-gl-compare-pgr2`, then run the missing Rainbow/Halo
+paired canaries and the SC2/Crimson routes with `XEMU_PERF_FRAME_LOG=1`.
+
+## 2026-05-11 late afternoon: Metal paired captures must use the NV2A source, not the final drawable
+
+**Decision.** Treat `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` as the canonical
+Metal screenshot source for `metal-gl-compare.sh` paired visual diffs. The
+final drawable capture includes xemu's ImGui UI layer (menu bar, toasts, and
+other host chrome) even when Apple's Metal Performance HUD is disabled via
+`--metal-no-hud`, so it is not comparable to the GL renderer-native display
+PNG.
+
+**Evidence.**
+
+- The prior trusted-looking PGR2 failures
+  `benchmark-runs/20260511-150043-metal-gl-compare-pgr2/summary.json` and
+  `benchmark-runs/20260511-151736-metal-gl-compare-pgr2/summary.json`
+  reported ~5.66% changed pixels. Inspection showed the Metal PNG contained
+  the xemu menu bar and "Connected Keyboard" toast while the GL
+  `XEMU_GL_SCREENSHOT_PATH` PNG contained only the game display.
+- After changing `metal-gl-compare.sh` to export
+  `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, PGR2 passed a capture/static-canary
+  comparison, not gameplay visual parity:
+  `benchmark-runs/20260511-152831-metal-gl-compare-pgr2/summary.json`,
+  `max_changed_pct=0.2594`.
+- A cold Rainbow f600 paired attempt without a snapshot failed 100% because
+  GL had advanced to the Rainbow loading screen while Metal was still in the
+  Xbox flubber sequence at the same flip ordinal. The snapshot-anchored rerun
+  using `rainbow_scene_b1_nothumb` from
+  `benchmark-runs/20260430-101703-rainbow-six-3/xbox_hdd.qcow2` passed:
+  `benchmark-runs/20260511-153506-metal-gl-compare-rainbow/summary.json`,
+  `max_changed_pct=0.2357`.
+- A cold Halo paired attempt at
+  `benchmark-runs/20260511-153638-metal-gl-compare-halo/` is not evidence
+  against Metal visual correctness: the GL leg segfaulted before any
+  `xemu-perf` interval or `gl_screenshot_written`; the Metal leg did write a
+  flip-1200 PNG.
+
+**Rationale.** The M15 paired-diff gate is meant to compare renderer output,
+not host UI composition. GL's new flip-trigger PNG is pre-HUD renderer
+output. Metal's `nv2a` screenshot source is the matching pre-HUD texture.
+For route-based titles, cold launch plus wallclock input can still diverge
+between renderers; use saved scene snapshots when available.
+
+**Supersession.** This entry originally overstated the PGR2/Rainbow result as
+"visual parity". The corrected interpretation is capture/static-canary only;
+see the following 2026-05-11 correction entry.
+
+## 2026-05-11 late afternoon correction: M15 visual parity requires matched gameplay keyframes
+
+**Decision.** Do not count boot, black, menu, loading, static, or host-UI
+contaminated frames as M15 title-level visual parity. The M15 paired visual
+gate requires multiple gameplay keyframes from a full controller-driven route,
+aligned by visual content rather than timestamp, with GL/Metal/oracle
+triptychs where oracle footage exists.
+
+**Evidence.**
+
+- The PGR2 `0.2594%` paired pass at
+  `benchmark-runs/20260511-152831-metal-gl-compare-pgr2/summary.json` is a
+  mostly black boot-ish/static frame. It proves the capture source improved;
+  it does not prove gameplay correctness.
+- The Rainbow `0.2357%` paired pass at
+  `benchmark-runs/20260511-153506-metal-gl-compare-rainbow/summary.json` is a
+  loading screen. It is useful as a static canary but not gameplay parity.
+- The user has directly observed large Metal-vs-OpenGL/retail-oracle visual
+  disparity during controller automation runs, so static canary passes are
+  insufficient and potentially misleading for default-on decisions.
+
+**Tooling consequence.** `metal-gl-compare.sh` now emits an
+`evidence_class` field (`canary` by default; `gameplay` only when explicitly
+requested). `m15-bundle-status.py` only counts paired visual summaries toward
+the M15 title-level visual gate when `evidence_class=gameplay` or
+`gameplay_evidence=true`. Static/capture canary passes show as missing
+gameplay evidence.
+
+**Follow-up.** Build/run a gameplay visual evidence path: capture sequences
+from GL, Metal, and oracle where available; extract several gameplay
+keyframes; align candidate frames by perceptual/content similarity rather
+than timestamp; reject boot/loading/black/static/host-UI frames; emit contact
+sheets/triptychs plus diff metrics; then rerun PGR2, Rainbow, Crimson, SC2,
+and Halo. Only after that should any title be called visually equivalent.
+
+## 2026-05-11 evening: gameplay visual evidence must be sequence-selected and content-aligned
+
+**Decision.** Use `scripts/apple-silicon/m15-gameplay-visual-compare.py` as the
+M15 gameplay evidence builder for paired GL/Metal visual summaries. A title's
+paired visual artifact should come from captured gameplay sequences, not a
+single requested frame ordinal. The builder selects multiple non-black,
+non-static, information-rich keyframes, aligns the Metal frame by perceptual
+content distance, optionally adds the nearest retail-oracle frame, and emits a
+contact sheet/triptychs alongside machine-readable diff metrics.
+
+**Evidence.**
+
+- The earlier 2026-05-11 static PGR2/Rainbow passes showed why ordinal capture
+  alone is unsafe: the diff numbers were low, but the content was not gameplay.
+- The new builder was self-tested against the known PGR2 retail-oracle sequence
+  at `benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite`
+  as both GL and Metal input. It selected four keyframes, wrote a contact
+  sheet, and returned `verdict=PASS` at
+  `/tmp/xemu-m15-gameplay-visual-selftest/summary.json`.
+
+**Rationale.** The default-on decision needs evidence that covers the rendered
+gameplay state the user will actually see. Content alignment is more robust
+than timestamp/ordinal matching when GL, Metal, and retail hardware enter a
+route at slightly different rates. Visible triptychs make false positives much
+harder to miss during review.
+
+**Follow-up.** Capture fresh GL/Metal gameplay sequences for PGR2 and Rainbow
+first, then run `m15-gameplay-visual-compare.py` with their existing oracle
+composite sequences. Repeat for Crimson, SC2, and Halo after their capture
+blockers are addressed.

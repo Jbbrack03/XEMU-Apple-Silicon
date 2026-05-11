@@ -1,12 +1,51 @@
 # Benchmark Automation
 
-Last updated: 2026-05-07 (oracle production-ready). The real-Xbox
-oracle is ready for production pipeline use. B1-B4 are closed:
-controller-roundtrip non-zero state is fixed via kseg0-canonical
-controller-buffer writes + CPU writeback/invalidate; the 10-iteration
-stress passed; live seqlock passed; and the untested reattach build
-was removed. Use `oracle-validate.sh` as the production oracle-side
-gate.
+Last updated: 2026-05-11 (paired capture source fixed; gameplay parity still
+unproven). Use
+`oracle-validate.sh` as the production oracle-side gate, and use
+`m15-bundle-status.py` as the read-only M15 default-on evidence
+checklist before long renderer runs. The real-Xbox oracle side is green
+for the stable trio, but M15 default-on is not closed:
+`m15-bundle-status.py` reports `verdict=incomplete ok=5 fail=4 missing=6`.
+Known blockers are missing gameplay visual diffs for PGR2/Rainbow/SC2/Halo,
+Crimson paired-diff failure, PGR2/Rainbow/Crimson p99 jitter failures,
+missing cold shader compile proof, and an undecided front-fb fallback policy.
+The current app build still does not expose QMP/HMP `screendump`, but
+`--trigger flip` paired runs now use the GL renderer's
+`XEMU_GL_SCREENSHOT_PATH` path instead of macOS window capture, and the Metal
+leg sets `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so xemu ImGui menu/toast pixels
+are excluded from paired PNGs. The 2026-05-11 PGR2/Rainbow paired passes are
+capture/static-canary evidence only, not gameplay parity. Future gameplay
+runs should pass `metal-gl-compare.sh --evidence-class gameplay` only after
+the compared keyframes are verified to be actual gameplay and content-aligned.
+
+## Gameplay visual evidence standard
+
+Static canaries are useful for regression checks, but they must not close M15
+visual parity. A title-level gameplay visual PASS requires:
+
+1. A controller-driven gameplay route under GL and Metal, and under the retail
+   oracle when hardware footage exists.
+2. A captured sequence from the gameplay portion of the route, not a single
+   wallclock/frame-ordinal screenshot.
+3. Multiple keyframes selected from gameplay. Reject boot, dashboard, black,
+   loading, title/menu-only, mostly static, and host-UI-contaminated frames.
+4. Frame matching by visual/content similarity within a search window, not by
+   exact timestamp, because GL, Metal, and hardware drift in timing.
+5. A report that includes visible GL / Metal / oracle triptychs or contact
+   sheets plus diff metrics. Pixel diff is supporting evidence after content
+   alignment, not the verdict by itself.
+
+The M15 status script intentionally requires paired summaries to be marked
+`evidence_class=gameplay` or `gameplay_evidence=true` before they satisfy the
+title-level visual gate. Use `--evidence-class gameplay` only when the above
+standard has been met.
+
+Earlier 2026-05-07: The real-Xbox oracle became ready for production
+pipeline use. B1-B4 are closed: controller-roundtrip non-zero state is
+fixed via kseg0-canonical controller-buffer writes + CPU writeback/invalidate;
+the 10-iteration stress passed; live seqlock passed; and the untested
+reattach build was removed.
 
 Earlier session: Oracle gap-closure session:
 **xbe-harness QMP-socket-path fix + agent's atomic anchor rename**.
@@ -2626,25 +2665,18 @@ mechanical enforcement of the M15 visual gate from
 diff vs GL on the validation title set"); slice W3 wires it into a
 canary regression gate.
 
-The GL leg uses the existing `macos`-screencapture backend with
-`XEMU_BENCH_SCREENSHOT_INTERVAL=1` so PNGs land at one-second cadence
-in `<gl_run>/screenshots/`. **W6 (2026-05-04):** the GL leg also sets
-`XEMU_CAPTURE_WINDOW_PATTERN=xemu` so `macos-capture.sh` runs
-`screencapture -l <wid>` against the matched xemu window via
-Quartz's `CGWindowListCopyWindowInfo` instead of full-desktop
-`screencapture -x`; the GL capture is bounded to the same logical
-region the Metal in-renderer drawable PNG covers. Falls back to
-full-desktop capture for any cycle where the xemu window is not
-on-screen. The Metal leg uses `--metal-screenshot <base>` plus
-`XEMU_METAL_SCREENSHOT_INTERVAL=60` so the in-renderer post-HUD-
-pre-present capture path writes a sequence of `<base>.0001.png` /
-`.0002.png` / ... files (byte-identical to the user-visible
-drawable, no Screen-Recording dialog, no window occlusion). The
-Metal leg also passes `--metal-no-hud` (W6) so the Performance HUD
-overlay never bleeds into the captured PNGs versus the GL leg.
-Frame ordinals in `--frames N,M,K` index into the sorted sequence
-on each side (1-indexed); the default `mid,end` heuristic picks the
-middle and last entry of the captured set's intersection.
+For `--trigger flip`, the GL leg uses `XEMU_GL_SCREENSHOT_PATH` to write an
+in-renderer display-framebuffer PNG at the shared flip-stall trigger. This
+avoids macOS window chrome, scaling drift, and Screen Recording state. The
+Metal leg uses `--metal-screenshot <base>` plus
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, so the captured PNG is the pre-HUD NV2A
+published texture rather than the post-ImGui drawable. The Metal leg also
+passes `--metal-no-hud` (W6) so Apple's Performance HUD never bleeds into the
+captured PNGs. The legacy `--trigger frame` path still uses the existing
+`macos` screenshot backend for GL and frame-ordinal Metal screenshots.
+Frame ordinals in `--frames N,M,K` index into the sorted sequence on each
+side (1-indexed); in `--trigger flip` mode the wrapper captures one paired
+frame and forces ordinal `1`.
 
 **W6 size-mismatch normalization.** Even with window-targeted GL
 capture, retina vs. drawable scaling can leave the GL PNG at a
@@ -2667,6 +2699,8 @@ scripts/apple-silicon/metal-gl-compare.sh <game> [--input <csv>]
     [--duration seconds] [--out-dir <path>]
     [--snapshot <tag>] [--loadvm-at <sec>]
     [--trigger <flip|frame>] [--trigger-ordinal <N>]
+    [--evidence-class <canary|gameplay|capture>]
+    [--metal-no-validate]
     [--help]
 ```
 
@@ -2684,14 +2718,21 @@ F1 alignment flags (added 2026-05-04):
   `s_screenshot_at_frame`). `flip` activates F1's path: both legs
   receive `XEMU_CAPTURE_AT_FLIP_STALL=<N>` and
   `XEMU_CAPTURE_FLIP_STALL_SENTINEL=<auto-generated path>`, the
-  in-renderer screenshot fires when the Nth FLIP_STALL ticks, and
-  the GL leg's `macos-capture.sh` polls the sentinel.
+  in-renderer screenshot fires when the Nth FLIP_STALL ticks, GL writes
+  `XEMU_GL_SCREENSHOT_PATH`, and Metal writes
+  `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`.
 - `--trigger-ordinal <N>` defaults to `30` for `flip` (lets the
   shader cache warm before the captured frame); ignored for `frame`.
   When `--trigger flip` and `--frames` is set with a non-`1` value,
   the script logs `ignoring --frames=… (flip trigger captures one
   frame)` and forces ordinal `1` (post-Codex UX fix at
   `metal-gl-compare.sh` ~line 550).
+- `--evidence-class <canary|gameplay|capture>` records the evidence class in
+  `summary.json`. Default is `canary`. Use `gameplay` only after a
+  controller-driven gameplay route, multiple gameplay keyframes, visual
+  content alignment, and boot/loading/black/static/host-UI rejection.
+- `--metal-no-validate` disables Metal API validation for the Metal leg when
+  measuring product-like perf/jitter.
 
 Worked example — paired PGR2 visual + perf check, default 30 s per
 renderer, 1 % changed-pixels threshold on two ordinals:
@@ -2712,10 +2753,67 @@ scripts/apple-silicon/metal-gl-compare.sh pgr2 \
     --duration 30
 ```
 
-Both legs load the same snapshot 2 s into the run, then capture on
-the 30th NV097_FLIP_STALL after process start; the captured frame is
-guaranteed to correspond to the same in-guest moment regardless of
-shader-compile or scheduler variance between the two cold launches.
+Both legs load the same snapshot 2 s into the run, then capture on the 30th
+NV097_FLIP_STALL after process start. This is a useful static canary alignment
+primitive, but it does not by itself prove gameplay parity; for M15 title-level
+evidence, capture a gameplay sequence and select multiple content-aligned
+gameplay keyframes.
+
+## M15 Gameplay Visual Evidence Builder (2026-05-11)
+
+`scripts/apple-silicon/m15-gameplay-visual-compare.py` turns GL, Metal, and
+optional retail-oracle frame sequences into the gameplay evidence artifact that
+M15 actually accepts. It rejects black/static/low-information frames, selects
+multiple gameplay keyframes from the GL sequence, aligns each one to the closest
+Metal frame by perceptual/content similarity, optionally aligns an oracle frame,
+then emits per-keyframe GL/Metal diffs plus visible triptychs/contact sheets.
+
+Use this after capturing full gameplay sequences. The GL/Metal inputs may be a
+benchmark run directory with `screenshots/`, a screenshots directory, or a
+single PNG. The oracle input may be a retail workflow directory, a
+`gameplay/composite/` directory, or omitted.
+
+```sh
+scripts/apple-silicon/m15-gameplay-visual-compare.py \
+  --game pgr2 \
+  --gl-frames benchmark-runs/<gl-run> \
+  --metal-frames benchmark-runs/<metal-run> \
+  --oracle-frames benchmark-runs/retail-oracle-workflow-pgr2-*/gameplay/composite \
+  --min-keyframes 3 \
+  --max-keyframes 6
+```
+
+Default output is
+`benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay/summary.json`, matching
+`m15-bundle-status.py`'s existing discovery pattern. The summary is marked
+`evidence_class=gameplay` and includes `gameplay_evidence=true` only when the
+run passes the keyframe count, alignment, and changed-pixel gates. Primary
+artifacts:
+
+- `summary.json` — M15-readable verdict, keyframe metrics, source paths, and
+  rejection/alignment metadata.
+- `report.md` — human-readable table of selected keyframes.
+- `contact-sheet.jpg` — stacked GL/Metal/oracle/diff triptychs for quick visual
+  inspection.
+- `triptychs/keyframe-NN.jpg` — per-keyframe visual evidence.
+- `diffs/frame-NN/` — cropped GL/Metal PNGs and amplified diff PNGs.
+
+Self-test example, using a known retail oracle sequence as both GL and Metal
+inputs so the diff should pass:
+
+```sh
+scripts/apple-silicon/m15-gameplay-visual-compare.py \
+  --game pgr2 \
+  --gl-frames benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite \
+  --metal-frames benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite \
+  --oracle-frames benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite \
+  --out-dir /tmp/xemu-m15-gameplay-visual-selftest \
+  --min-keyframes 3 \
+  --max-keyframes 4
+```
+
+Validated 2026-05-11: the self-test returned `verdict=PASS`, selected four
+keyframes, and wrote `/tmp/xemu-m15-gameplay-visual-selftest/contact-sheet.jpg`.
 
 Output directory layout (default
 `benchmark-runs/<TS>-metal-gl-compare-<game>/`):
@@ -2727,7 +2825,7 @@ Output directory layout (default
   metal-launcher.log          — full stdout/stderr of the Metal run-benchmark
   gl/run-dir.txt              — path to <gl_run> directory
   metal/run-dir.txt           — path to <metal_run> directory
-  metal/screenshot.NNNN.png   — Metal-rendered drawable PNGs
+  metal/screenshot.NNNN.png   — Metal-rendered NV2A texture PNGs
   diffs/frame-<N>/            — compare-screenshots.py outputs per ordinal
     baseline-crop.png
     candidate-crop.png
@@ -2743,9 +2841,10 @@ Exit codes: `0` PASS (every compared frame ≤ `--threshold`), `1` FAIL
 (at least one frame exceeded), `2` infrastructure failure (binary
 missing, screenshots missing, sub-script error). The script does NOT
 modify `run-benchmark.sh`, `compare-screenshots.py`, or
-`compare-runs.sh` — it wraps them. `XEMU_METAL_VALIDATION=1` is
-exported on the Metal leg so any Metal-API misuse is logged whether or
-not slice W1's auto-on landed.
+`compare-runs.sh` — it wraps them. `XEMU_METAL_VALIDATION=1` is exported on
+the Metal leg by default so any Metal-API misuse is logged whether or not
+slice W1's auto-on landed; pass `--metal-no-validate` for product-like
+perf/jitter runs.
 
 ## Canary regression gate (W3, 2026-05-04; counter mode 2026-05-04 evening)
 
@@ -4215,14 +4314,23 @@ into CI gates.
   oracle-side refactor. See top of script for full usage.
 
 - `scripts/apple-silicon/m15-visual-gate.sh` — composite M15
-  default-on visual-gate runner. Runs in canonical order: build
-  verification, oracle health, Metal canary regression gate
-  (counters), Tier-1 diag-XBE matrix on Metal + real Xbox. With
-  `--paired` adds Metal-vs-GL canary diff. Exit 0 = M15 default-on
-  flip is unblocked from the oracle's perspective; non-zero blocks
-  the flip. Designed to be the single command that decides "is
-  Metal ready to be default-on?" — answer is YES iff exit == 0
-  with all gates green.
+  default-on visual-gate runner for build/oracle/canary/diagnostic-XBE
+  health. Runs in canonical order: build verification, oracle health,
+  Metal canary regression gate (counters), Tier-1 diag-XBE matrix on
+  Metal + real Xbox. With `--paired` adds Metal-vs-GL **canary** diff.
+  Exit 0 means those component gates are green; it is not sufficient by
+  itself for M15 default-on until the separate gameplay visual bundle has
+  matched gameplay keyframes green for the tracked titles.
+
+- `scripts/apple-silicon/m15-bundle-status.py` — read-only M15
+  default-on evidence checklist. It scans `benchmark-runs/` for the
+  latest composite gate, `oracle-validate` summaries, stable retail
+  workflow proofs, paired Metal-vs-GL title diffs, p99 jitter deltas,
+  cold shader compile proof, and the front-fb fallback policy marker.
+  Exit 0 only when every required evidence item is present and green;
+  exit 1 means the bundle is still incomplete or failed. Use this
+  before long benchmark sessions to pick the next run from missing
+  evidence instead of guessing.
 
 - `scripts/apple-silicon/capture-composite-reference.sh` —
   capture a real-Xbox reference frame for a diag XBE via the

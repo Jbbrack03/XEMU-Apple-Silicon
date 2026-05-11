@@ -1,32 +1,22 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-05 (SC2 input route recorded; audio listen-test
-closed via SC2 single-title verification; Crimson Metal "blocker"
-reclassified as
-config — Crimson now joins PGR2, Rainbow Six 3, Halo CE menu, and
-Xbox boot/flubber as documented MSAA4 PASS canaries with the
-canonical M15 recipe (`XEMU_METAL_FRONT_FB_FALLBACK=1` plus the
-rest). The previous "patterned frame followed by black drawable"
-symptom on Crimson was a missing-config artifact in
-`metal-gl-compare.sh`, not a renderer bug. Five canaries now pass
-visually. M15 default-on stays BLOCKED on (a) F3 per-title snapshot
-anchor for paired diff (interactive recording needed; proof-of-concept
-proven for Crimson 2026-05-05 — `crimson-canary` snapshot in
-`benchmark-runs/profile-prep/crimson-canary.qcow2` loads on both
-GL and Metal legs, but cross-renderer Metal-saved → GL-loaded
-crashes), (b) SC2 routed visual canary — input script recorded
-2026-05-05 (`sc2-gameplay.csv`, 11,384 events through Arcade combat;
-GL combat FPS ~15 measured first time on this fork); paired Metal
-visual diff + F3 `sc2-canary` snapshot still pending —, (c) front-fb
-fallback default-on policy decision
-(PGR2 + Crimson now both documented as fallback-dependent).
-Earlier 2026-05-04: Metal MSAA store/resolve correctness follow-up
-+ PGR2 texture-bind attribution. The old white/magenta front-buffer
-failure is closed; MSAA4 black-frame regression fixed by
-StoreAndMultisampleResolve + stored depth/stencil MSAA attachments;
-PGR2 shader translation failures and pipeline fallbacks zero
-post-shared-GLSL-dot-intermediate fix; CPU wall-time counters +
-early cached-texture bind path landed.)
+Last updated: 2026-05-11 (M15 default-on remains blocked by the evidence
+bundle, not by oracle readiness). Run
+`scripts/apple-silicon/m15-bundle-status.py` before any M15 claim; current
+result is `verdict=incomplete ok=5 fail=4 missing=6`. Oracle production
+evidence and the stable retail trio are green. PGR2 and Rainbow gameplay
+visual parity are not proven; their 2026-05-11 paired passes are capture/
+static-canary evidence only. M15 requires multiple matched gameplay keyframes
+from controller routes, aligned by visual content rather than timestamp, with
+boot/loading/black/static/host-UI frames rejected. Crimson paired diff still
+fails (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay diffs are
+missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold shader compile
+proof is missing, and front-fb fallback policy is still undecided. The current
+app build does not expose QMP/HMP `screendump`; `metal-gl-compare.sh
+--trigger flip` uses the GL renderer's `XEMU_GL_SCREENSHOT_PATH` path instead.
+Earlier 2026-05-05: SC2 input
+route recorded, audio listen-test closed, and Crimson reclassified as a
+canonical-recipe canary rather than a missing-config renderer bug.
 
 This document is the staged implementation plan for replacing the
 OpenGL backend with a native Metal renderer for the Apple Silicon
@@ -1842,17 +1832,20 @@ failure is closed by a set of targeted surface/RTT fixes:
   `post_load_avg_fps=57.63`, but the no-input route captures
   boot/flubber and then black frames.
 
-**Highest-priority next-session action.** Fix the remaining visual
-routes before claiming the broad gate: route Crimson to a rendered
-gameplay frame, add an SC2 routed input script or known-good snapshot,
-and make an explicit front-fb fallback policy/faithfulness decision.
-Keep the PGR2, Rainbow, Halo, and boot/flubber canaries above green
-after each Metal change.
+**Highest-priority next-session action (2026-05-11).** Start with
+`scripts/apple-silicon/m15-bundle-status.py`. The next engineering blocker is
+gameplay evidence, not oracle health: `metal-gl-compare.sh --trigger flip`
+now uses GL `XEMU_GL_SCREENSHOT_PATH` and Metal
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, but PGR2/Rainbow latest passes are only
+static canaries. Build/run sequence-based gameplay comparison, reject boot/
+loading/black/static/host-UI frames, align keyframes by visible content, then
+rerun PGR2/Rainbow/Halo/Crimson/SC2 paired visual+perf routes with
+`XEMU_PERF_FRAME_LOG=1`.
 
 M15 default-on stays BLOCKED on:
-1. Broader Metal-vs-GL visual correctness across the gameplay gate.
-2. Paired Metal-vs-GL visual diff on PGR2, Rainbow, Crimson, SC2, and
-   one broader-sweep title.
+1. Matched gameplay keyframe evidence for paired GL-vs-Metal capture.
+2. Paired Metal-vs-GL gameplay visual diff on PGR2, Rainbow, Crimson, SC2,
+   and one broader-sweep title.
 3. Console-native FPS plus p99 jitter validation on the same set.
 4. Cold-launch shader compile time < 5 s on a fresh shader cache.
 5. Faithful front-fb/default presentation path or an accepted fallback

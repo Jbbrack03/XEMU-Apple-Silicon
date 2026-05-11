@@ -318,6 +318,7 @@ void pgraph_gl_sync(NV2AState *d);
 void pgraph_gl_update_entire_memory_buffer(NV2AState *d);
 void pgraph_gl_init_display(NV2AState *d);
 void pgraph_gl_finalize_display(PGRAPHState *pg);
+void pgraph_gl_capture_display_if_requested(NV2AState *d);
 void pgraph_gl_init_reports(NV2AState *d);
 void pgraph_gl_finalize_reports(PGRAPHState *pg);
 void pgraph_gl_init_shaders(PGRAPHState *pg);

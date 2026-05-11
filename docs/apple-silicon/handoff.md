@@ -1,12 +1,178 @@
 # Handoff
 
-Last updated: 2026-05-11 (retail oracle workflow proven end-to-end on
-Crimson Skies, Rainbow Six 3, and PGR2; Soul Calibur 2 remains useful
-for emulator-side rendering/perf validation but is now deferred as a
-retail-oracle production gate after repeated real-hardware return and
-patch-path failures on the current Xbox image).
+Last updated: 2026-05-11 (M15 bundle is checklist-gated and NOT closed.
+Retail oracle workflow is production-ready on Crimson Skies, Rainbow Six 3,
+and PGR2; Soul Calibur 2 remains useful for emulator-side rendering/perf
+validation but is deferred as a retail-oracle production gate after repeated
+real-hardware return and patch-path failures on the current Xbox image).
 
-## NEXT SESSION — three priorities
+## START HERE NEXT SESSION — M15 bundle closure
+
+Run this first:
+
+```sh
+cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+./scripts/apple-silicon/m15-bundle-status.py
+```
+
+Current result from 2026-05-11 after the checklist script learned to keep
+using the latest parseable p99 run even when a newer paired visual artifact
+has too few post-load intervals:
+
+```text
+verdict=incomplete ok=5 fail=4 missing=6
+```
+
+What is green:
+
+- Composite visual/oracle gate:
+  `benchmark-runs/m15-gate-20260507T143751Z/summary.json`
+  (`pass=5`, `fail=0`).
+- Targeted oracle production gate:
+  `benchmark-runs/oracle-validate-m15-20260511Ttargeted/summary.json`
+  (`pass=4`, `fail=0`; stress intentionally skipped for this targeted run).
+- Stable retail oracle trio:
+  Crimson Skies, Rainbow Six 3, and PGR2 all have `workflow.json`
+  `status=ok`.
+
+What blocks M15 default-on:
+
+- PGR2 and Rainbow gameplay visual parity are **not proven**. The 2026-05-11
+  PGR2/Rainbow paired passes are capture/static-canary evidence only:
+  `benchmark-runs/20260511-152831-metal-gl-compare-pgr2/summary.json`
+  (`max_changed_pct=0.2594`) captured a black/boot-ish PGR2 frame, and
+  `benchmark-runs/20260511-153506-metal-gl-compare-rainbow/summary.json`
+  (`max_changed_pct=0.2357`) captured a Rainbow loading screen. Do not count
+  either as gameplay visual parity.
+- PGR2 p99 jitter FAIL from the latest parseable paired run:
+  `gl=40.87ms`, `metal=300.87ms`, `improvement=-636.16%`.
+- Rainbow p99 jitter FAIL from the snapshot-anchored paired run:
+  `gl=90.99ms`, `metal=112.48ms`, `improvement=-23.62%`.
+- Crimson paired Metal-vs-GL diff FAIL:
+  `benchmark-runs/20260505-115225-metal-gl-compare-crimson/summary.json`,
+  `max_changed_pct=14.7560`.
+- Matched gameplay keyframe diffs are still missing for PGR2, Rainbow, SC2,
+  and Halo. A cold Halo paired attempt at
+  `benchmark-runs/20260511-153638-metal-gl-compare-halo/` is infrastructure-
+  blocked: the GL leg segfaulted before any `xemu-perf` interval or
+  `gl_screenshot_written`, while the Metal leg did write its flip-1200 PNG.
+- Cold shader compile proof is still missing.
+- Front-fb fallback policy is still undecided.
+
+Important tooling finding:
+
+- `qmp-capture.py` supports flip-stall sentinel mode and has an HMP/PPM
+  fallback for builds that expose screendump.
+- `metal-gl-compare.sh --metal-no-validate` now exists for product-like
+  paired perf/jitter reruns. A same-day PGR2 rerun with this flag produced
+  too few post-load intervals, so it is useful as visual evidence but not as
+  p99 evidence.
+- `compare-runs.sh` now reports `VERDICT: missing metrics` when post-load
+  fields are absent instead of saying "no regression" for an all-missing
+  table.
+- The current `dist/xemu.app` build does **not** expose screendump through
+  QMP or HMP (`unknown command: 'screendump'`), but `metal-gl-compare.sh`
+  now avoids macOS window capture in `--trigger flip` mode by setting
+  `XEMU_GL_SCREENSHOT_PATH` and letting the GL renderer write a display
+  framebuffer PNG at the same flip-stall trigger used by Metal.
+- `metal-gl-compare.sh` now sets `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so
+  Metal paired-diff PNGs come from the renderer-published NV2A texture
+  before xemu ImGui UI is composited. The prior PGR2 5.66% failures were
+  dominated by xemu menu/toast pixels in the Metal drawable capture.
+- A cold-launch Rainbow f600 attempt without a snapshot failed 100% because
+  GL had reached the Rainbow loading screen while Metal was still in the Xbox
+  flubber sequence at the same flip ordinal. Use a saved scene snapshot for
+  Rainbow paired work.
+- `m15-bundle-status.py` now requires paired summaries to be explicitly marked
+  as gameplay evidence (`evidence_class=gameplay` or `gameplay_evidence=true`)
+  before they can satisfy the M15 title-level visual gate. Static/capture
+  canary passes remain useful diagnostics but show as missing gameplay
+  evidence.
+- `m15-gameplay-visual-compare.py` now builds the stricter gameplay evidence
+  artifact from GL, Metal, and optional oracle frame sequences. It rejects
+  black/static/low-information frames, aligns by visual content, and emits
+  `summary.json`, `report.md`, per-keyframe triptychs, diffs, and a contact
+  sheet under `benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay/`. A
+  same-sequence PGR2 oracle self-test passed on 2026-05-11 with four selected
+  keyframes at `/tmp/xemu-m15-gameplay-visual-selftest/summary.json`.
+
+Next engineering steps, in order:
+
+1. Capture fresh GL/Metal gameplay sequences for PGR2 first, then run
+   `m15-gameplay-visual-compare.py` with the existing PGR2 oracle composite
+   sequence. The first evidence-producing target should be:
+
+   ```sh
+   cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+   ./scripts/apple-silicon/m15-bundle-status.py
+
+   OUT="benchmark-runs/m15-gameplay-pgr2-$(date +%Y%m%d-%H%M%S)"
+   mkdir -p "$OUT/metal"
+
+   env XEMU_RENDERER=GL \
+       XEMU_NATIVE_TRI_DEPTH=1 \
+       XEMU_NATIVE_QUAD=1 \
+       XEMU_PGRAPH_FAST_READ=1 \
+       XEMU_GL_MSAA=4 \
+       XEMU_PERF_FRAME_LOG=1 \
+       XEMU_BENCH_SCREENSHOT_BACKEND=macos \
+       XEMU_BENCH_SCREENSHOT_INTERVAL=1 \
+       XEMU_BENCH_SCREENSHOT_START_DELAY=2 \
+       ./scripts/apple-silicon/run-benchmark.sh \
+         pgr2 scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 120 \
+       | tee "$OUT/gl-launcher.log"
+
+   GL_RUN="$(awk -F': ' '/^Run directory: / { print $2 }' "$OUT/gl-launcher.log" | tail -n 1)"
+
+   env XEMU_RENDERER=METAL \
+       XEMU_METAL_TRANSLATED_PIPELINE=1 \
+       XEMU_METAL_FRONT_FB_FALLBACK=1 \
+       XEMU_METAL_MSAA=4 \
+       XEMU_METAL_SCREENSHOT_SOURCE=nv2a \
+       XEMU_METAL_SCREENSHOT_INTERVAL=60 \
+       XEMU_NATIVE_TRI_DEPTH=1 \
+       XEMU_NATIVE_QUAD=1 \
+       XEMU_PGRAPH_FAST_READ=1 \
+       XEMU_PERF_FRAME_LOG=1 \
+       XEMU_BENCH_SCREENSHOT_BACKEND=none \
+       ./scripts/apple-silicon/run-benchmark.sh \
+         --metal-screenshot "$OUT/metal/screenshot.png" \
+         --metal-screenshot-at-frame 60 \
+         --metal-no-hud \
+         --metal-no-validate \
+         pgr2 scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 120 \
+       | tee "$OUT/metal-launcher.log"
+
+   ./scripts/apple-silicon/m15-gameplay-visual-compare.py \
+       --game pgr2 \
+       --gl-frames "$GL_RUN" \
+       --metal-frames "$OUT/metal" \
+       --oracle-frames benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite \
+       --out-dir "$OUT/evidence" \
+       --min-keyframes 3 \
+       --max-keyframes 6
+   ```
+
+   Inspect `$OUT/evidence/contact-sheet.jpg` before treating the metrics as
+   evidence. If this passes, copy the same pattern to Rainbow using
+   `rainbow` / `rainbow-gameplay.csv` and
+   `benchmark-runs/retail-oracle-workflow-rainbow-20260510T214732Z/gameplay/composite`.
+2. Re-run PGR2 and Rainbow through that gameplay evidence path before making
+   any visual-parity claim.
+3. Re-run/diagnose Crimson paired visual diff using the corrected
+   `source=nv2a` Metal capture path, then run SC2.
+4. Find or create a Halo scene snapshot before retrying paired Halo, or first
+   debug the cold GL Halo segfault seen in
+   `20260511-153638-metal-gl-compare-halo`.
+5. Diagnose the paired p99 jitter failures for PGR2, Rainbow, and Crimson.
+6. Produce cold shader compile proof from a fresh Metal shader cache, without
+   destroying the user's existing cache; use backup/restore or an isolated
+   settings base if one is added.
+7. Decide `XEMU_METAL_FRONT_FB_FALLBACK` default policy only after the
+   paired visual/perf bundle is green or the remaining shortfall is explicitly
+   accepted in `decision-log.md`.
+
+## RETAIL ORACLE STATUS — stable trio is production-ready
 
 ### 1. RETAIL ORACLE WORKFLOW IS LIVE-PROVEN ON THE STABLE TRIO; SC2 IS DEFERRED ON THE RETAIL SIDE
 
@@ -809,15 +975,16 @@ validated 16/16 PASS. **However**, several built-but-not-exercised
 code paths and one observed-but-not-investigated agent degraded
 state mean the "production-ready" claim is not yet fully earned.
 
-**START HERE NEXT SESSION** — read the
-[NEXT SESSION PRIORITIES — gap closure](#next-session-priorities--gap-closure)
-section below; everything else in this banner is reference material
-once those gaps are closed. See decision-log "2026-05-07 (evening):
+**Archived 2026-05-07 instruction.** Do not use this as the current
+next-session entrypoint; the current entrypoint is the 2026-05-11
+[START HERE NEXT SESSION — M15 bundle closure](#start-here-next-session--m15-bundle-closure)
+section at the top of this file. The older gap-closure section below is
+preserved for audit trail. See decision-log "2026-05-07 (evening):
 Oracle pipeline taken to 'in-workflow ready' — Tier-1 controller
 injection + PCRTC capture fix + smoke-test + M15 gate runner"
 for the full session record.
 
-## Next session priorities — gap closure
+## Archived 2026-05-07 next session priorities — gap closure
 
 The user has explicitly asked next session to **close every gap and
 remove every lingering unknown** so the oracle is unambiguously

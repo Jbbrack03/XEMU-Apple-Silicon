@@ -39,6 +39,8 @@ Every Apple Silicon-specific decision, benchmark, and handoff lives under
   `.gputrace` interpretation, Tier-2 retail-game real-Xbox input,
   session-start dashboard, and full M15 evidence bundle.
   Start Metal sessions with
+  `scripts/apple-silicon/m15-bundle-status.py` when the task touches
+  M15/default-on evidence, then use
   `scripts/apple-silicon/metal-feedback-dashboard.py` when you need a
   fast measured state summary before choosing work. Use
   `scripts/apple-silicon/metal-tools-readiness.sh --quick` to verify
@@ -50,14 +52,24 @@ the task touches the Metal port):
 - `docs/apple-silicon/metal-renderer-plan.md` — staged Metal renderer
   implementation plan, slices M0–M15, validation gates, risk register
   R1–R8, open questions Q1–Q6 (all resolved as of M14).
-  **Slices M0–M14 SHIPPED 2026-05-02; M5.x correctness follow-ups
-  continue through 2026-05-04; M15 (default-on selection) BLOCKED
-  on the front-fb fallback policy, F3 per-title snapshot anchor for
-  paired diff (interactive cross-title rollout), SC2 paired Metal
-  visual diff (input route recorded 2026-05-05; replay under Metal +
-  F3 anchor still TODO), and the cross-renderer loadvm SIGSEGV
-  investigation. Crimson reclassified as PASS 2026-05-05
-  (see decision-log entry of that date).**
+  **Slices M0–M14 SHIPPED 2026-05-02; M15 (default-on selection)
+  is checklist-gated and BLOCKED as of 2026-05-11. Current
+  `m15-bundle-status.py` result: `verdict=incomplete ok=5 fail=4
+  missing=6`. Oracle/stable-retail-trio evidence is green. GL paired
+  capture no longer depends on macOS window capture for `--trigger flip`:
+  `XEMU_GL_SCREENSHOT_PATH` writes an in-renderer display PNG at the shared
+  flip-stall trigger, and Metal paired capture now uses
+  `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so xemu UI chrome/toasts are excluded.
+  The PGR2/Rainbow 2026-05-11 reruns are capture/static-canary evidence only
+  (black boot-ish PGR2 and Rainbow loading screen), **not gameplay visual
+  parity**. M15 still needs matched gameplay keyframe evidence for PGR2,
+  Rainbow, Crimson, SC2, and Halo; Crimson's older paired diff fails,
+  PGR2/Rainbow/Crimson p99 jitter gates fail, cold shader compile proof is
+  missing, and the front-fb fallback policy is undecided. New
+  `scripts/apple-silicon/m15-gameplay-visual-compare.py` builds the strict
+  gameplay visual artifact from GL/Metal/oracle frame sequences by rejecting
+  black/static frames, aligning keyframes by visual content, and emitting
+  triptychs/contact sheets plus M15-readable `summary.json`.**
   Read this when the
   task touches the Metal port; per-slice "Status (2026-05-02):
   SHIPPED" annotations document the landed implementation.
@@ -508,23 +520,17 @@ The fork-specific source-code changes are concentrated in:
       Next Metal work should route Crimson gameplay and SC2 to real
       rendered visual canaries and resolve the front-fb fallback policy
       before revisiting M15.
-      **(2026-05-05 update)** Crimson reclassified as MSAA4 PASS canary
-      with the canonical recipe (`benchmark-runs/20260505-104139-crimson-skies`
-      sustained ~30 FPS for 90s rendering tarot-card menu); the
-      previous "patterned frame followed by black drawable" framing
-      was a missing-config artifact in `metal-gl-compare.sh`, not a
-      renderer bug. Crimson now joins PGR2 as documented
-      "fallback-dependent". Five Metal MSAA4 canaries now PASS
-      (PGR2 / Rainbow / Halo / boot / Crimson). Remaining M15
-      blockers: (a) F3 per-title snapshot anchor for paired diff
-      (interactive cross-title rollout — proof-of-concept proven for
-      Crimson via `crimson-canary` snapshot), (b) SC2 paired Metal
-      visual diff (input route `sc2-gameplay.csv` recorded
-      2026-05-05; Metal replay + F3 anchor still TODO), (c)
-      front-fb fallback default-on policy, (d) cross-renderer loadvm
-      SIGSEGV investigation (workaround: save snapshots via GL only).
-      See decision-log "2026-05-05: Crimson Metal 'blocker'
-      reclassified as config".
+      **(2026-05-11 update)** M15 is checklist-gated by
+      `scripts/apple-silicon/m15-bundle-status.py` and currently
+      incomplete (`ok=5 fail=4 missing=6`). The oracle/stable-retail-trio
+      side is green, and paired capture plumbing improved by switching Metal
+      screenshots to `source=nv2a`, but PGR2/Rainbow gameplay visual parity is
+      not proven. M15 requires content-aligned gameplay keyframes, not
+      boot/loading/static canaries. Crimson visual, SC2/Halo/PGR2/Rainbow
+      gameplay diffs, PGR2/Rainbow/Crimson p99 jitter, cold shader compile
+      proof, and front-fb fallback policy remain open. Use
+      `scripts/apple-silicon/m15-gameplay-visual-compare.py` after capturing
+      GL/Metal gameplay sequences.
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and

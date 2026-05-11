@@ -144,6 +144,7 @@ static void pgraph_gl_flip_stall(NV2AState *d)
                        glfinish_end_us - glfinish_start_us);
     nv2a_profile_add_counter(NV2A_PROF_FLIP_STALL_US_TOTAL,
                              (int)(glfinish_end_us - flip_stall_start_us));
+    pgraph_gl_capture_display_if_requested(d);
 }
 
 static void pgraph_gl_flush(NV2AState *d)

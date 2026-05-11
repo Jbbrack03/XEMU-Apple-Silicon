@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import socket
 import time
 from pathlib import Path
+
+from PIL import Image
 
 
 class QMP:
@@ -71,6 +74,69 @@ def main():
         next_capture = start + args.start_delay
         end = start + args.duration
         index = 0
+        flip_stall_sentinel = os.environ.get("XEMU_CAPTURE_FLIP_STALL_SENTINEL", "")
+
+        def capture(filename):
+            filename = Path(filename)
+            try:
+                qmp.command("screendump", {
+                    "filename": str(filename),
+                    "format": "png",
+                })
+            except RuntimeError as exc:
+                # Some xemu/QEMU builds do not expose QMP screendump
+                # directly. When HMP screendump is available through
+                # human-monitor-command, write PPM and convert to PNG so
+                # the downstream screenshot diff stays unchanged.
+                ppm = filename.with_suffix(".ppm")
+                try:
+                    if ppm.exists():
+                        ppm.unlink()
+                except OSError:
+                    pass
+                try:
+                    hmp_ret = qmp.command("human-monitor-command", {
+                        "command-line": f"screendump {ppm} -f ppm",
+                    })
+                except RuntimeError as hmp_exc:
+                    print(
+                        f"capture failed: qmp={exc}; hmp={hmp_exc}",
+                        flush=True,
+                    )
+                    return
+                if hmp_ret:
+                    print(f"qmp-capture: hmp screendump returned: {hmp_ret!r}", flush=True)
+                if ppm.exists():
+                    Image.open(ppm).save(filename)
+                    ppm.unlink()
+            if filename.exists():
+                print(f"captured {filename}", flush=True)
+            else:
+                print(f"capture failed: no output file written: {filename}", flush=True)
+
+        if flip_stall_sentinel:
+            sentinel = Path(flip_stall_sentinel)
+            print(
+                f"qmp-capture: flip-stall sentinel mode sentinel={sentinel} "
+                f"timeout={args.duration}s",
+                flush=True,
+            )
+            while time.monotonic() < end:
+                if sentinel.exists():
+                    elapsed = int((time.monotonic() - start) * 1000)
+                    capture(out_dir / f"flip-stall-{elapsed:06d}ms.png")
+                    remaining = end - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(remaining)
+                    break
+                time.sleep(0.1)
+            else:
+                print(
+                    f"qmp-capture: flip-stall sentinel did not appear within "
+                    f"{args.duration}s; no shot taken",
+                    flush=True,
+                )
+            return
 
         while time.monotonic() < end:
             now = time.monotonic()
@@ -79,16 +145,7 @@ def main():
                 continue
 
             elapsed = int((now - start) * 1000)
-            filename = out_dir / f"{index:03d}-{elapsed:06d}ms.png"
-            try:
-                qmp.command("screendump", {
-                    "filename": str(filename),
-                    "format": "png",
-                })
-                print(f"captured {filename}", flush=True)
-            except RuntimeError as exc:
-                print(f"capture failed at {elapsed}ms: {exc}", flush=True)
-
+            capture(out_dir / f"{index:03d}-{elapsed:06d}ms.png")
             index += 1
             next_capture += args.interval
     finally:

@@ -1,33 +1,46 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-08 (retail-game oracle strategy pivot).
-B1-B4 are closed: persistent controller state is canonicalized
-through the kseg0 alias with cache writeback/invalidate, the
-temporary reattach build was removed, the controller-roundtrip
-diag is isolated from the default visual matrix unless explicitly
-requested, and the live seqlock/concurrency gate is stable. The
-deployed production oracle agent on the project Xbox has SHA-256
-`8fefa8c516b52aabc28cb8191bb31287030b11813742d074d80af720309ef756`.
-Validation evidence is recorded in `benchmark-runs/`: full
-oracle validation through smoke / visual matrix /
-controller-roundtrip / 10-iteration stress, followed by a focused
-post-fix gate with smoke / visual matrix / controller-roundtrip /
-seqlock all passing. See `docs/apple-silicon/handoff.md` and
-`docs/apple-silicon/decision-log.md` for the production-readiness
-record. The retail-game oracle is now pursuing per-title XBE patching
-for the fixed canary set; see
-`docs/apple-silicon/retail-title-patching-strategy.md`. Earlier
-2026-05-05: Crimson Metal "blocker" reclassified
-as config — Crimson now joins PGR2 / Rainbow / Halo / boot as a
-documented MSAA4 PASS canary when launched with the canonical M15
-recipe (specifically `XEMU_METAL_FRONT_FB_FALLBACK=1`). Project
-is now in Phase 1 (Translation Correctness, ACTIVE). **The user's
-stated 30/60 FPS at 1080p / high-quality AA / correct-colors goals
-remain met today via the GL renderer** with `XEMU_GL_MSAA=4` +
-`surface_scale=2`; Metal remains opt-in until M15 default-on
-visual-gate sweep passes. Input slices N1+N2 also shipped via
-opt-in `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework
-backend.)
+Last updated: 2026-05-11 (M15 bundle checklist added; Metal default-on
+is still blocked). The retail Xbox oracle is production-ready for the
+stable trio: Crimson Skies, Rainbow Six 3, and PGR2 all have live
+`retail-oracle-workflow.py` proofs with `workflow.json` `status=ok`.
+Soul Calibur 2 is deferred as a retail-oracle production gate on the
+current Xbox image because repeated real-hardware return/IGR proofs leave
+the console offline, but it remains useful for emulator-side renderer and
+performance validation.
+
+Before any M15/default-on claim, run:
+
+```sh
+./scripts/apple-silicon/m15-bundle-status.py
+```
+
+The 2026-05-11 result is `verdict=incomplete ok=5 fail=4 missing=6`.
+Oracle-side evidence is green, but the title-level Metal-vs-GL bundle is
+not closed: the 2026-05-11 PGR2/Rainbow paired passes only proved cleaner
+capture/static-canary comparison (black boot-ish PGR2 and Rainbow loading
+screen), not gameplay visual parity. M15 requires matched gameplay keyframes
+from controller routes, aligned by visual content rather than timestamp and
+reviewed as GL/Metal/oracle triptychs where possible. Crimson's older paired
+diff still fails (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay
+paired diffs are missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold
+shader compile proof is missing, and the front-fb fallback policy is still
+undecided. The current app build still does not expose QMP/HMP `screendump`;
+`metal-gl-compare.sh --trigger flip` uses the GL renderer's
+`XEMU_GL_SCREENSHOT_PATH` path and Metal `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`.
+
+Next session should start in `docs/apple-silicon/handoff.md` at
+"START HERE NEXT SESSION — M15 bundle closure". The first concrete task is a
+fresh PGR2 GL/Metal gameplay sequence pair, followed by
+`scripts/apple-silicon/m15-gameplay-visual-compare.py` against the existing
+PGR2 oracle composite frames. Only after inspecting the generated contact
+sheet should a PGR2 gameplay visual verdict be recorded; then repeat the same
+recipe for Rainbow.
+
+Project is still in Metal Phase 1/2 closure work. **The user's stated
+30/60 FPS at 1080p / high-quality AA / correct-colors goals remain met
+today via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2`;
+Metal remains opt-in until the M15 evidence bundle is complete and green.
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run

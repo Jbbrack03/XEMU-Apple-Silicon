@@ -1,6 +1,32 @@
 # Strategy
 
-Last updated: 2026-05-05 (Magenta investigation closed; PGR2 + Rainbow Six 3 + Halo CE menu + Xbox boot/flubber + Crimson Skies all PASS as Metal MSAA4 visual canaries with the canonical M15 recipe `XEMU_METAL_FRONT_FB_FALLBACK=1 + XEMU_METAL_TRANSLATED_PIPELINE=1 + XEMU_METAL_MSAA=4 + XEMU_NATIVE_TRI_DEPTH=1 + XEMU_NATIVE_QUAD=1 + XEMU_PGRAPH_FAST_READ=1`. Crimson reclassified 2026-05-05 — the previous "patterned frame followed by black drawable" symptom was caused by `metal-gl-compare.sh` not threading the canonical recipe to its Metal leg; Crimson now joins PGR2 as a documented "PASS only with `XEMU_METAL_FRONT_FB_FALLBACK=1`" title. **Phase 4 sub-deliverable 4j (MSAA) validated on the GL path** at `XEMU_GL_MSAA=4` + `surface_scale=2` across 5 titles (PGR2 47, Crimson 30, SC2 58, Halo 30, Rainbow 27); Metal MSAA4 also active on all five canaries. **GL renderer remains the production path for visual correctness today**; Metal renderer is feature-complete (M0–M14 shipped) and renders correctly on five canaries but M15 default-on stays BLOCKED on (a) F3 per-title snapshot anchor for paired diff (interactive recording needed), (b) SC2 routed visual canary (interactive input-script recording needed), (c) front-fb fallback default-on policy decision. Input slices N1+N2 also ship — `XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend with always-on input-latency counters.)
+Last updated: 2026-05-11 (M15 default-on is checklist-gated and still
+blocked). Retail Xbox oracle proof is production-ready for the stable trio
+(Crimson Skies / Rainbow Six 3 / PGR2), but the Metal default-on bundle is
+not closed: `scripts/apple-silicon/m15-bundle-status.py` currently reports
+`verdict=incomplete ok=5 fail=4 missing=6`. PGR2 and Rainbow gameplay visual
+parity are not proven; their 2026-05-11 paired passes are capture/static-
+canary evidence only. M15 requires multiple matched gameplay keyframes from
+controller routes, aligned by visual content rather than timestamp, with
+boot/loading/black/static/host-UI frames rejected. Crimson paired diff still
+fails (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay diffs are
+missing, and PGR2/Rainbow/Crimson p99 jitter gates fail. Cold shader compile
+proof and the front-fb fallback policy are still open. The current app build
+does not
+expose QMP/HMP `screendump`; `metal-gl-compare.sh --trigger flip` uses the
+GL renderer's `XEMU_GL_SCREENSHOT_PATH` path instead. **GL renderer remains
+the production path today** with
+`XEMU_GL_MSAA=4` + `surface_scale=2`; Metal remains opt-in until the full
+M15 evidence bundle is complete and green. Input slices N1+N2 also ship —
+`XEMU_MACOS_NATIVE_INPUT=1` GameController.framework backend with always-on
+input-latency counters.
+
+Immediate strategy for the next session: close evidence quality before
+claiming renderer parity. Start with PGR2, capture GL and Metal gameplay
+sequences using the same controller route, run
+`scripts/apple-silicon/m15-gameplay-visual-compare.py` with the existing oracle
+frames, and inspect the generated contact sheet. Rainbow follows only after
+the PGR2 artifact proves the pipeline is selecting true gameplay frames.
 
 ## North Star
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# m15-visual-gate.sh — composite M15 default-on visual-gate runner.
+# m15-visual-gate.sh — composite M15 build/oracle/canary gate runner.
 #
 # Runs the Metal default-on flip's mandatory visual + counter checks
 # in the canonical order:
@@ -12,21 +12,22 @@
 #      ~6 minutes).
 #   4. Tier-1 diag-XBE matrix on Metal AND real Xbox
 #      (xbe-harness run --renderer metal --renderer real-xbox).
-#   5. (Optional, --paired) Paired Metal-vs-GL diff for the standard
+#   5. (Optional, --paired) Paired Metal-vs-GL diff for the static
 #      canary set (PGR2 / Rainbow / Halo) via metal-gl-compare.sh.
 #
 # Exit code is the OR of every gate's status. A non-zero exit blocks
 # the M15 default-on flip per `metal-renderer-plan.md` §M15.
 #
-# Designed to be the single command that decides "is Metal ready to be
-# default-on?" — the answer is YES iff exit == 0 with all four gates
-# (or five with --paired) green. Per project rule #15, this is also a
-# good Codex-validate trigger: any change that flips this exit code
-# from FAIL to PASS (or vice versa) merits an independent read.
+# This command is necessary but no longer sufficient for default-on:
+# M15 also requires the separate gameplay visual bundle with matched
+# gameplay keyframes across GL/Metal/oracle where available. Per project
+# rule #15, this remains a good Codex-validate trigger: any change that
+# flips this exit code from FAIL to PASS (or vice versa) merits an
+# independent read.
 #
 # Usage:
 #   ./m15-visual-gate.sh                         # all 4 standard gates
-#   ./m15-visual-gate.sh --paired                # + paired Metal-vs-GL canary diff
+#   ./m15-visual-gate.sh --paired                # + paired Metal-vs-GL static canary diff
 #   ./m15-visual-gate.sh --skip-canary-regress   # skip step 3 (faster, less coverage)
 #   ./m15-visual-gate.sh --skip-tier1            # skip step 4 (Metal counters only)
 #   ./m15-visual-gate.sh --skip-oracle           # skip step 2 (no real Xbox needed)
@@ -134,9 +135,9 @@ else
     info "04 xbe-harness Tier-1: skipped (--skip-tier1)"
 fi
 
-# --- 5. Paired Metal-vs-GL canary diff (optional) ---------------
+# --- 5. Paired Metal-vs-GL static canary diff (optional) ---------
 if [ "$DO_PAIRED" -eq 1 ]; then
-    info "05 paired Metal-vs-GL canary diff (~12 min for 3 titles)..."
+    info "05 paired Metal-vs-GL static canary diff (~12 min for 3 titles)..."
     PAIRED_OUT="$OUT_DIR/05-paired"
     mkdir -p "$PAIRED_OUT"
     PAIRED_FAIL=0
@@ -150,7 +151,7 @@ if [ "$DO_PAIRED" -eq 1 ]; then
             PAIRED_FAIL=1
         fi
     done
-    [ "$PAIRED_FAIL" -eq 0 ] || fail "05 paired Metal-vs-GL: at least one canary failed"
+    [ "$PAIRED_FAIL" -eq 0 ] || fail "05 paired Metal-vs-GL static canary: at least one canary failed"
 fi
 
 echo "================================================================"

@@ -1,33 +1,29 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-05 (Crimson reclassified as MSAA4 PASS canary
-with the canonical recipe in
-`benchmarks/2026-05-05-crimson-config-not-renderer-bug.md`; the
-previous "Crimson screenshot lands on black transition/loading
-output" framing was the result of `metal-gl-compare.sh` not threading
-`XEMU_METAL_FRONT_FB_FALLBACK=1` to its Metal leg. Earlier 2026-05-04:
-Metal boot/flubber + PGR2/Rainbow follow-up in
-`benchmarks/2026-05-04-metal-pgr2-surface-rtt-validation.md`; PGR2
-texture-bind attribution + early-cache fast-path handoff in
-`benchmarks/2026-05-04-metal-pgr2-texture-bind-attribution.md`. GL
-renderer with `XEMU_GL_MSAA=4` + `surface_scale=2` remains the
-production configuration meeting the user's stated 30/60 FPS at 1080p
-goals. Metal visual canaries (post-2026-05-05 reclassification):
-PGR2 PASS, Rainbow Six 3 loading screen PASS, Halo CE menu PASS,
-Xbox boot/flubber PASS, **Crimson Skies main menu PASS** (sustained
-~30 FPS for 90s with canonical recipe; benchmark
-run `benchmark-runs/20260505-104139-crimson-skies`). Metal PGR2
-shader fallbacks zero post-shared-GLSL-fix; texture binding was the
-measured CPU bottleneck before the early cached-texture bind path.
-M15 remains blocked on (a) F3 cross-title snapshot anchor for paired
-diff (interactive recording needed; proof-of-concept proven for
-Crimson via crimson-canary snapshot), (b) SC2 routed visual canary
-(interactive input recording), (c) front-fb fallback default-on
-policy decision (PGR2 + Crimson now both fallback-dependent).
-Input-latency counters `INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` /
-`INPUT_LAT_US_TOTAL` / `INPUT_LAT_US_MAX` always-on;
-`XEMU_MACOS_NATIVE_INPUT=1` opt-in for the GameController.framework
-backend.)
+Last updated: 2026-05-11 (M15 evidence bundle is incomplete). Use
+`scripts/apple-silicon/m15-bundle-status.py` before new Metal/default-on
+claims; current result is `verdict=incomplete ok=5 fail=4 missing=6`.
+The oracle-side and stable retail trio evidence is green, but title-level
+paired gameplay Metal-vs-GL validation is not: the latest PGR2/Rainbow paired
+passes are capture/static canaries only, Crimson paired diff still fails
+(`changed_pct=14.7560`), SC2/Halo gameplay diffs are missing, PGR2/Rainbow/
+Crimson p99 jitter gates fail, cold shader compile proof is missing, and
+front-fb fallback policy remains undecided. `metal-gl-compare.sh --trigger
+flip` now uses GL `XEMU_GL_SCREENSHOT_PATH` plus Metal
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for cleaner paired PNGs, but production
+visual evidence still requires controller-driven gameplay sequences, multiple
+content-aligned keyframes, and visible GL/Metal/oracle triptychs. GL renderer
+with `XEMU_GL_MSAA=4` +
+`surface_scale=2` remains the production configuration meeting the user's
+stated 30/60 FPS at 1080p goals. Input-latency counters
+`INPUT_USB_POLLS` / `INPUT_BACKEND_UPDATES` / `INPUT_LAT_US_TOTAL` /
+`INPUT_LAT_US_MAX` remain always-on; `XEMU_MACOS_NATIVE_INPUT=1` is the
+opt-in GameController.framework backend.
+
+For the next M15 benchmark session, use the explicit PGR2 recipe in
+`handoff.md`: capture GL gameplay screenshots, capture Metal NV2A screenshots,
+run `m15-gameplay-visual-compare.py`, and inspect `contact-sheet.jpg`. Do not
+log a gameplay visual PASS from a single flip-trigger/static frame.
 
 ## Benchmarking Rules
 

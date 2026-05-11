@@ -1,6 +1,6 @@
 # Tooling gap plan
 
-Last updated: 2026-05-11 (early).
+Last updated: 2026-05-11 (M15 checklist + paired-capture finding).
 
 This note records the feedback gaps that matter for the Metal backend and how
 to close them without turning every Codex session into a pile of background
@@ -277,12 +277,42 @@ Optionally persist a snapshot:
 Current state: the oracle-side gate is green, but the complete default-on
 decision still needs the title-level visual/perf bundle.
 
+Status command:
+
+```sh
+./scripts/apple-silicon/m15-bundle-status.py
+```
+
+This reads existing `benchmark-runs/` artifacts and reports which M15
+preconditions are green, failed, or missing without launching xemu or touching
+the Xbox. As of 2026-05-11 it reports:
+
+- Oracle production gate: green via
+  `benchmark-runs/oracle-validate-m15-20260511Ttargeted/summary.json`
+  (`pass=4`, `fail=0`; targeted run skipped stress).
+- Stable retail oracle trio: green for Crimson Skies, Rainbow Six 3, and PGR2.
+- Paired visual/perf bundle: not green. PGR2/Rainbow latest passes are
+  capture/static-canary evidence only, Crimson paired diff fails, and SC2/Halo
+  gameplay diffs are still missing.
+- P99 jitter: PGR2/Rainbow/Crimson fail the current bundle criteria.
+- Cold shader compile proof and the front-fb fallback policy are still open.
+
+Tooling note: attempting to move the GL leg of `metal-gl-compare.sh` to QMP
+framebuffer capture on 2026-05-11 proved that this app build does not expose
+`screendump` through QMP or HMP. `qmp-capture.py` now has flip-stall sentinel
+support and an HMP/PPM fallback for builds that do expose screendump. The
+paired diff harness has since moved the `--trigger flip` GL leg to
+`XEMU_GL_SCREENSHOT_PATH` and the Metal leg to
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; the remaining tooling gap is gameplay
+sequence capture, keyframe selection, and content-aligned GL/Metal/oracle
+comparison.
+
 Closure path:
 
 1. Run `oracle-validate.sh` before any long Metal route if the real Xbox is in
    the loop.
 2. Run `m15-visual-gate.sh --paired` to exercise build, oracle, canary, XBE
-   matrix, and paired canary diff composition.
+   matrix, and paired static-canary diff composition.
 3. Complete five-title paired Metal-vs-GL route coverage:
    PGR2, Rainbow Six 3, Crimson Skies, Soul Calibur 2, and one broader-sweep
    title.

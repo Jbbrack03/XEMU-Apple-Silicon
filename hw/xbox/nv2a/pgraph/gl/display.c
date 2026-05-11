@@ -23,6 +23,7 @@
 #include "hw/display/vga_int.h"
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/util.h"
+#include "qemu/xemu-display-perf.h"
 #include "renderer.h"
 
 #include <math.h>
@@ -370,6 +371,147 @@ static void gl_fence(void)
                                          (GLuint64)(5000000000));
     assert(result == GL_CONDITION_SATISFIED || result == GL_ALREADY_SIGNALED);
     glDeleteSync(fence);
+}
+
+static char *s_gl_screenshot_path;
+static bool s_gl_screenshot_initialized;
+static bool s_gl_screenshot_taken;
+
+static void pgraph_gl_screenshot_init(void)
+{
+    if (s_gl_screenshot_initialized) {
+        return;
+    }
+    s_gl_screenshot_initialized = true;
+
+    const char *path = getenv("XEMU_GL_SCREENSHOT_PATH");
+    if (path == NULL || path[0] == '\0') {
+        return;
+    }
+    s_gl_screenshot_path = g_strdup(path);
+    xemu_capture_at_flip_stall_init();
+    fprintf(stderr,
+            "xemu-perf: gl_screenshot path=%s trigger=flip-stall\n",
+            s_gl_screenshot_path);
+}
+
+static bool pgraph_gl_screenshot_should_fire(void)
+{
+    pgraph_gl_screenshot_init();
+    if (s_gl_screenshot_path == NULL || s_gl_screenshot_taken) {
+        return false;
+    }
+
+    unsigned long long target = xemu_capture_at_flip_stall_target();
+    if (target == 0) {
+        return false;
+    }
+
+    /* pgraph.c arms the shared flip-stall trigger immediately after the
+     * renderer hook returns. The GL hook captures the same frame by
+     * looking one tick ahead. */
+    unsigned long long next = xemu_capture_at_flip_stall_count() + 1;
+    return next == target;
+}
+
+static bool pgraph_gl_write_display_buffer_png(PGRAPHGLState *r,
+                                               const char *path)
+{
+    unsigned int w = (unsigned int)r->gl_display_buffer_width;
+    unsigned int h = (unsigned int)r->gl_display_buffer_height;
+    if (path == NULL || w == 0 || h == 0 || r->gl_display_buffer == 0) {
+        return false;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, r->disp_rndr.fbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, r->gl_display_buffer, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, 0, 0);
+        return false;
+    }
+
+    GLint prev_pack_alignment = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &prev_pack_alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+    size_t bytes = (size_t)w * (size_t)h * 4u;
+    uint8_t *rgba = (uint8_t *)g_malloc(bytes);
+    glReadPixels(0, 0, (GLsizei)w, (GLsizei)h,
+                 GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, prev_pack_alignment);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, 0, 0);
+
+    size_t row_bytes = (size_t)w * 4u;
+    uint8_t *tmp = (uint8_t *)g_malloc(row_bytes);
+    for (unsigned int y = 0; y < h / 2; y++) {
+        uint8_t *top = rgba + (size_t)y * row_bytes;
+        uint8_t *bot = rgba + (size_t)(h - 1 - y) * row_bytes;
+        memcpy(tmp, top, row_bytes);
+        memcpy(top, bot, row_bytes);
+        memcpy(bot, tmp, row_bytes);
+    }
+    g_free(tmp);
+
+    bool ok = pgraph_gl_dump_rgba8_png_to_file(path, rgba, w, h);
+    g_free(rgba);
+    return ok;
+}
+
+void pgraph_gl_capture_display_if_requested(NV2AState *d)
+{
+    if (!pgraph_gl_screenshot_should_fire()) {
+        return;
+    }
+
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHGLState *r = pg->gl_renderer_state;
+
+    VGADisplayParams vga_display_params;
+    d->vga.get_params(&d->vga, &vga_display_params);
+
+    SurfaceBinding *surface = pgraph_gl_surface_get_within(
+        d, d->pcrtc.start + vga_display_params.line_offset);
+    if (surface == NULL || !surface->color || !surface->width ||
+        !surface->height) {
+        fprintf(stderr,
+                "xemu-perf: gl_screenshot skipped reason=no-front-surface "
+                "path=%s\n",
+                s_gl_screenshot_path);
+        s_gl_screenshot_taken = true;
+        return;
+    }
+
+    pgraph_gl_upload_surface_data(d, surface, !tcg_enabled());
+    if (surface->gl_buffer_msaa && !surface->msaa_resolved) {
+        pgraph_gl_resolve_surface_msaa(d, surface);
+    }
+    gl_fence();
+
+    glo_set_current(g_nv2a_context_display);
+    render_display(d, surface);
+    gl_fence();
+
+    bool ok = pgraph_gl_write_display_buffer_png(r, s_gl_screenshot_path);
+    glo_set_current(g_nv2a_context_render);
+
+    s_gl_screenshot_taken = true;
+    if (ok) {
+        fprintf(stderr,
+                "xemu-perf: gl_screenshot_written path=%s w=%d h=%d\n",
+                s_gl_screenshot_path,
+                r->gl_display_buffer_width,
+                r->gl_display_buffer_height);
+    } else {
+        fprintf(stderr,
+                "xemu-perf: gl_screenshot_write_failed path=%s\n",
+                s_gl_screenshot_path);
+    }
 }
 
 void pgraph_gl_sync(NV2AState *d)

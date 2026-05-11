@@ -1,16 +1,38 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-05 (SC2 input route recorded, GL combat FPS
-~15 measured; audio listen-test closed via SC2 single-title
-verification). This is the canonical operating playbook for
-the native Metal renderer port. It supersedes nothing — `metal-renderer-plan.md`
-remains the slice-level implementation plan (M0–M15), `handoff.md`
-remains the per-session current-state pointer, and `decision-log.md`
-remains the append-only record of binding decisions. This document
-sits one level above those: it captures the **phased process** by
-which we move the Metal renderer from "almost-shipping infrastructure"
-to "default-on production renderer", and prescribes the daily loop a
-session should follow inside each phase.
+Last updated: 2026-05-11 (M15 bundle checklist added; default-on still
+blocked). This is the canonical operating playbook for the native Metal
+renderer port. It supersedes nothing — `metal-renderer-plan.md` remains the
+slice-level implementation plan (M0–M15), `handoff.md` remains the
+per-session current-state pointer, and `decision-log.md` remains the
+append-only record of binding decisions. This document sits one level above
+those: it captures the **phased process** by which we move the Metal renderer
+from "almost-shipping infrastructure" to "default-on production renderer",
+and prescribes the daily loop a session should follow inside each phase.
+
+Start every M15/default-on session with:
+
+```sh
+./scripts/apple-silicon/m15-bundle-status.py
+```
+
+As of 2026-05-11 the bundle is `verdict=incomplete ok=5 fail=4 missing=6`.
+The oracle/stable-retail-trio evidence is green. PGR2/Rainbow gameplay visual
+parity is not proven; the 2026-05-11 paired passes are capture/static-canary
+evidence only. Remaining blockers: matched gameplay keyframe diffs are
+missing for PGR2 / Rainbow / SC2 / Halo, Crimson paired diff fails, PGR2 /
+Rainbow / Crimson p99 jitter gates fail, cold shader compile proof is
+missing, and front-fb fallback policy is undecided. The GL paired leg is now
+in-renderer via `XEMU_GL_SCREENSHOT_PATH`, and Metal paired captures use
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; QMP/HMP `screendump` remains unavailable
+in the current app build.
+
+The next session should not start by re-running static `metal-gl-compare.sh`
+captures. Follow the command recipe in `handoff.md`: capture a fresh PGR2 GL
+gameplay sequence, capture a fresh Metal NV2A screenshot sequence with the same
+route, then run `m15-gameplay-visual-compare.py` with the existing PGR2 oracle
+composite frames and inspect the generated contact sheet. Repeat for Rainbow
+only after the PGR2 evidence artifact is understood.
 
 This document was added 2026-05-04 alongside the parallel automation
 slices D1 (this doc) and W1 / W2 / W3 / W4 / W5 (auto-on validation,
@@ -27,9 +49,10 @@ of each.
 
 ## 1. Status banner
 
-**Phase pointer: Phase 1 — Translation Correctness, ACTIVE.**
+**Phase pointer: Phase 1/2 boundary — Translation Correctness plus Visual
+Parity closure, ACTIVE.**
 
-Date: 2026-05-05. Last canary state pulled from `handoff.md`:
+Date: 2026-05-11. Last canary state pulled from `handoff.md`:
 
 - PGR2 MSAA4: **PASS** as a static-canary
   (`benchmark-runs/20260504-100458-pgr2`,
@@ -295,13 +318,14 @@ are the smaller of the GL and Metal capture dimensions per W6).
 `--out-dir` overrides the default `benchmark-runs/<TS>-metal-gl-
 compare-<game>/` output path.
 
-The harness runs the same scripted route under GL and Metal at
-matched screenshot intervals (GL via `screencapture` window-targeted
-to the xemu window; Metal via the in-renderer drawable PNG path), runs
-`compare-screenshots.py` per requested frame, and writes a side-by-
-side diff plus a `report.md` + `summary.json` PASS/FAIL verdict.
-Per-pixel diff above `--threshold` becomes the failing-frame index
-that Section 3.3's per-draw RT dump targets.
+The harness runs the same scripted route under GL and Metal. In
+`--trigger flip` mode, GL captures through `XEMU_GL_SCREENSHOT_PATH` and Metal
+captures through `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; the older interval mode
+still uses window-targeted `screencapture` for GL. It runs
+`compare-screenshots.py` per requested frame and writes a side-by-side diff
+plus a `report.md` + `summary.json` PASS/FAIL verdict. Treat this as static
+canary evidence unless the summary is marked `evidence_class=gameplay` after
+multiple gameplay keyframes have been selected and content-aligned.
 
 When `metal-gl-compare.sh` is not yet available in your branch, the
 fallback is two manually-paired `run-benchmark.sh` invocations with

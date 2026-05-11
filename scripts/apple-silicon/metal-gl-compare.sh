@@ -30,6 +30,8 @@ usage: $0 <game> [--input <csv>] [--frames N,M,K]
                  [--duration seconds] [--out-dir <path>]
                  [--snapshot <tag>] [--loadvm-at <sec>]
                  [--trigger frame|flip] [--trigger-ordinal <N>]
+                 [--evidence-class canary|gameplay|capture]
+                 [--metal-no-validate]
                  [--help]
 
 Paired Metal-vs-GL visual + perf diff harness. Runs the same game/input
@@ -76,15 +78,22 @@ Options:
                      XEMU_CAPTURE_AT_FLIP_STALL counts NV097_FLIP_STALL
                      events (a guest-side page-flip request) and arms a
                      one-shot capture on the --trigger-ordinal-th event.
-                     The Metal leg fires its in-renderer screenshot
-                     directly; the GL leg watches a sentinel file
-                     touched by xemu and runs screencapture once.
+                     The Metal leg fires its in-renderer NV2A texture
+                     screenshot directly; the GL leg writes an
+                     in-renderer display-framebuffer PNG.
   --trigger-ordinal <N>
                      F1 — N for the trigger.  Defaults: 30 for
                      \`flip\` (gives the post-loadvm guest several
                      frames to settle / shader cache to warm), 60 for
                      \`frame\` (matches the existing harness default
                      submit-time at_frame).
+  --evidence-class <class>
+                     Classify the visual evidence written to summary.json.
+                     Use "gameplay" only for matched gameplay keyframes from
+                     a gameplay route. Default: canary.
+  --metal-no-validate
+                     Do not enable Metal API validation for the Metal leg.
+                     Use this for product-like perf/jitter measurements.
   --help             Print this usage.
 
 Exit codes:
@@ -113,6 +122,8 @@ SNAPSHOT_TAG=""
 LOADVM_AT="2"
 TRIGGER="frame"
 TRIGGER_ORDINAL=""
+METAL_VALIDATE=1
+EVIDENCE_CLASS="canary"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -170,6 +181,13 @@ while [[ $# -gt 0 ]]; do
             TRIGGER_ORDINAL="$2"; shift 2 ;;
         --trigger-ordinal=*)
             TRIGGER_ORDINAL="${1#--trigger-ordinal=}"; shift ;;
+        --evidence-class)
+            [[ $# -ge 2 ]] || { err "--evidence-class requires a value"; exit 2; }
+            EVIDENCE_CLASS="$2"; shift 2 ;;
+        --evidence-class=*)
+            EVIDENCE_CLASS="${1#--evidence-class=}"; shift ;;
+        --metal-no-validate)
+            METAL_VALIDATE=0; shift ;;
         --)
             shift; break ;;
         --*)
@@ -240,6 +258,11 @@ esac
 case "$TRIGGER" in
     frame|flip) ;;
     *) err "--trigger must be 'frame' or 'flip' (got '$TRIGGER')"; exit 2 ;;
+esac
+
+case "$EVIDENCE_CLASS" in
+    canary|gameplay|capture) ;;
+    *) err "--evidence-class must be canary, gameplay, or capture (got '$EVIDENCE_CLASS')"; exit 2 ;;
 esac
 
 if [[ -z "$TRIGGER_ORDINAL" ]]; then
@@ -341,6 +364,12 @@ if [[ -n "$SNAPSHOT_TAG" ]]; then
     log "  loadvm_at   = ${LOADVM_AT}s"
 fi
 log "  trigger     = $TRIGGER (ordinal=$TRIGGER_ORDINAL)"
+log "  evidence    = $EVIDENCE_CLASS"
+if [[ "$METAL_VALIDATE" -eq 1 ]]; then
+    log "  metal_validate = on"
+else
+    log "  metal_validate = off (--metal-no-validate)"
+fi
 
 # F1 — sentinel file the GL leg's macos-capture.sh polls when --trigger
 # flip is active. Lives under the harness OUT_DIR so the per-leg run
@@ -374,17 +403,15 @@ run_gl() {
     # macos-capture.sh runs `screencapture -l <wid>` against the
     # xemu window only, instead of the full desktop. This bounds
     # the GL capture to the same logical region the Metal leg's
-    # in-renderer drawable PNG covers; any residual size mismatch
+    # in-renderer texture PNG covers; any residual size mismatch
     # (retina vs. drawable scaling) is absorbed by the
     # `--resize smaller` normalization in compare-screenshots.py.
     #
     # F1 (2026-05-04): when --trigger flip, set the renderer-agnostic
-    # XEMU_CAPTURE_AT_FLIP_STALL=N + XEMU_CAPTURE_FLIP_STALL_SENTINEL
-    # env vars; macos-capture.sh polls the sentinel and one-shots a
-    # screencapture when xemu touches it. The legacy interval-based
-    # XEMU_BENCH_SCREENSHOT_INTERVAL stays in the env so the
-    # per-launcher metadata still records sane values, but
-    # macos-capture.sh's sentinel-mode branch ignores them.
+    # XEMU_CAPTURE_AT_FLIP_STALL=N env var. The GL renderer writes an
+    # in-renderer PNG via XEMU_GL_SCREENSHOT_PATH at that flip, avoiding
+    # macOS window chrome / scaling artifacts. The old macOS screenshot
+    # backend remains the frame-trigger fallback.
     local gl_extra_env=()
     # Canonical M15 recipe defaults for the GL leg (user env wins).
     # The geometry-shader bypass + lock-free PGRAPH read flags are
@@ -396,7 +423,7 @@ run_gl() {
     # comparable. XEMU_CAPTURE_WINDOW_REQUIRED=1 makes the GL leg
     # INFRA-FAIL instead of falling back to full-desktop screencapture
     # when window-id lookup fails — full-desktop capture compares
-    # macOS desktop chrome against the Metal in-renderer drawable PNG,
+    # macOS desktop chrome against the Metal in-renderer texture PNG,
     # producing meaningless ~70% changed_pct FAILs (Codex review,
     # 2026-05-05).
     [[ "${XEMU_NATIVE_TRI_DEPTH+x}" != "x" ]] && gl_extra_env+=("XEMU_NATIVE_TRI_DEPTH=1")
@@ -414,17 +441,26 @@ run_gl() {
         # known state.
         rm -f "$FLIP_STALL_SENTINEL" || true
         gl_extra_env+=("XEMU_CAPTURE_AT_FLIP_STALL=$TRIGGER_ORDINAL"
-                       "XEMU_CAPTURE_FLIP_STALL_SENTINEL=$FLIP_STALL_SENTINEL")
+                       "XEMU_CAPTURE_FLIP_STALL_SENTINEL=$FLIP_STALL_SENTINEL"
+                       "XEMU_GL_SCREENSHOT_PATH=$OUT_DIR/gl/screenshot.png")
     fi
     set +e
-    env "${gl_extra_env[@]}" \
-        XEMU_RENDERER=GL \
-        XEMU_BENCH_SCREENSHOT_BACKEND=macos \
-        XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
-        XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
-        XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
-        "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
-        > "$GL_LAUNCHER_LOG" 2>&1
+    if [[ "$TRIGGER" == "flip" ]]; then
+        env "${gl_extra_env[@]}" \
+            XEMU_RENDERER=GL \
+            XEMU_BENCH_SCREENSHOT_BACKEND=none \
+            "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
+            > "$GL_LAUNCHER_LOG" 2>&1
+    else
+        env "${gl_extra_env[@]}" \
+            XEMU_RENDERER=GL \
+            XEMU_BENCH_SCREENSHOT_BACKEND=macos \
+            XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
+            XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
+            XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
+            "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
+            > "$GL_LAUNCHER_LOG" 2>&1
+    fi
     rc=$?
     set -e
     if [[ $rc -ne 0 ]]; then
@@ -443,18 +479,22 @@ run_gl() {
 }
 
 # Run the Metal candidate. Uses --metal-screenshot to drive the in-renderer
-# PNG capture path so the encoded image is byte-identical to the user-
-# visible drawable (no Screen-Recording dialog, no window occlusion).
+# PNG capture path, with XEMU_METAL_SCREENSHOT_SOURCE=nv2a so the encoded
+# image is the renderer-published NV2A display texture, not the post-ImGui
+# drawable. That matches the GL leg's XEMU_GL_SCREENSHOT_PATH display PNG
+# and keeps xemu menu/toast overlays out of visual diffs.
 run_metal() {
     log "starting Metal candidate run (XEMU_RENDERER=METAL)"
     local rc
     local metal_shot_base="$OUT_DIR/metal/screenshot.png"
 
-    # XEMU_METAL_VALIDATION=1 — explicit even if W1 already auto-ons it.
+    # XEMU_METAL_VALIDATION=1 by default — explicit even if W1 already
+    # auto-ons it. --metal-no-validate disables it for product-like perf
+    # measurements where validation overhead would skew the jitter gate.
     # W6 (2026-05-04): --metal-no-hud is REQUIRED — W1 auto-ons
-    # XEMU_METAL_HUD=1 for any Metal benchmark, and the HUD overlay
-    # would pollute the captured PNGs versus the GL leg (which has
-    # no overlay). Validation stays on; only the visual HUD is off.
+    # Apple's Metal Performance HUD for any Metal benchmark. The xemu
+    # ImGui UI is avoided separately by capturing source=nv2a below.
+    # Validation stays on; only Apple's visual HUD is off.
     #
     # F1 (2026-05-04): in --trigger flip mode the in-renderer
     # screenshot is one-shot (XEMU_METAL_SCREENSHOT_INTERVAL is left
@@ -463,7 +503,7 @@ run_metal() {
     # because that env (XEMU_METAL_SCREENSHOT_PATH) is what enables the
     # blit-and-encode path inside ui/xemu-metal.mm; without it the
     # consume() call on the renderer side has nowhere to write.
-    local metal_extra_env=()
+    local metal_extra_env=("XEMU_METAL_SCREENSHOT_SOURCE=nv2a")
     local metal_extra_args=()
     # Canonical M15 Metal recipe defaults (user env wins). The
     # documented PASS recipe for the four green canaries
@@ -507,10 +547,14 @@ run_metal() {
         metal_extra_env+=("XEMU_METAL_SCREENSHOT_INTERVAL=$METAL_SCREENSHOT_INTERVAL_FRAMES")
         metal_extra_args+=("--metal-screenshot-at-frame" "$METAL_SCREENSHOT_AT_FRAME")
     fi
+    if [[ "$METAL_VALIDATE" -eq 0 ]]; then
+        metal_extra_args+=("--metal-no-validate")
+    else
+        metal_extra_env+=("XEMU_METAL_VALIDATION=1")
+    fi
     set +e
     env "${metal_extra_env[@]}" \
         XEMU_RENDERER=METAL \
-        XEMU_METAL_VALIDATION=1 \
         XEMU_BENCH_SCREENSHOT_BACKEND=none \
         "$RUN_BENCHMARK" \
             --metal-screenshot "$metal_shot_base" \
@@ -539,6 +583,13 @@ run_metal() {
 
 # Returns the sorted list of GL screenshot paths to stdout.
 gl_screenshots() {
+    if [[ "$TRIGGER" == "flip" ]]; then
+        local direct="$OUT_DIR/gl/screenshot.png"
+        if [[ -e "$direct" ]]; then
+            printf '%s\n' "$direct"
+        fi
+        return 0
+    fi
     local gl_run_dir
     gl_run_dir="$(cat "$OUT_DIR/gl/run-dir.txt")"
     local dir="$gl_run_dir/screenshots"
@@ -687,7 +738,7 @@ diff_one_frame() {
 
     # W6 (2026-05-04): pass --resize smaller so a size mismatch
     # between the GL full-desktop / window-targeted capture and the
-    # Metal in-renderer drawable PNG is normalized rather than
+    # Metal in-renderer texture PNG is normalized rather than
     # exiting INFRA-FAIL. Records the raw sizes in the per-frame TSV
     # so the report can show what was normalized.
     local stdout_file="$frame_dir/compare-stdout.txt"
@@ -828,12 +879,21 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf -- '- metal_run: %s\n' "$METAL_RUN_DIR"
     printf -- '- gl_launcher_log: %s\n' "$GL_LAUNCHER_LOG"
     printf -- '- metal_launcher_log: %s\n' "$METAL_LAUNCHER_LOG"
-    printf -- '- gl_capture: macos screencapture, XEMU_CAPTURE_WINDOW_PATTERN=xemu (window-id-targeted; falls back to full desktop when xemu window not found)\n'
-    printf -- '- metal_capture: in-renderer XEMU_METAL_SCREENSHOT_PATH (post-HUD, pre-presentDrawable: drawable PNG)\n'
-    printf -- '- metal_hud: off (--metal-no-hud passed; HUD overlay never bleeds into Metal-leg PNGs)\n'
-    printf -- '- metal_validation: on (XEMU_METAL_VALIDATION=1 explicit on Metal leg)\n'
+    if [[ "$TRIGGER" == "flip" ]]; then
+        printf -- '- gl_capture: in-renderer XEMU_GL_SCREENSHOT_PATH (display-framebuffer PNG at flip-stall trigger)\n'
+    else
+        printf -- '- gl_capture: macos screencapture, XEMU_CAPTURE_WINDOW_PATTERN=xemu (window-id-targeted; falls back to full desktop when xemu window not found)\n'
+    fi
+    printf -- '- metal_capture: in-renderer XEMU_METAL_SCREENSHOT_PATH (pre-HUD NV2A published texture PNG)\n'
+    printf -- '- metal_hud: off (--metal-no-hud passed; Metal Performance HUD overlay disabled)\n'
+    if [[ "$METAL_VALIDATE" -eq 1 ]]; then
+        printf -- '- metal_validation: on (XEMU_METAL_VALIDATION=1 explicit on Metal leg)\n'
+    else
+        printf -- '- metal_validation: off (--metal-no-validate passed for product-like perf)\n'
+    fi
     printf -- '- size_mismatch_policy: --resize smaller (compare-screenshots.py LANCZOS-resizes the larger image down to the smaller dimensions before crop+diff)\n'
     printf -- '- snapshot: %s\n' "${SNAPSHOT_TAG:-(none; cold launch)}"
+    printf -- '- evidence_class: %s\n' "$EVIDENCE_CLASS"
     if [[ -n "$SNAPSHOT_TAG" ]]; then
         printf -- '- loadvm_at: %ss\n' "$LOADVM_AT"
     fi
@@ -881,11 +941,25 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf '  "gl_run_dir": "%s",\n' "$GL_RUN_DIR"
     printf '  "metal_run_dir": "%s",\n' "$METAL_RUN_DIR"
     printf '  "perf_summary_path": "%s",\n' "$PERF_DIFF_FILE"
-    printf '  "gl_capture": "macos-screencapture-window-targeted",\n'
-    printf '  "metal_capture": "in-renderer-drawable-png",\n'
+    if [[ "$TRIGGER" == "flip" ]]; then
+        printf '  "gl_capture": "in-renderer-gl-display-png",\n'
+    else
+        printf '  "gl_capture": "macos-screencapture-window-targeted",\n'
+    fi
+    printf '  "metal_capture": "in-renderer-nv2a-png",\n'
     printf '  "metal_hud": "off",\n'
-    printf '  "metal_validation": "on",\n'
+    if [[ "$METAL_VALIDATE" -eq 1 ]]; then
+        printf '  "metal_validation": "on",\n'
+    else
+        printf '  "metal_validation": "off",\n'
+    fi
     printf '  "size_mismatch_policy": "resize-smaller",\n'
+    printf '  "evidence_class": "%s",\n' "$EVIDENCE_CLASS"
+    if [[ "$EVIDENCE_CLASS" == "gameplay" ]]; then
+        printf '  "gameplay_evidence": true,\n'
+    else
+        printf '  "gameplay_evidence": false,\n'
+    fi
     printf '  "snapshot": "%s",\n' "${SNAPSHOT_TAG:-}"
     printf '  "loadvm_at_seconds": %s,\n' "${LOADVM_AT:-0}"
     printf '  "trigger": "%s",\n' "$TRIGGER"

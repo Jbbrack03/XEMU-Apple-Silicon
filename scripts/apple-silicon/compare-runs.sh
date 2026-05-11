@@ -75,6 +75,7 @@ printf "%-40s | %12s | %12s | %10s | %s\n" "metric" "baseline" "candidate" "delt
 printf "%-40s-+-%-12s-+-%-12s-+-%-10s-+-%s\n" "----------------------------------------" "------------" "------------" "----------" "-------"
 
 regressed=0
+missing=0
 for entry in "${metrics[@]}"; do
     name="${entry%% *}"
     direction="${entry##* }"
@@ -82,6 +83,7 @@ for entry in "${metrics[@]}"; do
     cv="$(get "$cand_summary" "$name")"
     if [[ -z "$bv" || -z "$cv" ]]; then
         printf "%-40s | %12s | %12s | %10s | %s\n" "$name" "${bv:-?}" "${cv:-?}" "?" "missing"
+        missing=1
         continue
     fi
     # Compute percent delta with awk (handles floats and zero baseline).
@@ -115,7 +117,10 @@ for entry in "${metrics[@]}"; do
 done
 
 echo
-if (( regressed )); then
+if (( missing )); then
+    echo "VERDICT: missing metrics; benchmark interval data is incomplete"
+    exit 1
+elif (( regressed )); then
     echo "VERDICT: candidate regresses on at least one metric beyond ${NOISE_PCT}%"
     exit 1
 else
