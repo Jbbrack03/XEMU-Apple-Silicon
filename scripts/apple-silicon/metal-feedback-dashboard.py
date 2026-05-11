@@ -58,6 +58,16 @@ def latest_summary(pattern: str) -> tuple[Path, dict[str, Any]] | None:
     return d, data
 
 
+def latest_json_artifact(pattern: str, filename: str) -> tuple[Path, dict[str, Any]] | None:
+    d = latest_dir(pattern, filename)
+    if not d:
+        return None
+    data = read_json(d / filename)
+    if data is None:
+        return None
+    return d, data
+
+
 def xcode_mcp_state() -> dict[str, str]:
     out: dict[str, str] = {}
     try:
@@ -107,6 +117,33 @@ def xbe_status_counts(summary: dict[str, Any]) -> dict[str, int]:
         status = str(row.get("status", "unknown"))
         counts[status] = counts.get(status, 0) + 1
     return counts
+
+
+def retail_workflow_coverage() -> list[str]:
+    latest: dict[str, tuple[Path, dict[str, Any]]] = {}
+    for workflow in RUNS.glob("retail-oracle-workflow-*/workflow.json"):
+        data = read_json(workflow)
+        if not data:
+            continue
+        title = str(data.get("title") or workflow.parent.name)
+        current = latest.get(title)
+        candidate = (workflow.parent, data)
+        if current is None:
+            latest[title] = candidate
+            continue
+        prev_path, _ = current
+        if (workflow.stat().st_mtime, workflow.parent.name) > (prev_path.stat().st_mtime, prev_path.name):
+            latest[title] = candidate
+    lines = []
+    for title in sorted(latest):
+        path, data = latest[title]
+        status = str(data.get("status", "unknown"))
+        extra = ""
+        reasons = data.get("blocked_reasons") or data.get("failed_reasons")
+        if isinstance(reasons, list) and reasons:
+            extra = f" ({reasons[0]})"
+        lines.append(f"{title}: {status}{extra} `{path}`")
+    return lines
 
 
 def emit_dashboard() -> str:
@@ -192,15 +229,30 @@ def emit_dashboard() -> str:
     else:
         lines.append("- Tools readiness: no summary found")
 
+    retail_workflow = latest_json_artifact("retail-oracle-workflow-*", "workflow.json")
+    if retail_workflow:
+        path, data = retail_workflow
+        lines.append(
+            f"- Retail-game real-Xbox workflow: {data.get('status', 'unknown')} "
+            f"title={data.get('title', '?')} `{path}`"
+        )
+    else:
+        lines.append("- Retail-game real-Xbox workflow: no workflow artifact found")
+
     retail = latest_dir("retail-oracle-smoke-*", "verdict.json")
     if retail:
         data = read_json(retail / "verdict.json") or {}
-        lines.append(f"- Retail-game real-Xbox smoke: {data.get('verdict', 'unknown')} `{retail}`")
+        lines.append(f"- Legacy retail-game smoke gate: {data.get('verdict', 'unknown')} `{retail}`")
         reasons = data.get("blocked_reasons")
         if isinstance(reasons, list) and reasons:
             lines.append(f"  - blocker: {reasons[0]}")
     else:
-        lines.append("- Retail-game real-Xbox smoke: no verdict found")
+        lines.append("- Legacy retail-game smoke gate: no verdict found")
+
+    coverage = retail_workflow_coverage()
+    if coverage:
+        lines.append("- Retail workflow title coverage:")
+        lines.extend([f"  {line}" for line in coverage])
 
     xbe_direct = latest_summary("xbe-*")
     if xbe_direct:
@@ -234,13 +286,14 @@ def emit_dashboard() -> str:
     lines.append("## Remaining feedback gaps")
     lines.append("- Xcode MCP is installed but globally disabled by policy; use only for real Xcode/Swift tasks or targeted GPU-trace inspection.")
     lines.append("- `.gputrace` capture now has automatic sidecar manifests; deep draw/resource inspection is still manual in Xcode.")
-    lines.append("- Tier-1 real-Xbox diag input is shipped; Tier-2 readback/symbol tools are present; retail-game input + autonomous dashboard return are not proven.")
+    lines.append("- Retail gameplay is live-proven on the stable trio: Crimson, Rainbow, and PGR2 through OGX360 + dashboard FTP + controller IGR.")
+    lines.append("- SC2 remains installed and useful for emulator-side validation, but it is deferred as a retail-oracle production gate after repeated real-hardware return failures on the current Xbox image.")
     lines.append("- Full M15 title gate still needs five-title paired visual/perf coverage, p99 jitter proof, cold shader compile proof, and front-fb fallback policy.")
     lines.append("")
     lines.append("## Suggested next commands")
     lines.append("- `./scripts/apple-silicon/oracle-validate.sh`")
     lines.append("- `./scripts/apple-silicon/metal-tools-readiness.sh --quick`")
-    lines.append("- `./scripts/apple-silicon/retail-oracle-smoke.py --game-xbe 'F:\\\\Games\\\\Crimson Skies\\\\default.xbe' --input-csv scripts/apple-silicon/input-scripts/crimson-gameplay.csv`")
+    lines.append("- `python3 scripts/apple-silicon/retail-oracle-workflow.py --title crimson`")
     lines.append("- `./scripts/apple-silicon/m15-visual-gate.sh --paired`")
     lines.append("- `./scripts/apple-silicon/metal-gl-compare.sh sc2 --input scripts/apple-silicon/input-scripts/sc2-gameplay.csv --duration 120`")
     return "\n".join(lines) + "\n"

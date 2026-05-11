@@ -1,6 +1,6 @@
 # Tooling gap plan
 
-Last updated: 2026-05-07.
+Last updated: 2026-05-11 (early).
 
 This note records the feedback gaps that matter for the Metal backend and how
 to close them without turning every Codex session into a pile of background
@@ -67,6 +67,22 @@ Current state:
 - Tier-1 real-Xbox controller injection is shipped for diag XBEs.
 - The Tier-2 readback/preflight tools are now present.
 - Retail games still do not consume the synthetic controller buffer.
+- The OGX360 hardware bridge is now the production retail-game input path.
+- The end-to-end retail workflow is live-proven on Crimson Skies through
+  dashboard FTP launch, OGX360 replay, composite capture, controller IGR, and
+  dashboard FTP return.
+- The same end-to-end retail workflow is now also live-proven on Rainbow Six 3
+  at `benchmark-runs/retail-oracle-workflow-rainbow-20260510T214732Z/`.
+- The same end-to-end retail workflow is now also live-proven on PGR2 at
+  `benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/`.
+- The production retail-oracle title set is now the stable trio:
+  Crimson Skies, Rainbow Six 3, and PGR2.
+- `retail-oracle-workflow.py` can now list installed retail titles and
+  auto-resolve tracked titles against the Xbox's current FTP inventory instead
+  of assuming one fixed install path.
+- The wrapper also now accepts title-specific IGR-proof input routes plus
+  explicit exit timing knobs (`--igr-proof-input-csv`, `--exit-delay-ms`,
+  `--exit-hold-ms`, `--exit-attempts`, `--exit-repeat-gap-ms`).
 
 Closed pieces:
 
@@ -94,6 +110,14 @@ Closed pieces:
   the route, records composite A/V, launches the retail XBE, runs the supplied
   input backend command, waits for dashboard FTP recovery, and extracts
   keyframes plus audio artifacts.
+- `scripts/apple-silicon/retail-oracle-workflow.py` is the production wrapper
+  around the bridge proof, IGR proof, capture preflight, and gameplay run. The
+  2026-05-10 Crimson run at
+  `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/`
+  is the first accepted end-to-end retail-game oracle proof.
+- `scripts/apple-silicon/ogx360-bridge/` is now the shipped hardware backend
+  for retail-title control. Bench validation and Xbox-side readback validation
+  both passed on 2026-05-09/10, and the workflow reuses those proofs.
 - `scripts/apple-silicon/xbe-inspect.py` plus
   `docs/apple-silicon/retail-gameplay-software-paths.md` record the
   software-only verdict: agent RPC after launch and LaunchData-only preload
@@ -112,16 +136,112 @@ Closed pieces:
 
 Remaining implementation piece:
 
-- Build the first per-title patcher, starting with PGR2.
-- Prove autonomous dashboard return from the patched title before gameplay
-  input.
-- Prove one visible patched input event.
-- Run the existing PGR2 route through `retail-gameplay-oracle.py` with
-  title-patch input and autonomous-exit evidence.
-- Add successful `retail-oracle-smoke.py` evidence for at least one installed
-  retail title before using real-Xbox footage as a gameplay oracle for Metal.
-- Keep the hardware-controller-emulator path as the fallback if per-title
-  patching stalls or broader generic title coverage becomes necessary.
+- Soul Calibur 2 is now installed and its gameplay route is live-proven to
+  reach character-select and active combat, but controller IGR from that title
+  still black-screens/hangs the Xbox before dashboard FTP returns. The current
+  failure artifact is
+  `benchmark-runs/retail-oracle-workflow-sc2-20260510T232019Z/`.
+- A second retry using the wrapper-level exit-timing knobs
+  (`benchmark-runs/retail-oracle-workflow-sc2-20260511T005611Z/`,
+  early single-attempt IGR from the round-end loss screen) failed the same
+  way, so SC2 should now be treated as a title-specific hard blocker for the
+  generic controller-IGR exit path, not as a blocker for the stable retail
+  workflow trio.
+- A third return-only retry under a live BIOS change from
+  `iND-BiOS IGRMODE=2` to `IGRMODE=1` (compatible) also failed:
+  `benchmark-runs/sc2-compatible-igr-proof-20260511T012513Z/` still
+  ended with `dashboard_returned=false` and the Xbox off-network during
+  both the primary and fallback recovery waits. The public iND-BiOS
+  warning about SC2 quick-IGR lockups explains part of the symptom, but
+  on this console compatible IGR was not sufficient to make SC2 return
+  production-safe.
+- A fourth return-only retry with `IGRMODE=1` still live but the legacy
+  `E:\\x2config.ini` IGR layer disabled (`igrEnabled = 0`) also failed:
+  `benchmark-runs/sc2-compatible-igr-x2off-proof-20260511T022925Z/`
+  still ended with `dashboard_returned=false`. The failure shape changed
+  slightly during fallback recovery, so the stack configuration matters,
+  but removing the second IGR layer still did not make SC2 return
+  production-safe.
+- The immediate next production path is now patch-based rather than more
+  generic-IGR tuning. Offline prep succeeded on 2026-05-11:
+  `benchmark-runs/sc2-offline-xbe/Default.xbe` matches the configured
+  SC2 SHA-256 exactly, a return-only patch artifact exists at
+  `benchmark-runs/retail-title-patches/return-only-20260511T023825Z/sc2/default.xbe`,
+  and a full route-driven patch artifact exists at
+  `benchmark-runs/retail-title-patches/route-20260511T023825Z/sc2/default.xbe`.
+  The route patch resolved unique hooks for `xinputgetcaps`,
+  `xinputgetstate`, and `xinputsetstate`, with a direct
+  `HalReturnToFirmware(reboot)` exit after the route.
+- On 2026-05-11 the SC2 return-only patch was re-proved live on the
+  current Xbox image at
+  `benchmark-runs/retail-return-proof-sc2-20260511T0916-localreturn/`
+  (`status=ok`, `dashboard_ftp_returned=true`).
+- The same day, the full SC2 route patch was launched live at
+  `benchmark-runs/retail-automation-proof-sc2-route-20260511T0920/`.
+  It got past upload/launch but still failed to return:
+  `status=fail`, `dashboard_ftp_returned=false`, `capture_rc=137`,
+  `video.mp4 missing`, and the Xbox ended fully down (`ping=false`,
+  `ftp=false`, `agent=false`). So the title-local direct reboot path is
+  good in isolation, but the full embedded SC2 route patch is not yet
+  production-safe.
+- A smaller intermediate SC2 physical-device input-proof patch now
+  exists at
+  `benchmark-runs/retail-title-patches/input-proof-20260511T132911Z/sc2/default.xbe`.
+  It was then live-tested at
+  `benchmark-runs/retail-automation-proof-sc2-input-20260511T0832/`
+  and also failed to return (`status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, Xbox fully down afterward).
+  That result matters: the breakage is not specific to the huge embedded
+  SC2 gameplay route. Even a tiny 8-event proof pulse on the current
+  XInput-hook patch set is enough to strand SC2.
+- `scripts/apple-silicon/retail-title-patcher.py` now supports
+  `--physical-hook-profile {full,state-only}` so SC2 hook narrowing can
+  be tested directly.
+- `benchmark-runs/retail-title-patches/input-proof-20260511T141421Z/sc2/default.xbe`
+  is the first SC2 `state-only` physical patch (hooking only
+  `xinputgetstate`).
+- `benchmark-runs/retail-automation-proof-sc2-input-stateonly-20260511T1415/`
+  live-tested that `state-only` patch on 2026-05-11 and still failed to
+  return (`status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, Xbox fully down through the
+  full recovery window).
+- `scripts/apple-silicon/retail-title-patcher.py` also now supports
+  `--proof-style {pulse,idle}` for `--mode input-proof`; an SC2 idle
+  state-only artifact is staged at
+  `benchmark-runs/retail-title-patches/input-proof-20260511T142237Z/sc2/default.xbe`
+  for the next live reboot window.
+- `benchmark-runs/retail-automation-proof-sc2-input-stateonly-idle-20260511T1503/`
+  then live-tested that idle state-only patch on 2026-05-11 and it still
+  failed to return (`status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, Xbox down through the full
+  recovery window).
+- A title-owned SC2 wrapper-bypass artifact now exists at
+  `benchmark-runs/retail-title-patches/sc2-local-zero-20260511T175812Z/sc2/default.xbe`.
+  It redirects the SC2-local wrapper entry at `0x001c410` to the sibling
+  helper at `0x001c4c0`, which zeroes the same analog output fields
+  without touching `XInputGetState`.
+- A second title-owned artifact now exists at
+  `benchmark-runs/retail-title-patches/sc2-local-zero-return-20260511T175916Z/sc2/default.xbe`,
+  which detours that same SC2-local wrapper to a stub that bypasses
+  `XInputGetState`, zeroes the same analog output fields, and calls
+  `HalReturnToFirmware(reboot)` after a 25 s dwell.
+- `benchmark-runs/retail-automation-proof-sc2-local-zero-return-20260511T1800/`
+  then live-tested that title-owned wrapper detour on 2026-05-11 and it
+  still failed to return (`status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, Xbox down through the full
+  recovery window).
+- Immediate next work should move from rung-climbing to deeper patch
+  surgery: intercepting `xinputgetstate` alone is enough to break SC2, and
+  the first title-owned wrapper detour at `0x001c410` is still not enough
+  to restore dashboard FTP. The next experiment should patch a later
+  title-owned input consumer farther downstream than that wrapper, or add
+  breadcrumb/marker output to the current title-owned stub before another
+  live proof. This is now deferred work, not a blocker for the production
+  retail oracle.
+- Decide whether Halo or another sixth title should join the retail-gameplay
+  oracle set for the broader M15 evidence bundle.
+- Keep the per-title patching and Tier-2 kernel-hook material as research or
+  fallback paths, not as blockers for the hardware-backed retail workflow.
 
 ## Gap 3: session-start state visibility
 
@@ -186,8 +306,7 @@ Quick mode checks:
 - Shell syntax for benchmark and gate scripts.
 - Controller-readback source/manifest and built-XBE presence.
 - Whether previous capture-manifest and kernel-export artifacts exist.
-- Whether a successful retail-game real-Xbox smoke proof exists. Today this is
-  expected to warn until Tier-2 input/exit is closed.
+- Whether a successful retail-game real-Xbox workflow or smoke proof exists.
 
 Full mode additionally runs `oracle-validate.sh` and
 `m15-visual-gate.sh --paired`.

@@ -788,6 +788,7 @@ def patch_xinput_automation(
     route_source: str,
     exit_after_ms: int,
     device_mode: str,
+    physical_hook_profile: str,
     routine_name: str,
     expected_sha256: str | None,
     expected_title_id: str | None,
@@ -797,8 +798,6 @@ def patch_xinput_automation(
         raise FileExistsError(f"{dst} exists; pass --force to overwrite")
     if not src.exists():
         raise FileNotFoundError(src)
-    if not events:
-        raise ValueError("automation route has no events")
 
     src_sha = sha256_file(src)
     if expected_sha256 and src_sha.lower() != expected_sha256.lower():
@@ -829,9 +828,12 @@ def patch_xinput_automation(
         setstate_hook = hooks.get("xinputsetstate")
         if not setstate_hook or setstate_hook.get("status") == "ambiguous":
             raise ValueError(f"{src}: could not locate a unique XInputSetState hook")
+    elif physical_hook_profile not in ("full", "state-only"):
+        raise ValueError(f"unknown physical hook profile: {physical_hook_profile}")
 
     route_blob = encode_route_events(events)
-    if exit_after_ms <= events[-1][0]:
+    last_event_ms = events[-1][0] if events else -1
+    if exit_after_ms <= last_event_ms:
         raise ValueError("--exit-after-ms must be after the final route event")
 
     last = sections[-1]
@@ -863,7 +865,15 @@ def patch_xinput_automation(
 
     patched_hooks: dict[str, Any] = {}
     fake_device_hooks = {"xgetdevices", "xgetdevicechanges", "xinputopen", "xinputclose"}
+    if device_mode == "fake":
+        selected_hooks = set(entries)
+    elif physical_hook_profile == "state-only":
+        selected_hooks = {"xinputgetstate"}
+    else:
+        selected_hooks = {"xinputgetcaps", "xinputsetstate", "xinputgetstate"}
     for hook_name, entry_va in entries.items():
+        if hook_name not in selected_hooks:
+            continue
         if device_mode != "fake" and hook_name in fake_device_hooks:
             continue
         hook = hooks.get(hook_name)
@@ -920,6 +930,7 @@ def patch_xinput_automation(
         "route_blob_size": len(route_blob),
         "exit_after_ms": exit_after_ms,
         "device_mode": device_mode,
+        "physical_hook_profile": physical_hook_profile,
         "firmware_reentry": routine_name,
         "kernel_exports": {
             k: f"0x{v:08x}" for k, v in PROJECT_XBOX_EXPORTS.items()
@@ -950,6 +961,9 @@ def main(argv: list[str] | None = None) -> int:
                         default="return-only")
     parser.add_argument("--input-csv", type=Path,
                         help="Route CSV for --mode route; defaults to target config.")
+    parser.add_argument("--proof-style", choices=("pulse", "idle"), default="pulse",
+                        help="For --mode input-proof, use either the current "
+                             "built-in pulse route or an idle hook-only proof.")
     parser.add_argument("--delay-ms", type=int, default=5000)
     parser.add_argument("--exit-after-ms", type=int,
                         help="Automation mode exit time from first XInput poll.")
@@ -958,6 +972,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device-mode", choices=("fake", "physical"), default="fake",
                         help="fake hooks XInput device discovery/open; physical only "
                              "overrides state reads from an already-opened pad.")
+    parser.add_argument("--physical-hook-profile",
+                        choices=("full", "state-only"),
+                        default="full",
+                        help="When --device-mode physical, choose whether to hook "
+                             "the current full trio (caps/state/setstate) or only "
+                             "XInputGetState.")
     parser.add_argument("--firmware-reentry", choices=sorted(FIRMWARE_REENTRY),
                         default="reboot")
     parser.add_argument("--force", action="store_true")
@@ -987,8 +1007,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             if args.mode == "input-proof":
-                events = list(PROOF_EVENTS)
-                route_source = "built-in proof pulse route"
+                if args.proof_style == "idle":
+                    events = []
+                    route_source = "built-in idle proof route"
+                else:
+                    events = list(PROOF_EVENTS)
+                    route_source = "built-in proof pulse route"
             else:
                 route_csv = args.input_csv
                 if route_csv is None:
@@ -1011,6 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
                 route_source=route_source,
                 exit_after_ms=exit_after_ms,
                 device_mode=args.device_mode,
+                physical_hook_profile=args.physical_hook_profile,
                 routine_name=args.firmware_reentry,
                 expected_sha256=cfg["sha256"],
                 expected_title_id=cfg["title_id"],

@@ -35,26 +35,33 @@ TITLE_DEFAULTS = {
         "game_xbe": r"F:\Games\Crimson Skies\default.xbe",
         "input_csv": "scripts/apple-silicon/input-scripts/crimson-gameplay.csv",
         "route_offset_ms": 28000,
+        "install_names": ["Crimson Skies"],
     },
     "rainbow": {
         "name": "Rainbow Six 3",
         "game_xbe": r"F:\Games\Rainbow Six 3\default.xbe",
         "input_csv": "scripts/apple-silicon/input-scripts/rainbow-gameplay.csv",
         "route_offset_ms": 0,
+        "install_names": ["Rainbow Six 3"],
     },
     "pgr2": {
         "name": "Project Gotham Racing 2",
         "game_xbe": r"F:\Games\PGR2\default.xbe",
         "input_csv": "scripts/apple-silicon/input-scripts/pgr2-gameplay.csv",
         "route_offset_ms": 0,
+        "install_names": ["Project Gotham Racing 2", "PGR2"],
     },
     "sc2": {
         "name": "Soul Calibur 2",
         "game_xbe": r"F:\Games\Soul Calibur 2\Default.xbe",
         "input_csv": "scripts/apple-silicon/input-scripts/sc2-gameplay.csv",
         "route_offset_ms": 0,
+        "igr_input_csv": "scripts/apple-silicon/input-scripts/sc2-igr-proof.csv",
+        "install_names": ["Soul Calibur 2", "Soul Calibur II", "SC2"],
     },
 }
+
+GAME_ROOTS = ["/F/Games", "/G/Games", "/E/Games"]
 
 
 def run(argv: list[str], log_path: Path, timeout: float | None = None) -> dict[str, Any]:
@@ -102,6 +109,20 @@ def json_stdout(result: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def verdict_value(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    value = data.get("status")
+    if isinstance(value, str):
+        return value
+    value = data.get("verdict")
+    return value if isinstance(value, str) else None
 
 
 def parse_route(path: Path) -> dict[str, Any]:
@@ -157,6 +178,73 @@ def xbox_path_exists(host: str, xbox_path: str) -> dict[str, Any]:
                 "error": str(exc)}
 
 
+def ftp_list_games(host: str, roots: list[str] | None = None) -> dict[str, Any]:
+    roots = roots or GAME_ROOTS
+    out: dict[str, Any] = {"host": host, "roots": roots, "games": []}
+    try:
+        ftp = ftplib.FTP(host, timeout=8)
+        ftp.login(os.environ.get("ORACLE_FTP_USER", "xbox"),
+                  os.environ.get("ORACLE_FTP_PASS", "xbox"))
+    except Exception as exc:
+        out["error"] = str(exc)
+        return out
+    try:
+        for root in roots:
+            try:
+                entries: list[str] = []
+                ftp.cwd(root)
+                ftp.retrlines("LIST", entries.append)
+            except Exception as exc:
+                out.setdefault("root_errors", {})[root] = str(exc)
+                continue
+            for line in entries:
+                parts = line.split(maxsplit=8)
+                if len(parts) < 9 or not parts[0].startswith("d"):
+                    continue
+                name = parts[8]
+                if name in (".", ".."):
+                    continue
+                for default_xbe in ("default.xbe", "Default.xbe"):
+                    xbe = root.rstrip("/") + "/" + name + "/" + default_xbe
+                    try:
+                        size = ftp.size(xbe)
+                    except Exception:
+                        continue
+                    out["games"].append(
+                        {
+                            "name": name,
+                            "root": root,
+                            "xbe": xbe,
+                            "default_xbe_size": size,
+                        }
+                    )
+                    break
+    finally:
+        try:
+            ftp.quit()
+        except Exception:
+            pass
+    return out
+
+
+def discover_title_xbe(host: str, title_key: str) -> dict[str, Any]:
+    aliases = [s.lower() for s in TITLE_DEFAULTS[title_key].get("install_names", [])]
+    listing = ftp_list_games(host)
+    if listing.get("error"):
+        return {"status": "error", "listing": listing}
+    matches = []
+    for game in listing.get("games", []):
+        name = str(game.get("name", ""))
+        lower = name.lower()
+        if any(alias == lower for alias in aliases):
+            matches.append(game)
+    if len(matches) == 1:
+        return {"status": "resolved", "match": matches[0], "listing": listing}
+    if len(matches) > 1:
+        return {"status": "ambiguous", "matches": matches, "listing": listing}
+    return {"status": "missing", "listing": listing}
+
+
 def write_igr_probe_route(path: Path, exit_after_ms: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [
@@ -194,15 +282,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exit-evidence", type=Path)
     parser.add_argument("--skip-igr-proof", action="store_true")
     parser.add_argument("--igr-proof-delay-ms", type=int, default=45000)
+    parser.add_argument("--igr-proof-input-csv",
+                        help="Optional title-specific input route used before "
+                             "the controller IGR combo is appended.")
+    parser.add_argument("--igr-proof-timeout-s", type=float,
+                        help="Override the controller-IGR proof timeout.")
     parser.add_argument("--gameplay-record-extra-s", type=float, default=15.0)
+    parser.add_argument("--gameplay-timeout-s", type=float,
+                        help="Override the gameplay oracle timeout.")
+    parser.add_argument("--exit-delay-ms", type=int, default=5000,
+                        help="Delay before the controller IGR combo starts.")
+    parser.add_argument("--exit-hold-ms", type=int, default=6000,
+                        help="How long to hold the controller IGR combo.")
+    parser.add_argument("--exit-attempts", type=int, default=2,
+                        help="How many IGR combo attempts to send.")
+    parser.add_argument("--exit-repeat-gap-ms", type=int, default=6000,
+                        help="Gap between repeated IGR combo attempts.")
+    parser.add_argument("--list-installed", action="store_true",
+                        help="List installed retail titles discovered through dashboard FTP and exit.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.list_installed:
+        print(json.dumps(ftp_list_games(args.host), indent=2, sort_keys=True))
+        return 0
 
     defaults = TITLE_DEFAULTS[args.title]
     game_xbe = args.game_xbe or defaults["game_xbe"]
     input_csv = Path(args.input_csv or defaults["input_csv"]).resolve()
+    igr_input_csv = (Path(args.igr_proof_input_csv).resolve()
+                     if args.igr_proof_input_csv
+                     else (Path(defaults["igr_input_csv"]).resolve()
+                           if defaults.get("igr_input_csv") else None))
     route_offset_ms = (args.route_offset_ms if args.route_offset_ms is not None
                        else int(defaults.get("route_offset_ms", 0)))
+    if args.igr_proof_timeout_s is not None:
+        igr_timeout = args.igr_proof_timeout_s
+    else:
+        igr_timeout = max(300.0, args.igr_proof_delay_ms / 1000.0 + 240.0)
     out_dir = args.out or ROOT / "benchmark-runs" / (
         "retail-oracle-workflow-" + args.title + "-" +
         time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -217,10 +334,16 @@ def main(argv: list[str] | None = None) -> int:
         "title_name": defaults["name"],
         "game_xbe": game_xbe,
         "input_csv": str(input_csv),
+        "igr_input_csv": str(igr_input_csv) if igr_input_csv else None,
         "out_dir": str(out_dir),
         "hardware_device": args.hardware_device,
         "hardware_port_index": args.hardware_port_index,
         "route_offset_ms": route_offset_ms,
+        "igr_proof_timeout_s": igr_timeout,
+        "exit_delay_ms": args.exit_delay_ms,
+        "exit_hold_ms": args.exit_hold_ms,
+        "exit_attempts": args.exit_attempts,
+        "exit_repeat_gap_ms": args.exit_repeat_gap_ms,
         "steps": [],
         "artifacts": {},
     }
@@ -249,6 +372,16 @@ def main(argv: list[str] | None = None) -> int:
         step("input-route", "fail", error=str(exc))
         return write_report("blocked", 1, blocked_reasons=["input route invalid"])
 
+    if igr_input_csv:
+        try:
+            igr_route_summary = parse_route(igr_input_csv)
+            report["igr_route"] = igr_route_summary
+            step("igr-input-route", "ok", **igr_route_summary)
+        except Exception as exc:
+            step("igr-input-route", "fail", error=str(exc))
+            return write_report("blocked", 1,
+                                blocked_reasons=["IGR input route invalid"])
+
     status = run([sys.executable, str(HERE / "oracle-orchestrator.py"),
                   "--host", args.host, "status"],
                  out_dir / "status.json", timeout=20.0)
@@ -258,8 +391,26 @@ def main(argv: list[str] | None = None) -> int:
         return write_report("blocked", 1, blocked_reasons=["Xbox/oracle status failed"])
 
     xbe_probe = xbox_path_exists(args.host, game_xbe)
+    report["game_xbe_probe_initial"] = xbe_probe
+    resolved_from_install = False
+    if not xbe_probe.get("exists") and not args.game_xbe:
+        discovery = discover_title_xbe(args.host, args.title)
+        report["install_discovery"] = discovery
+        if discovery.get("status") == "resolved":
+            match = discovery["match"]
+            game_xbe = str(match["xbe"]).replace("/", "\\").lstrip("\\")
+            if ":" not in game_xbe and game_xbe.startswith("F\\"):
+                game_xbe = game_xbe.replace("F\\", "F:\\", 1)
+            elif ":" not in game_xbe and game_xbe.startswith("G\\"):
+                game_xbe = game_xbe.replace("G\\", "G:\\", 1)
+            elif ":" not in game_xbe and game_xbe.startswith("E\\"):
+                game_xbe = game_xbe.replace("E\\", "E:\\", 1)
+            report["game_xbe"] = game_xbe
+            resolved_from_install = True
+            xbe_probe = xbox_path_exists(args.host, game_xbe)
     report["game_xbe_probe"] = xbe_probe
-    step("game-xbe", "ok" if xbe_probe.get("exists") else "fail", **xbe_probe)
+    step("game-xbe", "ok" if xbe_probe.get("exists") else "fail",
+         resolved_from_install=resolved_from_install, **xbe_probe)
     if not xbe_probe.get("exists"):
         return write_report("blocked", 1, blocked_reasons=["game XBE not found on Xbox"])
 
@@ -330,8 +481,11 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_evidence = args.exit_evidence
     if not args.skip_igr_proof and not evidence_ok(exit_evidence):
-        igr_route = out_dir / "igr-proof-route.csv"
-        write_igr_probe_route(igr_route, args.igr_proof_delay_ms)
+        if igr_input_csv:
+            igr_route = igr_input_csv
+        else:
+            igr_route = out_dir / "igr-proof-route.csv"
+            write_igr_probe_route(igr_route, args.igr_proof_delay_ms)
         igr_dir = out_dir / "igr-proof"
         igr_cmd = [
             sys.executable, str(HERE / "retail-gameplay-oracle.py"),
@@ -350,9 +504,10 @@ def main(argv: list[str] | None = None) -> int:
             "--capture-backend", args.capture_backend,
             "--frame-interval-s", "5",
             "--route-offset-ms", "0",
-            "--exit-delay-ms", "5000",
-            "--exit-hold-ms", "6000",
-            "--exit-attempts", "2",
+            "--exit-delay-ms", str(args.exit_delay_ms),
+            "--exit-hold-ms", str(args.exit_hold_ms),
+            "--exit-attempts", str(args.exit_attempts),
+            "--exit-repeat-gap-ms", str(args.exit_repeat_gap_ms),
             "--allow-capture-failure",
             "--allow-unproven",
         ]
@@ -360,7 +515,6 @@ def main(argv: list[str] | None = None) -> int:
             igr_cmd.append("--no-audio")
         if args.dry_run:
             igr_cmd.append("--dry-run")
-        igr_timeout = max(240.0, args.igr_proof_delay_ms / 1000.0 + 180.0)
         igr = run(igr_cmd, out_dir / "igr-proof.json", timeout=igr_timeout)
         exit_evidence = igr_dir / "verdict.json"
         step("igr-proof", "ok" if igr.get("rc") == 0 and evidence_ok(exit_evidence) else "fail",
@@ -400,25 +554,36 @@ def main(argv: list[str] | None = None) -> int:
         "--frame-interval-s", str(args.frame_interval_s),
         "--route-offset-ms", str(route_offset_ms),
         "--record-extra-s", str(args.gameplay_record_extra_s),
-        "--exit-delay-ms", "5000",
-        "--exit-hold-ms", "6000",
-        "--exit-attempts", "2",
+        "--exit-delay-ms", str(args.exit_delay_ms),
+        "--exit-hold-ms", str(args.exit_hold_ms),
+        "--exit-attempts", str(args.exit_attempts),
+        "--exit-repeat-gap-ms", str(args.exit_repeat_gap_ms),
     ]
     if args.no_audio:
         gameplay_cmd.append("--no-audio")
     if args.dry_run:
         gameplay_cmd.append("--dry-run")
-    timeout = max(600.0, float(route_summary["last_ms"] or 0) / 1000.0 +
-                  args.gameplay_record_extra_s + 480.0)
+    if args.gameplay_timeout_s is not None:
+        timeout = args.gameplay_timeout_s
+    else:
+        timeout = max(600.0, float(route_summary["last_ms"] or 0) / 1000.0 +
+                      args.gameplay_record_extra_s + 480.0)
+    report["gameplay_timeout_s"] = timeout
     gameplay = run(gameplay_cmd, out_dir / "gameplay.json", timeout=timeout)
     gameplay_verdict = gameplay_dir / "verdict.json"
     report["artifacts"]["gameplay_verdict"] = str(gameplay_verdict)
-    step("gameplay-capture", "ok" if gameplay.get("rc") == 0 and evidence_ok(gameplay_verdict)
-         else "fail", rc=gameplay.get("rc"), verdict=str(gameplay_verdict))
+    gameplay_verdict_value = verdict_value(gameplay_verdict)
+    gameplay_ok = gameplay.get("rc") == 0 and (
+        evidence_ok(gameplay_verdict)
+        or (args.dry_run and gameplay_verdict_value == "dry-run")
+    )
+    step("gameplay-capture", "ok" if gameplay_ok else "fail",
+         rc=gameplay.get("rc"), verdict=str(gameplay_verdict),
+         gameplay_verdict_value=gameplay_verdict_value)
 
-    if gameplay.get("rc") != 0 or not evidence_ok(gameplay_verdict):
+    if not gameplay_ok:
         return write_report("fail", 1, failed_reasons=["gameplay oracle run failed"])
-    return write_report("ok", 0)
+    return write_report("dry-run" if args.dry_run else "ok", 0)
 
 
 if __name__ == "__main__":

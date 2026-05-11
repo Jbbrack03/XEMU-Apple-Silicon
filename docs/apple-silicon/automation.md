@@ -3758,6 +3758,10 @@ The wrapper:
 6. sends the controller IGR route and requires dashboard FTP to return.
 
 Known title defaults are `crimson`, `rainbow`, `pgr2`, and `sc2`.
+For production retail-oracle work, the stable title set is currently
+`crimson`, `rainbow`, and `pgr2`. `sc2` remains available as a workflow
+target, but it is deferred as a production retail gate because its
+real-hardware return path is still unstable on the current Xbox image.
 Override paths with `--game-xbe` / `--input-csv` when the Xbox HDD
 layout differs. Output lands under
 `benchmark-runs/retail-oracle-workflow-<title>-<UTC>/` with
@@ -3777,6 +3781,10 @@ Important timing details:
 Validation evidence:
 - `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/workflow.json`
   reports `status=ok`.
+- `benchmark-runs/retail-oracle-workflow-rainbow-20260510T214732Z/workflow.json`
+  reports `status=ok`.
+- `benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/workflow.json`
+  reports `status=ok`.
 - `gameplay/verdict.json` reports `verdict=ok`,
   `reference_frame_count=91`, `capture_rc=0`,
   `input_driver_rc=0`, and `dashboard_returned=true`.
@@ -3787,6 +3795,10 @@ Validation evidence:
   `agent=false`.
 - Narrative record:
   `docs/apple-silicon/benchmarks/2026-05-10-retail-oracle-workflow.md`.
+- SC2 launched and reached real gameplay on hardware, but repeated
+  controller-IGR, XInput-hook, and title-owned patch detours still left
+  dashboard FTP unrecovered on the current Xbox image. Treat SC2 as a
+  deferred retail-oracle outlier for now, not as a production gate.
 
 ## Retail gameplay oracle primitive — `retail-gameplay-oracle.py` (2026-05-07)
 

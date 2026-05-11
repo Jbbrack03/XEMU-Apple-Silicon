@@ -124,10 +124,33 @@ else
     warn "annotated kernel export artifact not found; run xbox-kernel-export-annotate.py after dumping symbols"
 fi
 
-if find "$ROOT/benchmark-runs" -maxdepth 2 -path '*/retail-oracle-smoke-*' -name verdict.json 2>/dev/null | xargs grep -l '"verdict": "ok"' 2>/dev/null | grep -q .; then
+if python3 - "$ROOT/benchmark-runs" <<'PY' > "$OUT_DIR/retail-workflow-proof.txt" 2>&1
+import json
+import sys
+from pathlib import Path
+
+runs = Path(sys.argv[1])
+ok = []
+for workflow in runs.glob("retail-oracle-workflow-*/workflow.json"):
+    try:
+        data = json.loads(workflow.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    if data.get("status") == "ok":
+        ok.append(workflow)
+
+if not ok:
+    raise SystemExit(1)
+
+latest = max(ok, key=lambda p: (p.stat().st_mtime, p.name))
+print(latest)
+PY
+then
+    ok "retail-game real-Xbox workflow proof exists"
+elif find "$ROOT/benchmark-runs" -maxdepth 2 -path '*/retail-oracle-smoke-*' -name verdict.json 2>/dev/null | xargs grep -l '"verdict": "ok"' 2>/dev/null | grep -q .; then
     ok "retail-game real-Xbox smoke proof exists"
 else
-    warn "no successful retail-game real-Xbox smoke proof exists; Tier-2 input/exit remains a production blocker"
+    warn "no successful retail-game real-Xbox workflow proof exists; retail gameplay oracle coverage remains incomplete"
 fi
 
 if [ "$MODE" = "full" ]; then

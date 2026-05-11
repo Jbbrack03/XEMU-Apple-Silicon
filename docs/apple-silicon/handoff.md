@@ -1,13 +1,14 @@
 # Handoff
 
-Last updated: 2026-05-10 (retail oracle workflow proven end-to-end:
-dashboard FTP launches Crimson Skies, OGX360 replays the route,
-approved macOS capture records reference frames, controller IGR returns
-to UnleashX, and dashboard FTP is back).
+Last updated: 2026-05-11 (retail oracle workflow proven end-to-end on
+Crimson Skies, Rainbow Six 3, and PGR2; Soul Calibur 2 remains useful
+for emulator-side rendering/perf validation but is now deferred as a
+retail-oracle production gate after repeated real-hardware return and
+patch-path failures on the current Xbox image).
 
 ## NEXT SESSION — three priorities
 
-### 1. RETAIL ORACLE WORKFLOW IS LIVE-PROVEN
+### 1. RETAIL ORACLE WORKFLOW IS LIVE-PROVEN ON THE STABLE TRIO; SC2 IS DEFERRED ON THE RETAIL SIDE
 
 Use the workflow wrapper for normal real-Xbox gameplay captures:
 
@@ -18,16 +19,195 @@ python3 scripts/apple-silicon/retail-oracle-workflow.py --title crimson
 The decisive run:
 - `benchmark-runs/retail-oracle-workflow-crimson-routeoffset-20260510T183546Z/workflow.json`
   reports `status=ok`.
+- `benchmark-runs/retail-oracle-workflow-rainbow-20260510T214732Z/workflow.json`
+  reports `status=ok`.
+- `benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/workflow.json`
+  reports `status=ok`.
 - `gameplay/verdict.json` reports `verdict=ok`,
   `reference_frame_count=91`, `dashboard_returned=true`, and
   `runxbe_ack="dashboard FTP launch issued for F:\Games\Crimson Skies\default.xbe"`.
+- Rainbow's paired gameplay verdict reports `verdict=ok`,
+  `reference_frame_count=102`, `dashboard_returned=true`, and
+  `runxbe_ack="dashboard FTP launch issued for F:\Games\Rainbow Six 3\default.xbe"`.
+- PGR2's paired gameplay verdict reports `verdict=ok`,
+  `reference_frame_count=108`, `dashboard_returned=true`, and
+  `runxbe_ack="dashboard FTP launch issued for F:\Games\PGR2\default.xbe"`.
 - `gameplay/composite/contact-sheet-all-frames.png` shows UnleashX,
   Crimson boot/loading, title/menu flow, cutscene/game scene/plane
   frames, UnleashX return, and final dashboard.
+- Rainbow's `gameplay/composite/` sequence is the second production
+  retail-title proof on the current Xbox image.
 - Final Xbox state after the run: `ping=true`, `ftp=true`,
   `agent=false`.
 - Narrative record:
   `docs/apple-silicon/benchmarks/2026-05-10-retail-oracle-workflow.md`.
+
+Current tracked-title install status on the project Xbox:
+- Installed and live-proven: Crimson Skies, Rainbow Six 3, PGR2.
+- Installed and launch/gameplay-proven but not return-proven: Soul Calibur 2.
+- Result: the production retail-oracle title set is now the stable trio
+  (Crimson / Rainbow / PGR2). SC2 should stay tracked as a hardware-oracle
+  outlier and as an emulator-side validation title, but it is no longer a
+  retail-oracle blocker for normal development work.
+
+Current SC2 evidence:
+- `benchmark-runs/retail-oracle-workflow-sc2-20260510T232019Z/gameplay/`
+  reaches real SC2 character-select and combat frames on hardware.
+- `gameplay/verdict.json` records `reference_frame_count=97`,
+  `input_driver_rc=0`, `capture_rc=0`, but `dashboard_returned=false`
+  even after the built-in recovery route.
+- Late capture frames go black after the in-route IGR attempt, and the
+  Xbox stops responding to ping/FTP until a manual power-cycle.
+- A second retry at
+  `benchmark-runs/retail-oracle-workflow-sc2-20260511T005611Z/`
+  moved the IGR earlier to the round-end "YOU LOSE" scene
+  (`--exit-delay-ms 1000 --exit-hold-ms 4000 --exit-attempts 1`) and
+  still failed the same way: `reference_frame_count=88`,
+  `input_driver_rc=0`, `capture_rc=0`, `dashboard_returned=false`,
+  black-screen after the combo, and Xbox offline until manual reboot.
+- A third return-only proof at
+  `benchmark-runs/sc2-compatible-igr-proof-20260511T012513Z/`
+  changed the live BIOS from `IGRMODE=2` (quick) to `IGRMODE=1`
+  (compatible) before rebooting and retrying SC2 with the short
+  `sc2-igr-proof.csv` route. The title still failed to return:
+  `reference_frame_count=15`, `input_driver_rc=0`, `capture_rc=0`,
+  `dashboard_returned=false`, and the Xbox dropped fully off-network
+  during both the normal and fallback dashboard-recovery waits.
+  Backup/edited configs for that BIOS experiment live under
+  `benchmark-runs/bios-config-backups/20260511T012308Z/`.
+- A fourth return-only proof at
+  `benchmark-runs/sc2-compatible-igr-x2off-proof-20260511T022925Z/`
+  kept `iND-BiOS IGRMODE=1` but disabled the legacy `E:\x2config.ini`
+  IGR layer (`igrEnabled = 0`) before rebooting and retrying the same
+  short `sc2-igr-proof.csv` route. It still failed:
+  `reference_frame_count=15`, `input_driver_rc=0`, `capture_rc=0`,
+  `dashboard_returned=false`. The failure shape changed slightly
+  (fallback recovery alternated among timeout / no-route / host-down
+  instead of staying purely host-down), but it still never returned to
+  dashboard FTP. Backup/edited configs for this step live under
+  `benchmark-runs/bios-config-backups/20260511T022739Z/`.
+- Practical conclusion: SC2 is no longer "maybe mistimed." On the
+  current softmod/dashboard stack, controller-IGR from SC2 appears to be
+  title-specific incompatible or at least far more fragile than
+  Crimson/Rainbow/PGR2. The known iND-BiOS quick-IGR warning for SC2 was
+  real, but switching this console to compatible IGR did not clear the
+  hang, and disabling the extra `x2config.ini` IGR layer also did not
+  clear it, so the remaining problem is not just button timing or
+  quick-vs-compatible mode selection.
+
+SC2-specific tooling added from this failure:
+- `scripts/apple-silicon/input-scripts/sc2-igr-proof.csv` records a
+  short title/menu prefix for future SC2 IGR-only retries.
+- `retail-oracle-workflow.py` now accepts
+  `--igr-proof-input-csv`, `--exit-delay-ms`, `--exit-hold-ms`,
+  `--exit-attempts`, and `--exit-repeat-gap-ms` so title-specific
+  return tuning can happen at the wrapper level instead of by editing
+  inner commands.
+
+If SC2 must become fully production-green, the next path is probably no
+longer "try another button timing." It is either:
+- a title-specific non-IGR exit path, or
+- a patched SC2 return stub/backend kept separate from the generic
+  hardware+IGR flow.
+
+Offline SC2 patch-prep status:
+- The retail SC2 `Default.xbe` was extracted from
+  `Test_Games/Soul Calibur 2.xiso.iso` and fingerprinted at
+  `benchmark-runs/sc2-offline-xbe/Default.xbe`.
+- SHA-256 matches the patcher target exactly:
+  `d28c9fff8ec7dad06617792f03e42cc46b4b21bd6f846156170b887d05bfef8f`.
+- `xbe-inspect.py` confirms XAPILIB build 5455 and stable controller/XInput
+  strings in the retail XBE.
+- A return-only patch artifact now exists at
+  `benchmark-runs/retail-title-patches/return-only-20260511T023825Z/sc2/default.xbe`
+  with metadata in the sibling `.patch.json`.
+- A route-driven patch artifact now exists at
+  `benchmark-runs/retail-title-patches/route-20260511T023825Z/sc2/default.xbe`.
+  Its metadata shows unique hook resolution for
+  `xinputgetcaps`, `xinputgetstate`, and `xinputsetstate`, using the
+  full `sc2-gameplay.csv` route in `device_mode=physical` and a direct
+  `HalReturnToFirmware(reboot)` exit after route completion.
+- Next live ladder after the next reboot should be:
+  1. upload/prove the SC2 return-only patched XBE;
+  2. if dashboard return is clean, upload/prove the SC2 route patch;
+  3. if the full route patch still fails, generate/run a smaller SC2
+     input-proof patch before attempting another full route;
+  4. only then decide whether to restore the generic BIOS/x2 IGR config.
+
+Live patch-path results on the current Xbox image:
+- `benchmark-runs/retail-return-proof-sc2-20260511T0916-localreturn/`
+  re-proved the SC2 return-only patch on 2026-05-11.
+  `verdict.json` reports `status=ok`, `dashboard_ftp_returned=true`,
+  and captured
+  `post-dashboard.png` after relaunching the agent. This confirms the
+  title-local `HalReturnToFirmware(reboot)` return path still works on
+  the current console image even though generic controller IGR does not.
+- `benchmark-runs/retail-automation-proof-sc2-route-20260511T0920/`
+  launched the full SC2 route patch (`device_mode=physical`,
+  hooks on `xinputgetcaps`, `xinputgetstate`, `xinputsetstate`,
+  direct `HalReturnToFirmware(reboot)` exit after the embedded route),
+  but still failed to return:
+  `status=fail`, `dashboard_ftp_returned=false`, `video.mp4 missing`,
+  `capture_rc=137`. During the wait tail the Xbox ended
+  `ping=false`, `ftp=false`, `agent=false`, so this is not just a
+  dashboard/FTP limbo case.
+- To reduce the next live step, an SC2 physical-device input-proof patch
+  was generated at
+  `benchmark-runs/retail-title-patches/input-proof-20260511T132911Z/sc2/default.xbe`
+  with a short 8-event built-in route (`start`, `a`, `dpad_down`) and
+  `exit_after_ms=25000`. Use this before retrying the full route patch.
+- `benchmark-runs/retail-automation-proof-sc2-input-20260511T0832/`
+  then live-tested that smaller physical-device input-proof patch on
+  2026-05-11. It also failed to return: `status=fail`,
+  `dashboard_ftp_returned=false`, `capture_rc=137`, `video.mp4 missing`,
+  and the Xbox again ended fully down (`ping=false`, `ftp=false`,
+  `agent=false`).
+- `scripts/apple-silicon/retail-title-patcher.py` now supports
+  `--physical-hook-profile {full,state-only}` so SC2 can be narrowed
+  without changing the route payload or the return backend.
+- `benchmark-runs/retail-title-patches/input-proof-20260511T141421Z/sc2/default.xbe`
+  is the first SC2 `state-only` physical patch. It hooks only
+  `xinputgetstate` while leaving `xinputgetcaps` and `xinputsetstate`
+  untouched.
+- `benchmark-runs/retail-automation-proof-sc2-input-stateonly-20260511T1415/`
+  live-tested that `state-only` patch on 2026-05-11. It still failed:
+  `status=fail`, `dashboard_ftp_returned=false`, `capture_rc=137`,
+  `video.mp4 missing`, and the Xbox again ended fully down through the
+  entire 90-attempt FTP recovery window.
+- `scripts/apple-silicon/retail-title-patcher.py` also now supports
+  `--proof-style {pulse,idle}` for `--mode input-proof`. An SC2 idle
+  artifact is ready at
+  `benchmark-runs/retail-title-patches/input-proof-20260511T142237Z/sc2/default.xbe`
+  (`physical_hook_profile=state-only`, `route.events=0`) for the next
+  live reboot window.
+- `benchmark-runs/retail-automation-proof-sc2-input-stateonly-idle-20260511T1503/`
+  then live-tested that idle `state-only` patch on 2026-05-11. It also
+  failed to return: `status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, and the Xbox stayed off-network
+  for the entire 90-attempt FTP recovery window.
+- A title-owned SC2 wrapper-bypass artifact now exists at
+  `benchmark-runs/retail-title-patches/sc2-local-zero-20260511T175812Z/sc2/default.xbe`.
+  It patches the SC2-local wrapper entry at `0x001c410` to jump to the
+  sibling helper at `0x001c4c0`, which zeroes the same analog output
+  fields without calling `XInputGetState`.
+- A second title-owned artifact now exists at
+  `benchmark-runs/retail-title-patches/sc2-local-zero-return-20260511T175916Z/sc2/default.xbe`.
+  It detours that same SC2-local wrapper to a stub which bypasses
+  `XInputGetState`, zeros the same analog output fields, and calls
+  `HalReturnToFirmware(reboot)` after a 25 s dwell.
+- `benchmark-runs/retail-automation-proof-sc2-local-zero-return-20260511T1800/`
+  live-tested that title-owned SC2 wrapper detour on 2026-05-11. It still
+  failed to return: `status=fail`, `dashboard_ftp_returned=false`,
+  `capture_rc=137`, `video.mp4 missing`, and the Xbox again stayed
+  off-network through the full recovery window.
+- Current practical conclusion: SC2's title-local direct reboot stub is
+  sound, but both of the current automation directions still strand the
+  console: intercepting `xinputgetstate` alone is enough to break SC2, and
+  the first title-owned wrapper detour still does not restore dashboard
+  FTP either. The next step is no longer "try a shorter route" or "drop
+  the other XInput hooks." It is deeper patch surgery with breadcrumb
+  output or a later title-owned consumer farther downstream than the
+  `0x001c410` wrapper.
 
 Important implementation facts:
 - Retail games launch from dashboard FTP `SITE EXEC`, not from
