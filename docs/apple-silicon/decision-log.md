@@ -1,5 +1,125 @@
 # Decision Log
 
+## 2026-05-11 (evening 2): Front-fb fallback policy stays opt-in (NOT default-on)
+
+**Decision.** Keep `XEMU_METAL_FRONT_FB_FALLBACK` as an opt-in flag.
+Do **not** flip it default-on for the Apple Silicon system build until
+the multi-RT compositing pipeline that PGR2 uses for the profile screen
+is bridged in the Metal renderer. This closes the "front-fb fallback
+policy" M15 bundle gap with a documented "policy decided, defer fix"
+state rather than a blank line.
+
+**Supersession scope.** This makes the explicit decision the earlier
+2026-05-11 entry deferred. The earlier "do not decide ... until paired
+visual/perf artifacts exist" guidance applied to flipping default-ON;
+this entry decides to STAY OFF until the fix lands, which the prior
+entry implicitly allowed.
+
+**Evidence.**
+
+- `docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`
+  rules out the capture source as the bug. NV2A-source and
+  drawable-source PGR2 frames show identical UI-on-flat-gray output;
+  GL shows the rain-soaked cityscape. The Metal render path does not
+  produce the cityscape, regardless of how it is captured.
+- `benchmark-runs/m15-pgr2-vramdump-32a4000-20260511-203756/metal/vram32a4.*.png`
+  shows the CRTC-pointed surface (0x32a4000) frozen at boot-state
+  fuchsia plus an upside-down "Microsoft" logo. PGR2 abandons that
+  surface after boot. CRTC-strict publish would always render this.
+- `benchmark-runs/m15-pgr2-vramdump-3628000-20260511-204029/metal/vram3628.*.png`
+  shows the wide back-buffer (0x3628000) with tiled colour-noise
+  patterns, not a coherent rendered scene. The dominant-draw fallback
+  publishes this, which is also wrong.
+- Renderer plumbing is healthy: `METAL_PIPELINE_TRANSLATED_FAILED=0`,
+  `METAL_PIPELINE_FALLBACKS=0`, 95.7 % `METAL_DRAW_PASS_COALESCED`,
+  99.85 % `METAL_TEX_CACHE_HITS`. The failure is upstream of shader
+  translation and pipeline execution — at the "which surface contains
+  the title's intended composited image" level.
+
+**Why opt-in, not default-on.** The fallback works for the visual
+canaries (PGR2 / Rainbow / Halo MSAA4 PASS at boot/menu canaries on
+2026-05-04) but does not produce gameplay parity for PGR2's
+profile screen. Flipping it default-on would mask the real bug under
+"it almost works" and remove a useful A/B knob.
+
+**Why not flip default-off.** Existing benchmark runs (Crimson reclass
+2026-05-05, the canary PASS suite) depend on the fallback to reach
+visible content. Removing it would regress those visual canaries that
+ARE good evidence.
+
+**Next closure move.** Open a future Metal slice (provisionally M5.11
+or a renderer-track M16) scoped to:
+
+1. Identify PGR2's final-composite surface by shape (640×480 format-4
+   surfaces 0x3c84000 / 0x3b58000 are the most likely candidates per
+   the diagnostic surface map) and prefer that surface for publish
+   over the dominant-draw count heuristic.
+2. Track NV097_IMAGE_BLIT and similar composite ops so the renderer
+   knows where the title routes the final image (current PGR2
+   `METAL_IMAGE_BLITS=0` rules out the blit path for this title; the
+   composite is a draw, not a blit).
+3. Verify the surface-as-texture fast path for vram_addr=0 — the
+   `texture.mm:294` early return is correct for the texture cache,
+   but `texture_pg.c:1183` should still take the
+   surface-as-texture path; confirm `has_compatible_surface` is true
+   for PGR2's profile-screen background quad.
+
+These three threads need careful design — the wrong heuristic could
+regress the currently-green canaries.
+
+**Implications for M15.** The "front-fb fallback policy" check in
+`scripts/apple-silicon/m15-bundle-status.py` should be updated to
+recognize this decision-log entry as the policy-resolved state. The
+PGR2 paired gameplay visual diff remains FAIL until the multi-RT
+composite fix lands; M15 default-on remains blocked on the same
+title-level visual evidence.
+
+## 2026-05-11 (evening 1): m15-bundle-status.py also discovers m15-gameplay-* evidence
+
+**Decision.** Extend `scripts/apple-silicon/m15-bundle-status.py` so
+the M15 paired-gameplay-visual-diff check discovers BOTH
+`*metal-gl-compare-*/summary.json` and
+`m15-gameplay-*/<subdir>/summary.json` artifacts, and prefers
+gameplay-evidence-marked summaries over non-gameplay summaries when a
+title has both.
+
+**Background.** `scripts/apple-silicon/m15-gameplay-visual-compare.py`
+(landed earlier this session) writes its output to
+`benchmark-runs/<TS>-...-pgr2-gameplay/<out-dir>/summary.json` —
+typically `evidence/summary.json` per the handoff recipe at
+`docs/apple-silicon/handoff.md:129..168`. The gate script only globbed
+`*metal-gl-compare-*/summary.json`, so any PASS the recommended
+gameplay command produced would have been invisible to the gate. The
+session could produce real evidence and the gate would still report
+missing.
+
+**Evidence.** Codex-validate flagged this as a HIGH-severity issue
+during the changes-review pass earlier in the same session, citing
+`scripts/apple-silicon/m15-bundle-status.py:81` against the recipe at
+`docs/apple-silicon/handoff.md:168`. The fix has been verified to
+discover the existing 2026-05-11 PGR2 diagnostic at
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/summary.json`
+and correctly report it as FAIL with `max_changed_pct=100.0000`. The
+previous mtime-only "latest paired summary" logic was hiding this
+artifact behind the newer (mtime-greater) static-canary metal-gl-compare
+PASS for PGR2; the new logic prefers gameplay-evidence tier.
+
+**Implementation.** Added `_iter_paired_summary_paths()` helper that
+iterates both glob patterns, parses `data["game"]` (falling back to
+parent or grandparent dir name regex per pattern), and yields
+`(path, data, game)` triples. `paired_summaries()` now selects per
+title by `(gameplay_tier, mtime)` lexicographic max. The
+`paired_summary_history()` p99 jitter consumer was extended to the
+same discovery — gameplay-only summaries lack
+`gl_run_dir`/`metal_run_dir` and are skipped naturally by
+`latest_parseable_jitter`. Gate verdict shifted from
+`ok=5 fail=4 missing=6` to `ok=5 fail=5 missing=5` (a MISSING converted
+to FAIL — strictly more accurate evidence).
+
+**Next closure move.** When the M15 gameplay evidence finally passes
+for any of the five required titles, the new discovery will pick it
+up automatically. No further script change is anticipated.
+
 ## 2026-05-11: M15 bundle status is now checklist-gated; default-on remains blocked
 
 **Decision.** Do not declare the M15 Metal default-on bundle closed yet.
@@ -40,12 +160,14 @@ and `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for the Metal leg; the remaining
 tooling gap is sequence-based gameplay capture and content-aligned keyframe
 comparison.
 
-**Next closure move.** Build/run the gameplay visual evidence path first:
-controller-driven GL/Metal/oracle routes, multiple gameplay keyframes, visual
-content alignment, and triptychs/contact sheets before any parity claim. Then
-rerun PGR2/Rainbow/Halo and the SC2/Crimson route diffs with frame logging. Do
-not decide the `XEMU_METAL_FRONT_FB_FALLBACK` default until those paired
-visual/perf artifacts exist.
+**Next closure move.** Superseded later the same day by the PGR2 strict
+gameplay attempt: the evidence builder exists, but the first PGR2 sequence
+artifact exposed a Metal/capture-source divergence. Start from
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/contact-sheet.jpg`,
+debug whether the Metal NV2A screenshot source or live Metal rendering is
+wrong, then rerun PGR2/Rainbow/Halo and the SC2/Crimson route diffs with frame
+logging. Do not decide the `XEMU_METAL_FRONT_FB_FALLBACK` default until those
+paired visual/perf artifacts exist.
 
 ## 2026-05-10: Retail oracle workflow proven end-to-end on Crimson Skies
 
@@ -10257,3 +10379,47 @@ harder to miss during review.
 first, then run `m15-gameplay-visual-compare.py` with their existing oracle
 composite sequences. Repeat for Crimson, SC2, and Halo after their capture
 blockers are addressed.
+
+## 2026-05-11 evening follow-up: PGR2 strict gameplay attempt exposes Metal/capture-source divergence
+
+**Decision.** Do not count the 2026-05-11 evening PGR2 GL/Metal/oracle attempt
+as M15 evidence. Treat it as a concrete PGR2 Metal/capture-source divergence
+that must be debugged before moving the gameplay evidence pipeline to Rainbow.
+
+**Evidence.**
+
+- Initial artifact
+  `benchmark-runs/m15-gameplay-pgr2-20260511-181650/evidence/summary.json`
+  returned `verdict=INFRA-FAIL` because the GL leg used full-desktop macOS
+  screenshots. That was a harness-use failure: the command omitted
+  `XEMU_CAPTURE_WINDOW_PATTERN=xemu` and `XEMU_CAPTURE_WINDOW_REQUIRED=1`.
+- A strict xemu-window GL rerun at `benchmark-runs/20260511-182317-pgr2/`
+  fixed the capture source (`source=window:662` in `capture.log`).
+- `m15-gameplay-visual-compare.py` now supports source-specific crops:
+  `--gl-crop`, `--metal-crop`, and `--oracle-crop`, with legacy `--crop`
+  preserved as the shared default.
+- The cropped strict compare still returned `INFRA-FAIL` at
+  `benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/evidence-gl-crop/summary.json`.
+- A relaxed-align diagnostic at
+  `benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/summary.json`
+  produced six triptychs and failed every keyframe
+  (`changed_pct=85.4635..100.0000`). The contact sheet shows GL/oracle PGR2
+  menu/profile visuals with real backgrounds while Metal NV2A captures are
+  stuck around earlier title/profile states and the profile-select background
+  is flat gray/missing detail.
+
+**Rationale.** The evidence builder did its job: it rejected an artifact whose
+content did not align and whose relaxed diagnostic showed obvious visual
+divergence. The next question is no longer "can we generate a PGR2 evidence
+artifact?" but "is `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` sampling the wrong
+published texture, or is the live Metal renderer itself missing the PGR2
+profile/menu background?"
+
+**Follow-up.** Start the next session from
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/contact-sheet.jpg`.
+Compare a drawable-source Metal capture against the NV2A-source capture only
+as a diagnostic, remembering drawable capture can include xemu UI/HUD pixels.
+If live drawable is correct but NV2A is wrong, fix the screenshot/published
+texture path. If both are wrong, debug the Metal renderer texture/publish path
+for PGR2 profile/menu backgrounds. Then rerun PGR2 with strict GL window
+capture and `--gl-crop 112,143,1280,960` before moving to Rainbow.

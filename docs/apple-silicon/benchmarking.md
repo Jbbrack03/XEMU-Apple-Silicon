@@ -1,14 +1,21 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-11 (M15 evidence bundle is incomplete). Use
+Last updated: 2026-05-11 evening (M15 evidence bundle is incomplete). Use
 `scripts/apple-silicon/m15-bundle-status.py` before new Metal/default-on
-claims; current result is `verdict=incomplete ok=5 fail=4 missing=6`.
-The oracle-side and stable retail trio evidence is green, but title-level
-paired gameplay Metal-vs-GL validation is not: the latest PGR2/Rainbow paired
-passes are capture/static canaries only, Crimson paired diff still fails
-(`changed_pct=14.7560`), SC2/Halo gameplay diffs are missing, PGR2/Rainbow/
-Crimson p99 jitter gates fail, cold shader compile proof is missing, and
-front-fb fallback policy remains undecided. `metal-gl-compare.sh --trigger
+claims; 2026-05-11 evening result is
+`verdict=incomplete ok=6 fail=5 missing=4` (after the same-day
+m15-gameplay-* discovery extension and the front-fb fallback policy
+decision-log entry). The oracle-side and stable retail trio evidence is
+green, but title-level paired gameplay Metal-vs-GL validation is not: the
+latest PGR2/Rainbow paired passes are capture/static canaries only, Crimson
+paired diff still fails (`changed_pct=14.7560`), and the 2026-05-11 evening
+PGR2 capture-source diagnostic decisively ruled out the capture path,
+confirming the bug is in Metal's multi-RT compositing path (see
+`docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`).
+SC2/Halo/Rainbow gameplay diffs are missing, PGR2/Rainbow/Crimson p99
+jitter gates fail, and cold shader compile proof is missing. The front-fb
+fallback policy is now resolved (stays opt-in pending the multi-RT
+compositing fix). `metal-gl-compare.sh --trigger
 flip` now uses GL `XEMU_GL_SCREENSHOT_PATH` plus Metal
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for cleaner paired PNGs, but production
 visual evidence still requires controller-driven gameplay sequences, multiple
@@ -21,9 +28,12 @@ stated 30/60 FPS at 1080p goals. Input-latency counters
 opt-in GameController.framework backend.
 
 For the next M15 benchmark session, use the explicit PGR2 recipe in
-`handoff.md`: capture GL gameplay screenshots, capture Metal NV2A screenshots,
-run `m15-gameplay-visual-compare.py`, and inspect `contact-sheet.jpg`. Do not
-log a gameplay visual PASS from a single flip-trigger/static frame.
+`handoff.md`, but first inspect the failed PGR2 diagnostic in
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`.
+The immediate benchmark question is whether the Metal NV2A screenshot source is
+wrong or the live Metal renderer is genuinely missing PGR2 profile/menu
+background content. Do not log a gameplay visual PASS from a single
+flip-trigger/static frame or from a relaxed-align diagnostic.
 
 ## Benchmarking Rules
 

@@ -3,15 +3,20 @@
 Last updated: 2026-05-11 (M15 default-on remains blocked by the evidence
 bundle, not by oracle readiness). Run
 `scripts/apple-silicon/m15-bundle-status.py` before any M15 claim; current
-result is `verdict=incomplete ok=5 fail=4 missing=6`. Oracle production
-evidence and the stable retail trio are green. PGR2 and Rainbow gameplay
-visual parity are not proven; their 2026-05-11 paired passes are capture/
-static-canary evidence only. M15 requires multiple matched gameplay keyframes
-from controller routes, aligned by visual content rather than timestamp, with
-boot/loading/black/static/host-UI frames rejected. Crimson paired diff still
-fails (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay diffs are
-missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold shader compile
-proof is missing, and front-fb fallback policy is still undecided. The current
+result is `verdict=incomplete ok=6 fail=5 missing=4` (2026-05-11 evening,
+after the m15-gameplay-* discovery extension and the front-fb fallback
+policy decision-log entry). Oracle production evidence and the stable
+retail trio are green. PGR2 and Rainbow gameplay visual parity are not
+proven; the 2026-05-11 PGR2 capture-source hypothesis is decisively ruled
+out and the failure is in the Metal multi-RT compositing path (see
+`docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`).
+M15 requires multiple matched gameplay keyframes from controller routes,
+aligned by visual content rather than timestamp, with boot/loading/black/
+static/host-UI frames rejected. Crimson paired diff still fails
+(`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay diffs are missing
+or FAIL, PGR2/Rainbow/Crimson p99 jitter gates fail, and cold shader
+compile proof is missing. Front-fb fallback policy is now resolved (stays
+opt-in pending the multi-RT compositing fix). The current
 app build does not expose QMP/HMP `screendump`; `metal-gl-compare.sh
 --trigger flip` uses the GL renderer's `XEMU_GL_SCREENSHOT_PATH` path instead.
 Earlier 2026-05-05: SC2 input
@@ -1832,15 +1837,19 @@ failure is closed by a set of targeted surface/RTT fixes:
   `post_load_avg_fps=57.63`, but the no-input route captures
   boot/flubber and then black frames.
 
-**Highest-priority next-session action (2026-05-11).** Start with
+**Highest-priority next-session action (2026-05-11 evening).** Start with
 `scripts/apple-silicon/m15-bundle-status.py`. The next engineering blocker is
 gameplay evidence, not oracle health: `metal-gl-compare.sh --trigger flip`
 now uses GL `XEMU_GL_SCREENSHOT_PATH` and Metal
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`, but PGR2/Rainbow latest passes are only
-static canaries. Build/run sequence-based gameplay comparison, reject boot/
-loading/black/static/host-UI frames, align keyframes by visible content, then
-rerun PGR2/Rainbow/Halo/Crimson/SC2 paired visual+perf routes with
-`XEMU_PERF_FRAME_LOG=1`.
+static canaries. The first sequence-based PGR2 attempt failed after strict GL
+window capture and GL viewport cropping:
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`
+shows Metal NV2A title/profile captures diverging from GL/oracle with flat or
+missing background detail. Next session should inspect that contact sheet,
+decide whether the NV2A screenshot source or the live Metal renderer is wrong,
+then rerun PGR2 before moving to Rainbow/Halo/Crimson/SC2 paired visual+perf
+routes with `XEMU_PERF_FRAME_LOG=1`.
 
 M15 default-on stays BLOCKED on:
 1. Matched gameplay keyframe evidence for paired GL-vs-Metal capture.

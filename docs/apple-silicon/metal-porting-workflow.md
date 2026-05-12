@@ -1,7 +1,7 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-11 (M15 bundle checklist added; default-on still
-blocked). This is the canonical operating playbook for the native Metal
+Last updated: 2026-05-11 evening (PGR2 gameplay evidence attempt failed;
+default-on still blocked). This is the canonical operating playbook for the native Metal
 renderer port. It supersedes nothing — `metal-renderer-plan.md` remains the
 slice-level implementation plan (M0–M15), `handoff.md` remains the
 per-session current-state pointer, and `decision-log.md` remains the
@@ -16,23 +16,36 @@ Start every M15/default-on session with:
 ./scripts/apple-silicon/m15-bundle-status.py
 ```
 
-As of 2026-05-11 the bundle is `verdict=incomplete ok=5 fail=4 missing=6`.
+As of 2026-05-11 evening the bundle is
+`verdict=incomplete ok=6 fail=5 missing=4` (after the same-day
+m15-gameplay-* discovery extension and the front-fb fallback policy
+decision-log entry).
 The oracle/stable-retail-trio evidence is green. PGR2/Rainbow gameplay visual
 parity is not proven; the 2026-05-11 paired passes are capture/static-canary
-evidence only. Remaining blockers: matched gameplay keyframe diffs are
-missing for PGR2 / Rainbow / SC2 / Halo, Crimson paired diff fails, PGR2 /
-Rainbow / Crimson p99 jitter gates fail, cold shader compile proof is
-missing, and front-fb fallback policy is undecided. The GL paired leg is now
-in-renderer via `XEMU_GL_SCREENSHOT_PATH`, and Metal paired captures use
+evidence only. The first strict PGR2 sequence attempt also failed:
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`
+shows Metal NV2A title/profile frames with flat or missing background detail
+versus GL/oracle, with 85.4635..100.0000% changed pixels in the relaxed
+diagnostic. Remaining blockers: matched gameplay keyframe diffs are missing
+for Rainbow / SC2 / Halo, PGR2 has a Metal/capture-source divergence to
+debug, Crimson paired diff fails, PGR2 /
+Rainbow / Crimson p99 jitter gates fail, and cold shader compile proof is
+missing. Front-fb fallback policy is resolved (opt-in stays pending the
+multi-RT compositing fix — decision-log "2026-05-11 (evening 2)"). The GL
+paired leg is now in-renderer via `XEMU_GL_SCREENSHOT_PATH`, and Metal
+paired captures use
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; QMP/HMP `screendump` remains unavailable
 in the current app build.
 
 The next session should not start by re-running static `metal-gl-compare.sh`
-captures. Follow the command recipe in `handoff.md`: capture a fresh PGR2 GL
-gameplay sequence, capture a fresh Metal NV2A screenshot sequence with the same
-route, then run `m15-gameplay-visual-compare.py` with the existing PGR2 oracle
-composite frames and inspect the generated contact sheet. Repeat for Rainbow
-only after the PGR2 evidence artifact is understood.
+captures or blindly repeating the PGR2 sequence. Start by inspecting the failed
+PGR2 diagnostic contact sheet and deciding whether `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`
+is sampling the wrong published texture or whether the live Metal renderer is
+missing PGR2 profile/menu background content. Then rerun PGR2 using the
+handoff recipe: strict xemu-window GL capture, `--gl-crop 112,143,1280,960`,
+Metal NV2A sequence capture, and `m15-gameplay-visual-compare.py` against the
+existing PGR2 oracle composite. Repeat for Rainbow only after the PGR2 evidence
+artifact is understood.
 
 This document was added 2026-05-04 alongside the parallel automation
 slices D1 (this doc) and W1 / W2 / W3 / W4 / W5 (auto-on validation,

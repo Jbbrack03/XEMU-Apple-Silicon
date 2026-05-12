@@ -1,10 +1,13 @@
 # Handoff
 
-Last updated: 2026-05-11 (M15 bundle is checklist-gated and NOT closed.
-Retail oracle workflow is production-ready on Crimson Skies, Rainbow Six 3,
-and PGR2; Soul Calibur 2 remains useful for emulator-side rendering/perf
-validation but is deferred as a retail-oracle production gate after repeated
-real-hardware return and patch-path failures on the current Xbox image).
+Last updated: 2026-05-11 evening (M15 bundle is checklist-gated and NOT
+closed. Retail oracle workflow is production-ready on Crimson Skies, Rainbow
+Six 3, and PGR2; Soul Calibur 2 remains useful for emulator-side
+rendering/perf validation but is deferred as a retail-oracle production
+gate after repeated real-hardware return and patch-path failures on the
+current Xbox image. Front-fb fallback policy is now decided: stays
+opt-in. PGR2 capture-source hypothesis is decisively ruled out; bug is
+in the Metal render path's multi-RT compositing).
 
 ## START HERE NEXT SESSION — M15 bundle closure
 
@@ -15,12 +18,12 @@ cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
 ./scripts/apple-silicon/m15-bundle-status.py
 ```
 
-Current result from 2026-05-11 after the checklist script learned to keep
-using the latest parseable p99 run even when a newer paired visual artifact
-has too few post-load intervals:
+Current result from 2026-05-11 evening after (a) the m15-gameplay-* evidence
+discovery extension and (b) the front-fb fallback policy decision were both
+landed:
 
 ```text
-verdict=incomplete ok=5 fail=4 missing=6
+verdict=incomplete ok=6 fail=5 missing=4
 ```
 
 What is green:
@@ -34,6 +37,10 @@ What is green:
 - Stable retail oracle trio:
   Crimson Skies, Rainbow Six 3, and PGR2 all have `workflow.json`
   `status=ok`.
+- **Front-fb fallback policy** — decision-log entry
+  "2026-05-11 (evening 2): Front-fb fallback policy stays opt-in (NOT
+  default-on)" closes the gap. The gate script recognizes the marker
+  string automatically; do not edit the gate to remove this check.
 
 What blocks M15 default-on:
 
@@ -57,7 +64,9 @@ What blocks M15 default-on:
   blocked: the GL leg segfaulted before any `xemu-perf` interval or
   `gl_screenshot_written`, while the Metal leg did write its flip-1200 PNG.
 - Cold shader compile proof is still missing.
-- Front-fb fallback policy is still undecided.
+- Front-fb fallback policy is RESOLVED (opt-in stays; multi-RT compositing
+  fix deferred to future Metal slice). See decision-log "2026-05-11
+  (evening 2)".
 
 Important tooling finding:
 
@@ -95,12 +104,71 @@ Important tooling finding:
   sheet under `benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay/`. A
   same-sequence PGR2 oracle self-test passed on 2026-05-11 with four selected
   keyframes at `/tmp/xemu-m15-gameplay-visual-selftest/summary.json`.
+- 2026-05-11 evening PGR2 evidence attempt did **not** produce M15 evidence:
+  `benchmark-runs/m15-gameplay-pgr2-20260511-181650/evidence/summary.json`
+  is `INFRA-FAIL` because the initial GL run used full-desktop macOS
+  screenshots. A strict xemu-window rerun at
+  `benchmark-runs/20260511-182317-pgr2/` fixed that capture issue
+  (`source=window:662`). `m15-gameplay-visual-compare.py` now supports
+  source-specific crops (`--gl-crop`, `--metal-crop`, `--oracle-crop`), but
+  the cropped diagnostic still fails: see
+  `benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/summary.json`
+  (`changed_pct=85.4635..100.0000`). The contact sheet shows GL/oracle PGR2
+  menu/profile visuals with real backgrounds while Metal NV2A captures are
+  stuck on earlier title/profile states and the profile-select background is
+  flat gray/missing detail.
+- 2026-05-11 evening (2): the capture-source hypothesis is **decisively
+  ruled out**.
+  `docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`
+  documents three captures of the same input route:
+  `XEMU_METAL_SCREENSHOT_SOURCE={drawable, vram:0x32a4000, vram:0x3628000}`.
+  The drawable and NV2A frames show identical UI-on-flat-gray output (capture
+  source not where information is lost). The CRTC-pointed surface
+  (`vram:0x32a4000`) holds residual boot-state fuchsia plus an
+  upside-down "Microsoft" logo throughout the run — PGR2 abandons that
+  surface after boot. The dominant-draw wide RT (`vram:0x3628000`)
+  contains tiled colour-noise patterns rather than a coherent rendered
+  scene. The render path itself does not produce a publishable PGR2
+  cityscape; the title appears to use a multi-RT composition pipeline
+  (intermediate RTs at 0x3628000 / 0x2c06000 / 0x2e06000 / vram_addr=0 +
+  smaller format-4 surfaces 0x3c84000 / 0x3b58000) and the Metal renderer
+  cannot identify which surface holds the final composite. This is the
+  next deep Metal work and is documented as future M5.11 / M16 in the
+  decision-log entry "2026-05-11 (evening 2): Front-fb fallback policy
+  stays opt-in".
+- Tooling: `scripts/apple-silicon/m15-bundle-status.py` now discovers
+  `m15-gameplay-*/<subdir>/summary.json` in addition to the
+  `*metal-gl-compare-*/summary.json` legacy pattern, preferring
+  gameplay-evidence-marked summaries over non-gameplay ones for the same
+  title. The 2026-05-11 PGR2 gameplay diagnostic is now surfaced as
+  `FAIL max_changed_pct=100.0000` instead of being masked by the newer
+  static-canary metal-gl-compare PASS. The script also reads
+  `docs/apple-silicon/decision-log.md` for the front-fb fallback policy
+  marker; running the gate locally without rebuilding xemu is enough to
+  pick up new policy entries.
 
 Next engineering steps, in order:
 
-1. Capture fresh GL/Metal gameplay sequences for PGR2 first, then run
-   `m15-gameplay-visual-compare.py` with the existing PGR2 oracle composite
-   sequence. The first evidence-producing target should be:
+1. **Re-run `m15-bundle-status.py` first** every session — the bundle is
+   now closer to closure (`ok=6 fail=5 missing=4`). The remaining gaps
+   are PGR2/Rainbow/Crimson gameplay visual diffs (PGR2 is FAIL and
+   blocked by multi-RT compositing), SC2/Halo missing paired evidence,
+   PGR2/Rainbow/Crimson p99 jitter, and cold shader compile proof.
+2. **Multi-RT compositing investigation (the deferred PGR2 deep fix)**:
+   - Identify PGR2's final-composite surface by shape — 640×480
+     format-4 surfaces 0x3c84000 / 0x3b58000 are the prime suspects per
+     the diagnostic surface map.
+   - Track NV097_IMAGE_BLIT and similar composite ops — current PGR2
+     run shows `METAL_IMAGE_BLITS=0`, so the composite is a draw, not a
+     blit. Find which draw call writes the final image.
+   - Verify surface-as-texture for vram_addr=0 — the `texture.mm:294`
+     early return is correct for the texture cache, but
+     `texture_pg.c:1183` should still take the surface-as-texture path;
+     confirm `has_compatible_surface` is true for PGR2's profile-screen
+     background quad. Run with `XEMU_METAL_DIAG_SURFACE_TEX=1` for
+     `metal_surface_texture` log lines.
+3. After the PGR2 multi-RT compositing fix lands, rerun PGR2
+   through the strict gameplay evidence path. The evidence-producing target is:
 
    ```sh
    cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
@@ -118,6 +186,8 @@ Next engineering steps, in order:
        XEMU_BENCH_SCREENSHOT_BACKEND=macos \
        XEMU_BENCH_SCREENSHOT_INTERVAL=1 \
        XEMU_BENCH_SCREENSHOT_START_DELAY=2 \
+       XEMU_CAPTURE_WINDOW_PATTERN=xemu \
+       XEMU_CAPTURE_WINDOW_REQUIRED=1 \
        ./scripts/apple-silicon/run-benchmark.sh \
          pgr2 scripts/apple-silicon/input-scripts/pgr2-gameplay.csv 120 \
        | tee "$OUT/gl-launcher.log"
@@ -149,28 +219,33 @@ Next engineering steps, in order:
        --metal-frames "$OUT/metal" \
        --oracle-frames benchmark-runs/retail-oracle-workflow-pgr2-20260510T231608Z/gameplay/composite \
        --out-dir "$OUT/evidence" \
+       --gl-crop 112,143,1280,960 \
        --min-keyframes 3 \
        --max-keyframes 6
    ```
 
    Inspect `$OUT/evidence/contact-sheet.jpg` before treating the metrics as
-   evidence. If this passes, copy the same pattern to Rainbow using
+   evidence. If strict alignment fails but a relaxed diagnostic contact sheet
+   shows content divergence like the 2026-05-11 PGR2 attempt, debug the Metal
+   capture/rendering path before moving to Rainbow. If this passes, copy the
+   same pattern to Rainbow using
    `rainbow` / `rainbow-gameplay.csv` and
    `benchmark-runs/retail-oracle-workflow-rainbow-20260510T214732Z/gameplay/composite`.
-2. Re-run PGR2 and Rainbow through that gameplay evidence path before making
+4. Re-run PGR2 and Rainbow through that gameplay evidence path before making
    any visual-parity claim.
-3. Re-run/diagnose Crimson paired visual diff using the corrected
+5. Re-run/diagnose Crimson paired visual diff using the corrected
    `source=nv2a` Metal capture path, then run SC2.
-4. Find or create a Halo scene snapshot before retrying paired Halo, or first
+6. Find or create a Halo scene snapshot before retrying paired Halo, or first
    debug the cold GL Halo segfault seen in
    `20260511-153638-metal-gl-compare-halo`.
-5. Diagnose the paired p99 jitter failures for PGR2, Rainbow, and Crimson.
-6. Produce cold shader compile proof from a fresh Metal shader cache, without
+7. Diagnose the paired p99 jitter failures for PGR2, Rainbow, and Crimson.
+8. Produce cold shader compile proof from a fresh Metal shader cache, without
    destroying the user's existing cache; use backup/restore or an isolated
    settings base if one is added.
-7. Decide `XEMU_METAL_FRONT_FB_FALLBACK` default policy only after the
-   paired visual/perf bundle is green or the remaining shortfall is explicitly
-   accepted in `decision-log.md`.
+
+(The earlier "decide front-fb fallback policy" step is now closed by the
+2026-05-11 evening (2) decision-log entry — the policy is opt-in, deferred
+deeper fix is item #2 above.)
 
 ## RETAIL ORACLE STATUS — stable trio is production-ready
 
@@ -2849,12 +2924,14 @@ immediate work:
    Crimson / SC2 + one broader-sweep title. ≤1% per-pixel diff vs
    GL on all five = visual gate met. Combine with FPS / p99 jitter
    validation per `metal-renderer-plan.md` §4 M15.
-6. **Decide front-fb fallback policy** (`XEMU_METAL_FRONT_FB_FALLBACK`
-   default flip ON, or implement faithful CRTC publish path with
-   back-buffer propagation). See decision-log
-   "2026-05-04 evening: Front-fb fallback policy". Reopen after the
-   broader sweep characterizes which title classes benefit /
-   regress.
+6. ~~**Decide front-fb fallback policy**~~ — **RESOLVED 2026-05-11
+   evening.** Policy stays opt-in (NOT default-on) pending the multi-RT
+   compositing fix. See decision-log "2026-05-11 (evening 2): Front-fb
+   fallback policy stays opt-in (NOT default-on)" which supersedes the
+   earlier "2026-05-04 evening: Front-fb fallback policy" deferral. The
+   deeper fix (identify final-composite surface, track NV097_IMAGE_BLIT,
+   verify surface-as-texture for vram_addr=0) is a future M5.11 / M16
+   slice.
 7. **(GL-side) Audio listen-test for `XEMU_APU_LOCK_RELEASE`** —
    still UNBLOCKED, orthogonal to Metal. Human listener plays
    Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice on. If

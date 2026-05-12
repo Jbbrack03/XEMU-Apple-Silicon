@@ -64,8 +64,10 @@ the task touches the Metal port):
   (black boot-ish PGR2 and Rainbow loading screen), **not gameplay visual
   parity**. M15 still needs matched gameplay keyframe evidence for PGR2,
   Rainbow, Crimson, SC2, and Halo; Crimson's older paired diff fails,
-  PGR2/Rainbow/Crimson p99 jitter gates fail, cold shader compile proof is
-  missing, and the front-fb fallback policy is undecided. New
+  PGR2/Rainbow/Crimson p99 jitter gates fail, and cold shader compile
+  proof is missing. The front-fb fallback policy is resolved 2026-05-11
+  evening (opt-in stays pending the multi-RT compositing fix — decision-log
+  "2026-05-11 (evening 2)"). New
   `scripts/apple-silicon/m15-gameplay-visual-compare.py` builds the strict
   gameplay visual artifact from GL/Metal/oracle frame sequences by rejecting
   black/static frames, aligning keyframes by visual content, and emitting
@@ -522,15 +524,24 @@ The fork-specific source-code changes are concentrated in:
       before revisiting M15.
       **(2026-05-11 update)** M15 is checklist-gated by
       `scripts/apple-silicon/m15-bundle-status.py` and currently
-      incomplete (`ok=5 fail=4 missing=6`). The oracle/stable-retail-trio
-      side is green, and paired capture plumbing improved by switching Metal
-      screenshots to `source=nv2a`, but PGR2/Rainbow gameplay visual parity is
-      not proven. M15 requires content-aligned gameplay keyframes, not
-      boot/loading/static canaries. Crimson visual, SC2/Halo/PGR2/Rainbow
-      gameplay diffs, PGR2/Rainbow/Crimson p99 jitter, cold shader compile
-      proof, and front-fb fallback policy remain open. Use
-      `scripts/apple-silicon/m15-gameplay-visual-compare.py` after capturing
-      GL/Metal gameplay sequences.
+      incomplete (`ok=6 fail=5 missing=4` as of 2026-05-11 evening,
+      after the same-day m15-gameplay-* discovery extension and the
+      front-fb fallback policy decision-log entry). The
+      oracle/stable-retail-trio side is green; paired capture plumbing
+      improved by switching Metal screenshots to `source=nv2a`. The PGR2
+      capture-source hypothesis is decisively ruled out — the failure
+      is in Metal's multi-RT compositing path (see
+      `docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`).
+      M15 requires content-aligned gameplay keyframes, not boot/loading/
+      static canaries. Crimson visual, SC2/Halo gameplay diffs are
+      missing; PGR2 paired gameplay is FAIL; PGR2/Rainbow/Crimson p99
+      jitter and cold shader compile proof remain open. Front-fb
+      fallback policy is now resolved (stays opt-in pending the
+      multi-RT compositing fix). Use
+      `scripts/apple-silicon/m15-gameplay-visual-compare.py` after
+      capturing GL/Metal gameplay sequences; the gate now discovers
+      `m15-gameplay-*/<subdir>/summary.json` artifacts in addition to
+      the legacy `*metal-gl-compare-*` pattern.
     - `blit.c` — **(M5.9-followup-A, 2026-05-03)**
       `pgraph_mtl_image_blit(NV2AState *d)` mirrors
       `vk/blit.c::pgraph_vk_image_blit` and

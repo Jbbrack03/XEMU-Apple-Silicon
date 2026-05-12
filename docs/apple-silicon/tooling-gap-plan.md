@@ -295,7 +295,9 @@ the Xbox. As of 2026-05-11 it reports:
   capture/static-canary evidence only, Crimson paired diff fails, and SC2/Halo
   gameplay diffs are still missing.
 - P99 jitter: PGR2/Rainbow/Crimson fail the current bundle criteria.
-- Cold shader compile proof and the front-fb fallback policy are still open.
+- Cold shader compile proof is still open. Front-fb fallback policy is
+  resolved as of 2026-05-11 evening (opt-in stays; multi-RT compositing
+  fix deferred — see decision-log "2026-05-11 (evening 2)").
 
 Tooling note: attempting to move the GL leg of `metal-gl-compare.sh` to QMP
 framebuffer capture on 2026-05-11 proved that this app build does not expose

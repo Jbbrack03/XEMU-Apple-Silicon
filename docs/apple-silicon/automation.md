@@ -6,10 +6,12 @@ unproven). Use
 `m15-bundle-status.py` as the read-only M15 default-on evidence
 checklist before long renderer runs. The real-Xbox oracle side is green
 for the stable trio, but M15 default-on is not closed:
-`m15-bundle-status.py` reports `verdict=incomplete ok=5 fail=4 missing=6`.
-Known blockers are missing gameplay visual diffs for PGR2/Rainbow/SC2/Halo,
-Crimson paired-diff failure, PGR2/Rainbow/Crimson p99 jitter failures,
-missing cold shader compile proof, and an undecided front-fb fallback policy.
+`m15-bundle-status.py` reports `verdict=incomplete ok=6 fail=5 missing=4`
+(2026-05-11 evening). Known blockers are missing or FAIL gameplay visual
+diffs for PGR2/Rainbow/SC2/Halo, Crimson paired-diff failure,
+PGR2/Rainbow/Crimson p99 jitter failures, and missing cold shader compile
+proof. The front-fb fallback policy is now resolved (opt-in pending the
+multi-RT compositing fix — see decision-log "2026-05-11 (evening 2)").
 The current app build still does not expose QMP/HMP `screendump`, but
 `--trigger flip` paired runs now use the GL renderer's
 `XEMU_GL_SCREENSHOT_PATH` path instead of macOS window capture, and the Metal
@@ -2773,10 +2775,20 @@ benchmark run directory with `screenshots/`, a screenshots directory, or a
 single PNG. The oracle input may be a retail workflow directory, a
 `gameplay/composite/` directory, or omitted.
 
+For GL screenshots captured through `macos-capture.sh`, prefer strict xemu
+window targeting (`XEMU_CAPTURE_WINDOW_PATTERN=xemu` and
+`XEMU_CAPTURE_WINDOW_REQUIRED=1`) so desktop chrome is never accepted as
+evidence. If the GL input still includes the xemu titlebar/window border, use
+source-specific crops rather than a shared `--crop`: `--gl-crop` applies only
+to the GL frames, `--metal-crop` only to Metal frames, and `--oracle-crop`
+only to oracle frames. The legacy `--crop` remains as a shared default for all
+sources.
+
 ```sh
 scripts/apple-silicon/m15-gameplay-visual-compare.py \
   --game pgr2 \
   --gl-frames benchmark-runs/<gl-run> \
+  --gl-crop 112,143,1280,960 \
   --metal-frames benchmark-runs/<metal-run> \
   --oracle-frames benchmark-runs/retail-oracle-workflow-pgr2-*/gameplay/composite \
   --min-keyframes 3 \
@@ -2814,6 +2826,15 @@ scripts/apple-silicon/m15-gameplay-visual-compare.py \
 
 Validated 2026-05-11: the self-test returned `verdict=PASS`, selected four
 keyframes, and wrote `/tmp/xemu-m15-gameplay-visual-selftest/contact-sheet.jpg`.
+
+2026-05-11 evening PGR2 production attempt: the first GL run accidentally used
+full-desktop screenshots and produced an `INFRA-FAIL`. A strict xemu-window GL
+rerun plus `--gl-crop 112,143,1280,960` fixed the capture contamination, but
+the relaxed diagnostic still failed with 85.4635..100.0000% changed pixels.
+See
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/contact-sheet.jpg`.
+Do not count relaxed-align diagnostics as M15 evidence; they are for visual
+triage when strict alignment rejects the artifact.
 
 Output directory layout (default
 `benchmark-runs/<TS>-metal-gl-compare-<game>/`):

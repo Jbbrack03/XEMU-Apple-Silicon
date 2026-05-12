@@ -1,7 +1,7 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-11 (M15 bundle checklist added; Metal default-on
-is still blocked). The retail Xbox oracle is production-ready for the
+Last updated: 2026-05-11 evening (PGR2 strict gameplay evidence attempt
+failed; Metal default-on is still blocked). The retail Xbox oracle is production-ready for the
 stable trio: Crimson Skies, Rainbow Six 3, and PGR2 all have live
 `retail-oracle-workflow.py` proofs with `workflow.json` `status=ok`.
 Soul Calibur 2 is deferred as a retail-oracle production gate on the
@@ -15,27 +15,36 @@ Before any M15/default-on claim, run:
 ./scripts/apple-silicon/m15-bundle-status.py
 ```
 
-The 2026-05-11 result is `verdict=incomplete ok=5 fail=4 missing=6`.
+The 2026-05-11 evening result is `verdict=incomplete ok=6 fail=5 missing=4`
+(after the same-day m15-gameplay-* discovery extension and the front-fb
+fallback policy decision-log entry).
 Oracle-side evidence is green, but the title-level Metal-vs-GL bundle is
 not closed: the 2026-05-11 PGR2/Rainbow paired passes only proved cleaner
 capture/static-canary comparison (black boot-ish PGR2 and Rainbow loading
 screen), not gameplay visual parity. M15 requires matched gameplay keyframes
 from controller routes, aligned by visual content rather than timestamp and
 reviewed as GL/Metal/oracle triptychs where possible. Crimson's older paired
-diff still fails (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay
-paired diffs are missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold
+diff still fails (`changed_pct=14.7560`). A 2026-05-11 evening PGR2 gameplay
+evidence attempt also failed: after fixing the GL leg to strict xemu-window
+capture and adding source-specific crops to
+`m15-gameplay-visual-compare.py`, the relaxed diagnostic still showed
+85.4635..100.0000% changed pixels and Metal NV2A profile/menu captures
+missing the GL/oracle background detail. SC2/Halo/Rainbow gameplay paired
+diffs are missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold
 shader compile proof is missing, and the front-fb fallback policy is still
 undecided. The current app build still does not expose QMP/HMP `screendump`;
 `metal-gl-compare.sh --trigger flip` uses the GL renderer's
 `XEMU_GL_SCREENSHOT_PATH` path and Metal `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`.
 
 Next session should start in `docs/apple-silicon/handoff.md` at
-"START HERE NEXT SESSION — M15 bundle closure". The first concrete task is a
-fresh PGR2 GL/Metal gameplay sequence pair, followed by
-`scripts/apple-silicon/m15-gameplay-visual-compare.py` against the existing
-PGR2 oracle composite frames. Only after inspecting the generated contact
-sheet should a PGR2 gameplay visual verdict be recorded; then repeat the same
-recipe for Rainbow.
+"START HERE NEXT SESSION — M15 bundle closure". The first concrete task is no
+longer a blind PGR2 rerun: inspect the failed PGR2 contact sheet from
+`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`
+and debug whether `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` is capturing the wrong
+published texture or whether live Metal rendering is missing the PGR2
+profile/menu background. Only after that is understood should PGR2 be rerun
+with strict GL window capture (`XEMU_CAPTURE_WINDOW_PATTERN=xemu`,
+`XEMU_CAPTURE_WINDOW_REQUIRED=1`) and `--gl-crop 112,143,1280,960`.
 
 Project is still in Metal Phase 1/2 closure work. **The user's stated
 30/60 FPS at 1080p / high-quality AA / correct-colors goals remain met
