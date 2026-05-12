@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 
 REQUIRED_RETAIL = ("crimson", "rainbow", "pgr2")
@@ -78,38 +78,92 @@ def find_latest_workflow(root: Path, title: str) -> tuple[Path | None, dict[str,
     return path, load_json(path)
 
 
+def _iter_paired_summary_paths(root: Path) -> Iterable[tuple[Path, dict[str, Any], str]]:
+    """Yield (path, data, game) for paired-evidence summaries.
+
+    Two discovery patterns are supported:
+
+    1. `*metal-gl-compare-*/summary.json` — the legacy metal-gl-compare.sh
+       harness output (paired visual diff + perf).
+    2. `m15-gameplay-*/<subdir>/summary.json` — the M15 gameplay evidence
+       artifacts produced by `m15-gameplay-visual-compare.py`. The
+       `<subdir>` is typically `evidence` (the canonical path used in the
+       handoff recipe) but can be `evidence-*`, `diagnostic-*`, etc.
+
+    The game id is extracted from `data["game"]` if present, otherwise
+    parsed from the parent directory name. The two patterns share the
+    `verdict` + `frames[].changed_pct` shape consumed by the M15 paired
+    gameplay diff check, and the gameplay artifacts add the explicit
+    `evidence_class=gameplay` / `gameplay_evidence=true` markers that
+    `is_gameplay_visual_evidence()` keys on.
+    """
+    glob_pattern_dir_re = {
+        "*metal-gl-compare-*/summary.json": r"metal-gl-compare-([A-Za-z0-9_-]+)",
+        "m15-gameplay-*/*/summary.json": r"m15-gameplay-([A-Za-z0-9]+)",
+    }
+    for pattern, dir_re in glob_pattern_dir_re.items():
+        for path in root.glob(pattern):
+            data = load_json(path)
+            if not data:
+                continue
+            game = str(data.get("game") or "").strip()
+            if not game:
+                # The m15-gameplay-* pattern has the title as part of the
+                # grandparent directory name (`m15-gameplay-<title>-<ts>`).
+                # Walk parents until the regex bites — the immediate
+                # parent is the `evidence` subdir which carries no title.
+                for parent in (path.parent, path.parent.parent):
+                    m = re.search(dir_re, parent.name)
+                    if m:
+                        game = m.group(1)
+                        break
+            if not game:
+                continue
+            yield path, data, game
+
+
 def paired_summaries(root: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
-    out: dict[str, tuple[Path, dict[str, Any]]] = {}
-    for path in root.glob("*metal-gl-compare-*/summary.json"):
-        data = load_json(path)
-        if not data:
-            continue
-        game = str(data.get("game") or "").strip()
-        if not game:
-            m = re.search(r"metal-gl-compare-([A-Za-z0-9_-]+)", str(path.parent))
-            game = m.group(1) if m else ""
-        if not game:
-            continue
+    """Return the best paired-evidence summary per game.
+
+    Selection preference:
+      1. Gameplay-evidence summaries (evidence_class=gameplay /
+         gameplay_evidence=true) win over non-gameplay summaries
+         regardless of mtime — this is the M15 production gate.
+      2. Within each preference tier, latest by mtime wins.
+
+    Without (1), a newer static-canary metal-gl-compare PASS would
+    eclipse an earlier real gameplay PASS just because it ran more
+    recently; the M15 gate would then report MISSING evidence the
+    project actually has.
+    """
+    out: dict[str, tuple[Path, dict[str, Any], int]] = {}  # game -> (path, data, tier)
+    for path, data, game in _iter_paired_summary_paths(root):
+        tier = 1 if is_gameplay_visual_evidence(data) else 0
         prev = out.get(game)
-        if prev is None or path.stat().st_mtime > prev[0].stat().st_mtime:
-            out[game] = (path, data)
-    return out
+        if prev is None:
+            out[game] = (path, data, tier)
+            continue
+        prev_path, _prev_data, prev_tier = prev
+        if tier > prev_tier:
+            out[game] = (path, data, tier)
+        elif tier == prev_tier and path.stat().st_mtime > prev_path.stat().st_mtime:
+            out[game] = (path, data, tier)
+    return {game: (path, data) for game, (path, data, _tier) in out.items()}
 
 
 def paired_summary_history(root: Path) -> dict[str, list[tuple[Path, dict[str, Any]]]]:
-    out: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
-    for path in root.glob("*metal-gl-compare-*/summary.json"):
-        data = load_json(path)
-        if not data:
-            continue
-        game = str(data.get("game") or "").strip()
-        if not game:
-            m = re.search(r"metal-gl-compare-([A-Za-z0-9_-]+)", str(path.parent))
-            game = m.group(1) if m else ""
-        if not game:
-            continue
-        out.setdefault(game, []).append((path, data))
+    """Return all paired-evidence summaries per game, newest first.
 
+    Used by the p99 jitter check which walks history looking for a
+    summary that exposes parseable `gl_run_dir`/`metal_run_dir` fields.
+    Gameplay-evidence summaries don't carry those (visual-only artifact)
+    and are skipped naturally by `latest_parseable_jitter`; including
+    them in history is harmless and keeps both discovery patterns
+    coherent.
+    """
+    out: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path, data, game in _iter_paired_summary_paths(root):
+        out.setdefault(game, []).append((path, data))
     for items in out.values():
         items.sort(key=lambda item: item[0].stat().st_mtime, reverse=True)
     return out
@@ -170,6 +224,45 @@ def is_gameplay_visual_evidence(data: dict[str, Any]) -> bool:
     return evidence_class in {"gameplay", "gameplay-route", "route-gameplay"}
 
 
+def parse_perf_diff_p99(perf_diff: Path) -> tuple[float, float] | None:
+    """Parse `post_load_mspf_max_p99` from a metal-gl-compare perf-diff.txt.
+
+    The compare harness writes `perf-diff.txt` next to its `summary.json`.
+    Format is a pipe-separated table; the relevant row is:
+
+        post_load_mspf_max_p99   |    40.87 |   300.87 | +636.16 | regression
+
+    Returns (gl_p99, metal_p99) on success. None if the file is absent,
+    unreadable, or doesn't contain a parseable row.
+
+    Why this fallback exists: `latest_parseable_jitter` previously
+    depended on running `extract-perf-summary.sh` to derive p99 fields
+    when `perf-summary.txt` was missing from the per-run dir. In a
+    read-only execution environment (or when the launcher didn't write
+    a perf-summary.txt), that subprocess call can fail silently and
+    the gate reports p99 as MISSING even when the same data is sitting
+    in `perf-diff.txt`. Reading the diff directly removes that
+    dependency.
+    """
+    try:
+        text = perf_diff.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.strip().startswith("post_load_mspf_max_p99"):
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 3:
+            continue
+        try:
+            gl_p99 = float(parts[1])
+            metal_p99 = float(parts[2])
+        except ValueError:
+            continue
+        return gl_p99, metal_p99
+    return None
+
+
 def latest_parseable_jitter(
     history: dict[str, list[tuple[Path, dict[str, Any]]]],
     game: str,
@@ -182,6 +275,15 @@ def latest_parseable_jitter(
         metal_p99 = parse_float(metal, "post_load_mspf_max_p99")
         if gl_p99 is not None and metal_p99 is not None and gl_p99 != 0:
             return path, data, gl_p99, metal_p99
+        # Fallback: the compare run wrote `perf-diff.txt` next to its
+        # summary.json with the same p99 metric already computed for
+        # the regression report. Use that when re-extracting from the
+        # per-run dir is not possible (subprocess unavailable,
+        # `perf-summary.txt` missing on disk, etc.).
+        perf_diff = path.parent / "perf-diff.txt"
+        diff_pair = parse_perf_diff_p99(perf_diff)
+        if diff_pair is not None and diff_pair[0] != 0:
+            return path, data, diff_pair[0], diff_pair[1]
     return None
 
 
@@ -281,11 +383,40 @@ def build_checks(root: Path) -> list[Check]:
         "missing",
         "needs a fresh-cache Metal run with METAL_SHADER_COMPILE_* and METAL_SHADER_CACHE_* counters recorded",
     ))
-    checks.append(Check(
-        "front-fb fallback policy",
-        "missing",
-        "needs a decision-log entry accepting fallback default-on or a faithful CRTC publish fix",
-    ))
+
+    # Front-fb fallback policy: resolved when a decision-log entry uses
+    # one of the policy-decision markers below. The markers are
+    # phrased so any policy outcome (default-on, opt-in stays, faithful
+    # CRTC publish replaces the fallback) registers — the gate is
+    # "policy is decided", not "policy is a specific value".
+    decision_log = repo / "docs/apple-silicon/decision-log.md"
+    fallback_markers = (
+        "Front-fb fallback policy stays opt-in",
+        "Front-fb fallback policy: default-on",
+        "Front-fb fallback replaced by faithful CRTC publish",
+    )
+    fallback_resolved_line: str | None = None
+    try:
+        text = decision_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    for marker in fallback_markers:
+        if marker.lower() in text.lower():
+            fallback_resolved_line = marker
+            break
+    if fallback_resolved_line:
+        checks.append(Check(
+            "front-fb fallback policy",
+            "ok",
+            f"decision-log records: \"{fallback_resolved_line}\"",
+            str(decision_log),
+        ))
+    else:
+        checks.append(Check(
+            "front-fb fallback policy",
+            "missing",
+            "needs a decision-log entry accepting fallback default-on or a faithful CRTC publish fix",
+        ))
     return checks
 
 

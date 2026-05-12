@@ -311,9 +311,14 @@ def align_one(
     return best, feature_distance(source, best)
 
 
-def resized_pair(a_path: Path, b_path: Path, crop: tuple[int, int, int, int] | None) -> tuple[Image.Image, Image.Image]:
-    a = crop_to_common(Image.open(a_path).convert("RGB"), crop)
-    b = crop_to_common(Image.open(b_path).convert("RGB"), crop)
+def resized_pair(
+    a_path: Path,
+    b_path: Path,
+    a_crop: tuple[int, int, int, int] | None,
+    b_crop: tuple[int, int, int, int] | None,
+) -> tuple[Image.Image, Image.Image]:
+    a = crop_to_common(Image.open(a_path).convert("RGB"), a_crop)
+    b = crop_to_common(Image.open(b_path).convert("RGB"), b_crop)
     target = (min(a.width, b.width), min(a.height, b.height))
     if a.size != target:
         a = a.resize(target, Image.Resampling.LANCZOS)
@@ -325,12 +330,13 @@ def resized_pair(a_path: Path, b_path: Path, crop: tuple[int, int, int, int] | N
 def compare_images(
     gl_path: Path,
     metal_path: Path,
-    crop: tuple[int, int, int, int] | None,
+    gl_crop: tuple[int, int, int, int] | None,
+    metal_crop: tuple[int, int, int, int] | None,
     out_dir: Path,
     threshold: int,
 ) -> tuple[float, float, float, int, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    gl, metal = resized_pair(gl_path, metal_path, crop)
+    gl, metal = resized_pair(gl_path, metal_path, gl_crop, metal_crop)
     diff = ImageChops.difference(gl, metal)
     stat = ImageStat.Stat(diff)
     channels = len(stat.mean)
@@ -364,13 +370,18 @@ def make_triptych(
     oracle_path: Path | None,
     diff_path: Path,
     out_path: Path,
-    crop: tuple[int, int, int, int] | None,
+    gl_crop: tuple[int, int, int, int] | None,
+    metal_crop: tuple[int, int, int, int] | None,
+    oracle_crop: tuple[int, int, int, int] | None,
     labels: Iterable[str],
 ) -> None:
     thumb_w = 320
-    panels = [fit_thumb(gl_path, thumb_w, crop), fit_thumb(metal_path, thumb_w, crop)]
+    panels = [
+        fit_thumb(gl_path, thumb_w, gl_crop),
+        fit_thumb(metal_path, thumb_w, metal_crop),
+    ]
     if oracle_path is not None:
-        panels.append(fit_thumb(oracle_path, thumb_w, crop))
+        panels.append(fit_thumb(oracle_path, thumb_w, oracle_crop))
     panels.append(fit_thumb(diff_path, thumb_w, None))
     labels = list(labels)
     font = ImageFont.load_default()
@@ -454,6 +465,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Default: benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay")
     parser.add_argument("--glob", default="*.png")
     parser.add_argument("--crop", type=parse_crop)
+    parser.add_argument("--gl-crop", type=parse_crop,
+                        help="Source-specific GL crop x,y,width,height; defaults to --crop")
+    parser.add_argument("--metal-crop", type=parse_crop,
+                        help="Source-specific Metal crop x,y,width,height; defaults to --crop")
+    parser.add_argument("--oracle-crop", type=parse_crop,
+                        help="Source-specific oracle crop x,y,width,height; defaults to --crop")
     parser.add_argument("--threshold", type=float, default=1.0,
                         help="Maximum changed-pixels pct for PASS")
     parser.add_argument("--pixel-threshold", type=int, default=8,
@@ -471,7 +488,61 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-progress-delta", type=float, default=0.25)
     parser.add_argument("--ignore-gl-indexes", type=parse_int_set, default=set())
     parser.add_argument("--ignore-metal-indexes", type=parse_int_set, default=set())
+    parser.add_argument(
+        "--diagnostic", action="store_true",
+        help=(
+            "Mark this run as a triage diagnostic, not strict M15 evidence. "
+            "Sets evidence_class=diagnostic and gameplay_evidence=false in "
+            "the output summary regardless of verdict. Auto-set when any "
+            "strictness-affecting parameter is relaxed below its M15 "
+            "default (see auto-detection logic post-parse)."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # Mechanical strictness check: if the operator relaxed any of the
+    # M15-evidence-grade parameters, force diagnostic mode even when the
+    # --diagnostic flag was forgotten. The strict default values listed
+    # here MUST match the argparse defaults above; if one changes, change
+    # the other. Codex flagged in the 2026-05-11 evening review that
+    # operator-remembered diagnostic marking can reintroduce the
+    # capture/static-canary-PASS-poses-as-gameplay-evidence footgun, so
+    # the parser auto-demotes relaxed runs.
+    relaxed_reasons: list[str] = []
+    if args.threshold > 1.0:
+        relaxed_reasons.append(
+            f"--threshold={args.threshold} > strict 1.0 (PASS bar)")
+    if args.min_keyframes < 3:
+        relaxed_reasons.append(
+            f"--min-keyframes={args.min_keyframes} < strict 3")
+    if args.max_align_distance > 0.35:
+        relaxed_reasons.append(
+            f"--max-align-distance={args.max_align_distance} > strict 0.35")
+    if args.max_progress_delta > 0.25:
+        relaxed_reasons.append(
+            f"--max-progress-delta={args.max_progress_delta} > strict 0.25")
+    if args.min_nonblack_pct < 5.0:
+        relaxed_reasons.append(
+            f"--min-nonblack-pct={args.min_nonblack_pct} < strict 5.0")
+    if args.min_entropy < 1.2:
+        relaxed_reasons.append(
+            f"--min-entropy={args.min_entropy} < strict 1.2")
+    if args.min_motion_mae < 0.2:
+        relaxed_reasons.append(
+            f"--min-motion-mae={args.min_motion_mae} < strict 0.2")
+    if args.ignore_gl_indexes:
+        relaxed_reasons.append(
+            "--ignore-gl-indexes set (selectively excluding GL frames)")
+    if args.ignore_metal_indexes:
+        relaxed_reasons.append(
+            "--ignore-metal-indexes set (selectively excluding Metal frames)")
+    auto_diagnostic = bool(relaxed_reasons) and not args.diagnostic
+    if auto_diagnostic:
+        eprint(
+            "[m15-gameplay-visual-compare] auto-demoting to diagnostic "
+            f"due to relaxed parameter(s): {'; '.join(relaxed_reasons)}"
+        )
+        args.diagnostic = True
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out_dir = args.out_dir or (BENCHMARK_ROOT / f"{stamp}-metal-gl-compare-{args.game}-gameplay")
@@ -487,16 +558,20 @@ def main(argv: list[str] | None = None) -> int:
     if not gl_paths or not metal_paths:
         raise SystemExit(f"need at least one GL and Metal frame (gl={len(gl_paths)} metal={len(metal_paths)})")
 
+    gl_crop = args.gl_crop or args.crop
+    metal_crop = args.metal_crop or args.crop
+    oracle_crop = args.oracle_crop or args.crop
+
     gl_features = compute_features(
-        gl_paths, args.crop, args.black_luma, args.min_nonblack_pct,
+        gl_paths, gl_crop, args.black_luma, args.min_nonblack_pct,
         args.static_motion, args.ignore_gl_indexes,
     )
     metal_features = compute_features(
-        metal_paths, args.crop, args.black_luma, args.min_nonblack_pct,
+        metal_paths, metal_crop, args.black_luma, args.min_nonblack_pct,
         args.static_motion, args.ignore_metal_indexes,
     )
     oracle_features = compute_features(
-        oracle_paths, args.crop, args.black_luma, args.min_nonblack_pct,
+        oracle_paths, oracle_crop, args.black_luma, args.min_nonblack_pct,
         args.static_motion, set(),
     ) if oracle_paths else []
 
@@ -555,7 +630,7 @@ def main(argv: list[str] | None = None) -> int:
 
             frame_dir = diffs_dir / f"frame-{pair_idx:02d}"
             changed_pct, mae, rms, max_abs, diff_path = compare_images(
-                Path(gl_feature.path), Path(metal_feature.path), args.crop,
+                Path(gl_feature.path), Path(metal_feature.path), gl_crop, metal_crop,
                 frame_dir, args.pixel_threshold,
             )
             triptych_path = triptych_dir / f"keyframe-{pair_idx:02d}.jpg"
@@ -569,7 +644,7 @@ def main(argv: list[str] | None = None) -> int:
             make_triptych(
                 Path(gl_feature.path), Path(metal_feature.path),
                 Path(oracle_feature.path) if oracle_feature else None,
-                diff_path, triptych_path, args.crop, labels,
+                diff_path, triptych_path, gl_crop, metal_crop, oracle_crop, labels,
             )
             triptych_paths.append(triptych_path)
             if changed_pct > args.threshold:
@@ -601,19 +676,26 @@ def main(argv: list[str] | None = None) -> int:
     verdict = "PASS" if pass_value else ("INFRA-FAIL" if infra_failures else "FAIL")
     summary_path = out_dir / "summary.json"
     report_path = out_dir / "report.md"
+    evidence_class = "diagnostic" if args.diagnostic else "gameplay"
+    gameplay_evidence = pass_value and not args.diagnostic
     payload = {
         "schema": "m15-gameplay-visual-compare-v1",
         "pass": pass_value,
         "verdict": verdict,
         "game": args.game,
-        "evidence_class": "gameplay",
-        "gameplay_evidence": pass_value,
+        "evidence_class": evidence_class,
+        "gameplay_evidence": gameplay_evidence,
+        "diagnostic": bool(args.diagnostic),
         "threshold": args.threshold,
         "pixel_threshold": args.pixel_threshold,
         "sources": {
             "gl_frames": str(resolve_frame_dir(args.gl_frames)),
             "metal_frames": str(resolve_frame_dir(args.metal_frames)),
             "oracle_frames": str(resolve_frame_dir(args.oracle_frames)) if args.oracle_frames else None,
+            "crop": args.crop,
+            "gl_crop": gl_crop,
+            "metal_crop": metal_crop,
+            "oracle_crop": oracle_crop,
         },
         "artifacts": {
             "report": str(report_path),
