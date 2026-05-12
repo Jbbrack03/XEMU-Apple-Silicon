@@ -133,9 +133,10 @@ Important tooling finding:
   (intermediate RTs at 0x3628000 / 0x2c06000 / 0x2e06000 / vram_addr=0 +
   smaller format-4 surfaces 0x3c84000 / 0x3b58000) and the Metal renderer
   cannot identify which surface holds the final composite. This is the
-  next deep Metal work and is documented as future M5.11 / M16 in the
-  decision-log entry "2026-05-11 (evening 2): Front-fb fallback policy
-  stays opt-in".
+  next deep Metal work and is documented as a future Metal slice
+  (provisionally M5.12 / M17 — M5.11 is already the shipped
+  surface-download/RTT work of 2026-05-04) in the decision-log entry
+  "2026-05-11 (evening 2): Front-fb fallback policy stays opt-in".
 - Tooling: `scripts/apple-silicon/m15-bundle-status.py` now discovers
   `m15-gameplay-*/<subdir>/summary.json` in addition to the
   `*metal-gl-compare-*/summary.json` legacy pattern, preferring
@@ -2930,8 +2931,9 @@ immediate work:
    fallback policy stays opt-in (NOT default-on)" which supersedes the
    earlier "2026-05-04 evening: Front-fb fallback policy" deferral. The
    deeper fix (identify final-composite surface, track NV097_IMAGE_BLIT,
-   verify surface-as-texture for vram_addr=0) is a future M5.11 / M16
-   slice.
+   verify surface-as-texture for vram_addr=0) is a future Metal slice
+   (provisionally M5.12 / M17 — M5.11 is already shipped as the
+   2026-05-04 surface-download/RTT work).
 7. **(GL-side) Audio listen-test for `XEMU_APU_LOCK_RELEASE`** —
    still UNBLOCKED, orthogonal to Metal. Human listener plays
    Crimson, Rainbow, PGR2 for ≥ 5 minutes each with the slice on. If

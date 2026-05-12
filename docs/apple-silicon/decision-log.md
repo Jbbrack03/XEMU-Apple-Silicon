@@ -47,8 +47,11 @@ profile screen. Flipping it default-on would mask the real bug under
 visible content. Removing it would regress those visual canaries that
 ARE good evidence.
 
-**Next closure move.** Open a future Metal slice (provisionally M5.11
-or a renderer-track M16) scoped to:
+**Next closure move.** Open a future Metal slice (M5.11 is already
+shipped as the surface-download/RTT work of 2026-05-04; this new slice
+needs its own number — provisionally **M5.12 / M17** depending on
+whether the renderer team treats it as a surface-cache continuation or
+a top-level renderer-track item) scoped to:
 
 1. Identify PGR2's final-composite surface by shape (640×480 format-4
    surfaces 0x3c84000 / 0x3b58000 are the most likely candidates per
