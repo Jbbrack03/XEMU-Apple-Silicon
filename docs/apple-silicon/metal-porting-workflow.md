@@ -1,6 +1,9 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-11 evening (PGR2 gameplay evidence attempt failed;
+Last updated: 2026-05-12 (CLAUDE.md compressed; cross-refs to its
+"Stable opt-in" / "Working rules" sections redirected to
+automation.md and the workspace CLAUDE.md respectively. PGR2
+gameplay evidence attempt from 2026-05-11 evening still applies;
 default-on still blocked). This is the canonical operating playbook for the native Metal
 renderer port. It supersedes nothing — `metal-renderer-plan.md` remains the
 slice-level implementation plan (M0–M15), `handoff.md` remains the

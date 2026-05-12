@@ -2,7 +2,8 @@
 
 Last updated: 2026-05-12 (gate-discovery extension + diagnostic vs evidence
 split landed; paired capture source fixed in prior session; gameplay parity
-still unproven). Use
+still unproven; CLAUDE.md compressed and cross-refs to its "Stable opt-in"
+section redirected to this file as canonical). Use
 `oracle-validate.sh` as the production oracle-side gate, and use
 `m15-bundle-status.py` as the read-only M15 default-on evidence
 checklist before long renderer runs. The real-Xbox oracle side is green
@@ -3005,9 +3006,11 @@ boot+flubber gold was originally captured during a Crimson Skies
 launch that hit the boot animation before the title screen; the disc
 is irrelevant — frame 300 sits inside the dashboard boot sequence.
 
-Env recipe (verbatim from `handoff.md` "PGR2 PASS" bullet — see the
-"Stable opt-in" entries in `xemu-fork/CLAUDE.md` for each flag's full
-semantics; this script does not re-document them):
+Env recipe (verbatim from `handoff.md` "PGR2 PASS" bullet — each
+flag's full semantics is documented later in this file (search by
+flag name); `.claude/rules/flags-*.md` indices give a 1-line summary
+per flag and auto-load when matching source is touched. This script
+does not re-document them):
 
 ```
 XEMU_RENDERER=METAL
