@@ -1,7 +1,8 @@
 # Benchmark Automation
 
-Last updated: 2026-05-11 (paired capture source fixed; gameplay parity still
-unproven). Use
+Last updated: 2026-05-12 (gate-discovery extension + diagnostic vs evidence
+split landed; paired capture source fixed in prior session; gameplay parity
+still unproven). Use
 `oracle-validate.sh` as the production oracle-side gate, and use
 `m15-bundle-status.py` as the read-only M15 default-on evidence
 checklist before long renderer runs. The real-Xbox oracle side is green
@@ -2796,11 +2797,27 @@ scripts/apple-silicon/m15-gameplay-visual-compare.py \
 ```
 
 Default output is
-`benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay/summary.json`, matching
-`m15-bundle-status.py`'s existing discovery pattern. The summary is marked
-`evidence_class=gameplay` and includes `gameplay_evidence=true` only when the
-run passes the keyframe count, alignment, and changed-pixel gates. Primary
-artifacts:
+`benchmark-runs/<TS>-metal-gl-compare-<game>-gameplay/summary.json`. The
+M15 gate (`m15-bundle-status.py`) also discovers summaries written under
+`benchmark-runs/m15-gameplay-*/<subdir>/summary.json` (the canonical
+handoff-recipe layout), so either output location works.
+
+By default the summary is marked `evidence_class=gameplay` and includes
+`gameplay_evidence=true` only when the run passes the keyframe count,
+alignment, and changed-pixel gates. Use `--diagnostic` (2026-05-12) for
+triage runs that should NOT count as M15 evidence — it forces
+`evidence_class=diagnostic`, `gameplay_evidence=false`, and adds a
+top-level `diagnostic=true` field regardless of verdict. The flag is
+auto-set when any strictness-affecting parameter is relaxed below its
+M15 default (`--threshold > 1.0`, `--min-keyframes < 3`,
+`--max-align-distance > 0.35`, `--max-progress-delta > 0.25`,
+`--min-nonblack-pct < 5.0`, `--min-entropy < 1.2`,
+`--min-motion-mae < 0.2`, or `--ignore-gl-indexes`/
+`--ignore-metal-indexes` non-empty), with the reason(s) logged to
+stderr. This prevents operator-remembered marking from accidentally
+satisfying the M15 paired-gameplay gate with relaxed runs.
+
+Primary artifacts:
 
 - `summary.json` — M15-readable verdict, keyframe metrics, source paths, and
   rejection/alignment metadata.
@@ -4352,6 +4369,19 @@ into CI gates.
   exit 1 means the bundle is still incomplete or failed. Use this
   before long benchmark sessions to pick the next run from missing
   evidence instead of guessing.
+  Paired-evidence discovery (2026-05-12) covers both
+  `*metal-gl-compare-*/summary.json` (legacy) and
+  `m15-gameplay-*/<subdir>/summary.json` (M15 gameplay evidence)
+  patterns, preferring `evidence_class=gameplay`/
+  `gameplay_evidence=true` summaries over non-gameplay ones for the
+  same title. The p99 jitter check has a `perf-diff.txt` fallback so it
+  reports FAIL with concrete numbers even when
+  `extract-perf-summary.sh` can't run from the per-run dir
+  (sandboxed/read-only environments). The front-fb fallback policy
+  check resolves OK when the decision-log records one of three policy
+  marker phrases (`Front-fb fallback policy stays opt-in`,
+  `Front-fb fallback policy: default-on`,
+  `Front-fb fallback replaced by faithful CRTC publish`).
 
 - `scripts/apple-silicon/capture-composite-reference.sh` —
   capture a real-Xbox reference frame for a diag XBE via the
