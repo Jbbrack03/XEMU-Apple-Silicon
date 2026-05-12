@@ -383,7 +383,7 @@ zero-padded 6-digit cumulative-per-RUN draw index, matching
 Mesa/RADV debug-dump semantics) for draws indexed `[START, END]`
 **inclusive**. The W4 implementations in `pgraph/mtl/draw.mm` and
 `pgraph/gl/draw.c` both check `idx >= START && idx <= END`; the
-upstream `xemu-fork/CLAUDE.md` flag entry says inclusive too. Keep
+upstream `docs/apple-silicon/automation.md` flag entry (and the `.claude/rules/flags-renderer.md` index) say inclusive too. Keep
 the range tight to bound disk usage — a single Metal frame can issue
 100+ draws at PGR2 gameplay rates.
 
@@ -498,9 +498,12 @@ Phase 1 sessions that change Metal renderer code must:
 
 This section catalogues every Metal-relevant flag, script, and counter
 the workflow consumes, mapped to the phase that uses it. Stable
-opt-in flags are reproduced verbatim from `xemu-fork/CLAUDE.md` "Stable
-opt-in"; new tools introduced 2026-05-04 are flagged as such with a
-forward reference to `handoff.md` for current implementation status.
+opt-in flags are reproduced verbatim from
+`docs/apple-silicon/automation.md` (canonical full descriptions);
+`.claude/rules/flags-renderer.md` is the 1-line-per-flag index that
+auto-loads when Claude touches matching source. New tools introduced
+2026-05-04 are flagged as such with a forward reference to
+`handoff.md` for current implementation status.
 
 ### 4.1 Renderer-selection flags
 
@@ -658,7 +661,7 @@ forward reference to `handoff.md` for current implementation status.
 ### 4.7 Counters
 
 The full set of 50 `METAL_*` counters is documented in
-`xemu-fork/CLAUDE.md` "Stable opt-in" and `automation.md`. The
+`docs/apple-silicon/automation.md` (canonical). The
 phase-relevant subset:
 
 - **Phase 1 (correctness floors):**
@@ -1120,8 +1123,11 @@ subset; the §7.1 primary path is sufficient until then.
 - `emulator-metal-survey.md` — peer-emulator structural patterns
   (Dolphin, PCSX2, DuckStation, MoltenVK). Useful when a Phase 1
   bug looks like a known peer-emulator issue.
-- `xemu-fork/CLAUDE.md` "Stable opt-in" — the authoritative flag
-  list. Section 4 above mirrors but does not replace it.
-- `xemu-fork/CLAUDE.md` "Working rules" — project rules #1
-  (no guessing), #4 (no doc drift), #5 (build tools when blocked),
-  #15 (Codex-validate triggers) directly bind the workflow above.
+- `docs/apple-silicon/automation.md` — the authoritative flag and
+  counter reference. Section 4 above mirrors but does not replace it.
+  `.claude/rules/flags-renderer.md` is the path-scoped 1-line-per-flag
+  index auto-loaded when matching source is touched.
+- workspace `CLAUDE.md` "Working rules" (loaded automatically via
+  the directory-walk from this fork) — project rules #1 (no
+  guessing), #4 (no doc drift), #5 (build tools when blocked), #15
+  (Codex-validate triggers) directly bind the workflow above.
