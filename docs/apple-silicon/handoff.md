@@ -1,32 +1,59 @@
 # Handoff
 
-Last updated: 2026-05-12 evening — T1 boot-animation temporal baseline
-landed (`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`).
-**User-reported "green blobs" on Metal is reproduced as the M15 eval
-recipe** (`XEMU_METAL_FRONT_FB_FALLBACK=1` + `SOURCE=drawable`): the
-Metal renderer fails the BIOS boot animation in all three tested
-configs while GL renders it correctly. Single-frame MSAA4 canary PASSes
-are **proven insufficient** as M15 evidence — they sample at a fixed
-flip ordinal and cannot detect that 97% of surrounding frames are solid
-magenta (`FRONT_FB_FALLBACK=0`) or that the alternative config renders
-green-blob noise where the Xbox logo should be. New tools shipped
-this session: `capture-boot-temporal.sh` (renderer-native PNG-every-frame
-boot capture) and `temporal-flicker-analyze.py` (frame-N vs N-1 toggle
-detection + heat maps + storyboards + blink reels). Prior 2026-05-12
-state (oracle-agent v0.4 with `smc.*` thermal + fan-control surface;
-Codex confirmed fan-percent mapping and 67 °C -> 57 °C idle cooldown
-when forcing raw=50/100%, retail oracle Xbox still thermally
-compromised pending repaste — see
-`benchmarks/2026-05-12-noctua-fan-validation.md`). Prior 2026-05-11
-state: M15 bundle checklist-gated and NOT closed. Retail oracle
-workflow production-ready on Crimson/Rainbow/PGR2 in principle;
-the project Xbox needs repaste before more retail-oracle gameplay
-capture. SC2 deferred as a retail-oracle production gate after IGR
-patch-path failures. Front-fb fallback policy stays opt-in. PGR2
-capture-source hypothesis decisively ruled out; bug is in the Metal
-render path's multi-RT compositing — and the new boot-animation
-evidence shows the same class of bug also breaks the BIOS
-animation, which has no PGR2-specific multi-RT pipeline at all.
+Last updated: 2026-05-12 evening — **T2 per-host-refresh front-fb
+publish landed** (commits `ca35b96562` + `3ae76a327c`). Root cause of
+the boot-animation-magenta + tracked-title-flicker class of bugs was
+identified: `gl_render_frame` (`ui/xemu.c:872`) short-circuits to
+`xemu_metal_render_frame()` and skips
+`nv2a_get_framebuffer_surface()`, so on Metal the CRTC-aware publish
+to the compositor's side-channel only fired on guest `NV097_FLIP_STALL`
+(~6× / 18 s on BIOS boot vs ~558 host vblanks). T2 wires the GL-style
+call/release pair around the Metal frame and uses a new lightweight
+publish (`pgraph_mtl_surface_publish_front_fb_pointer_only`) so the
+60 Hz publish doesn't pay the heavyweight compose-with-GPU-sync cost
+the flip_stall path uses. Codex review caught a pre-existing
+cache-lifetime race that the new 60 Hz rate widened ~200×; the fix
+serializes the host-refresh publish under `pg->lock` (same lock PFIFO
+method handlers hold while mutating the cache).
+
+**Boot animation result (run `20260513T030000Z-boot-metal-T2v4-locked`):**
+1051 frames at ~58 fps with default Metal flags, 525 frames now show
+content (vs 0 pre-fix). Metal renders the post-handoff
+`flat-tri-depth.xbe` correctly — red triangle / cyan triangle match GL
+at the same flip ordinals on spot-checked frames. The remaining 506
+solid frames are the BIOS animation itself, which the BIOS renders via
+the VGA-direct path (writes pixels directly into the VGA framebuffer
+at the CRTC-pointed address, bypassing PGRAPH). GL handles this via
+its fallback at `ui/xemu.c:902-910`; Metal has no equivalent. The VGA
+fallback is the next slice (M5.13 / M18). See
+`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`
+"2026-05-12 evening update — T2 partial fix landed".
+
+**Tracked-title (PGR2/Rainbow/Crimson/Halo/SC2) gameplay impact is
+unverified** — those engines use PGRAPH for rendering so T2 should
+help, but separate concerns (multi-RT compositing per PGR2 diagnostic,
+p99 jitter) may still bite. Queued: rerun Crimson paired diff (cheapest),
+then PGR2.
+
+Earlier this session (still relevant):
+- T1: temporal-flicker tooling shipped (`scripts/apple-silicon/
+  capture-boot-temporal.sh`, `scripts/apple-silicon/temporal-flicker-
+  analyze.py`). T1 baseline reproduced the user-reported "green blobs"
+  symptom under the M15 eval recipe (1.06 blinks/sec vs GL 0.06).
+- M15 evidence methodology change (decision-log "2026-05-12 (evening)"):
+  single-frame MSAA4 canary PASSes demoted to smoke; temporal-flicker
+  analysis now required.
+- Oracle-agent v0.4 thermal/fan surface (prior session, still
+  uncommitted): retail oracle Xbox thermally compromised pending
+  repaste — see `benchmarks/2026-05-12-noctua-fan-validation.md`.
+
+Prior 2026-05-11 state remains: M15 bundle checklist-gated and not
+closed. Retail oracle workflow production-ready on Crimson / Rainbow /
+PGR2 in principle. SC2 deferred as a retail-oracle production gate
+after IGR patch-path failures. Front-fb fallback policy stays opt-in.
+PGR2 capture-source hypothesis decisively ruled out; the multi-RT
+compositing concern remains a separate deferred fix (M5.12 / M17)
+that T2 does NOT address.
 
 ## START HERE NEXT SESSION — M15 bundle closure
 

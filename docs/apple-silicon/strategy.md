@@ -1,7 +1,15 @@
 # Strategy
 
-Last updated: 2026-05-11 evening (M15 default-on is checklist-gated and still
-blocked). Retail Xbox oracle proof is production-ready for the stable trio
+Last updated: 2026-05-12 evening (T2 front-fb publish fix landed —
+commits `ca35b96562` + `3ae76a327c`; the Metal renderer now publishes
+per host vsync instead of only per guest `NV097_FLIP_STALL`, which
+restores PGRAPH-rendered content for tracked titles. M15 default-on
+is still checklist-gated and not closed; the BIOS-animation portion
+of the boot capture still falls through to the missing VGA fallback
+path, and tracked-title gameplay impact is unverified pending
+Crimson / PGR2 reruns. See decision-log "2026-05-12 (evening 2)" and
+`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`).
+Retail Xbox oracle proof is production-ready for the stable trio
 (Crimson Skies / Rainbow Six 3 / PGR2), but the Metal default-on bundle is
 not closed: `scripts/apple-silicon/m15-bundle-status.py` currently reports
 `verdict=incomplete ok=6 fail=5 missing=4` (2026-05-11 evening, after

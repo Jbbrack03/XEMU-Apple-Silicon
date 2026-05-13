@@ -10576,3 +10576,109 @@ remain required.
    non-paused workloads, or a minimum publishes-per-second floor) so
    the fast smoke gate also catches the "renderer presents but
    nothing reaches display" case the boot baseline exposes.
+
+---
+
+## 2026-05-12 (evening 2): T2 — Metal front-fb publish runs per host refresh, not per guest NV097_FLIP_STALL
+
+**Decision.** The Metal renderer now publishes the CRTC-pointed front
+framebuffer to the compositor side-channel once per host vsync (~60 Hz),
+matching the GL renderer's per-host-refresh pattern. Previously the
+publish only fired on guest `NV097_FLIP_STALL` writes (~0.33 Hz on
+BIOS boot, low single digits per second in normal gameplay), which
+left the compositor reading a stale texture pointer between guest
+flip_stalls.
+
+Two commits land this:
+
+- `ca35b96562` — `metal: per-host-refresh front-fb publish (T2)`.
+  `ui/xemu-metal.mm` now wraps `xemu_metal_render_frame()` in a
+  `nv2a_get_framebuffer_surface()` / `nv2a_release_framebuffer_surface()`
+  pair mirroring GL's `ui/xemu.c:898` / `:935`. The pair dispatches to
+  the renderer's ops table; on Metal the op
+  (`pgraph_mtl_get_framebuffer_surface`) does the CRTC-aware cache
+  lookup. The publish call is switched from
+  `pgraph_mtl_surface_publish_display_front_fb` (heavyweight — runs
+  `cmd commit` + `waitUntilCompleted` per call) to a new
+  `pgraph_mtl_surface_publish_front_fb_pointer_only`. The lightweight
+  variant stores the resolved `id<MTLTexture>` pointer atomically and
+  is safe at 60 Hz because the compositor reads the pointer atomically
+  and uses it in a render pass on the same `s_render_queue` as the
+  NV2A draws, which serializes the ordering naturally.
+
+- `3ae76a327c` — `metal: serialize T2 host-refresh publish with
+  pg->lock (Codex review)`. Codex flagged a high-severity
+  cache-lifetime race: PFIFO `DEF_METHOD` handlers (e.g.
+  `NV097_FLIP_STALL` at `pgraph.c:1030`) hold `pg->lock` while
+  mutating the surface cache; the pre-T2 publish path was implicitly
+  safe because it ran inside that lock. T2's host-refresh path runs
+  from the display thread with only `renderer_lock` held, which does
+  not exclude PFIFO. The pre-T2 op had the same race but at the
+  flip_stall rate (~0.33 Hz) the window almost never hit. T2 widened
+  the window ~200×. Fix: take `d->pgraph.lock` around the cache
+  lookup in `pgraph_mtl_get_framebuffer_surface`. Lock-order safe:
+  PFIFO workers never take `renderer_lock`, so `renderer_lock →
+  pg->lock` from the display thread cannot AB-BA.
+
+**Evidence.**
+
+Run `benchmark-runs/20260513T030000Z-boot-metal-T2v4-locked`. 1051
+PNG-every-frame Metal frames captured at ~58 fps with default flags
+(no env overrides). 525 frames showed rendered content (vs 0 in
+the pre-T2 default Metal capture). First non-solid frame at ordinal
+9 in the locked-fix run; the BIOS→XBE handoff visible content
+starts around frame 515. Post-handoff Metal correctly renders the
+`flat-tri-depth.xbe` red triangle and cyan triangle sequences on
+spot-checked frames (800), matching GL at the same flip ordinals.
+
+`METAL_FRONT_FB_PUBLISHES` cadence semantics change: pre-T2 was 1-8
+publishes per interval (driven by guest flip_stall + clear); post-T2
+is dozens to ~60 per interval (driven by host vsync). The counter
+docs in `automation.md` are updated.
+
+**What T2 does NOT fix.**
+
+The remaining ~506 solid frames in the post-T2 boot capture are the
+BIOS animation itself, which writes pixels into the VGA framebuffer
+at the CRTC-pointed VRAM address without going through PGRAPH. The
+PGRAPH surface cache has no entry for that address, so the publish
+short-circuits and the side-channel pointer stays at its last value.
+GL handles this via the fallback at `ui/xemu.c:902-910` — when
+`nv2a_get_framebuffer_surface()` returns 0, GL creates a texture from
+`scon->surface` (the VGA/SDL surface). Metal has no equivalent. The
+VGA fallback path is tracked as the next slice (provisionally M5.13 /
+M18). It is separate from the multi-RT compositing concern from
+`benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`
+(M5.12 / M17) — different VRAM ownership model, different fix.
+
+**Rationale.**
+
+The boot-animation temporal baseline (T1, decision-log 2026-05-12
+evening) reproduced the user-reported "green blobs" symptom but did
+not explain it. T2's root-cause investigation showed the gap is in the
+host-side display path, not the NV2A render path: Metal's rendering
+WAS landing in cache entries; the compositor just couldn't see those
+cache entries because the publish never fired. The fix is structural,
+not a content workaround.
+
+**Follow-up.**
+
+1. Rerun PGR2 / Rainbow / Crimson / Halo / SC2 paired Metal-vs-GL
+   gameplay routes. Hypothesis: existing FAIL verdicts (PGR2
+   `max_changed_pct=100.0000`, Crimson `=14.7560`) should improve
+   materially. The multi-RT compositing concern (M5.12 / M17) is
+   independent and may still bite PGR2 specifically.
+2. Implement the VGA fallback for Metal (M5.13 / M18). Pattern:
+   on `pgraph_mtl_surface_has_front_framebuffer() == 0`, upload
+   the VGA-managed surface bytes to a Metal texture (CPU→GPU
+   blit), publish that texture pointer for the compositor.
+3. Once both M5.12/M17 and M5.13/M18 are in, capture-boot-temporal
+   on default Metal should produce zero solid frames across the
+   full 18 s run — the same shape as GL today.
+4. The `metal-canary-regress.sh --mode counters` gate's
+   `METAL_FRONT_FB_PUBLISHES > 0` floor (at
+   `scripts/apple-silicon/metal-canary-regress.sh:456`) is still
+   too weak — T2 makes 60+ publishes/interval trivial, but a sick
+   renderer could still publish at 60 Hz with the wrong texture
+   pointer. Strengthening to a publishes/presents ratio remains
+   queued (decision-log 2026-05-12 evening, follow-up #5).

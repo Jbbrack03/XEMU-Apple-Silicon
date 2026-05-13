@@ -1,6 +1,8 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-11 evening (M15 evidence bundle is incomplete). Use
+Last updated: 2026-05-12 evening (added T1/T2 boot-animation temporal
+baseline rows; M15 evidence bundle remains incomplete pending tracked-
+title reruns under T2). Use
 `scripts/apple-silicon/m15-bundle-status.py` before new Metal/default-on
 claims; 2026-05-11 evening result is
 `verdict=incomplete ok=6 fail=5 missing=4` (after the same-day
@@ -154,6 +156,17 @@ Known emulator files:
 | M5.14-CS-VISUAL | Crimson Metal "blocker" reclassified as config | Metal | Crimson Skies main menu (canonical recipe) | 90s | PASS — sustained ~30 FPS; tarot-card menu rendered correctly | `benchmarks/2026-05-05-crimson-config-not-renderer-bug.md`, `benchmark-runs/20260505-104139-crimson-skies` |
 | W3-RERUN | Counter-mode regression gate post-atexit-skip fix | Metal | All four canaries (PGR2 / Rainbow / Halo / boot) | ~6 min total | 4/4 PASS | `benchmark-runs/20260505-110002-canary-regress` |
 | F3-CRIMSON | Per-title snapshot anchor proof-of-concept | GL+Metal | Crimson menu via `crimson-canary` snapshot | 30s | snapshot save+load PASS same-renderer; cross-renderer Metal-saved → GL-loaded SIGSEGV | `benchmark-runs/profile-prep/crimson-canary.qcow2`, `benchmark-runs/20260505-114034-metal-gl-compare-crimson` |
+
+### 2026-05-12 boot-animation temporal baseline + T2 fix
+
+| ID | Slice / target | Renderer | Game / scene | Duration | Verdict | Note |
+| --- | --- | --- | --- | --- | --- | --- |
+| T1-METAL-NV2A | Boot animation PNG-every-frame (SOURCE=nv2a, FRONT_FB_FALLBACK=0) | Metal | Xbox BIOS animation + flat-tri-depth.xbe | 18s | **FAIL** — 1036/1066 frames solid magenta | `benchmark-runs/20260512T200701Z-boot-metal-temporal/`; user-reported "green blobs" baseline |
+| T1-METAL-DRAW | Boot animation (SOURCE=drawable, FRONT_FB_FALLBACK=0) | Metal | same | 18s | **FAIL** — 709/1070 frames solid magenta | `benchmark-runs/20260512T200800Z-boot-metal-drawable/` |
+| T1-METAL-FRONTFB | Boot animation (SOURCE=drawable, FRONT_FB_FALLBACK=1; the M15 eval recipe) | Metal | same | 18s | **FAIL** — green-blob noise; blink rate 1.06/sec (17× GL) | `benchmark-runs/20260512T201000Z-boot-metal-frontfb/` |
+| T1-GL-REF | Boot animation reference | GL | same | 18s | PASS — orderly BIOS animation + flat-tri-depth red/cyan triangle | `benchmark-runs/20260512T200844Z-boot-gl-temporal/`, ffmpeg AVFoundation capture |
+| T1-PAIRED | Temporal-flicker analyzer paired output | Metal vs GL | aggregated | n/a | analysis artifact | `benchmark-runs/20260512T201100Z-boot-temporal-analysis/`, drove the methodology-change decision-log entry 2026-05-12 (evening) |
+| T2-METAL-FIX | Post-fix boot animation (per-host-refresh publish + pg->lock) | Metal | same | 18s | PARTIAL PASS — 525 content frames (vs 0 pre-fix); flat-tri-depth renders correctly; BIOS animation still solid magenta pending VGA fallback (M5.13/M18) | `benchmark-runs/20260513T030000Z-boot-metal-T2v4-locked/`, see decision-log 2026-05-12 (evening 2), commits `ca35b96562` + `3ae76a327c`, `benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md` |
 
 
 ## Retail Gameplay Targets
