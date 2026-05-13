@@ -1,5 +1,63 @@
 # Decision Log
 
+## 2026-05-12: Oracle-agent v0.4 ships `smc.*` thermal + fan-control commands
+
+**Decision.** Extend `scripts/apple-silicon/xbe-tests/oracle-agent/`
+with four new TCP-9001 verbs — `smc.read`, `smc.write`, `smc.temps`,
+`smc.fan` — so the headless retail-oracle Xbox can report CPU + M/B
+temperatures and accept fan-curve overrides without anyone reading
+the dashboard. SMC accessed at SMBus 7-bit `0x10` (HAL 8-bit `0x20`)
+via `HalReadSMBusValue` / `HalWriteSMBusValue`.
+
+**Why.** User installed a Noctua NF-A6x25 FLX fan replacement; the
+Xbox is headless so the conventional "check the dashboard" path
+didn't apply, and the agent had no thermal-monitoring surface.
+Building the tool — rather than guessing or one-off-XBE-dumping —
+follows project rule #5 (build tools when the existing toolset is
+the limit).
+
+**Safety design.**
+
+- `smc.read` allowlist `{0x01 VER, 0x03 TRAYSTATE, 0x04 AVPACK,
+  0x09 CPUTEMP, 0x0a BOARDTEMP, 0x10 FANSPEED_RB, 0x1b SCRATCH}`.
+  `0x11 INTSTATUS` is clear-on-read and `0x18` is xboxdevwiki-flagged
+  dangerous — both deliberately denied (Codex plan-validation finding,
+  applied 2026-05-12).
+- `smc.write` allowlist `{0x05 FANMODE, 0x06 FANSPEED}` only.
+  Broader writes require explicit slice scope.
+- Both `smc.write` and `smc.fan` are gated by `unsafe.enable` (existing
+  session-scoped arm flag).
+- `oracle_smc_cleanup_if_manual()` reverts FANMODE→AUTO on
+  `cmd_reboot` and `cmd_runxbe` (agent-exit paths) but **NOT** on
+  `cmd_bye` — the Python client closes politely after every command,
+  so cleanup-on-bye would silently revert every caller's manual fan
+  setting. This bug was caught and fixed mid-session before any real
+  measurement.
+- All HAL calls check `NT_SUCCESS`; agent returns `500-` on failure
+  and does not update last-written session state.
+
+**Validation evidence.** Built + deployed + smoke-tested on the
+retail oracle Xbox (192.168.0.200, MAC `00:12:5A:00:5B:CF`, v1.6
+Xyclops "P2L" SMC). 9-minute fan=100% trace at idle reduced M/B
+from 65 °C → 57 °C steady-state, proving the fan write path
+functions end-to-end on Xyclops. See
+`benchmarks/2026-05-12-noctua-fan-validation.md` for the full
+dataset; the user-visible takeaway is that this Xbox's thermal
+interface material is degraded enough that fan curve tuning alone
+is insufficient — a CPU+GPU re-paste is the next remediation step.
+
+**What this is NOT.** This is a measurement-and-control surface,
+not a thermal management policy. The agent does not implement an
+autonomous fan curve and does not enforce a thermal-trip override
+beyond the SMC's own hardware protections. The agent's manual-mode
+cleanup only fires on its own exit paths — a hard power-loss could
+strand the SMC in manual mode, though Xyclops persistence across
+hard cycle has not been characterized.
+
+**Supersession scope.** None — this is a pure additive surface; no
+prior decision is reversed. The `oracle-agent` "Phase 1 + 2 + v0.3
+controller.*" surface from 2026-05-07 stands as-is.
+
 ## 2026-05-11 (evening 2): Front-fb fallback policy stays opt-in (NOT default-on)
 
 **Decision.** Keep `XEMU_METAL_FRONT_FB_FALLBACK` as an opt-in flag.
@@ -10426,3 +10484,95 @@ If live drawable is correct but NV2A is wrong, fix the screenshot/published
 texture path. If both are wrong, debug the Metal renderer texture/publish path
 for PGR2 profile/menu backgrounds. Then rerun PGR2 with strict GL window
 capture and `--gl-crop 112,143,1280,960` before moving to Rainbow.
+
+---
+
+## 2026-05-12 (evening): M15 evidence methodology — temporal flicker analysis required, static MSAA4 canary PASSes demoted
+
+**Decision.** The M15 default-on gate is augmented with a mandatory
+temporal-flicker analysis step. Single-frame MSAA4 canary PASSes (PGR2 f900,
+Rainbow f600, Halo f1200, Crimson 90 s sustained-30 FPS) are demoted to
+"smoke" status — they remain useful as a fast first-line check but no longer
+constitute renderer-correctness evidence. Per-title gameplay PASS now
+additionally requires `temporal-flicker-analyze.py` output that shows the
+Metal `blink_rate_per_sec` within 2× of the GL reference and no large
+solid-color frame runs.
+
+**Evidence (boot-animation baseline, 2026-05-12).** See
+`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`. Three
+Metal-leg + one GL-leg PNG-every-frame captures of the Xbox BIOS boot
+animation reveal:
+
+- Metal `SOURCE=nv2a FRONT_FB_FALLBACK=0` (canary capture path): 1036/1066
+  frames are solid magenta. The BIOS animation is invisible to the canary.
+- Metal `SOURCE=drawable FRONT_FB_FALLBACK=0`: 709/1070 frames are solid
+  magenta. The drawable composite — what the user sees — is also broken.
+- Metal `SOURCE=drawable FRONT_FB_FALLBACK=1` (the M15 eval recipe in
+  `metal-renderer-plan.md`): green-blob noise where the Xbox logo should
+  be. Mean adjacent-frame `changed_pct=1.70` (vs GL 0.81), spike count 19
+  (vs GL 1), blink rate 1.06/sec (vs GL 0.06) — **17× the temporal
+  instability of the GL reference** on the simplest possible workload.
+- GL reference: orderly BIOS animation (orb → ring → "XBOX" logo → flat-tri-
+  depth diagnostic XBE), no solid frames, smooth content-driven change.
+
+Counters during the broken Metal-A run show the renderer believes it is
+healthy: `METAL_DRAW_COUNT=534 METAL_PIPELINE_TRANSLATED_OK=534
+METAL_PIPELINE_FALLBACKS=0 METAL_DRAWABLE_ACQUIRE_FAILS=0 METAL_PRESENTS=562`.
+Only `METAL_FRONT_FB_PUBLISHES=5` over the full 18 s capture hints that
+rendered content is not reaching display. That counter is not in the
+`metal-canary-regress.sh --mode counters` pass criteria.
+
+**Rationale.** Closing M15 default-on with the prior methodology would
+have shipped a renderer that fails the Xbox BIOS animation — a workload
+that has no PGR2-specific multi-RT pipeline, no game-engine variables,
+and no flicker complexity. The Codex-validated PR #2240 work explicitly
+preserved depth/polygon-offset/flat-shading correctness; preserving
+*single-frame* depth correctness while losing the 60+ frames between each
+sample is not the bar we agreed to ship at. The temporal-flicker gate
+addresses the methodological gap directly: it samples adjacent-frame
+differences across the full workload, not isolated points.
+
+**New tools shipped this session.**
+
+- `scripts/apple-silicon/capture-boot-temporal.sh` — boot-only PNG-every-
+  frame capture harness. `--renderer GL|METAL`, `--duration N`, `--fps N`,
+  `--out-name NAME`. Uses Metal renderer-native every-frame screenshot
+  for the Metal leg and ffmpeg avfoundation for the GL leg. macOS UNIX-
+  socket 104-byte limit handled by parking the QMP socket in `/tmp/`
+  with a symlink in the run-dir.
+- `scripts/apple-silicon/temporal-flicker-analyze.py` — PNG-sequence
+  flicker analyzer. Single-leg or paired Metal-vs-GL. Emits per-leg
+  summary.json (mean adjacent-frame diff, blink rate, solid-frame
+  breakdown, longest stable run, per-pixel instability heat map %),
+  heatmap-*.png, storyboard-*.jpg, blink-reel/, and report.md.
+
+**Counter expectation.** Until the Metal renderer produces a boot-animation
+sequence with `solid_frame_count == 0`, the M15 default-on gate cannot
+flip. The boot-animation gate is the necessary minimum; per-title gates
+remain required.
+
+**Follow-up.**
+
+1. Investigate why `METAL_FRONT_FB_PUBLISHES=5` for an 18 s boot run
+   (~558 vblanks delivered). Either the BIOS does not write to the CRTC-
+   pointed surface the way Metal expects, or Metal's publish gate is
+   stricter than the GL equivalent.
+2. Investigate the magenta init color. Either the front-fb/drawable clear
+   color is set to fuchsia and never overwritten in no-publish frames, or
+   an uninitialized texture is being sampled at composite time.
+3. Apply `temporal-flicker-analyze.py` to PGR2/Rainbow/Crimson/Halo/SC2
+   gameplay routes with PNG-every-frame capture. Existing paired runs
+   sample at 60-frame intervals which inherits the same blind spot the
+   canary captures had.
+4. Extend `m15-bundle-status.py` to consume per-leg temporal-flicker
+   summaries and gate PASS on `metal_blink_rate <= 2 * gl_blink_rate`
+   plus `metal_solid_frame_count < 5% of frame_count`.
+5. Strengthen the `metal-canary-regress.sh --mode counters` gate. The
+   existing `METAL_FRONT_FB_PUBLISHES > 0` check at
+   `scripts/apple-silicon/metal-canary-regress.sh:456` is too weak —
+   5 publishes over an 18 s capture trivially passes that gate while
+   99% of frames never publish. Replace with a publish-rate threshold
+   (e.g. `METAL_FRONT_FB_PUBLISHES / METAL_PRESENTS >= 0.5` for
+   non-paused workloads, or a minimum publishes-per-second floor) so
+   the fast smoke gate also catches the "renderer presents but
+   nothing reaches display" case the boot baseline exposes.

@@ -1,13 +1,32 @@
 # Handoff
 
-Last updated: 2026-05-11 evening (M15 bundle is checklist-gated and NOT
-closed. Retail oracle workflow is production-ready on Crimson Skies, Rainbow
-Six 3, and PGR2; Soul Calibur 2 remains useful for emulator-side
-rendering/perf validation but is deferred as a retail-oracle production
-gate after repeated real-hardware return and patch-path failures on the
-current Xbox image. Front-fb fallback policy is now decided: stays
-opt-in. PGR2 capture-source hypothesis is decisively ruled out; bug is
-in the Metal render path's multi-RT compositing).
+Last updated: 2026-05-12 evening — T1 boot-animation temporal baseline
+landed (`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`).
+**User-reported "green blobs" on Metal is reproduced as the M15 eval
+recipe** (`XEMU_METAL_FRONT_FB_FALLBACK=1` + `SOURCE=drawable`): the
+Metal renderer fails the BIOS boot animation in all three tested
+configs while GL renders it correctly. Single-frame MSAA4 canary PASSes
+are **proven insufficient** as M15 evidence — they sample at a fixed
+flip ordinal and cannot detect that 97% of surrounding frames are solid
+magenta (`FRONT_FB_FALLBACK=0`) or that the alternative config renders
+green-blob noise where the Xbox logo should be. New tools shipped
+this session: `capture-boot-temporal.sh` (renderer-native PNG-every-frame
+boot capture) and `temporal-flicker-analyze.py` (frame-N vs N-1 toggle
+detection + heat maps + storyboards + blink reels). Prior 2026-05-12
+state (oracle-agent v0.4 with `smc.*` thermal + fan-control surface;
+Codex confirmed fan-percent mapping and 67 °C -> 57 °C idle cooldown
+when forcing raw=50/100%, retail oracle Xbox still thermally
+compromised pending repaste — see
+`benchmarks/2026-05-12-noctua-fan-validation.md`). Prior 2026-05-11
+state: M15 bundle checklist-gated and NOT closed. Retail oracle
+workflow production-ready on Crimson/Rainbow/PGR2 in principle;
+the project Xbox needs repaste before more retail-oracle gameplay
+capture. SC2 deferred as a retail-oracle production gate after IGR
+patch-path failures. Front-fb fallback policy stays opt-in. PGR2
+capture-source hypothesis decisively ruled out; bug is in the Metal
+render path's multi-RT compositing — and the new boot-animation
+evidence shows the same class of bug also breaks the BIOS
+animation, which has no PGR2-specific multi-RT pipeline at all.
 
 ## START HERE NEXT SESSION — M15 bundle closure
 
@@ -150,11 +169,36 @@ Important tooling finding:
 
 Next engineering steps, in order:
 
+0. **NEW (2026-05-12 evening): the M15 evidence methodology itself is the
+   first blocker.** Single-frame MSAA4 canary PASSes are insufficient — see
+   `benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`. The
+   new tools are:
+   - `./scripts/apple-silicon/capture-boot-temporal.sh --renderer
+     {GL|METAL} --duration 18` — boot-only PNG-every-frame harness.
+   - `./scripts/apple-silicon/temporal-flicker-analyze.py
+     --frames-dir <DIR> --glob <PATTERN> --out-dir <DIR>
+     --duration-seconds N` — single-leg or paired temporal flicker analysis
+     (mean adj-frame diff, blink rate, solid-frame breakdown, instability
+     heat map, storyboard, blink reel).
+
+   Apply both to PGR2/Rainbow/Crimson/Halo/SC2 gameplay routes before
+   re-claiming any M15 PASS. The boot-animation baseline shows the
+   "M15 eval recipe" (`XEMU_METAL_FRONT_FB_FALLBACK=1` +
+   `SOURCE=drawable`) renders green-blob noise at 1.06 blinks/sec
+   vs GL's 0.06 — 17× the temporal instability — so existing
+   per-title PASS canaries cannot be trusted as gameplay evidence
+   until the same titles are passed through the new temporal gate.
+
 1. **Re-run `m15-bundle-status.py` first** every session — the bundle is
-   now closer to closure (`ok=6 fail=5 missing=4`). The remaining gaps
-   are PGR2/Rainbow/Crimson gameplay visual diffs (PGR2 is FAIL and
-   blocked by multi-RT compositing), SC2/Halo missing paired evidence,
-   PGR2/Rainbow/Crimson p99 jitter, and cold shader compile proof.
+   now closer to closure (`ok=6 fail=5 missing=4`) BUT the green
+   composite-visual/oracle-gate and the per-title MSAA4 canary PASSes
+   are now flagged as methodology-insufficient pending temporal-
+   flicker re-runs. The remaining gaps are PGR2/Rainbow/Crimson
+   gameplay visual diffs (PGR2 is FAIL and blocked by multi-RT
+   compositing — and now also blocked by the boot-animation evidence
+   that the bug class is more fundamental than PGR2-specific),
+   SC2/Halo missing paired evidence, PGR2/Rainbow/Crimson p99 jitter,
+   and cold shader compile proof.
 2. **Multi-RT compositing investigation (the deferred PGR2 deep fix)**:
    - Identify PGR2's final-composite surface by shape — 640×480
      format-4 surfaces 0x3c84000 / 0x3b58000 are the prime suspects per

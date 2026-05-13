@@ -315,6 +315,113 @@ directory and deletes them automatically at exit. Use `--keep-temp` only for a
 one-off debugging session; do not keep extracted video frames under
 `benchmark-runs/`.
 
+## Temporal Flicker Analysis (T1, 2026-05-12)
+
+The Visual Flight Recorder is information-density-biased: it selects
+keyframes by motion/entropy/colorfulness and is therefore good at "what
+happened during this route" summaries, but blind to flicker — a Metal
+renderer can blink between solid magenta and partial content at 1-2 frame
+boundaries and the recorder will pick the visually richest frames and
+call the run informative. The 2026-05-12 boot-animation baseline
+(`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`) proves
+this is not hypothetical: Metal renders the Xbox BIOS animation as solid
+magenta or chaotic green noise depending on the `FRONT_FB_FALLBACK` and
+`SOURCE` settings, and the single-frame canary PASSes never noticed.
+
+For Metal-renderer correctness gating, every adjacent-frame transition
+must be sampled, not just selected keyframes.
+
+### `capture-boot-temporal.sh`
+
+Boot-only PNG-every-frame harness. Useful for renderer correctness
+diagnosis because the BIOS animation is deterministic, game-agnostic,
+and short (~18 s covers BIOS animation + dashboard transition + first
+frames of the placeholder disc):
+
+```sh
+scripts/apple-silicon/capture-boot-temporal.sh --renderer METAL --duration 18
+scripts/apple-silicon/capture-boot-temporal.sh --renderer GL    --duration 18 --fps 60
+```
+
+For Metal, sets `XEMU_METAL_SCREENSHOT_PATH=<run>/frames/metal-boot.png`,
+`AT_FRAME=1`, `INTERVAL=1`, `SOURCE=nv2a` by default. Override with
+the matching env vars. For GL, launches `ffmpeg -f avfoundation` in
+parallel to capture the desktop at the requested fps, then decomposes
+the `.mov` to a PNG sequence. macOS UNIX-socket 104-byte limit is
+honored by parking the QMP socket in `/tmp/` with a symlink in the
+run-dir.
+
+Honors project rules #9 (scratch HDD copy, never modify
+`Xbox-Emulator-Files` in place), #10 (refuse to launch when another
+xemu is running unless `XEMU_BENCH_ALLOW_EXISTING=1`), #13
+(`XEMU_SNAPSHOT_NO_THUMBNAIL=1`).
+
+### `temporal-flicker-analyze.py`
+
+Standalone PNG-sequence analyzer. Single-leg or paired Metal-vs-GL:
+
+```sh
+# Single-leg
+scripts/apple-silicon/temporal-flicker-analyze.py \
+  --frames-dir benchmark-runs/<ts>-boot-metal-temporal/frames \
+  --glob 'metal-boot.*.png' \
+  --out-dir benchmark-runs/<ts>-boot-metal-temporal/flicker \
+  --duration-seconds 18
+
+# Paired (Metal renderer-native + GL avfoundation screen capture).
+# Frame sizes differ (Metal 1280x960 NV2A surface; GL 2560x1440 full
+# desktop) so use asymmetric crops:
+scripts/apple-silicon/temporal-flicker-analyze.py \
+  --metal-frames benchmark-runs/<ts>-boot-metal-temporal/frames \
+  --metal-glob 'metal-boot.*.png' \
+  --gl-frames benchmark-runs/<ts>-boot-gl-temporal/frames \
+  --gl-glob 'boot-*.png' \
+  --gl-crop 800,300,960,720 \
+  --out-dir benchmark-runs/<ts>-paired-flicker \
+  --duration-seconds 18
+```
+
+Outputs:
+
+- `summary.json` (per-leg, plus `delta` block in paired mode):
+  - `mean_changed_pct`: mean adjacent-frame `changed_pct` (% of pixels
+    with absolute per-channel delta > 9).
+  - `mean_diff_mae`: mean absolute error vs previous frame (0-255).
+  - `spike_count`, `blink_rate_per_sec`: number of adjacent-frame
+    transitions exceeding `--spike-changed-pct` (default 35) OR
+    `--spike-mae` (default 20), normalized over the duration.
+  - `solid_frame_count`, `solid_color_breakdown`: how many frames are
+    classified as near-uniform (>=99% of pixels within ±4 of mean per
+    channel), broken down by color hint (black/white/magenta/etc.).
+  - `longest_stable_run`: longest run of consecutive solid frames.
+  - `instability_heatmap_pct`: % of pixels with per-frame stddev > 12
+    across the full sequence. High value with no solid frames means
+    healthy animation; high value WITH solid frames means flicker.
+- `heatmap-<label>.png`: red/orange-channel encoding of per-pixel
+  stddev — visualizes which regions are temporally unstable.
+- `storyboard-<label>.jpg`: 8 evenly-spread frames + 2 worst-spike
+  frames mosaiced for at-a-glance visual review.
+- `blink-reel-<label>/`: top-N spike frames preserved at full
+  resolution for one-by-one inspection.
+- `report.md`: human-readable narrative with the headline metrics
+  table.
+
+The `--spike-changed-pct` and `--spike-mae` thresholds are tuned for
+the boot-animation workload; relax for slow gameplay scenes and
+tighten for high-motion shooter routes.
+
+**Reading the headline numbers.** Two solid color frames in a row are
+*usually* an early-boot black or a paused dashboard. Two solid magenta
+frames in a row are almost always a Metal publish failure. The
+`solid_color_breakdown` block names the failure class. A
+`blink_rate_per_sec` more than 2× the GL reference is a renderer-
+correctness issue.
+
+**Honors the no-doc-drift rule.** Any new flicker-related counter or
+threshold added here should also land in `extract-perf-summary.sh` if
+it ties back to an `xemu-perf:` log line, and in `flags-bench.md` if
+it adds a new `XEMU_*` env var.
+
 The per-run config writes `[display.quality] surface_scale = N`, where
 `N` defaults to **2** (matching the Apple Silicon system build's
 first-run default — 1080p-class internal resolution). Override per
@@ -3328,6 +3435,31 @@ keeping per-file scope under ~200 lines.
 | `controller.get [port=N]`                               | Multi-line readback of current state. Omit `port=` to dump all four ports. |
 | `controller.clear [port=N]`                             | Zero one or all ports. |
 | `controller.buffer-info`                                | Report buffer's virtual address, size, magic (`'XCTR'`=0x58435452), version (1), port count (4), per-port size (24). For future shim/kernel-hook consumers. |
+
+**Phase 2 + smc.* commands** (agent v0.4, shipped 2026-05-12):
+
+| Command | Behavior |
+| ------- | -------- |
+| `smc.read off=0xNN` | Read one SMC register. Allowlist: `{0x01 VER, 0x03 TRAYSTATE, 0x04 AVPACK, 0x09 CPUTEMP, 0x0a BOARDTEMP, 0x10 FANSPEED_RB, 0x1b SCRATCH}`. Side-effecting regs (`0x11` clear-on-read, `0x18` xboxdevwiki-dangerous) deliberately denied. |
+| `smc.write off=0xNN val=0xVV` | Write one SMC register. Gated by `unsafe.enable`. Allowlist: `{0x05 FANMODE, 0x06 FANSPEED}`. |
+| `smc.temps` | Single-line read of CPU temp + board temp + avpack + agent's last commanded fan settings + `FANSPEED_RB` readback. |
+| `smc.fan val=auto\|0-100` | Convenience wrapper. `val=auto` writes `FANMODE=0`. `0..100` writes `FANMODE=1` then `FANSPEED=round(val × 50 / 100)`. Gated. Both writes check `NT_SUCCESS`; if the second fails, the agent reverts FANMODE to AUTO to avoid leaving the system in stale manual mode. |
+
+Auto-cleanup: `cmd_reboot` and `cmd_runxbe` revert `FANMODE=AUTO` via
+`oracle_smc_cleanup_if_manual()` before exiting so a stranded agent
+can't leave the SMC in manual mode. `cmd_bye` deliberately does NOT
+call cleanup — `oracle-client.py`'s polite close sends `bye` after
+every command, so cleanup-on-bye would silently revert every
+caller's fan setting (caught and fixed mid-session during the
+agent-v0.4 bring-up; see
+`benchmarks/2026-05-12-noctua-fan-validation.md`).
+
+SMC SMBus address: 7-bit `0x10` → HAL 8-bit `0x20`
+(`hw/xbox/xbox.c:300`, `hw/xbox/smbus_xbox_smc.c:74-93`). Register
+semantics empirically validated against a v1.6 Xyclops board (SMC
+version string "P2L" via `smc.read off=0x01` × 3). `FANSPEED` raw 0..50
+maps to 0..100% PWM duty; agent's `smc.fan` percentage uses
+round-to-nearest mapping.
 
 The state lives in agent BSS as a 120-byte `oracle_ctrl_buffer`
 (magic + version + reserved + 4 × 26-byte port states; see
