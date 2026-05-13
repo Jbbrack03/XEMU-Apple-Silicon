@@ -210,6 +210,23 @@ bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
                                                  uint32_t vga_line_offset,
                                                  const char *reason);
 
+/* T2 (2026-05-12 evening): lightweight publish for the per-host-refresh
+ * code path (xemu_metal_render_frame → nv2a_get_framebuffer_surface →
+ * pgraph_mtl_get_framebuffer_surface). Behaves like
+ * `pgraph_mtl_surface_publish_front_fb` BUT unconditionally takes the
+ * non-snapshot path — no GPU copy, no `waitUntilCompleted`. The atomic
+ * texture-pointer store is the only side effect. Safe because the
+ * compositor at xemu-metal.mm:1410 reads the pointer and uses it in a
+ * Metal render pass on the same `s_render_queue`, which serializes the
+ * NV2A draws and the compositor present ops naturally.
+ *
+ * The full `publish_front_fb` path (snapshot-or-not gated on
+ * `XEMU_METAL_PRESENT_SNAPSHOT`) is preserved for the once-per-guest-
+ * flip `pgraph_mtl_flip_stall` caller, where a stable snapshot is
+ * still valuable for screenshot/capture diagnostics. */
+bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
+                                                      const char *reason);
+
 /*
  * Accessors for the currently-bound color / depth render targets.
  */

@@ -101,6 +101,21 @@ extern "C" void *pgraph_mtl_get_framebuffer_metal_texture(void);
 extern "C" void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
 extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void *texture);
 
+/* T2 (2026-05-12): per-host-refresh CRTC-aware publish. The GL path
+ * calls nv2a_get_framebuffer_surface() once per host vsync from
+ * gl_render_frame() at ui/xemu.c:898 which dispatches to the active
+ * renderer's ops.get_framebuffer_surface — for Metal that's
+ * pgraph_mtl_get_framebuffer_surface(d) at
+ * hw/xbox/nv2a/pgraph/mtl/renderer.c:2048, which does the CRTC-aware
+ * publish to the side-channel that the Metal compositor reads. The
+ * Metal-renderer branch in gl_render_frame returned early before
+ * touching the ops table, so the publish only ran when the guest
+ * issued NV097_FLIP_STALL (~6× / 18 s on BIOS boot vs ~558 vblanks).
+ * See benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md.
+ */
+extern "C" int  nv2a_get_framebuffer_surface(void);
+extern "C" void nv2a_release_framebuffer_surface(void);
+
 /* M5 — weak forward decl of the per-target shader-validation harness.
  * Lives in libqemu-i386-softmmu.a (per-target). The weak link lets
  * the host binary link cleanly even on platform configurations where
@@ -1795,10 +1810,33 @@ void xemu_metal_render_frame(void)
      * function only orchestrates the lock/unlock dance — the
      * actual Metal command-buffer work is in begin/end. */
 
+    /* T2 (2026-05-12 evening): drive the renderer's framebuffer-surface
+     * op every host refresh. Mirrors gl_render_frame at ui/xemu.c:898,
+     * which calls nv2a_get_framebuffer_surface() per vsync. On the
+     * Metal path that dispatches to pgraph_mtl_get_framebuffer_surface
+     * (renderer.c:2048) which performs the CRTC-aware lookup +
+     * pgraph_mtl_surface_publish_display_front_fb() side-effect that
+     * refreshes the side-channel texture pointer read by the
+     * compositor at xemu-metal.mm:1410. Without this call the publish
+     * only runs on guest NV097_FLIP_STALL writes, which on the Xbox
+     * BIOS boot animation fired ~6× over 18 s vs ~558 host vblanks
+     * — leaving 99 % of frames displaying stale CRTC contents (solid
+     * magenta from the front-fb's uninitialized clear color). See
+     * benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md.
+     *
+     * The return value (1 = a previous publish landed, 0 = cache
+     * miss) is not used here; the side effect — populating the
+     * Metal-side front-fb pointer for the compositor — is what
+     * matters. Mirror the GL call/release pair around the actual
+     * frame render so the pgraph framebuffer_in_use flag toggles
+     * correctly (pgraph.c:489). */
+    (void)nv2a_get_framebuffer_surface();
+
     /* Acquire CAMetalDrawable and set up the Metal/SDL ImGui frame before
      * taking BQL. nextDrawable can block behind the window server; holding
      * BQL there starves vCPU, IDE, and PFIFO progress in automated runs. */
     if (!xemu_metal_begin_imgui_frame()) {
+        nv2a_release_framebuffer_surface();
         return;
     }
 
@@ -1807,4 +1845,6 @@ void xemu_metal_render_frame(void)
     xemu_main_loop_unlock();
 
     xemu_hud_render();
+
+    nv2a_release_framebuffer_surface();
 }

@@ -2063,7 +2063,24 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
      * previous front-fb pointer in place — better to display a
      * stale-but-correct frame than reset to black mid-stream. The
      * presence signal still returns 1 if a previous publish landed; 0
-     * if the cache is entirely empty. */
+     * if the cache is entirely empty.
+     *
+     * T2 (2026-05-12 evening): this op is now invoked from
+     * xemu_metal_render_frame at every host vsync (~60 Hz), not just
+     * on guest NV097_FLIP_STALL. The previous implementation called
+     * `pgraph_mtl_surface_publish_display_front_fb` which runs a
+     * render-pass compose into a display-sized texture with a
+     * `waitUntilCompleted` GPU sync — fine at 0.33 Hz (the flip_stall
+     * rate on BIOS boot) but catastrophic at 60 Hz (drops effective
+     * present cadence to ~2 fps). Switch to the cheap
+     * `pgraph_mtl_surface_publish_front_fb` path which just stores
+     * the surface's MTLTexture pointer in the side channel. The
+     * compositor (xemu-metal.mm:1410) already does its own present-
+     * pipeline scaling into the drawable. Line-offset correction is
+     * not applied here; the compositor handles aspect/scaling.
+     * `pgraph_mtl_flip_stall` keeps the compose path for the
+     * once-per-guest-flip publish where the dimension correction
+     * matters. */
     qemu_mutex_lock(&d->pfifo.lock);
 
     VGADisplayParams vga_display_params;
@@ -2073,11 +2090,9 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
 
     /* Try to publish the surface that contains `crtc_addr`. */
-    unsigned int display_w = 0, display_h = 0;
-    mtl_get_display_dimensions(d, &display_w, &display_h);
-    bool published = pgraph_mtl_surface_publish_display_front_fb(
-        (uint32_t)crtc_addr, display_w, display_h,
-        (uint32_t)vga_display_params.line_offset, "crtc-display");
+    (void)mtl_get_display_dimensions;  /* still useful in flip_stall path */
+    bool published = pgraph_mtl_surface_publish_front_fb_pointer_only(
+        (uint32_t)crtc_addr, "crtc-refresh");
     (void)published;
 
     return pgraph_mtl_surface_has_front_framebuffer();

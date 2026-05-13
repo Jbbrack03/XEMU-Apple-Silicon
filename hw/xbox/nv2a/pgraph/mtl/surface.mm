@@ -1632,6 +1632,42 @@ bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
     return publish_front_texture(e, reason);
 }
 
+/* T2 (2026-05-12 evening): lightweight per-host-refresh publish. */
+bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
+                                                      const char *reason)
+{
+    if (!s_initialized) {
+        return false;
+    }
+    MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    if (e == NULL || e->texture == NULL) {
+        return false;
+    }
+
+    /* Bump last_use_seq so LRU eviction doesn't reclaim the surface that
+     * the compositor is about to sample. Matches the bookkeeping inside
+     * publish_front_texture's non-snapshot path. */
+    e->last_use_seq = ++s_use_seq;
+
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    void *prev = atomic_load(&s_front_framebuffer_texture);
+    if (prev == e->texture) {
+        pthread_mutex_unlock(&s_front_framebuffer_lock);
+        return true;
+    }
+    atomic_store(&s_front_framebuffer_texture, e->texture);
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+    atomic_fetch_add(&s_front_fb_publishes, 1);
+    if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
+                "width=%u height=%u format=%u reason=%s pointer_only=1\n",
+                (unsigned)e->vram_addr, e->width, e->height,
+                e->nv097_format, reason ? reason : "?");
+    }
+    return true;
+}
+
 static bool publish_display_binding_front_fb(MtlSurfaceBinding *e,
                                              uint32_t display_width,
                                              uint32_t display_height,

@@ -208,3 +208,97 @@ game-specific surface layout level.
 4. **Demote the static MSAA4 canary PASSes** in the M15 gate to "smoke
    smoke" status. They remain useful as a fast first-line check but no
    longer constitute renderer-correctness evidence.
+
+## 2026-05-12 evening update — T2 partial fix landed
+
+Root cause of the publish-rate gap is now identified. `gl_render_frame`
+in `ui/xemu.c:872` short-circuits to `xemu_metal_render_frame()` on the
+Metal path and bypasses the per-host-refresh
+`nv2a_get_framebuffer_surface()` call that the GL leg makes at
+`ui/xemu.c:898`. Metal's renderer ops table has
+`pgraph_mtl_get_framebuffer_surface(d)` wired in (renderer.c:2048)
+which performs the CRTC-aware publish to the side-channel that the
+compositor reads at `xemu-metal.mm:1410` — it was just never being
+called per host refresh, only via guest `NV097_FLIP_STALL`.
+
+### T2 fix (shipped 2026-05-12 evening)
+
+Three small changes, committed together:
+
+1. `ui/xemu-metal.mm`: `xemu_metal_render_frame()` now calls
+   `nv2a_get_framebuffer_surface()` + `nv2a_release_framebuffer_surface()`
+   around the actual frame render, mirroring the GL pair at
+   `ui/xemu.c:898` / `ui/xemu.c:935`. Same per-vsync cadence.
+2. `hw/xbox/nv2a/pgraph/mtl/renderer.c`:
+   `pgraph_mtl_get_framebuffer_surface()` switches from the expensive
+   `pgraph_mtl_surface_publish_display_front_fb` (which runs a
+   `[cmd commit]` + `[cmd waitUntilCompleted]` per call) to a new
+   lightweight publish variant. The compose-with-GPU-sync path remains
+   for the `pgraph_mtl_flip_stall` caller (at most 1× per guest flip).
+3. `hw/xbox/nv2a/pgraph/mtl/surface.{h,mm}`: new
+   `pgraph_mtl_surface_publish_front_fb_pointer_only()` that always
+   takes the non-snapshot path (atomic texture-pointer store only —
+   no GPU work, no `waitUntilCompleted`), regardless of the
+   `XEMU_METAL_PRESENT_SNAPSHOT` env var. Safe at 60 Hz because the
+   compositor reads the pointer atomically and uses it in a render
+   pass on the same `s_render_queue` as the NV2A draws, which
+   serializes the ordering naturally.
+
+### Verification (run 20260513T021500Z-boot-metal-T2v3-default)
+
+PNG-every-frame Metal capture of the same BIOS-to-flat-tri-depth
+boot sequence as the baseline above, with all default flags and no
+env overrides:
+
+| Metric                          | Pre-fix Metal default | **POST-fix Metal default** | GL reference |
+|---------------------------------|----------------------:|---------------------------:|-------------:|
+| frames                          | 1066                  | 1048                       | 1033         |
+| content frames                  | 0                     | **534**                    | 1033         |
+| solid magenta frames            | 1036 (97 %)           | 492 (47 %)                 | 0            |
+| solid black frames              | 30                    | 22                         | 0            |
+| blink rate / sec                | 0.06                  | 0.22                       | 0.06         |
+| mean adj-frame changed_pct      | 0.09                  | 0.26                       | 0.81         |
+
+Crucially: the first **content frame appears at frame 515** (~8.6 s into
+the run), coinciding with the BIOS→XBE handoff when `flat-tri-depth.xbe`
+takes over rendering. After that, Metal renders the diagnostic XBE's
+red triangle and cyan-triangle sequences correctly, matching the GL
+reference at the same frame ordinals.
+
+### What is NOT fixed by T2
+
+The remaining 506 solid frames are the BIOS animation itself, which
+the BIOS renders via the **VGA-direct path** — writing pixel bytes
+into the VGA framebuffer at the CRTC-pointed address WITHOUT going
+through PGRAPH. The GL renderer handles this via the fallback at
+`ui/xemu.c:902-910`: when `nv2a_get_framebuffer_surface()` returns 0,
+GL creates a texture from `scon->surface` (the VGA/SDL surface) and
+displays it. Metal has no equivalent VGA fallback — when the CRTC
+addr doesn't resolve to a PGRAPH-cached surface, the side-channel
+pointer is left unchanged (likely pointing at the very-early-boot
+PGRAPH-cleared surface with fuchsia init color, hence the magenta).
+
+The VGA fallback is the next slice to land for full Metal BIOS
+parity. Tracking item: VGA→Metal fallback path
+(provisionally M5.13 / M18) — must implement VGA framebuffer texture
+upload + present at host refresh rate when the CRTC addr has no
+PGRAPH-cached surface, mirroring GL's xemu.c fallback.
+
+### Impact on tracked titles
+
+The PGRAPH-rendered case is now correct. All four tracked titles
+(PGR2, Rainbow Six 3, Crimson Skies, Halo CE) plus SC2 use PGRAPH for
+gameplay rendering — they are full 3D engines. The T2 fix should
+materially improve the existing paired-gameplay FAIL verdicts
+(PGR2 `max_changed_pct=100.0000`, Crimson `=14.7560`). Verification
+on the canary titles is queued as next-session work.
+
+### Files touched (T2)
+
+- `ui/xemu-metal.mm` — call/release pair added to
+  `xemu_metal_render_frame()`.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c` — switch
+  `pgraph_mtl_get_framebuffer_surface()` to the lightweight publish.
+- `hw/xbox/nv2a/pgraph/mtl/surface.h` — declare
+  `pgraph_mtl_surface_publish_front_fb_pointer_only()`.
+- `hw/xbox/nv2a/pgraph/mtl/surface.mm` — implement same.
