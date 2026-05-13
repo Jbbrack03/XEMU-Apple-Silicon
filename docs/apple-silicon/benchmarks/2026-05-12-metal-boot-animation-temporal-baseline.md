@@ -250,20 +250,30 @@ PNG-every-frame Metal capture of the same BIOS-to-flat-tri-depth
 boot sequence as the baseline above, with all default flags and no
 env overrides:
 
+All numbers below come directly from
+`benchmark-runs/20260513T021500Z-boot-metal-T2v3-default/flicker/summary.json`
+and the corresponding pre-fix runs' `summary.json`. "Solid" means
+the analyzer's near-uniform classification (>= 99 % of pixels within
+±4 of mean per channel). "Non-solid" = `frame_count -
+solid_frame_count`.
+
 | Metric                          | Pre-fix Metal default | **POST-fix Metal default** | GL reference |
 |---------------------------------|----------------------:|---------------------------:|-------------:|
 | frames                          | 1066                  | 1048                       | 1033         |
-| content frames                  | 0                     | **534**                    | 1033         |
-| solid magenta frames            | 1036 (97 %)           | 492 (47 %)                 | 0            |
-| solid black frames              | 30                    | 22                         | 0            |
+| solid_frame_count               | 1036                  | **506**                    | 0            |
+|   solid magenta                 | 1036                  | 492                        | 0            |
+|   solid black                   | 0                     | 14                         | 0            |
+| non-solid frames (`frames - solid`) | 30                | **542**                    | 1033         |
 | blink rate / sec                | 0.06                  | 0.22                       | 0.06         |
 | mean adj-frame changed_pct      | 0.09                  | 0.26                       | 0.81         |
 
-Crucially: the first **content frame appears at frame 515** (~8.6 s into
-the run), coinciding with the BIOS→XBE handoff when `flat-tri-depth.xbe`
-takes over rendering. After that, Metal renders the diagnostic XBE's
-red triangle and cyan-triangle sequences correctly, matching the GL
-reference at the same frame ordinals.
+Crucially: the first **non-solid frame appears around frame 515**
+(~8.6 s into the run), coinciding with the BIOS→XBE handoff when
+`flat-tri-depth.xbe` takes over rendering. After that, Metal renders
+the diagnostic XBE's red triangle and cyan-triangle sequences,
+matching the GL reference at the same frame ordinals on the
+spot-checked frames (frame 800 in particular). Per-frame content-vs-GL
+parity across the full post-handoff sequence has NOT been verified.
 
 ### What is NOT fixed by T2
 
@@ -286,12 +296,18 @@ PGRAPH-cached surface, mirroring GL's xemu.c fallback.
 
 ### Impact on tracked titles
 
-The PGRAPH-rendered case is now correct. All four tracked titles
-(PGR2, Rainbow Six 3, Crimson Skies, Halo CE) plus SC2 use PGRAPH for
-gameplay rendering — they are full 3D engines. The T2 fix should
-materially improve the existing paired-gameplay FAIL verdicts
-(PGR2 `max_changed_pct=100.0000`, Crimson `=14.7560`). Verification
-on the canary titles is queued as next-session work.
+The flat-tri-depth PGRAPH case is now publishing content after
+BIOS→XBE handoff (frame 515 onward) — a 0 → 542 step change in
+non-solid frames over an 18 s capture. Tracked-title impact on
+PGR2 / Rainbow Six 3 / Crimson Skies / Halo CE / SC2 is **unverified
+pending canary reruns**. The hypothesis is that the existing paired-
+gameplay FAIL verdicts (PGR2 `max_changed_pct=100.0000`, Crimson
+`=14.7560`) should improve once the per-host-refresh CRTC publish
+makes the compositor see the actual rendered scene; the multi-RT
+compositing concern from `2026-05-11-pgr2-metal-render-path-diagnostic.md`
+may still bite if PGR2's final-composite surface isn't the
+CRTC-pointed one. Queue: run capture-boot-temporal / paired
+gameplay routes on Crimson next (cheapest), then PGR2.
 
 ### Files touched (T2)
 

@@ -2091,11 +2091,33 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
 
     /* Try to publish the surface that contains `crtc_addr`. */
     (void)mtl_get_display_dimensions;  /* still useful in flip_stall path */
+
+    /* T2 followup (Codex review, 2026-05-12): take pg->lock around the
+     * cache access. Without this, the host-refresh publish races with
+     * PFIFO-thread cache mutations (binding_destroy, eviction, rebind)
+     * which run under pg->lock from the NV097 method handlers. The
+     * pre-T2 flip_stall publish path was implicitly safe because
+     * `DEF_METHOD(NV097, FLIP_STALL)` (pgraph.c:1030) holds pg->lock
+     * during the call; this op was called from the display thread
+     * without that guarantee, but at the 0.33 Hz flip_stall rate the
+     * race window almost never hit. T2 moved this to 60 Hz, widening
+     * the race ~200×. Taking pg->lock here serializes with PFIFO
+     * cache mutations and matches the locking discipline of other
+     * Metal renderer ops that touch the cache from non-PFIFO threads
+     * (e.g. mtl_after_surface_download at renderer.c:466).
+     *
+     * Lock-order note: nv2a_get_framebuffer_surface (pgraph.c:481)
+     * already holds renderer_lock when calling this op. PFIFO workers
+     * never take renderer_lock, so renderer_lock → pg->lock is safe;
+     * no AB-BA deadlock is possible. */
+    qemu_mutex_lock(&d->pgraph.lock);
     bool published = pgraph_mtl_surface_publish_front_fb_pointer_only(
         (uint32_t)crtc_addr, "crtc-refresh");
     (void)published;
+    int has_fb = pgraph_mtl_surface_has_front_framebuffer();
+    qemu_mutex_unlock(&d->pgraph.lock);
 
-    return pgraph_mtl_surface_has_front_framebuffer();
+    return has_fb;
 }
 
 static GPUProperties *pgraph_mtl_get_gpu_properties(void)

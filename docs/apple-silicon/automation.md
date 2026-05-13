@@ -1005,25 +1005,39 @@ and stack:
   need pre-resolve MSAA contents, use the `XEMU_METAL_CAPTURE`
   `.gputrace` capture path instead — that's M13's job, not this
   flag's.
-- `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03**): per-interval
-  count of front-fb texture pointer **changes** in the Metal
-  renderer's surface cache. Always-on atomic. Bumped whenever the
-  resolved front-fb MTLTexture differs from the previously-published
-  pointer; deduped across repeated publishes of the same texture.
-  Companion always-on diagnostic line emits per-change as
-  `xemu-perf: metal_front_fb_publish vram_addr=0x.. width=W height=H
-  format=FMT reason={crtc,clear}`. `reason=crtc` indicates a CRTC-
-  scan publish from `pgraph_mtl_flip_stall` looking up
-  `d->pcrtc.start + line_offset`; `reason=clear` indicates the
-  legacy "publish-on-color-clear" fallback that fires before the
-  CRTC publish for the first frame. Steady-state: 1-8 publishes per
-  interval as the game cycles between front-buffer / back-buffer /
-  aux-RT bindings. Zero publishes after the first frame indicates
-  the renderer is stuck on the same front-fb (correctness-impacting
-  if the game expects frame-to-frame variance). Surface-routing
-  regressions of the M5.9 class are catch-able by counter
-  inspection without requiring screenshot diffing. Apple Silicon
-  performance fork; slice M5.9.
+- `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03; cadence revised T2,
+  2026-05-12 evening**): per-interval count of front-fb texture
+  pointer **changes** in the Metal renderer's surface cache.
+  Always-on atomic. Bumped whenever the resolved front-fb MTLTexture
+  differs from the previously-published pointer; deduped across
+  repeated publishes of the same texture. Companion per-change
+  diagnostic line emits as `xemu-perf: metal_front_fb_publish
+  vram_addr=0x.. width=W height=H format=FMT reason=<reason>`
+  (gated on `XEMU_METAL_DIAG_PUBLISH=1` for the
+  pointer-only/snapshot variants; always-emitted for the legacy
+  flip_stall publish path). `reason` values:
+  - `crtc` / `crtc-display` — CRTC-scan publish from
+    `pgraph_mtl_flip_stall`. Driven by guest `NV097_FLIP_STALL`.
+  - `crtc-refresh` (**T2**) — per-host-refresh publish from
+    `pgraph_mtl_get_framebuffer_surface` invoked by
+    `xemu_metal_render_frame`'s `nv2a_get_framebuffer_surface()`
+    call. Logged with `pointer_only=1`. New high-frequency path
+    that runs at the host vsync rate (~60 Hz), mirroring GL's
+    `ui/xemu.c:898` pattern.
+  - `fallback-dominant-draw` — opt-in `XEMU_METAL_FRONT_FB_FALLBACK`
+    publish of the per-frame dominant-draw target.
+  - `clear` — legacy "publish-on-color-clear" fallback (M5.9-era;
+    largely retired post-M5.9-followup-A).
+  Steady-state pre-T2: 1-8 publishes per interval. Steady-state
+  post-T2: dozens to ~60 publishes per interval as the per-vsync
+  publish detects every surface-content change. Zero publishes after
+  the first frame indicates the renderer is stuck (correctness-
+  impacting if the game expects frame-to-frame variance) AND the
+  per-vsync publish is failing to resolve a CRTC-pointed cache
+  entry. The pre-T2 `> 0` floor in `metal-canary-regress.sh:456`
+  remains useful as a "publish path alive at all" check; consider
+  augmenting with a publishes-per-second floor once the T2 cadence
+  stabilizes. Apple Silicon performance fork; slices M5.9 + T2.
 - `METAL_SURFACE_CACHE_SIZE` (**M5.9, 2026-05-03**): live count of
   entries in the Metal-renderer per-VRAM surface cache. Capped at
   16 (LRU eviction). Steady-state: 4-12 entries on PGR2 / Crimson /
