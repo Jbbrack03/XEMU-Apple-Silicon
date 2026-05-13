@@ -1,5 +1,5 @@
 /*
- * xbox-oracle-agent v0.2 (Phase 2)
+ * xbox-oracle-agent v0.4 (Phase 2 + controller.* + smc.*)
  *
  * A network-listening XBE that exposes the Xbox console as an oracle
  * for xemu correctness validation. Speaks a simple text-line RPC
@@ -7,29 +7,37 @@
  * TCP port 9001.
  *
  * Phase 1 commands (always present):
- *   info, eeprom, reboot, bye
+ *   info, eeprom, reboot, bye, help
  *
- * Phase 2 additions (this build):
- *   mem.read addr=0xHEX len=N
- *   mem.write addr=0xHEX data=<hex>          (gated by unsafe.enable)
- *   nv2a.read off=0xHEX
- *   nv2a.write off=0xHEX val=0xHEX           (gated by unsafe.enable)
- *   vram.read off=0xHEX len=N
- *   screenshot                                (binary front-buffer capture)
- *   runxbe path=<xbox-path>                  (chainload another XBE)
- *   unsafe.enable                             (arm writes for this session)
- *   help
+ * Phase 2 commands:
+ *   mem.read / mem.write (gated) / nv2a.read / nv2a.write (gated) /
+ *   vram.read / screenshot / runxbe / unsafe.enable
  *
- * Source layout (refactored 2026-05-06 evening):
- *   main.c       — entry point, network bring-up, listener, dispatch
- *   protocol.{h,c} — wire-protocol helpers (line + binary writers, parsers)
- *   commands.{h,c} — Phase 1 + Phase 2 command implementations
+ * v0.3 controller.* commands (2026-05-07):
+ *   controller.set / controller.get / controller.button /
+ *   controller.axis / controller.clear / controller.buffer-info
+ *
+ * v0.4 smc.* commands (2026-05-12):
+ *   smc.read  — allowlisted SMC register read
+ *   smc.write — allowlisted SMC register write (gated)
+ *   smc.temps — convenience cpu+board+fan readout
+ *   smc.fan   — set fan curve (auto or 0..100 percent; gated)
+ *
+ * Source layout:
+ *   main.c            — entry point, network bring-up, listener, dispatch
+ *   protocol.{h,c}    — wire-protocol helpers (line + binary writers, parsers)
+ *   commands.{h,c}    — Phase 1 + Phase 2 command implementations
+ *   controller.{h,c}  — v0.3 synthetic-input state + RPCs
+ *   tier2.{h,c}       — Tier-2 kernel hook research (research-only,
+ *                       install commands crash this Xbox)
+ *   smc.{h,c}         — v0.4 SMC sensor + fan-control RPCs
  *
  * Built with nxdk; lwIP TCP via the same pattern as the httpd sample.
  */
 #include "commands.h"
 #include "controller.h"
 #include "protocol.h"
+#include "smc.h"
 #include "tier2.h"
 
 #include <hal/debug.h>
@@ -76,6 +84,10 @@ static const struct cmd_entry s_cmds[] = {
     { "tier2.install-noop",      cmd_tier2_install_noop      },
     { "tier2.uninstall",         cmd_tier2_uninstall         },
     { "tier2.status",            cmd_tier2_status            },
+    { "smc.read",                cmd_smc_read                },
+    { "smc.write",               cmd_smc_write               },
+    { "smc.temps",               cmd_smc_temps               },
+    { "smc.fan",                 cmd_smc_fan                 },
     { "reboot",                  cmd_reboot                  },
     { "bye",                     cmd_bye                     },
     { "help",                    cmd_help                    },
@@ -180,7 +192,7 @@ static void handle_client(struct netconn *c)
 int main(void)
 {
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    debugPrint("\nxbox-oracle-agent v0.3 (Phase 2 + controller.*)\n");
+    debugPrint("\nxbox-oracle-agent v0.4 (Phase 2 + controller.* + smc.*)\n");
     debugPrint("Bringing up network...\n");
 
     /* Initialize the synthetic controller-state buffer up front so the

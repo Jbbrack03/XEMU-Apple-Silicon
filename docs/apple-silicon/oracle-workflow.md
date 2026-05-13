@@ -42,6 +42,7 @@ default-on visual gate.
 |       ├── oracle-client.py                                          |
 |       │       ├── info / eeprom / mem.read / nv2a.read / vram.read  |
 |       │       ├── controller.set/get/button/axis/clear/buffer-info  |
+|       │       ├── smc.read / smc.write / smc.temps / smc.fan        |
 |       │       ├── screenshot / runxbe / decode-xoss                 |
 |       │       └── reboot / bye / help                               |
 |       │                                                             |
@@ -132,6 +133,45 @@ Validation evidence (2026-05-07):
   `changed_pixels_pct=0.0000`).
 - All 4 PASS on xemu Metal at `--max-changed-pct 1.0` against the
   same math-derived oracles.
+
+## Thermal + fan-curve monitoring (agent v0.4, 2026-05-12)
+
+The agent exposes the Xbox SMC at SMBus 7-bit `0x10` so a headless
+Xbox can report temperatures and accept fan-curve overrides:
+
+| Verb | Args | Gated? | Returns |
+|---|---|---|---|
+| `smc.read` | `off=0xNN` | no | `200- off=0xNN val=0xVV dec=DD` |
+| `smc.write` | `off=0xNN val=0xVV` | yes | `200- wrote off=0xNN val=0xVV` |
+| `smc.temps` | (none) | no | `200- cpu_c=NN board_c=NN avpack=0xXX fan_mode=auto|manual fan_percent=NN [fan_raw_rb=NN]` |
+| `smc.fan` | `val=auto|0-100` | yes | `200- fan mode=auto` or `200- fan mode=manual percent=NN raw=NN` |
+
+Read allowlist: `{0x01 VER, 0x03 TRAYSTATE, 0x04 AVPACK, 0x09 CPUTEMP,
+0x0a BOARDTEMP, 0x10 FANSPEED_RB, 0x1b SCRATCH}`. Write allowlist:
+`{0x05 FANMODE, 0x06 FANSPEED}` only — broader writes require an
+explicit slice scope.
+
+Side-effecting registers (`0x11 INTSTATUS` clear-on-read, `0x18`
+xboxdevwiki-flagged dangerous) are deliberately denied.
+
+Auto-cleanup: `cmd_reboot` and `cmd_runxbe` revert `FANMODE=AUTO`
+before exiting so the SMC isn't stranded in manual mode. `cmd_bye`
+deliberately does NOT touch fan state (the Python client closes
+politely after every command, which would silently revert any
+manual curve set via `smc.fan`).
+
+CPU temp register (0x09) and board temp register (0x0a) report
+identical values on v1.6 "P2L" Xyclops boards — there is no usable
+on-die CPU thermal diode on this revision and the SMC drives both
+registers from the motherboard thermistor.
+
+Typical idle target with healthy thermal interface and stock fan:
+26-29 °C M/B. Sustained idle above 45 °C usually indicates degraded
+thermal compound or insufficient airflow. See
+`benchmarks/2026-05-12-noctua-fan-validation.md` for the worked
+example on the project oracle Xbox (Noctua NF-A6x25 FLX swap that
+exposed a separate TIM-degradation issue — fan upgrade alone could
+not bring idle below 57 °C).
 
 ## How synthetic input drives the M15 gate
 
@@ -257,7 +297,7 @@ If the new XBE renders synthetic input, also include
 
 | Component | Version | Notes |
 |---|---|---|
-| Oracle agent | v0.3 + persistent controller buffer | Shipped 2026-05-07 |
+| Oracle agent | v0.4 + smc.* thermal + fan control | Shipped 2026-05-12 (smc.*); v0.3 controller.* shipped 2026-05-07 |
 | `xbed_capture` PCRTC path | 1.0 | Shipped 2026-05-07; unblocked all Tier-1 diags |
 | `xbed_input_synth` shim | 1.0 | Shipped 2026-05-07 |
 | Persistence anchor file format | v1 | "XCTR\n0x<phys>\n0x<virt>\n0x<size>\n" |

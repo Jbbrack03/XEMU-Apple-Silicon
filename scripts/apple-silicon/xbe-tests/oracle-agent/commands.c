@@ -16,6 +16,7 @@
  */
 #include "commands.h"
 #include "protocol.h"
+#include "smc.h"
 
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -32,7 +33,7 @@
 
 #define EEPROM_SMBUS_ADDR  0xA8
 #define EEPROM_SIZE        256
-#define VERSION_STR        "xbox-oracle-agent v0.3 (Phase 2 + controller.*)"
+#define VERSION_STR        "xbox-oracle-agent v0.4 (Phase 2 + controller.* + smc.*)"
 #define ORACLE_MAX_READ_LEN (1u * 1024u * 1024u) /* 1 MiB */
 #define ORACLE_MAX_WRITE_LEN 1024u
 #define NV2A_BAR0_BASE     0xFD000000u
@@ -44,7 +45,8 @@
 extern struct netif *g_pnetif;
 
 /* Process-global "writes are armed for this session" flag.
- * Only mem.write and nv2a.write check this. Resets on agent restart. */
+ * Checked by all mutating commands: mem.write, nv2a.write, smc.write,
+ * smc.fan. Resets on agent restart. */
 static int s_unsafe_writes_enabled = 0;
 
 int oracle_writes_enabled(void)
@@ -361,6 +363,9 @@ int cmd_runxbe(struct netconn *c, const char *args)
     }
     memcpy(path, p, n);
     path[n] = 0;
+    /* This call replaces the agent image, so any session-set fan
+     * curve would be stranded. Same rationale as cmd_reboot. */
+    oracle_smc_cleanup_if_manual();
     op_send_okf(c, "launching %s", path);
     /* Best effort: drain the netconn and close the listener before
      * blowing away our own image. */
@@ -377,6 +382,10 @@ int cmd_runxbe(struct netconn *c, const char *args)
 int cmd_reboot(struct netconn *c, const char *args)
 {
     (void)args;
+    /* If this session put the SMC into manual fan mode, restore auto
+     * before the kernel reboots. We don't know whether Xyclops/PIC
+     * retains FANMODE across a soft reboot — fail-safe to auto. */
+    oracle_smc_cleanup_if_manual();
     op_send_okf(c, "rebooting");
     netconn_close(c);
     Sleep(500);
@@ -387,6 +396,11 @@ int cmd_reboot(struct netconn *c, const char *args)
 int cmd_bye(struct netconn *c, const char *args)
 {
     (void)args;
+    /* `bye` only closes the connection — the agent stays alive.
+     * Do NOT touch fan state here; oracle-client.py's polite-close
+     * sends `bye` after every command, which would silently revert
+     * any caller-set manual fan curve. Cleanup happens only on
+     * agent-exit paths (cmd_reboot, cmd_runxbe). */
     op_send_okf(c, "bye");
     return 1;
 }
@@ -404,7 +418,7 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "vram.read off=0xHEX len=N             read NV2A VRAM aperture");
     op_send_line(c, "screenshot                            capture front buffer (XOSS+pixels)");
     op_send_line(c, "runxbe path=<xbox-path>               chainload another XBE");
-    op_send_line(c, "unsafe.enable                         arm mem.write + nv2a.write");
+    op_send_line(c, "unsafe.enable                         arm mem.write / nv2a.write / smc.write / smc.fan");
     op_send_line(c, "controller.set port=N [...]           update synthetic input state");
     op_send_line(c, "controller.button port=N name=X value=V edit one button by xemu name");
     op_send_line(c, "controller.axis   port=N name=X value=V edit one axis by xemu name");
@@ -416,6 +430,10 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");
     op_send_line(c, "tier2.uninstall                       restore Tier-2 hook slot (unsafe)");
     op_send_line(c, "tier2.status                          read Tier-2 hook page + counters");
+    op_send_line(c, "smc.read off=0xHEX                    read one SMC register (allowlisted)");
+    op_send_line(c, "smc.write off=0xHEX val=0xHEX         write SMC reg (needs unsafe.enable; allowlist 0x05,0x06)");
+    op_send_line(c, "smc.temps                             cpu_c/board_c/avpack + last-set fan");
+    op_send_line(c, "smc.fan val=auto|0-100                set fan curve floor (needs unsafe.enable)");
     op_send_line(c, "reboot                                reboot to dashboard");
     op_send_line(c, "bye                                   close connection");
     op_send_line(c, "help                                  this list");

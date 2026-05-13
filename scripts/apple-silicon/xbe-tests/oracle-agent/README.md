@@ -8,9 +8,24 @@ leaked-XDK-dependent XBDM path that
 proposed (see decision-log "2026-05-06: Real Xbox oracle architecture
 pivot — custom oracle agent supersedes XBDM").
 
-**Status: Phase 2 shipped 2026-05-06.** All commands (mem/nv2a/vram
-read+write, screenshot, runxbe chainload) are live and smoke-tested
-against the project Xbox.
+**Status: Phase 2 + v0.3 controller.\* + v0.4 smc.\* shipped.**
+
+- Phase 2 (2026-05-06): `mem.read` / `mem.write` (gated) / `nv2a.read`
+  / `nv2a.write` (gated) / `vram.read` / `screenshot` / `runxbe`
+  chainload, all live and smoke-tested.
+- v0.3 (2026-05-07): `controller.set` / `controller.get` /
+  `controller.button` / `controller.axis` / `controller.clear` /
+  `controller.buffer-info` for synthetic XID input. See `controller.h`.
+- v0.4 (2026-05-12): `smc.read` / `smc.write` / `smc.temps` / `smc.fan`
+  for headless thermal monitoring and fan-curve override (SMBus 0x10,
+  CPU/board sensors at regs 0x09/0x0a, FANMODE/FANSPEED at 0x05/0x06).
+  Tight read+write allowlists; auto-restore FANMODE=AUTO on
+  `cmd_reboot` / `cmd_runxbe` (NOT on `cmd_bye`). See `smc.h`.
+
+Canonical RPC surface lives in `docs/apple-silicon/automation.md`
+("Real Xbox oracle agent" section) and the workflow integration in
+`docs/apple-silicon/oracle-workflow.md`. This README is build/usage
+notes only — do not duplicate command tables here.
 
 ## Why not XBDM
 
@@ -125,7 +140,14 @@ Response codes (XBDM/SMTP-inspired so a streaming line parser works):
 | `bye`    | Close connection cleanly                              |
 | `help`   | Multi-line list of all commands                       |
 
-### Phase 2 commands
+### Phase 2 + v0.3 + v0.4 commands
+
+Authoritative reference: `docs/apple-silicon/automation.md`
+("Real Xbox oracle agent" section) and
+`docs/apple-silicon/oracle-workflow.md`. Summary kept here only for
+quick local lookup.
+
+Phase 2 (2026-05-06):
 
 | Command                              | Behavior                                       |
 | ------------------------------------ | ---------------------------------------------- |
@@ -136,7 +158,16 @@ Response codes (XBDM/SMTP-inspired so a streaming line parser works):
 | `vram.read off=0xHEX len=N`          | Read NV2A 0xF0000000 VRAM aperture; 202-       |
 | `screenshot`                         | Front-buffer capture; 202- BINARY <total>      |
 | `runxbe path=<xbox-path>`            | Chainload another XBE; agent terminates        |
-| `unsafe.enable`                      | Arm `mem.write` + `nv2a.write` for the session |
+| `unsafe.enable`                      | Arm `mem.write` / `nv2a.write` / `smc.write` / `smc.fan` for the session |
+
+v0.3 controller.* (2026-05-07): `controller.set` / `controller.get` /
+`controller.button` / `controller.axis` / `controller.clear` /
+`controller.buffer-info`. See `controller.h` for full schema.
+
+v0.4 smc.* (2026-05-12): `smc.read` (allowlist {0x01, 0x03, 0x04,
+0x09, 0x0a, 0x10, 0x1b}) / `smc.write` (allowlist {0x05 FANMODE,
+0x06 FANSPEED}, gated) / `smc.temps` (cpu+board+fan readout) /
+`smc.fan val=auto|0-100` (gated). See `smc.h` for full contract.
 
 #### Memory address allowlist
 
@@ -230,9 +261,9 @@ nothing on the Xbox side relaunches the agent automatically.
 
 ```sh
 ( printf 'info\nbye\n'; sleep 1 ) | nc -w 5 192.168.0.200 9001
-# expected:
+# expected (version string current as of 2026-05-12):
 #   200- xbox-oracle-agent ready
-#   200- xbox-oracle-agent v0.2 (Phase 2); ip=192.168.0.200; mode=640x480@32bpp; writes_enabled=0
+#   200- xbox-oracle-agent v0.4 (Phase 2 + controller.* + smc.*); ip=192.168.0.200; mode=640x480@32bpp; writes_enabled=0
 #   200- bye
 
 # Or via the Mac CLI:

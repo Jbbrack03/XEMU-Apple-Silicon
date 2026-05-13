@@ -4,6 +4,7 @@
 #include "protocol.h"
 
 #include <lwip/api.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -127,6 +128,13 @@ int op_parse_kv_u32(const char *args, const char *key, uint32_t *out)
         } else {
             if (*v < '0' || *v > '9') return -1;
             d = *v - '0';
+        }
+        /* Reject values that don't fit in uint32_t. Without this,
+         * callers' downstream range checks (e.g. `val > 0xFF` in
+         * smc.write) can be bypassed by oversized tokens that
+         * silently wrap during accumulation. */
+        if (acc > (UINT32_MAX - (uint32_t)d) / (uint32_t)base) {
+            return -1;
         }
         acc = acc * (uint32_t)base + (uint32_t)d;
         v++;
