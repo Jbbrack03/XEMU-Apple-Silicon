@@ -30,6 +30,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -275,6 +276,30 @@ uint64_t pgraph_mtl_surface_clear_count(void);
 /* M5.9: counters. */
 uint64_t pgraph_mtl_surface_front_fb_publishes(void);
 uint64_t pgraph_mtl_surface_cache_entries(void);
+
+/* Tool 1 (2026-05-19): structured per-flip JSONL surface-graph dump.
+ *
+ * Emits one "flip" header line followed by one "binding" line per
+ * cache entry to `out`. Designed for consumption by
+ * `scripts/apple-silicon/surface-graph-analyze.py`. The publish-source
+ * metadata in the flip header is taken from the SELECTED source
+ * binding at last publish time (Codex review 2026-05-19, finding #1) —
+ * the published texture object itself may be a composed display
+ * texture, snapshot, or the binding's own e->texture depending on the
+ * publish path. Caller MUST hold `pg->lock` so the singly-linked cache
+ * list does not mutate while we walk it (the flip_stall hook already
+ * runs under pg->lock per T2, commit 3ae76a327c).
+ *
+ * `flip_ordinal` is the monotonic flip-stall counter maintained by the
+ * caller; embedded into every emitted line so the analyzer can group.
+ * `reason` is a short literal stored in the flip header (e.g.,
+ * "flip_stall", "manual"). */
+void pgraph_mtl_surface_dump_graph_jsonl(FILE *out, const char *reason,
+                                         uint64_t flip_ordinal);
+
+/* Tool 1 (2026-05-19): cumulative graph-dump counter; surfaced via
+ * METAL_SURFACE_GRAPH_DUMPS in `extract-perf-summary.sh`. */
+uint64_t pgraph_mtl_surface_graph_dumps(void);
 /* 2026-05-03 magenta-RT diagnostic: monotonic count of cache entries
  * destroyed + recreated due to shape mismatch on same-vram_addr rebind.
  * Each shape-mismatch destroy clobbers all previously rendered content

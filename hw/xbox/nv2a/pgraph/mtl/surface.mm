@@ -186,6 +186,14 @@ typedef struct MtlSurfaceBinding {
      * while leaving the color target at its clear color. */
     uint32_t frame_draw_count;
 
+    /* 2026-05-19 surface-graph diag (Tool 1): monotonic seq snapshot of
+     * the most recent color-writing draw that hit this binding. Mirrors
+     * `last_use_seq` but only updates on color-write, so the graph
+     * analyzer can rank "most-recently-rendered-to" candidates per flip
+     * without depending on `frame_draw_count` which only resets on the
+     * fallback publish path. Zero means "never color-drawn". */
+    uint64_t last_color_draw_seq;
+
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
 
@@ -295,7 +303,30 @@ static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
  * recreated due to shape mismatch on a same-vram_addr rebind. */
 static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
 
+/* 2026-05-19 surface-graph diag (Tool 1). Captures the SOURCE binding
+ * selected at publish time (not the texture the compositor sees). For
+ * the display-compose path the published texture is a freshly
+ * synthesized `dst`, so the dump cannot infer "which cache entry was
+ * the publish source" by pointer match on s_front_framebuffer_texture.
+ * These statics are written under s_front_framebuffer_lock alongside
+ * the atomic_store of s_front_framebuffer_texture so the dump path
+ * can re-read them under the same lock without tearing. */
+static _Atomic(uint64_t) s_graph_dumps = 0;
+static uint32_t          s_last_publish_source_vram_addr  = 0;
+static void             *s_last_publish_source_texture    = NULL;
+static void             *s_last_publish_published_texture = NULL;
+static const char       *s_last_publish_kind              = NULL;
+static const char       *s_last_publish_reason            = NULL;
+static uint64_t          s_last_publish_seq               = 0;
+
 static bool s_initialized = false;
+
+/* Forward decl so publish paths can record source info under the
+ * front-fb lock. */
+static void record_publish_source_locked(MtlSurfaceBinding *e,
+                                         void *published_texture,
+                                         const char *kind,
+                                         const char *reason);
 
 /* ---------------------------------------------------------------- */
 
@@ -303,6 +334,29 @@ static bool present_snapshot_enabled(void)
 {
     const char *e = getenv("XEMU_METAL_PRESENT_SNAPSHOT");
     return !(e && e[0] == '0');
+}
+
+/* Tool 1 (2026-05-19): record the SOURCE binding selected at publish
+ * time so the graph dump can identify it independently of whichever
+ * texture object the compositor ends up sampling (which may be a
+ * composed `dst`, a snapshot, or the binding's own e->texture
+ * depending on the publish path). Caller must hold
+ * s_front_framebuffer_lock — fields are read under the same lock
+ * from the dump path so the snapshot is internally consistent. */
+static void record_publish_source_locked(MtlSurfaceBinding *e,
+                                         void *published_texture,
+                                         const char *kind,
+                                         const char *reason)
+{
+    if (e == NULL) {
+        return;
+    }
+    s_last_publish_source_vram_addr  = e->vram_addr;
+    s_last_publish_source_texture    = e->texture;
+    s_last_publish_published_texture = published_texture;
+    s_last_publish_kind              = kind ? kind : "?";
+    s_last_publish_reason            = reason ? reason : "?";
+    s_last_publish_seq               = ++s_use_seq;
 }
 
 static void release_display_textures(void)
@@ -463,6 +517,8 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
             return true;
         }
         atomic_store(&s_front_framebuffer_texture, e->texture);
+        record_publish_source_locked(e, e->texture,
+                                     "front-texture", reason);
         pthread_mutex_unlock(&s_front_framebuffer_lock);
         atomic_fetch_add(&s_front_fb_publishes, 1);
         fprintf(stderr,
@@ -517,6 +573,9 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
     pthread_mutex_lock(&s_front_framebuffer_lock);
     atomic_store(&s_front_framebuffer_texture,
                  (__bridge void *)s_front_snapshot_texture);
+    record_publish_source_locked(e,
+                                 (__bridge void *)s_front_snapshot_texture,
+                                 "front-snapshot", reason);
     pthread_mutex_unlock(&s_front_framebuffer_lock);
     atomic_fetch_add(&s_front_fb_publishes, 1);
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
@@ -1656,6 +1715,7 @@ bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
         return true;
     }
     atomic_store(&s_front_framebuffer_texture, e->texture);
+    record_publish_source_locked(e, e->texture, "pointer-only", reason);
     pthread_mutex_unlock(&s_front_framebuffer_lock);
     atomic_fetch_add(&s_front_fb_publishes, 1);
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
@@ -1754,6 +1814,8 @@ static bool publish_display_binding_front_fb(MtlSurfaceBinding *e,
     e->last_use_seq = ++s_use_seq;
     pthread_mutex_lock(&s_front_framebuffer_lock);
     atomic_store(&s_front_framebuffer_texture, (__bridge void *)dst);
+    record_publish_source_locked(e, (__bridge void *)dst,
+                                 "display-compose", reason);
     pthread_mutex_unlock(&s_front_framebuffer_lock);
     atomic_fetch_add(&s_front_fb_publishes, 1);
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
@@ -1793,6 +1855,12 @@ void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
     }
 
     uint32_t n = ++e->frame_draw_count;
+    /* Tool 1 (2026-05-19): timestamp the most-recent color-write on this
+     * binding using the shared monotonic seq counter. The graph analyzer
+     * uses this to rank "most-recently-rendered-to" candidates per flip
+     * — frame_draw_count alone is cumulative and only resets on the
+     * fallback-publish path (Codex review 2026-05-19, finding #2). */
+    e->last_color_draw_seq = ++s_use_seq;
     if (s_fallback_draw_candidate == NULL ||
         n > s_fallback_draw_candidate_count ||
         (n == s_fallback_draw_candidate_count && e == s_color_binding)) {
@@ -2049,6 +2117,127 @@ uint64_t pgraph_mtl_surface_front_fb_publishes(void)
 uint64_t pgraph_mtl_surface_cache_entries(void)
 {
     return s_initialized ? (uint64_t)s_cache_size : 0;
+}
+
+uint64_t pgraph_mtl_surface_graph_dumps(void)
+{
+    return atomic_load(&s_graph_dumps);
+}
+
+/* Tool 1 (2026-05-19): structured per-flip dump of every cache binding.
+ *
+ * Emits one JSONL "flip" header line followed by one JSONL "binding"
+ * line per cache entry. Caller MUST hold `pg->lock` so the singly-
+ * linked s_cache_head list does not mutate while we walk it; the
+ * flip_stall hook in renderer.c already runs under that lock per
+ * T2 (commit 3ae76a327c). We additionally take the front-fb mutex
+ * briefly to snapshot s_last_publish_* fields so the publish-source
+ * info is internally consistent with the surface state. */
+void pgraph_mtl_surface_dump_graph_jsonl(FILE *out,
+                                         const char *reason,
+                                         uint64_t flip_ordinal)
+{
+    if (!s_initialized || out == NULL) {
+        return;
+    }
+
+    /* Snapshot publish state under the front-fb lock. */
+    uint32_t    last_src_vram_addr  = 0;
+    void       *last_src_texture    = NULL;
+    void       *last_pub_texture    = NULL;
+    const char *last_kind           = "(none)";
+    const char *last_reason         = "(none)";
+    uint64_t    last_pub_seq        = 0;
+    pthread_mutex_lock(&s_front_framebuffer_lock);
+    last_src_vram_addr  = s_last_publish_source_vram_addr;
+    last_src_texture    = s_last_publish_source_texture;
+    last_pub_texture    = s_last_publish_published_texture;
+    last_kind           = s_last_publish_kind   ? s_last_publish_kind   : "(none)";
+    last_reason         = s_last_publish_reason ? s_last_publish_reason : "(none)";
+    last_pub_seq        = s_last_publish_seq;
+    void *current_front = atomic_load(&s_front_framebuffer_texture);
+    pthread_mutex_unlock(&s_front_framebuffer_lock);
+
+    int64_t  ts_us       = mtl_now_us();
+    uint64_t cur_seq     = s_use_seq;
+    uint32_t cache_size  = s_cache_size;
+    void    *cur_color   = (s_color_binding != NULL) ? s_color_binding->texture : NULL;
+    void    *cur_depth   = (s_depth_binding != NULL) ? s_depth_binding->texture : NULL;
+    uint32_t cur_color_a = (s_color_binding != NULL) ? s_color_binding->vram_addr : 0;
+    uint32_t cur_depth_a = (s_depth_binding != NULL) ? s_depth_binding->vram_addr : 0;
+
+    fprintf(out,
+            "{\"type\":\"flip\","
+            "\"flip_ordinal\":%llu,\"seq\":%llu,\"ts_us\":%lld,"
+            "\"reason\":\"%s\","
+            "\"cache_size\":%u,\"msaa\":%u,"
+            "\"current_front_texture\":\"%p\","
+            "\"current_color_binding_vram_addr\":\"0x%x\","
+            "\"current_color_binding_texture\":\"%p\","
+            "\"current_depth_binding_vram_addr\":\"0x%x\","
+            "\"current_depth_binding_texture\":\"%p\","
+            "\"last_publish\":{"
+            "\"kind\":\"%s\",\"reason\":\"%s\","
+            "\"source_vram_addr\":\"0x%x\",\"source_texture\":\"%p\","
+            "\"published_texture\":\"%p\",\"seq\":%llu}}\n",
+            (unsigned long long)flip_ordinal,
+            (unsigned long long)cur_seq,
+            (long long)ts_us,
+            reason ? reason : "?",
+            cache_size, s_msaa_sample_count,
+            current_front,
+            cur_color_a, cur_color,
+            cur_depth_a, cur_depth,
+            last_kind, last_reason,
+            last_src_vram_addr, last_src_texture,
+            last_pub_texture,
+            (unsigned long long)last_pub_seq);
+
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        bool is_cur_color = (e == s_color_binding);
+        bool is_cur_depth = (e == s_depth_binding);
+        bool was_publish_source =
+            (e->vram_addr == last_src_vram_addr &&
+             e->texture   == last_src_texture &&
+             last_src_texture != NULL);
+        uint32_t draw_dirty = atomic_load(&e->draw_dirty);
+        uint32_t dirty_vram = atomic_load(&e->dirty_vram);
+        fprintf(out,
+                "{\"type\":\"binding\","
+                "\"flip_ordinal\":%llu,\"seq\":%llu,"
+                "\"vram_addr\":\"0x%x\",\"size\":%u,\"pitch\":%u,"
+                "\"is_color\":%s,"
+                "\"width\":%u,\"height\":%u,"
+                "\"guest_width\":%u,\"guest_height\":%u,"
+                "\"nv097_format\":%u,\"mtl_pixel_format\":%u,"
+                "\"msaa_sample_count\":%u,"
+                "\"texture\":\"%p\",\"msaa_texture\":\"%p\","
+                "\"frame_draw_count\":%u,"
+                "\"last_color_draw_seq\":%llu,"
+                "\"last_use_seq\":%llu,"
+                "\"draw_dirty\":%u,\"dirty_vram\":%u,"
+                "\"is_current_color\":%s,\"is_current_depth\":%s,"
+                "\"was_publish_source\":%s}\n",
+                (unsigned long long)flip_ordinal,
+                (unsigned long long)cur_seq,
+                (unsigned)e->vram_addr, e->size, e->pitch,
+                e->is_color ? "true" : "false",
+                e->width, e->height,
+                e->guest_width, e->guest_height,
+                e->nv097_format, e->mtl_pixel_format,
+                e->msaa_sample_count,
+                e->texture, e->msaa_texture,
+                (unsigned)e->frame_draw_count,
+                (unsigned long long)e->last_color_draw_seq,
+                (unsigned long long)e->last_use_seq,
+                draw_dirty, dirty_vram,
+                is_cur_color ? "true" : "false",
+                is_cur_depth ? "true" : "false",
+                was_publish_source ? "true" : "false");
+    }
+
+    atomic_fetch_add(&s_graph_dumps, 1);
+    fflush(out);
 }
 
 /* ---------------------------------------------------------------- */

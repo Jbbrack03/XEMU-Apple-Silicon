@@ -363,6 +363,7 @@ function emit_jitter(prefix, fps_arr, mspf_max_arr, mspf_avg_arr, n,    sorted, 
                    key == "METAL_SURFACE_DOWNLOADS" ||
                    key == "METAL_SURFACE_DOWNLOAD_BYTES" ||
                    key == "METAL_SURFACE_DOWNLOAD_US_TOTAL" ||
+                   key == "METAL_SURFACE_GRAPH_DUMPS" ||
                    key == "METAL_DRAW_RT_DUMPS" ||
                    key == "GL_DRAW_RT_DUMPS" ||
                    key == "INPUT_USB_POLLS" ||

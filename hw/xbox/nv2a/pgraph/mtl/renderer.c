@@ -354,6 +354,89 @@ static bool mtl_front_fb_fallback_enabled(void)
     return s_front_fb_fallback != 0;
 }
 
+/* Tool 1 (2026-05-19): structured per-flip surface-graph dump.
+ *
+ * Driven by three env vars read once at first flip:
+ *   XEMU_METAL_SURFACE_GRAPH_DUMP=/path  (required to activate)
+ *   XEMU_METAL_SURFACE_GRAPH_AT_FLIP_STALL=N   (one-shot at Nth flip)
+ *   XEMU_METAL_SURFACE_GRAPH_INTERVAL=N        (every-N flips)
+ *
+ * If neither AT_FLIP_STALL nor INTERVAL is set, defaults to every flip.
+ * If both are set, AT_FLIP_STALL wins (fires once at N, then stops).
+ *
+ * Lifecycle: lazy fopen(..., "a") on first dump. The FILE* persists
+ * for the renderer's lifetime; fflush() runs every dump but no fsync
+ * (60 flips/sec on tracked titles would dominate the publish window).
+ * The OS closes the descriptor on process exit; no explicit cleanup
+ * is needed because this is a diagnostic-only path. */
+static FILE       *s_surface_graph_file        = NULL;
+static uint64_t    s_surface_graph_flip_seq    = 0;
+static int         s_surface_graph_mode_cached = 0;
+static int         s_surface_graph_at          = 0; /* 0 = unset */
+static int         s_surface_graph_interval    = 0; /* 0 = unset (=> every flip) */
+static bool        s_surface_graph_fired_one   = false;
+static const char *s_surface_graph_path        = NULL;
+
+static int mtl_env_int_or_zero(const char *name)
+{
+    const char *e = getenv(name);
+    if (!e || !e[0]) {
+        return 0;
+    }
+    long v = strtol(e, NULL, 10);
+    if (v < 0 || v > INT_MAX) {
+        return 0;
+    }
+    return (int)v;
+}
+
+static void mtl_surface_graph_dump_if_enabled(NV2AState *d)
+{
+    (void)d;
+    if (!s_surface_graph_mode_cached) {
+        s_surface_graph_path     = getenv("XEMU_METAL_SURFACE_GRAPH_DUMP");
+        s_surface_graph_at       = mtl_env_int_or_zero(
+                                       "XEMU_METAL_SURFACE_GRAPH_AT_FLIP_STALL");
+        s_surface_graph_interval = mtl_env_int_or_zero(
+                                       "XEMU_METAL_SURFACE_GRAPH_INTERVAL");
+        s_surface_graph_mode_cached = 1;
+    }
+    if (s_surface_graph_path == NULL || s_surface_graph_path[0] == '\0') {
+        return;
+    }
+
+    s_surface_graph_flip_seq++;
+    uint64_t n = s_surface_graph_flip_seq;
+    bool fire = false;
+    if (s_surface_graph_at > 0) {
+        fire = (!s_surface_graph_fired_one) &&
+               (n == (uint64_t)s_surface_graph_at);
+    } else if (s_surface_graph_interval > 0) {
+        fire = ((n % (uint64_t)s_surface_graph_interval) == 0);
+    } else {
+        fire = true;
+    }
+    if (!fire) {
+        return;
+    }
+
+    if (s_surface_graph_file == NULL) {
+        s_surface_graph_file = fopen(s_surface_graph_path, "a");
+        if (s_surface_graph_file == NULL) {
+            fprintf(stderr,
+                    "xemu-perf: metal_surface_graph_dump_open_fail "
+                    "path=%s errno=%d\n",
+                    s_surface_graph_path, errno);
+            /* Poison the cached path so we don't keep retrying. */
+            s_surface_graph_path = NULL;
+            return;
+        }
+    }
+
+    pgraph_mtl_surface_dump_graph_jsonl(s_surface_graph_file, "flip_stall", n);
+    s_surface_graph_fired_one = true;
+}
+
 static void mtl_get_display_dimensions(NV2AState *d,
                                        unsigned int *out_width,
                                        unsigned int *out_height)
@@ -1033,6 +1116,13 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
     if (use_front_fb_fallback) {
         pgraph_mtl_surface_publish_latest_draw_fallback();
     }
+
+    /* Tool 1 (2026-05-19): structured per-flip surface-graph dump for
+     * the PGR2 multi-RT compositing investigation (M5.12/M17). Runs
+     * after both publish paths so the dump sees the FINAL state.
+     * Caller holds `pg->lock` per T2; the dump function relies on that
+     * to walk s_cache_head safely. */
+    mtl_surface_graph_dump_if_enabled(d);
 }
 
 /* MTLPrimitiveType values, mirrored from <Metal/MTLRenderCommandEncoder.h>.
