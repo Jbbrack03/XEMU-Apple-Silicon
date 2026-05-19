@@ -1,6 +1,52 @@
 # Handoff
 
-Last updated: 2026-05-12 evening — **T2 per-host-refresh front-fb
+Last updated: 2026-05-19 — **Three oracle-independent measurement
+tools shipped** (Tool 1 surface-graph dump, Tool 2 gameplay temporal
+capture, Tool 3 LLDB-attached GL leg). Retail Xbox oracle is offline
+pending thermal repaste; this slice closes the measurement gaps that
+were blocking the next round of M15 default-on evidence work so it
+can proceed without the oracle.
+
+- **Tool 1 (`XEMU_METAL_SURFACE_GRAPH_DUMP=path` + analyzer
+  `surface-graph-analyze.py`)** — per-flip JSONL of every cached
+  `MtlSurfaceBinding`. Compresses the three-diagnostic-runs-with-
+  different-`vram:0x…`-source-overrides workflow used in the
+  2026-05-11 PGR2 investigation into one xemu run + one analyzer
+  pass. Backs M5.12/M17 PGR2 multi-RT compositing investigation.
+  Validation evidence: `benchmarks/2026-05-19-tooling-gap-closure.md`.
+- **Tool 2 (`capture-gameplay-temporal.sh`)** — gameplay analogue
+  of `capture-boot-temporal.sh`. Thin orchestrator over
+  `run-benchmark.sh` via new `XEMU_BENCH_TEMPORAL_CAPTURE=1` mode
+  (PNG-every-frame on Metal renderer-native; parallel ffmpeg
+  AVFoundation on GL). Backs the per-tracked-title temporal re-
+  validation required by the 2026-05-12 (evening) methodology
+  decision. Metal leg smoke tested 691 frames at ~59.6 fps over 12 s.
+- **Tool 3 (`lldb-gl-launch.sh` + `metal-gl-compare.sh --gl-attach-lldb`)**
+  — wraps the GL leg under LLDB via the new `XEMU_BENCH_LAUNCHER_PREFIX`
+  hook in `run-benchmark.sh`; harness setup/teardown stays intact.
+  Backs the Halo cold-launch segfault investigation at
+  `benchmark-runs/20260511-153638-metal-gl-compare-halo`. Wrapper
+  invocation smoke tested; crash-on-source mechanism in place
+  (not exercised — flat-tri-depth didn't segfault).
+
+Codex review applied (`/codex-validate plan` MAJOR ISSUES → fixes
+adopted; `/codex-validate changes` MINOR ISSUES → doc/dead-code fixes
+adopted). See decision-log "2026-05-19" for the full adopt/deflect
+trail.
+
+**Tracked-title impact still unverified.** The 2026-05-12 T2 fix's
+hypothesized improvement on PGR2 / Rainbow / Crimson paired-diff
+FAILs remains queued for next session — these tools provide the
+measurement infrastructure but the actual reruns + analysis are a
+separate slice.
+
+Pre-2026-05-19 banner preserved below.
+
+---
+
+## 2026-05-12 evening banner (T2 front-fb publish)
+
+**T2 per-host-refresh front-fb
 publish landed** (commits `ca35b96562` + `3ae76a327c`). Root cause of
 the boot-animation-magenta + tracked-title-flicker class of bugs was
 identified: `gl_render_frame` (`ui/xemu.c:872`) short-circuits to

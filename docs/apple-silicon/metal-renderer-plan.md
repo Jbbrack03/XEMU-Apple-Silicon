@@ -1,7 +1,15 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-11 (M15 default-on remains blocked by the evidence
-bundle, not by oracle readiness). Run
+Last updated: 2026-05-19 (M5.12/M17 PGR2 multi-RT compositing
+investigation now backed by the surface-graph diagnostic surface
+shipped 2026-05-19 — `XEMU_METAL_SURFACE_GRAPH_DUMP=path` +
+`surface-graph-analyze.py` emit per-flip JSONL of every cached
+`MtlSurfaceBinding` with explicit publish-source attribution,
+replacing the three-runs-with-different-`vram:0x…`-overrides
+workflow that the 2026-05-11 diagnostic used; see
+`benchmarks/2026-05-19-tooling-gap-closure.md` and decision-log
+"2026-05-19"). Prior 2026-05-11: M15 default-on remains blocked by
+the evidence bundle, not by oracle readiness. Run
 `scripts/apple-silicon/m15-bundle-status.py` before any M15 claim; current
 result is `verdict=incomplete ok=6 fail=5 missing=4` (2026-05-11 evening,
 after the m15-gameplay-* discovery extension and the front-fb fallback

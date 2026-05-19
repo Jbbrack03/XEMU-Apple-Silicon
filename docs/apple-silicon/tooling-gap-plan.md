@@ -1,6 +1,15 @@
 # Tooling gap plan
 
-Last updated: 2026-05-11 (M15 checklist + paired-capture finding).
+Last updated: 2026-05-19 (oracle-independent measurement closure — three
+gaps closed: surface-graph dump backing M5.12/M17 PGR2 multi-RT
+investigation; gameplay-route temporal capture via
+`capture-gameplay-temporal.sh` for the per-tracked-title temporal
+re-validation required by the 2026-05-12 evening methodology; LLDB-
+attached GL leg via `lldb-gl-launch.sh` + `metal-gl-compare.sh
+--gl-attach-lldb` for the Halo cold-launch segfault. See
+`benchmarks/2026-05-19-tooling-gap-closure.md` and decision-log
+"2026-05-19"). Prior 2026-05-11: M15 checklist + paired-capture
+finding.
 
 This note records the feedback gaps that matter for the Metal backend and how
 to close them without turning every Codex session into a pile of background
@@ -322,6 +331,64 @@ Closure path:
    compile time with a fresh shader cache.
 5. Decide the front-fb fallback policy from title coverage evidence, not from
    intuition.
+
+## Gap 5: oracle-independent measurement closure — **CLOSED 2026-05-19**
+
+Three measurement gaps were blocking the next round of M15 default-on
+evidence work while the retail Xbox oracle is offline (thermal repaste
+pending). The 2026-05-19 slice closed all three with oracle-independent
+tools (decision-log "2026-05-19";
+`benchmarks/2026-05-19-tooling-gap-closure.md`).
+
+Closed pieces:
+
+- **Surface-graph dump.** `XEMU_METAL_SURFACE_GRAPH_DUMP=path` +
+  `XEMU_METAL_SURFACE_GRAPH_AT_FLIP_STALL=N` /
+  `XEMU_METAL_SURFACE_GRAPH_INTERVAL=N` emit per-flip JSONL of every
+  cached `MtlSurfaceBinding`. Analyzer
+  `scripts/apple-silicon/surface-graph-analyze.py` ranks final-composite
+  candidates by recency (`last_color_draw_seq`) with explicit
+  publish-source attribution (`s_last_publish_source_*` statics
+  recorded under `s_front_framebuffer_lock`). New counter
+  `METAL_SURFACE_GRAPH_DUMPS`. Compresses the three-diagnostic-runs-
+  with-different-`XEMU_METAL_SCREENSHOT_SOURCE=vram:0x…`-overrides
+  workflow from 2026-05-11 into one xemu run + one analyzer pass.
+  Smoke evidence: 25 flips × 17 bindings on flat-tri-depth produced
+  7 candidate addresses, with the display-compose publish path's
+  `source_texture ≠ published_texture` divergence captured cleanly
+  (Codex finding #1 about pointer-match being unreliable proven correct).
+- **Gameplay-route temporal capture.**
+  `scripts/apple-silicon/capture-gameplay-temporal.sh` is a thin
+  orchestrator over `run-benchmark.sh`. New
+  `XEMU_BENCH_TEMPORAL_CAPTURE=1` mode in the launcher forces PNG-
+  every-frame output: Metal via the existing renderer-native
+  `XEMU_METAL_SCREENSHOT_*` infrastructure (every-frame from frame 1,
+  `_SOURCE=nv2a`), GL via a parallel `ffmpeg -f avfoundation` capture
+  decomposed post-run. Pairs directly with
+  `temporal-flicker-analyze.py`. Smoke evidence: 691 frames at
+  ~59.6 fps over 12 s under METAL on flat-tri-depth.
+- **LLDB-attached GL leg.**
+  `scripts/apple-silicon/lldb-gl-launch.sh` writes a one-shot wrapper
+  script and exports `XEMU_BENCH_LAUNCHER_PREFIX=<wrapper-path>`,
+  which `run-benchmark.sh` prepends to the xemu launch in all three
+  launch branches. The wrapper invokes `lldb --batch --source-on-crash
+  <cmds>` so on crash the file (`thread list`, `thread backtrace all`,
+  `process status`, `register read`, `image list`) fires and the
+  backtrace lands in `<run-dir>/crash.lldb.log`.
+  `metal-gl-compare.sh --gl-attach-lldb` routes the GL leg through
+  the wrapper. Smoke evidence: wrapper invocation OK on flat-tri-depth;
+  crash path not exercised (no segfault on flat-tri-depth) but
+  `--source-on-crash` is standard LLDB behavior. Known limitation:
+  the inferior's normal `fprintf(stderr,…)` output is full-buffered
+  under LLDB's batch redirection — irrelevant for crash capture (the
+  crash path uses `-o` commands which flow into LLDB's own stdout)
+  but visible as missing perf intervals in a non-crashing LLDB run.
+
+Codex review applied to plan + changes; 4 of 5 plan findings adopted,
+2 of 2 changes findings adopted, 1 plan finding deflected (prompt
+overstated rule #4 — project rule mandates `automation.md` +
+`.claude/rules/flags-*.md`, both already present). Marker at
+`.claude/state/codex-validate-last-run`.
 
 ## Readiness gate
 

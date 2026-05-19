@@ -1,5 +1,88 @@
 # Decision Log
 
+## 2026-05-19: Tooling slice — oracle-independent measurement closure
+
+**Decision.** Ship three measurement tools to unblock the next round
+of M15 default-on evidence work while the retail Xbox oracle is
+offline (thermal repaste pending; rule #1 — no guessing without data,
+so we must close measurement gaps independently rather than wait).
+
+Tools (paths under `scripts/apple-silicon/` unless noted):
+1. **Surface-graph dump** — `XEMU_METAL_SURFACE_GRAPH_DUMP=path` +
+   `_AT_FLIP_STALL=N` / `_INTERVAL=N` env vars emit per-flip JSONL of
+   every cached `MtlSurfaceBinding`. Analyzer: `surface-graph-analyze.py`.
+   Renderer change in `hw/xbox/nv2a/pgraph/mtl/{surface.h,surface.mm,
+   renderer.c}`. New counter `METAL_SURFACE_GRAPH_DUMPS` in
+   `util/xemu-metal-perf.c` + `extract-perf-summary.sh`. Primary
+   unblock: PGR2 multi-RT compositing investigation (M5.12/M17).
+2. **Gameplay-route temporal capture** — `capture-gameplay-temporal.sh`
+   is a thin orchestrator over `run-benchmark.sh`. New
+   `XEMU_BENCH_TEMPORAL_CAPTURE=1` mode in the launcher forces
+   PNG-every-frame (Metal renderer-native or GL ffmpeg AVFoundation).
+   Output shape pairs directly with `temporal-flicker-analyze.py`.
+   Primary unblock: per-tracked-title temporal re-validation per
+   2026-05-12 (evening) methodology decision.
+3. **LLDB-attached GL leg** — `lldb-gl-launch.sh` wraps
+   `run-benchmark.sh` via the new `XEMU_BENCH_LAUNCHER_PREFIX` env
+   var; harness setup/teardown stays intact, the final `xemu` exec
+   runs under LLDB. `metal-gl-compare.sh --gl-attach-lldb` routes
+   the GL leg through this wrapper. Primary unblock: Halo cold-launch
+   segfault at `benchmark-runs/20260511-153638-metal-gl-compare-halo`.
+
+**Why.** Three concrete blockers, each oracle-independent:
+- PGR2 final-composite surface identification today requires three
+  separate xemu runs with `XEMU_METAL_SCREENSHOT_SOURCE=vram:0x…` per
+  the 2026-05-11 diagnostic. One run with the surface-graph dump
+  produces the same elimination evidence.
+- The 2026-05-12 (evening) methodology decision demoted single-frame
+  canary PASSes to smoke. Re-validating each tracked title against
+  the temporal gate needed a gameplay analogue of
+  `capture-boot-temporal.sh`, which is BIOS-boot-only.
+- The Halo paired-gameplay infra-block has zero backtrace evidence
+  for the GL cold-launch segfault. No backtrace ⇒ no debug.
+
+**Codex review applied.** `/codex-validate plan` flagged five issues;
+four adopted, one deflected:
+- Adopted #1: publish-source identification must be explicit (not
+  pointer-match on `s_front_framebuffer_texture`, which holds a
+  composed display texture, not the source binding). New
+  `s_last_publish_*` statics + `record_publish_source_locked()` set
+  under the front-fb lock alongside the publish atomic_store.
+- Adopted #2: `frame_draw_count` is cumulative and only resets on
+  fallback publish, so it cannot mean "drew this flip". Added
+  `last_color_draw_seq` on `MtlSurfaceBinding`, bumped from
+  `pgraph_mtl_surface_note_color_draw` with `color_write=true`;
+  analyzer ranks candidates by this recency seq instead.
+- Adopted #3: gameplay-temporal overlaps with `run-benchmark.sh`,
+  not with `capture-boot-temporal.sh`. Refactored Tool 2 to a thin
+  wrapper that adds `XEMU_BENCH_TEMPORAL_CAPTURE=1` to the launcher;
+  no clone drift.
+- Adopted #4: direct `lldb -- xemu` bypasses the harness. Added
+  `XEMU_BENCH_LAUNCHER_PREFIX` to `run-benchmark.sh` so LLDB
+  attaches without losing run-dir / scratch-HDD / QMP / cleanup.
+- Deflected #5: missing `xemu-fork/CLAUDE.md` flag docs. The codex
+  prompt overstated the project rule. Project rule #4 mandates
+  `automation.md` + `.claude/rules/flags-*.md` indexes, not
+  `xemu-fork/CLAUDE.md` updates. Original doc plan stands.
+
+**What this is NOT.** Not new measurements or new claims about M15
+default-on. These are observation surfaces; the evidence work using
+them happens in subsequent sessions. The surface-graph dump in
+particular is diagnostic-only (opt-in via env var; zero hot-path
+cost when unset).
+
+**Validation evidence.** Tool 1 builds clean
+(`ninja -C build qemu-system-i386` 18 targets, no new warnings).
+Tools 2 and 3 syntax-check with `bash -n`. Smoke-test evidence
+captured in `benchmarks/2026-05-19-tooling-gap-closure.md`.
+
+**Path-scoped rules updated.** `.claude/rules/flags-renderer.md`
+(3 new entries) and `.claude/rules/flags-bench.md` (3 new entries).
+`extract-perf-summary.sh` registers `METAL_SURFACE_GRAPH_DUMPS`.
+
+**Owner.** Claude (this session). Codex provided independent plan
+review per rule #15.
+
 ## 2026-05-12: Oracle-agent v0.4 ships `smc.*` thermal + fan-control commands
 
 **Decision.** Extend `scripts/apple-silicon/xbe-tests/oracle-agent/`

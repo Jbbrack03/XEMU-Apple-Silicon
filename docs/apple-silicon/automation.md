@@ -1,9 +1,18 @@
 # Benchmark Automation
 
-Last updated: 2026-05-12 (gate-discovery extension + diagnostic vs evidence
+Last updated: 2026-05-19 (three oracle-independent tools added —
+`XEMU_METAL_SURFACE_GRAPH_DUMP` + `surface-graph-analyze.py` for
+per-flip MtlSurfaceBinding dumps backing the M5.12/M17 PGR2 multi-RT
+investigation; `capture-gameplay-temporal.sh` thin wrapper for
+gameplay-route PNG-every-frame capture via the new
+`XEMU_BENCH_TEMPORAL_CAPTURE` launcher mode;
+`lldb-gl-launch.sh` + `metal-gl-compare.sh --gl-attach-lldb` for the
+Halo cold-launch segfault path via the new `XEMU_BENCH_LAUNCHER_PREFIX`
+hook. Codex-reviewed plan + changes; see decision-log "2026-05-19").
+Prior 2026-05-12 update: gate-discovery extension + diagnostic vs evidence
 split landed; paired capture source fixed in prior session; gameplay parity
 still unproven; CLAUDE.md compressed and cross-refs to its "Stable opt-in"
-section redirected to this file as canonical). Use
+section redirected to this file as canonical. Use
 `oracle-validate.sh` as the production oracle-side gate, and use
 `m15-bundle-status.py` as the read-only M15 default-on evidence
 checklist before long renderer runs. The real-Xbox oracle side is green
@@ -421,6 +430,97 @@ correctness issue.
 threshold added here should also land in `extract-perf-summary.sh` if
 it ties back to an `xemu-perf:` log line, and in `flags-bench.md` if
 it adds a new `XEMU_*` env var.
+
+### `capture-gameplay-temporal.sh` (Tool 2, 2026-05-19)
+
+Gameplay analogue of `capture-boot-temporal.sh`. Thin orchestrator
+over `run-benchmark.sh` — sets `XEMU_BENCH_TEMPORAL_CAPTURE=1` which
+forces PNG-every-frame output on the chosen renderer (Metal renderer-
+native via `XEMU_METAL_SCREENSHOT_PATH` + `_AT_FRAME=1` + `_INTERVAL=1`
++ `_SOURCE=nv2a`; GL via parallel `ffmpeg -f avfoundation` to a
+primary-display .mov, decomposed to PNGs post-run). Preserves the
+harness's scratch HDD, xemu-running guard, scripted input, QMP
+socket, snapshot loadvm, and cleanup machinery (Codex review
+2026-05-19, finding #3 — thin orchestrator avoids the clone drift
+that would come from copying capture-boot-temporal.sh).
+
+```sh
+# Crimson gameplay route, Metal leg, 30 s.
+scripts/apple-silicon/capture-gameplay-temporal.sh \
+    --renderer METAL --game crimson --duration 30
+
+# PGR2 with surface-graph dump active.
+XEMU_METAL_SURFACE_GRAPH_DUMP=/tmp/pgr2-graph.jsonl \
+XEMU_METAL_SURFACE_GRAPH_INTERVAL=30 \
+scripts/apple-silicon/capture-gameplay-temporal.sh \
+    --renderer METAL --game pgr2 --duration 60
+```
+
+Output: `benchmark-runs/<ts>-<alias>/frames/{metal-gameplay,gameplay}-*.png`,
+`temporal-summary.json`, plus the standard run-benchmark.sh artifacts.
+Pair with `temporal-flicker-analyze.py` for per-leg flicker metrics.
+
+### `surface-graph-analyze.py` (Tool 1, 2026-05-19)
+
+Reads the JSONL stream written by `XEMU_METAL_SURFACE_GRAPH_DUMP` and
+emits a structured report. Designed to compress the PGR2 multi-RT
+"three diagnostic runs with different
+`XEMU_METAL_SCREENSHOT_SOURCE=vram:0x…` values" workflow into one
+xemu run + one analyzer pass.
+
+Heuristic for "final-composite candidates" (configurable):
+1. Color RT (`is_color=true`).
+2. `last_color_draw_seq > 0` (drew color this run; finding #2 fix —
+   per-flip recency instead of cumulative `frame_draw_count`).
+3. NOT the publish source (the publish source is what we suspect is
+   wrong for PGR2 — the boot-residual or HUD surface).
+4. Guest dimensions within `--scale-tolerance` × target (default
+   640×480 per the PGR2 hint at `0x3c84000` / `0x3b58000`).
+5. Optional `--target-format` for nv097_format constraint
+   (e.g., 4 per the 2026-05-11 PGR2 diagnostic).
+
+```sh
+scripts/apple-silicon/surface-graph-analyze.py \
+    --jsonl /tmp/pgr2-graph.jsonl \
+    --out-dir benchmark-runs/<ts>-pgr2/surface-graph/ \
+    --target-format 4
+```
+
+Output: `summary.json` (per-flip + per-vram_addr aggregates),
+`report.md` (first/middle/last flip tables + ranked candidates),
+`candidates.md` (standalone candidate writeup), `per-flip.csv`
+(spreadsheet-friendly).
+
+### `lldb-gl-launch.sh` (Tool 3, 2026-05-19) + `metal-gl-compare.sh --gl-attach-lldb`
+
+LLDB-attached run-benchmark.sh wrapper. Sets
+`XEMU_BENCH_LAUNCHER_PREFIX="lldb --batch -o run -k 'bt all' …"` so
+the launcher's run-dir / scratch-HDD / QMP / scripted-input / cleanup
+machinery still runs but the final xemu exec happens under LLDB.
+Any segfault or abort produces a captured backtrace at
+`<run-dir>/crash.lldb.log` (Codex review 2026-05-19, finding #4 —
+launcher-prefix hook keeps the harness intact). Primary use: the Halo
+cold-launch segfault path at
+`benchmark-runs/20260511-153638-metal-gl-compare-halo` that
+infra-blocks paired Halo evidence.
+
+```sh
+# Direct wrapper.
+scripts/apple-silicon/lldb-gl-launch.sh halo
+
+# Through the paired-diff harness.
+scripts/apple-silicon/metal-gl-compare.sh halo --gl-attach-lldb \
+    --snapshot halo-menu --loadvm-at 2
+```
+
+The `XEMU_BENCH_LAUNCHER_PREFIX` env is a single-word hook — the
+value is expanded unquoted inside `run-benchmark.sh` so bash word-
+splitting strips embedded quotes from any multi-word command. Pass
+the path to an executable wrapper that internally wires up the
+full multi-word debugger / tracer invocation. `lldb-gl-launch.sh`
+generates a temporary wrapper file for exactly this reason; any
+follow-on tool (`dtrace`, `perf`, `instruments` agent, etc.) should
+follow the same pattern.
 
 The per-run config writes `[display.quality] surface_scale = N`, where
 `N` defaults to **2** (matching the Apple Silicon system build's
@@ -1005,6 +1105,41 @@ and stack:
   need pre-resolve MSAA contents, use the `XEMU_METAL_CAPTURE`
   `.gputrace` capture path instead — that's M13's job, not this
   flag's.
+- `XEMU_METAL_SURFACE_GRAPH_DUMP=/path/to/file.jsonl`
+  (**Tool 1, 2026-05-19**) — structured per-flip JSONL dump of every
+  cached `MtlSurfaceBinding` (M5.9 cache). Required to activate;
+  setting to empty/unset disables the path. The file is opened in
+  append mode and reused for every dump (lazy open on first fire;
+  fflushed every dump; no fsync). One JSON object per binding plus
+  one "flip" header object per fire. Designed for consumption by
+  `scripts/apple-silicon/surface-graph-analyze.py`. Primary use:
+  PGR2 multi-RT compositing investigation (M5.12/M17) — identify
+  which back buffer holds the final composited scene by elimination
+  rather than three separate XEMU_METAL_SCREENSHOT_SOURCE=vram:0x…
+  diagnostic runs (per `benchmarks/2026-05-11-pgr2-metal-render-path-
+  diagnostic.md`). Counter: `METAL_SURFACE_GRAPH_DUMPS` per-interval
+  delta. The dump captures the SELECTED publish source binding
+  (Codex review 2026-05-19, finding #1) — the published `dst`
+  texture for the display-compose path is composed from `e->texture`
+  and would not be discoverable via pointer match. Implementation:
+  `mtl/surface.mm::pgraph_mtl_surface_dump_graph_jsonl` +
+  `mtl/renderer.c::mtl_surface_graph_dump_if_enabled` hooked from
+  `pgraph_mtl_flip_stall`.
+- `XEMU_METAL_SURFACE_GRAPH_AT_FLIP_STALL=N` (**Tool 1, 2026-05-19**) —
+  one-shot mode: fire the dump exactly once at the Nth flip-stall
+  since process start. Mutually exclusive with `_INTERVAL` (this one
+  wins). Unset / 0 → no one-shot mode; combine with `_INTERVAL` or
+  default to every-flip.
+- `XEMU_METAL_SURFACE_GRAPH_INTERVAL=N` (**Tool 1, 2026-05-19**) —
+  every-Nth-flip mode. Default (unset / 0) when `_AT_FLIP_STALL` is
+  also unset is "every flip". For tracked-title gameplay routes at
+  30 Hz flip cadence over 30 s ⇒ ~900 dumps; set to 30 for one dump
+  per second of gameplay.
+- `METAL_SURFACE_GRAPH_DUMPS` (**Tool 1, 2026-05-19**) — per-interval
+  delta count of completed surface-graph dump events. Bumped each
+  time the dump function emits a flip header + binding list.
+  Surfaces on the `xemu-perf:` line and in `extract-perf-summary.sh`.
+  Use as a smoke gate that the flag is actually firing.
 - `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03; cadence revised T2,
   2026-05-12 evening**): per-interval count of front-fb texture
   pointer **changes** in the Metal renderer's surface cache.

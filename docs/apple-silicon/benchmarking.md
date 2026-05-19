@@ -1,8 +1,16 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-12 evening (added T1/T2 boot-animation temporal
+Last updated: 2026-05-19 (oracle-independent measurement tools shipped
+— gameplay-route temporal capture via `capture-gameplay-temporal.sh`
+unblocks per-tracked-title temporal re-validation under the
+2026-05-12 evening methodology; surface-graph dump via
+`XEMU_METAL_SURFACE_GRAPH_DUMP` + `surface-graph-analyze.py` backs the
+M5.12/M17 PGR2 multi-RT compositing investigation; `lldb-gl-launch.sh`
+captures backtraces for the Halo cold-launch segfault. Tracked-title
+T2-impact reruns themselves remain queued for the next session).
+Prior 2026-05-12 evening: added T1/T2 boot-animation temporal
 baseline rows; M15 evidence bundle remains incomplete pending tracked-
-title reruns under T2). Use
+title reruns under T2. Use
 `scripts/apple-silicon/m15-bundle-status.py` before new Metal/default-on
 claims; 2026-05-11 evening result is
 `verdict=incomplete ok=6 fail=5 missing=4` (after the same-day
