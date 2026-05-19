@@ -19,6 +19,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_ROOT="${ROOT_DIR}/benchmark-runs"
 XEMU_BIN="${ROOT_DIR}/dist/xemu.app/Contents/MacOS/xemu"
 RUN_BENCHMARK="${ROOT_DIR}/scripts/apple-silicon/run-benchmark.sh"
+LLDB_GL_LAUNCH="${ROOT_DIR}/scripts/apple-silicon/lldb-gl-launch.sh"
 COMPARE_SCREENSHOTS="${ROOT_DIR}/scripts/apple-silicon/compare-screenshots.py"
 COMPARE_RUNS="${ROOT_DIR}/scripts/apple-silicon/compare-runs.sh"
 INPUT_SCRIPT_DIR="${ROOT_DIR}/scripts/apple-silicon/input-scripts"
@@ -94,6 +95,15 @@ Options:
   --metal-no-validate
                      Do not enable Metal API validation for the Metal leg.
                      Use this for product-like perf/jitter measurements.
+  --gl-attach-lldb
+                     Tool 3 (2026-05-19) — route the GL leg through
+                     scripts/apple-silicon/lldb-gl-launch.sh so a
+                     segfault during cold launch yields a captured
+                     backtrace at <gl-run-dir>/crash.lldb.log. Primary
+                     use: Halo cold-launch segfault investigation
+                     (benchmark-runs/20260511-153638-metal-gl-compare-halo).
+                     Adds LLDB overhead to the GL leg only; the Metal
+                     leg is unaffected.
   --help             Print this usage.
 
 Exit codes:
@@ -124,6 +134,7 @@ TRIGGER="frame"
 TRIGGER_ORDINAL=""
 METAL_VALIDATE=1
 EVIDENCE_CLASS="canary"
+GL_ATTACH_LLDB=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -188,6 +199,8 @@ while [[ $# -gt 0 ]]; do
             EVIDENCE_CLASS="${1#--evidence-class=}"; shift ;;
         --metal-no-validate)
             METAL_VALIDATE=0; shift ;;
+        --gl-attach-lldb)
+            GL_ATTACH_LLDB=1; shift ;;
         --)
             shift; break ;;
         --*)
@@ -444,12 +457,22 @@ run_gl() {
                        "XEMU_CAPTURE_FLIP_STALL_SENTINEL=$FLIP_STALL_SENTINEL"
                        "XEMU_GL_SCREENSHOT_PATH=$OUT_DIR/gl/screenshot.png")
     fi
+    # Tool 3 (2026-05-19): when --gl-attach-lldb is set, route through
+    # lldb-gl-launch.sh so a cold-launch segfault yields a captured
+    # backtrace inside the GL run dir. The wrapper sets
+    # XEMU_BENCH_LAUNCHER_PREFIX and forces XEMU_RENDERER=GL; we still
+    # explicitly export GL here for clarity.
+    local gl_launcher="$RUN_BENCHMARK"
+    if [[ "$GL_ATTACH_LLDB" -eq 1 ]]; then
+        gl_launcher="$LLDB_GL_LAUNCH"
+        log "  gl_launcher = lldb-gl-launch.sh (LLDB attached)"
+    fi
     set +e
     if [[ "$TRIGGER" == "flip" ]]; then
         env "${gl_extra_env[@]}" \
             XEMU_RENDERER=GL \
             XEMU_BENCH_SCREENSHOT_BACKEND=none \
-            "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
+            "$gl_launcher" "$GAME" "$INPUT_CSV" "$DURATION" \
             > "$GL_LAUNCHER_LOG" 2>&1
     else
         env "${gl_extra_env[@]}" \
@@ -458,7 +481,7 @@ run_gl() {
             XEMU_BENCH_SCREENSHOT_INTERVAL="$GL_SCREENSHOT_INTERVAL_SECONDS" \
             XEMU_BENCH_SCREENSHOT_START_DELAY="$GL_SCREENSHOT_START_DELAY_SECONDS" \
             XEMU_CAPTURE_WINDOW_PATTERN="xemu" \
-            "$RUN_BENCHMARK" "$GAME" "$INPUT_CSV" "$DURATION" \
+            "$gl_launcher" "$GAME" "$INPUT_CSV" "$DURATION" \
             > "$GL_LAUNCHER_LOG" 2>&1
     fi
     rc=$?

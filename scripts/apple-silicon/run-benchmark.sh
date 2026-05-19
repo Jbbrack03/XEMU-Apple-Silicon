@@ -222,6 +222,13 @@ SCREENSHOT_INTERVAL="${XEMU_BENCH_SCREENSHOT_INTERVAL:-10}"
 SCREENSHOT_START_DELAY="${XEMU_BENCH_SCREENSHOT_START_DELAY:-5}"
 SCREENSHOT_BACKEND="${XEMU_BENCH_SCREENSHOT_BACKEND:-macos}"
 VISUAL_ANALYSIS="${XEMU_BENCH_VISUAL_ANALYSIS:-0}"
+# Tool 2 (2026-05-19): every-frame temporal capture mode. When set to 1,
+# the launcher forces PNG-every-frame output (renderer-native on Metal,
+# parallel ffmpeg AVFoundation on GL). Designed for downstream
+# `scripts/apple-silicon/temporal-flicker-analyze.py` consumption.
+# capture-gameplay-temporal.sh sets this; it can also be set directly.
+TEMPORAL_CAPTURE="${XEMU_BENCH_TEMPORAL_CAPTURE:-0}"
+TEMPORAL_FPS="${XEMU_BENCH_TEMPORAL_FPS:-60}"
 PERF_LOG_INTERVAL_MS="${XEMU_PERF_LOG_INTERVAL_MS:-1000}"
 SAVEVM_AT="${XEMU_BENCH_SAVEVM_AT:-}"
 SAVEVM_TAG="${XEMU_BENCH_SAVEVM_TAG:-${GAME_NAME}-scene}"
@@ -391,6 +398,17 @@ EOF
 } > "$META_FILE"
 
 cleanup() {
+    if [[ -n "${TEMPORAL_FFMPEG_PID:-}" ]] && kill -0 "$TEMPORAL_FFMPEG_PID" 2>/dev/null; then
+        # SIGINT first so the .mov container finalizes cleanly.
+        kill -INT "$TEMPORAL_FFMPEG_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            if ! kill -0 "$TEMPORAL_FFMPEG_PID" 2>/dev/null; then break; fi
+            sleep 0.5
+        done
+        kill -KILL "$TEMPORAL_FFMPEG_PID" 2>/dev/null || true
+        wait "$TEMPORAL_FFMPEG_PID" 2>/dev/null || true
+    fi
+
     if [[ -n "${CAPTURE_PID:-}" ]] && kill -0 "$CAPTURE_PID" 2>/dev/null; then
         kill "$CAPTURE_PID" 2>/dev/null || true
         wait "$CAPTURE_PID" 2>/dev/null || true
@@ -506,6 +524,45 @@ if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
     echo "Metal screenshot: $METAL_SCREENSHOT_PATH (at frame=${METAL_SCREENSHOT_AT_FRAME:-60})"
 fi
 
+# Tool 2 (2026-05-19): temporal capture mode — every-frame PNG output
+# suitable for `temporal-flicker-analyze.py`. Forces Metal renderer-
+# native every-frame screenshot (source=nv2a, pre-HUD) OR a parallel
+# ffmpeg AVFoundation primary-display capture for GL. Output lives at
+# $RUN_DIR/frames/ — Metal writes metal-gameplay.NNNN.png directly via
+# the existing in-renderer screenshot path; GL ffmpeg is spawned below
+# after the xemu launch. Honors --metal-screenshot if already set
+# (the operator's explicit path wins).
+TEMPORAL_FRAMES_DIR=""
+TEMPORAL_GL_MOV=""
+if [[ "$TEMPORAL_CAPTURE" == "1" ]]; then
+    TEMPORAL_FRAMES_DIR="${RUN_DIR}/frames"
+    mkdir -p "$TEMPORAL_FRAMES_DIR"
+    if [[ "${XEMU_RENDERER:-}" == "METAL" ]]; then
+        if [[ -z "${XEMU_METAL_SCREENSHOT_PATH:-}" ]]; then
+            export XEMU_METAL_SCREENSHOT_PATH="${TEMPORAL_FRAMES_DIR}/metal-gameplay.png"
+        fi
+        export XEMU_METAL_SCREENSHOT_AT_FRAME="${XEMU_METAL_SCREENSHOT_AT_FRAME:-1}"
+        export XEMU_METAL_SCREENSHOT_INTERVAL="${XEMU_METAL_SCREENSHOT_INTERVAL:-1}"
+        export XEMU_METAL_SCREENSHOT_SOURCE="${XEMU_METAL_SCREENSHOT_SOURCE:-nv2a}"
+        echo "Temporal capture (METAL): every-frame PNG -> $XEMU_METAL_SCREENSHOT_PATH"
+    fi
+    # GL ffmpeg invocation is deferred until after xemu launches so the
+    # display window is up before AVFoundation begins capture.
+fi
+
+# Tool 3 (2026-05-19): launcher prefix env var. Expanded unquoted
+# before the xemu launch in each of the three launch branches below
+# (record/live/scripted). Bash word-splits the variable on whitespace
+# AND strips embedded quotes, so multi-word commands like
+# `lldb -o "process status"` break. The supported contract is
+# SINGLE-WORD ONLY — pass a path to an executable wrapper that
+# internally invokes the multi-word debugger / tracer command.
+# `scripts/apple-silicon/lldb-gl-launch.sh` generates such a wrapper.
+LAUNCHER_PREFIX="${XEMU_BENCH_LAUNCHER_PREFIX:-}"
+if [[ -n "$LAUNCHER_PREFIX" ]]; then
+    echo "Launcher prefix: $LAUNCHER_PREFIX"
+fi
+
 if [[ -n "$RECORD_INPUT" ]]; then
     echo "Recording controller input: $RECORD_INPUT"
     XEMU_RECORD_INPUT="$RECORD_INPUT" \
@@ -513,6 +570,7 @@ if [[ -n "$RECORD_INPUT" ]]; then
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
@@ -523,6 +581,7 @@ elif [[ "$LIVE_INPUT" == "1" ]]; then
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
@@ -534,6 +593,7 @@ else
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
@@ -543,6 +603,27 @@ fi
 
 XEMU_PID=$!
 echo "$XEMU_PID" > "${RUN_DIR}/xemu.pid"
+
+# Tool 2 (2026-05-19): GL temporal capture. ffmpeg AVFoundation captures
+# the primary display in parallel with xemu. Downstream
+# temporal-flicker-analyze.py crops to the xemu window via --gl-crop.
+# AVFoundation device index 1 is the primary display on Apple Silicon
+# (verified via `ffmpeg -f avfoundation -list_devices true` 2026-05-12).
+TEMPORAL_FFMPEG_PID=""
+if [[ "$TEMPORAL_CAPTURE" == "1" && "${XEMU_RENDERER:-}" == "GL" ]]; then
+    TEMPORAL_GL_MOV="${TEMPORAL_FRAMES_DIR}/gameplay.mov"
+    TEMPORAL_FFMPEG_LOG="${RUN_DIR}/ffmpeg-temporal.log"
+    # Brief 1s settle so the xemu window is up before AVFoundation starts.
+    sleep 1
+    ffmpeg -hide_banner -y \
+        -f avfoundation -framerate "$TEMPORAL_FPS" -capture_cursor 0 -i "1:none" \
+        -t "$DURATION" \
+        -c:v libx264 -preset ultrafast -crf 12 \
+        "$TEMPORAL_GL_MOV" \
+        > "$TEMPORAL_FFMPEG_LOG" 2>&1 &
+    TEMPORAL_FFMPEG_PID=$!
+    echo "Temporal capture (GL): ffmpeg pid $TEMPORAL_FFMPEG_PID -> $TEMPORAL_GL_MOV"
+fi
 
 case "$SCREENSHOT_BACKEND" in
   macos)
@@ -604,6 +685,23 @@ if [[ -n "${SAVEVM_PID:-}" ]]; then
 fi
 cleanup
 trap - EXIT INT TERM
+
+# Tool 2 (2026-05-19): post-run, decompose the GL .mov into a PNG
+# sequence so temporal-flicker-analyze.py (--glob 'gameplay-*.png')
+# can read the frames. Metal already writes individual PNGs as it goes.
+if [[ "$TEMPORAL_CAPTURE" == "1" && "${XEMU_RENDERER:-}" == "GL" && -n "${TEMPORAL_GL_MOV:-}" ]]; then
+    if [[ -s "$TEMPORAL_GL_MOV" ]]; then
+        echo "Decomposing $TEMPORAL_GL_MOV to PNG sequence..."
+        ffmpeg -hide_banner -y \
+            -i "$TEMPORAL_GL_MOV" \
+            -vf "fps=$TEMPORAL_FPS" \
+            "${TEMPORAL_FRAMES_DIR}/gameplay-%04d.png" \
+            >> "${RUN_DIR}/ffmpeg-temporal.log" 2>&1 || \
+            echo "warning: ffmpeg decompose failed; see ${RUN_DIR}/ffmpeg-temporal.log" >&2
+    else
+        echo "warning: ffmpeg .mov is empty/missing; nothing to decompose" >&2
+    fi
+fi
 
 if [[ "$VISUAL_ANALYSIS" == "1" ]]; then
     VISUAL_ANALYSIS_LOG="${RUN_DIR}/visual-analysis.log"
