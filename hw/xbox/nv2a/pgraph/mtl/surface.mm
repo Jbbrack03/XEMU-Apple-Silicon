@@ -2015,16 +2015,24 @@ bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
 /* ---------------------------------------------------------------- */
 
 void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
-                              bool write_zeta, float depth)
+                              bool write_depth, float depth,
+                              bool write_stencil, int stencil)
 {
     if (!s_initialized) {
         return;
     }
 
+    /* Need a depth binding only when at least one zeta aspect is being
+     * cleared. The two aspects are independently gated below: if only
+     * depth is asked for, we DO NOT attach the stencil aspect to the
+     * render pass (Metal would otherwise clear stencil too) and vice
+     * versa. Mirrors gl/draw.c's per-bit glClear semantics. Per Codex
+     * 2026-05-20 finding #1 -- the previous "write_zeta = Z|S"
+     * collapse always cleared both aspects when only one was requested. */
     bool have_color_target = write_color &&
                              s_color_binding != NULL &&
                              s_color_binding->texture != NULL;
-    bool have_depth_target = write_zeta &&
+    bool have_depth_target = (write_depth || write_stencil) &&
                              s_depth_binding != NULL &&
                              s_depth_binding->texture != NULL;
     if (!have_color_target && !have_depth_target) {
@@ -2041,10 +2049,10 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
         atomic_fetch_add(&s_clear_diag_count, 1);
         fprintf(stderr,
                 "xemu-perf: metal_surface_clear vram_addr=0x%x "
-                "rgba=(%.3f,%.3f,%.3f,%.3f) write_zeta=%d\n",
+                "rgba=(%.3f,%.3f,%.3f,%.3f) write_depth=%d write_stencil=%d\n",
                 (unsigned)s_color_binding->vram_addr,
                 rgba[0], rgba[1], rgba[2], rgba[3],
-                write_zeta ? 1 : 0);
+                write_depth ? 1 : 0, write_stencil ? 1 : 0);
     }
 
     bool have_msaa_color =
@@ -2081,37 +2089,46 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
         }
 
         if (have_depth_target) {
+            /* Per-aspect attach (Codex 2026-05-20 finding #1): only
+             * configure the depth attachment when NV097_CLEAR_SURFACE_Z
+             * was requested, and only configure the stencil attachment
+             * when NV097_CLEAR_SURFACE_STENCIL was requested. Mirrors
+             * gl/draw.c::pgraph_gl_clear_surface, which gates
+             * glClearDepth/glClearStencil on the corresponding bits
+             * independently. Unconfigured aspects keep their texture
+             * contents (Metal preserves the unattached aspect of a
+             * combined depth+stencil texture across the render pass). */
             id<MTLTexture> tex =
                 (__bridge id<MTLTexture>)s_depth_binding->texture;
-            if (have_msaa_depth) {
-                id<MTLTexture> ms =
-                    (__bridge id<MTLTexture>)s_depth_binding->msaa_texture;
-                desc.depthAttachment.texture     = ms;
+            id<MTLTexture> ms = have_msaa_depth ?
+                (__bridge id<MTLTexture>)s_depth_binding->msaa_texture :
+                nil;
+
+            if (write_depth) {
+                desc.depthAttachment.texture     = ms ? ms : tex;
                 desc.depthAttachment.loadAction  = MTLLoadActionClear;
                 desc.depthAttachment.storeAction = MTLStoreActionStore;
-            } else {
-                desc.depthAttachment.texture     = tex;
-                desc.depthAttachment.loadAction  = MTLLoadActionClear;
-                desc.depthAttachment.storeAction = MTLStoreActionStore;
+                desc.depthAttachment.clearDepth  = depth;
             }
-            desc.depthAttachment.clearDepth  = depth;
 
             MTLPixelFormat fmt =
                 (MTLPixelFormat)s_depth_binding->mtl_pixel_format;
-            if (fmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
-                fmt == MTLPixelFormatDepth32Float_Stencil8 ||
-                fmt == MTLPixelFormatStencil8) {
-                if (have_msaa_depth) {
-                    desc.stencilAttachment.texture     =
-                        desc.depthAttachment.texture;
-                    desc.stencilAttachment.loadAction  = MTLLoadActionClear;
-                    desc.stencilAttachment.storeAction = MTLStoreActionStore;
-                } else {
-                    desc.stencilAttachment.texture     = tex;
-                    desc.stencilAttachment.loadAction  = MTLLoadActionClear;
-                    desc.stencilAttachment.storeAction = MTLStoreActionStore;
-                }
-                desc.stencilAttachment.clearStencil = 0;
+            bool format_has_stencil =
+                (fmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
+                 fmt == MTLPixelFormatDepth32Float_Stencil8 ||
+                 fmt == MTLPixelFormatStencil8);
+            if (write_stencil && format_has_stencil) {
+                /* Honor the decoded stencil clear value from
+                 * pgraph_get_clear_depth_stencil_value. Hardcoding 0
+                 * here broke the §4.10 stencil-ops XBE on Metal (task
+                 * #14): the XBE clears stencil to 0x80 per cell before
+                 * each op pass, but Metal's clear ignored the value so
+                 * every cell's op started from stencil=0. Mirrors
+                 * gl/draw.c's glClearStencil(gl_clear_stencil) call. */
+                desc.stencilAttachment.texture     = ms ? ms : tex;
+                desc.stencilAttachment.loadAction  = MTLLoadActionClear;
+                desc.stencilAttachment.storeAction = MTLStoreActionStore;
+                desc.stencilAttachment.clearStencil = (uint32_t)stencil;
             }
         }
 

@@ -931,9 +931,10 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
      * draws must therefore be committed first or they're lost. */
     pgraph_mtl_draw_flush_open_pass();
 
-    bool write_color = (parameter & NV097_CLEAR_SURFACE_COLOR);
-    bool write_zeta =
-        (parameter & (NV097_CLEAR_SURFACE_Z | NV097_CLEAR_SURFACE_STENCIL));
+    bool write_color   = (parameter & NV097_CLEAR_SURFACE_COLOR);
+    bool write_depth   = (parameter & NV097_CLEAR_SURFACE_Z);
+    bool write_stencil = (parameter & NV097_CLEAR_SURFACE_STENCIL);
+    bool write_zeta    = write_depth || write_stencil;
 
     if (!write_color && !write_zeta) {
         return;
@@ -962,9 +963,18 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
      * and the clear-rect scissor (renders the full surface). The exit
      * gate for M2 is "the game's cleared color is visible in the
      * window"; per-channel and per-rect refinement land with M3+ when
-     * the render-pass machinery is reused for draws. */
+     * the render-pass machinery is reused for draws.
+     *
+     * 2026-05-20 (task #14 Codex finding #1): NV097_CLEAR_SURFACE_Z and
+     * _STENCIL are now passed independently. Previously the depth and
+     * stencil aspects of a combined depth+stencil format were always
+     * cleared together whenever either bit was set, which diverged from
+     * gl/draw.c::pgraph_gl_clear_surface (which gates each via the
+     * corresponding bit independently). */
 
-    pgraph_mtl_surface_clear(write_color, rgba, write_zeta, depth);
+    pgraph_mtl_surface_clear(write_color, rgba,
+                             write_depth, depth,
+                             write_stencil, stencil);
 
     pg->surface_color.draw_dirty |= write_color;
     pg->surface_zeta.draw_dirty  |= write_zeta;

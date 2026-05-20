@@ -158,12 +158,20 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
 /*
  * Encode a clear pass into a fresh command buffer and commit it.
  *
- * write_color: clear the color binding with rgba (each channel 0..1f).
- * write_zeta:  clear the depth binding with depth (0..1f).
+ * write_color:   clear the color binding with rgba (each channel 0..1f).
+ * write_depth:   clear the depth aspect of the depth binding with depth.
+ * write_stencil: clear the stencil aspect (low 8 bits of stencil). When
+ *                the bound depth format lacks a stencil aspect this is
+ *                silently ignored. Independently gated from write_depth
+ *                so NV097_CLEAR_SURFACE_Z and _STENCIL are honored
+ *                separately, mirroring GL's `glClear(GL_DEPTH_BUFFER_BIT)`
+ *                vs `glClear(GL_STENCIL_BUFFER_BIT)` semantics in
+ *                `gl/draw.c::pgraph_gl_clear_surface`.
  * If a binding is nil, that aspect of the clear is silently skipped.
  */
 void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
-                              bool write_zeta, float depth);
+                              bool write_depth, float depth,
+                              bool write_stencil, int stencil);
 
 /*
  * Returns 1 if a front framebuffer texture is available, else 0.
