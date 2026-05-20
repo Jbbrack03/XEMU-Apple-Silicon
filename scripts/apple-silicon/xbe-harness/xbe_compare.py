@@ -247,6 +247,77 @@ def signal_match_check(captured_png: Path, reference_png: Path,
                     f"signal_match_pct={pct:.4f} (gate ≥ {min_signal_match_pct})")
 
 
+def frame_quality_score(captured_png: Path, reference_png: Path,
+                        threshold: int = 16) -> Tuple[float, float, str]:
+    """In-process frame quality scan. Returns:
+
+        (signal_match_pct, total_match_pct, reason)
+
+    `signal_match_pct` is the same metric `signal_match_check` returns
+    — fraction of non-black-in-reference pixels that match within
+    `threshold` in the captured.
+
+    `total_match_pct` is the fraction of *all* pixels matching the
+    reference within `threshold`. Used as a tiebreak by
+    `xbe_orchestrator.run_matrix`'s frame selector: when multiple
+    candidate frames tie at 100% signal_match_pct (the dashboard
+    happens to have white pixels where the diag XBE's signal pixels
+    land — see mirror.0022 vs mirror.0062 in
+    `benchmark-runs/xbe-rotation-20260520T170630Z/`), the candidate
+    with the higher total_match_pct is the actual diag-render frame
+    because its non-signal (background) pixels also match the
+    reference. Without this tiebreak, the first-in-glob frame wins
+    even when it's a dashboard frame with happenstance signal-match.
+
+    Runs in-process via PIL (no subprocess invocation per frame).
+    A 640x480 image takes ~50 ms on an M3 Ultra, so the full 138
+    candidates for a mirror rotation costs ~7 s — acceptable.
+    """
+    from PIL import Image
+    ref = Image.open(reference_png).convert("RGB")
+    cap = Image.open(captured_png).convert("RGB")
+    if cap.size != ref.size:
+        if (cap.size[0] >= ref.size[0] and cap.size[1] >= ref.size[1]):
+            cap = cap.resize(ref.size, Image.BOX)
+        elif (ref.size[0] >= cap.size[0] and ref.size[1] >= cap.size[1]):
+            ref = ref.resize(cap.size, Image.BOX)
+        else:
+            return -1.0, -1.0, (f"size mismatch and neither dim is "
+                                f"dominant: cap={cap.size} ref={ref.size}")
+    ref_bytes = ref.tobytes()
+    cap_bytes = cap.tobytes()
+    n_pixels = ref.size[0] * ref.size[1]
+    if len(ref_bytes) != n_pixels * 3 or len(cap_bytes) != n_pixels * 3:
+        return -1.0, -1.0, (f"unexpected byte counts: ref={len(ref_bytes)} "
+                            f"cap={len(cap_bytes)} expected={n_pixels * 3}")
+    signal_total = 0
+    signal_match = 0
+    total_match = 0
+    for off in range(0, n_pixels * 3, 3):
+        r = ref_bytes[off]
+        g = ref_bytes[off + 1]
+        b = ref_bytes[off + 2]
+        cr = cap_bytes[off]
+        cg = cap_bytes[off + 1]
+        cb = cap_bytes[off + 2]
+        pixel_match = (abs(r - cr) <= threshold and
+                       abs(g - cg) <= threshold and
+                       abs(b - cb) <= threshold)
+        if pixel_match:
+            total_match += 1
+        if not (r == 0 and g == 0 and b == 0):
+            signal_total += 1
+            if pixel_match:
+                signal_match += 1
+    sig_pct = (100.0 if signal_total == 0
+               else (signal_match / signal_total) * 100.0)
+    tot_pct = (total_match / n_pixels) * 100.0
+    return sig_pct, tot_pct, (
+        f"signal_total={signal_total} signal_match={signal_match} "
+        f"signal_match_pct={sig_pct:.4f} "
+        f"total_match_pct={tot_pct:.4f}")
+
+
 def compare(captured_png: Path, reference_png: Path, out_dir: Path,
             crop: str = "0,0,640,480", threshold: int = 0,
             max_changed_pct: float = 0.0,

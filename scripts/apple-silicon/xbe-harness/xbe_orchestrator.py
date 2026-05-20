@@ -41,7 +41,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import xbe_compare
 import xbe_discover
@@ -141,8 +141,6 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
             })
             continue
         for renderer in renderers:
-            cell_dir = out_root / m.id / renderer
-            cell_dir.mkdir(parents=True, exist_ok=True)
             # Honor `real_xbox_only`: a diag XBE that depends on the
             # real-Xbox kernel-pool controller buffer (or any other
             # real-only resource) cannot run on xemu-GL/Metal. Skip
@@ -159,104 +157,167 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
                     "notes": "real_xbox_only",
                 })
                 continue
-            print(f"[xbe-harness] running {m.id} on {renderer} ...",
-                  flush=True)
-            run_t0 = time.time()
-            run = _drive(m, renderer, cell_dir, surface_scale,
-                         real_xbox_host=real_xbox_host,
-                         upload_xbe=upload_xbe)
-            run_t1 = time.time()
-            cell: dict = {
-                "xbe": m.id,
-                "renderer": renderer,
-                "run_seconds": round(run_t1 - run_t0, 2),
-                "captured_png": str(run.captured_png),
-                "status": run.status,
-                "notes": run.notes,
-            }
-            if run.status == "ok":
-                # Pick reference & compare. For xemu runs the diag XBE
-                # renders a brief window then reboots, so only a subset
-                # of the captured PNGs show our pattern. Iterate over
-                # all captured PNGs and pick the one with the lowest
-                # changed_pixels_pct against the reference; that's the
-                # frame that landed during the diag render.
-                try:
-                    # Build the flag-recipe dict from the canonical
-                    # recipe + per-cell overrides so the reference
-                    # key actually reflects what we ran (e.g.
-                    # FRONT_FB_FALLBACK affects expected output for
-                    # crtc-publish-style XBEs).
-                    recipe_flags = _flag_recipe_dict(renderer)
-                    cell_recipe = {"scale": surface_scale, "msaa": 0,
-                                   **recipe_flags}
-                    key = xbe_compare.select_reference_key(
-                        m, renderer, cell_recipe)
-                    cell["reference_key"] = key
-                    ref_png, ref_kind = xbe_compare.resolve_reference_png(
-                        m, key, cell_dir)
-                    cell["reference_kind"] = ref_kind
-                    candidates = (run.extra or {}).get(
-                        "screenshots", [str(run.captured_png)])
-                    # Frame selection: pick the candidate with the
-                    # HIGHEST signal_match_pct (i.e. the frame where
-                    # the expected non-black pixels are actually
-                    # rendered). Tiebreak by lowest changed_pixels_pct.
-                    # Using changed_pixels_pct alone is biased AGAINST
-                    # diag-render frames for sparse oracles like
-                    # mirror: a fully-black BIOS frame has
-                    # changed_pixels_pct=0.005% (the missing white
-                    # block), beating the correctly-rendered frame
-                    # which adds sub-pixel anti-aliasing drift to the
-                    # signal pixels.
-                    best_signal = -1.0
-                    best_pct: Optional[float] = None
-                    best_path: Optional[str] = None
-                    for cand in candidates:
-                        sig_pass, sig_notes = xbe_compare.signal_match_check(
-                            Path(cand), ref_png,
-                            threshold=max(threshold, 16),
-                            min_signal_match_pct=0.0)
-                        sig_pct = 0.0
-                        for tok in sig_notes.split():
-                            if tok.startswith("signal_match_pct="):
-                                try:
-                                    sig_pct = float(tok.split("=", 1)[1])
-                                except ValueError:
-                                    pass
-                        # Cheap percent-changed scan only for tiebreak
-                        # (skip running compare-screenshots for every
-                        # candidate; do it once on the chosen frame).
-                        if (sig_pct > best_signal or
-                                (abs(sig_pct - best_signal) < 1e-6 and
-                                 best_path is None)):
-                            best_signal = sig_pct
-                            best_path = cand
-                    if best_path is None:
+
+            # Build the per-(xbe, renderer) recipe variant list.
+            # The first variant is always the canonical recipe (label
+            # "canonical"). Metal renderer additionally picks up
+            # manifest-declared `additional_metal_recipes`, each run
+            # as its own cell with the canonical recipe + per-variant
+            # env overrides. Used by `crtc-publish` to exercise both
+            # XEMU_METAL_FRONT_FB_FALLBACK=0 and =1 in a single matrix
+            # run; before this, the fallback=0 leg was only reachable
+            # via the per-XBE sidecar wrapper, hiding fallback=0
+            # regressions from the standard report (Codex review,
+            # 2026-05-20).
+            variants: List[Tuple[str, Dict[str, str]]] = [("canonical", {})]
+            if renderer.lower() == "metal":
+                for entry in m.additional_metal_recipes:
+                    name = entry.get("name") or "extra"
+                    env = entry.get("env") or {}
+                    if not isinstance(env, dict):
+                        continue
+                    variants.append((str(name),
+                                     {str(k): str(v) for k, v in env.items()}))
+
+            for variant_label, variant_overrides in variants:
+                # When there are no extra variants, keep the original
+                # cell-dir layout (one level: <xbe>/<renderer>/) so the
+                # m15-gate `04-tier1-matrix/` paths and existing
+                # benchmark-runs entries stay stable. With variants,
+                # nest under a `<variant>` directory for clarity.
+                if len(variants) == 1:
+                    cell_dir = out_root / m.id / renderer
+                else:
+                    cell_dir = out_root / m.id / renderer / variant_label
+                cell_dir.mkdir(parents=True, exist_ok=True)
+                log_label = (renderer if variant_label == "canonical"
+                             else f"{renderer}[{variant_label}]")
+                print(f"[xbe-harness] running {m.id} on {log_label} ...",
+                      flush=True)
+                run_t0 = time.time()
+                run = _drive(m, renderer, cell_dir, surface_scale,
+                             real_xbox_host=real_xbox_host,
+                             upload_xbe=upload_xbe,
+                             flag_recipe_override=variant_overrides)
+                run_t1 = time.time()
+                cell: dict = {
+                    "xbe": m.id,
+                    "renderer": renderer,
+                    "recipe_variant": variant_label,
+                    "run_seconds": round(run_t1 - run_t0, 2),
+                    "captured_png": str(run.captured_png),
+                    "status": run.status,
+                    "notes": run.notes,
+                }
+                if variant_overrides:
+                    cell["recipe_overrides"] = variant_overrides
+                if run.status == "ok":
+                    # Pick reference & compare. For xemu runs the diag XBE
+                    # renders a brief window then reboots, so only a subset
+                    # of the captured PNGs show our pattern. Iterate over
+                    # all captured PNGs and pick the one with the lowest
+                    # changed_pixels_pct against the reference; that's the
+                    # frame that landed during the diag render.
+                    try:
+                        # Build the flag-recipe dict from the canonical
+                        # recipe + per-cell overrides so the reference
+                        # key actually reflects what we ran (e.g.
+                        # FRONT_FB_FALLBACK affects expected output for
+                        # crtc-publish-style XBEs).
+                        recipe_flags = _flag_recipe_dict(
+                            renderer, overrides=variant_overrides)
+                        cell_recipe = {"scale": surface_scale, "msaa": 0,
+                                       **recipe_flags}
+                        key = xbe_compare.select_reference_key(
+                            m, renderer, cell_recipe)
+                        cell["reference_key"] = key
+                        ref_png, ref_kind = xbe_compare.resolve_reference_png(
+                            m, key, cell_dir)
+                        cell["reference_kind"] = ref_kind
+                        candidates = (run.extra or {}).get(
+                            "screenshots", [str(run.captured_png)])
+                        # Frame selection: pick the candidate whose
+                        # composite (signal × total)-match score is
+                        # highest. Both metrics come from
+                        # `xbe_compare.frame_quality_score` in a single
+                        # PIL pass per candidate (~50 ms each).
+                        #
+                        # Why composite, not signal-then-tiebreak:
+                        # post-T2 host-refresh publish (2026-05-12 evening)
+                        # the screenshot sequence picks up dashboard
+                        # frames at every host vsync. The dashboard can
+                        # have white pixels at the diag XBE's signal
+                        # location by happenstance — those frames score
+                        # signal=100, total≈0. Real XBE-render frames
+                        # have signal≈75-100 (boundary AA on the signal
+                        # patch reduces strict-threshold matches) AND
+                        # total≈99.99 (background matches reference).
+                        # Composite `sig × tot` cleanly separates the
+                        # two: dashboard ≈ 100×0 = 0, real-render ≈
+                        # 75×99.99 = 7499. Verified against the mirror
+                        # rotation at
+                        # `benchmark-runs/xbe-rotation-fix-20260520T*Z/`
+                        # where dashboard frames had sig=100, tot=0.01
+                        # while real mirror frames had sig=75, tot=99.99.
+                        best_score = -1.0
+                        best_signal = -1.0
+                        best_total = -1.0
+                        best_path: Optional[str] = None
+                        n_comparable = 0
+                        for cand in candidates:
+                            sig_pct, tot_pct, _notes = (
+                                xbe_compare.frame_quality_score(
+                                    Path(cand), ref_png,
+                                    threshold=max(threshold, 16)))
+                            # Skip non-comparable frames. `frame_quality_score`
+                            # returns (-1.0, -1.0, reason) on size-mismatch
+                            # or unexpected byte counts. Without this filter,
+                            # `sig * tot` of (-1)*(-1)=+1 would let a
+                            # malformed frame beat legitimate zero-score
+                            # frames (Codex 2026-05-20 finding #1).
+                            if sig_pct < 0.0 or tot_pct < 0.0:
+                                continue
+                            n_comparable += 1
+                            # Composite score; ties broken by raw signal,
+                            # then by first-seen.
+                            score = sig_pct * tot_pct
+                            if (score > best_score + 1e-6 or
+                                    (abs(score - best_score) < 1e-6 and
+                                     sig_pct > best_signal + 1e-6) or
+                                    best_path is None):
+                                best_score = score
+                                best_signal = sig_pct
+                                best_total = tot_pct
+                                best_path = cand
+                        if best_path is None:
+                            cell["status"] = "infra-error"
+                            cell["notes"] = (
+                                f"no comparable screenshots "
+                                f"({len(candidates)} candidates, "
+                                f"{n_comparable} usable)")
+                        else:
+                            # Re-run the compare with the chosen frame for
+                            # the canonical artifact dir + final gate.
+                            cell["captured_png"] = best_path
+                            verdict = xbe_compare.compare(
+                                Path(best_path), ref_png,
+                                out_dir=cell_dir / "compare",
+                                crop=crop, threshold=threshold,
+                                max_changed_pct=max_changed_pct,
+                            )
+                            cell["verdict"] = verdict.as_dict()
+                            cell["best_frame_count"] = len(candidates)
+                            cell["best_frame_signal_match_pct"] = best_signal
+                            cell["best_frame_total_match_pct"] = best_total
+                            cell["status"] = verdict.status
+                    except (KeyError, FileNotFoundError, ValueError) as e:
                         cell["status"] = "infra-error"
-                        cell["notes"] = "no comparable screenshots"
-                    else:
-                        # Re-run the compare with the chosen frame for
-                        # the canonical artifact dir + final gate.
-                        cell["captured_png"] = best_path
-                        verdict = xbe_compare.compare(
-                            Path(best_path), ref_png,
-                            out_dir=cell_dir / "compare",
-                            crop=crop, threshold=threshold,
-                            max_changed_pct=max_changed_pct,
-                        )
-                        cell["verdict"] = verdict.as_dict()
-                        cell["best_frame_count"] = len(candidates)
-                        cell["best_frame_signal_match_pct"] = best_signal
-                        cell["status"] = verdict.status
-                except (KeyError, FileNotFoundError, ValueError) as e:
-                    cell["status"] = "infra-error"
-                    cell["notes"] = (cell["notes"] + " | " if cell["notes"]
-                                     else "") + f"reference: {e}"
-            report["results"].append(cell)
-            print(f"[xbe-harness]   → {cell['status']} "
-                  f"({cell.get('notes', '')})",
-                  flush=True)
+                        cell["notes"] = (cell["notes"] + " | " if cell["notes"]
+                                         else "") + f"reference: {e}"
+                report["results"].append(cell)
+                print(f"[xbe-harness]   → {cell['status']} "
+                      f"({cell.get('notes', '')})",
+                      flush=True)
 
     report["finished_at"] = time.time()
     summary_path = out_root / "summary.json"
@@ -268,21 +329,36 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
     return report
 
 
-def _flag_recipe_dict(renderer: str) -> Dict[str, str]:
-    """Translate the renderer's canonical recipe (METAL_/GL_)
-    into the recipe-key dict format `select_reference_key` expects."""
+def _flag_recipe_dict(renderer: str,
+                      overrides: Optional[Dict[str, str]] = None
+                      ) -> Dict[str, str]:
+    """Translate the renderer's canonical recipe (METAL_/GL_) into
+    the recipe-key dict format `select_reference_key` expects.
+
+    `overrides` is the optional per-variant env override dict
+    (e.g. `{"XEMU_METAL_FRONT_FB_FALLBACK": "0"}`) supplied by
+    `additional_metal_recipes`. When set, the effective env is
+    `CANONICAL ⨁ overrides`, and the recipe-key dict reflects that
+    composite so the reference selector picks the right
+    per-(renderer, flag-recipe) expected_results entry.
+    """
     r = renderer.lower()
+    ov = overrides or {}
     if r == "metal":
+        effective = dict(METAL_CANONICAL_RECIPE)
+        effective.update(ov)
         return {
-            "fallback": "1" if METAL_CANONICAL_RECIPE.get(
+            "fallback": "1" if effective.get(
                 "XEMU_METAL_FRONT_FB_FALLBACK") == "1" else "0",
-            "translated": "1" if METAL_CANONICAL_RECIPE.get(
+            "translated": "1" if effective.get(
                 "XEMU_METAL_TRANSLATED_PIPELINE") == "1" else "0",
-            "msaa": METAL_CANONICAL_RECIPE.get("XEMU_METAL_MSAA", "0"),
+            "msaa": str(effective.get("XEMU_METAL_MSAA", "0")),
         }
     if r == "gl":
+        effective = dict(GL_CANONICAL_RECIPE)
+        effective.update(ov)
         return {
-            "msaa": GL_CANONICAL_RECIPE.get("XEMU_GL_MSAA", "0"),
+            "msaa": str(effective.get("XEMU_GL_MSAA", "0")),
         }
     if r in ("real-xbox", "real_xbox", "xbox"):
         return {}
@@ -302,17 +378,34 @@ def _verdict_pct(v) -> Optional[float]:
 
 def _drive(manifest: xbe_discover.XbeManifest, renderer: str,
            cell_dir: Path, surface_scale: int,
-           real_xbox_host: str, upload_xbe: bool) -> xbe_renderers.RunResult:
+           real_xbox_host: str, upload_xbe: bool,
+           flag_recipe_override: Optional[Dict[str, str]] = None
+           ) -> xbe_renderers.RunResult:
+    """Run a single (XBE, renderer) cell.
+
+    `flag_recipe_override`: per-variant env overrides applied on
+    top of the renderer's canonical recipe. Empty / None → run the
+    canonical recipe. Used by the additional_metal_recipes feature
+    so `crtc-publish` can exercise both XEMU_METAL_FRONT_FB_FALLBACK=0
+    and =1 in the standard matrix.
+    """
     r = renderer.lower()
+    overrides = flag_recipe_override or {}
     if r == "gl":
+        recipe = dict(GL_CANONICAL_RECIPE)
+        recipe.update(overrides)
         return xbe_renderers.run_xemu(manifest, "GL", cell_dir,
-                                      flag_recipe=GL_CANONICAL_RECIPE,
+                                      flag_recipe=recipe,
                                       surface_scale=surface_scale)
     if r == "metal":
+        recipe = dict(METAL_CANONICAL_RECIPE)
+        recipe.update(overrides)
         return xbe_renderers.run_xemu(manifest, "METAL", cell_dir,
-                                      flag_recipe=METAL_CANONICAL_RECIPE,
+                                      flag_recipe=recipe,
                                       surface_scale=surface_scale)
     if r in ("real-xbox", "real_xbox", "xbox"):
+        # Real-Xbox runs ignore variant overrides (canonical Xbox HW
+        # publishes CRTC regardless of any xemu flag).
         return xbe_renderers.run_real_xbox(manifest, cell_dir,
                                            host=real_xbox_host,
                                            upload_xbe=upload_xbe)
@@ -334,12 +427,20 @@ def _format_report_md(report: dict) -> str:
         "",
         "## Results matrix",
         "",
-        "| XBE | Renderer | Status | Notes |",
-        "|---|---|---|---|",
+        "| XBE | Renderer | Variant | Status | Notes |",
+        "|---|---|---|---|---|",
     ]
     for c in report["results"]:
+        # Variant column distinguishes canonical vs additional_metal_recipes
+        # cells (e.g. crtc-publish ships two Metal cells: `canonical`
+        # publishes the dominant-draw fallback candidate, `fallback0`
+        # publishes the CRTC-pointed surface). Without this column the
+        # two cells were indistinguishable in the human-readable report
+        # (Codex 2026-05-20 finding #2).
+        variant = c.get("recipe_variant", "-") or "-"
         lines.append(
             f"| {c['xbe']} | {c.get('renderer', '-')} | "
+            f"{variant} | "
             f"{c['status']} | {c.get('notes', '').replace('|', '\\|')} |"
         )
     lines.append("")
@@ -347,8 +448,11 @@ def _format_report_md(report: dict) -> str:
     lines.append("")
     for c in report["results"]:
         if "captured_png" in c:
-            lines.append(f"- {c['xbe']} / {c.get('renderer', '-')}: "
-                         f"`{c['captured_png']}`")
+            variant = c.get("recipe_variant", "")
+            label = (f"{c['xbe']} / {c.get('renderer', '-')}"
+                     + (f" / {variant}" if variant and variant != "canonical"
+                        else ""))
+            lines.append(f"- {label}: `{c['captured_png']}`")
             if "verdict" in c:
                 lines.append(f"  - reference: `{c['verdict']['reference']}`")
                 lines.append(f"  - compare-out: `{c['verdict']['out_dir']}`")

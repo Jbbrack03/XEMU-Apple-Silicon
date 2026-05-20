@@ -31,6 +31,18 @@ class XbeManifest:
     capture_at_flip_stall_ordinal: Optional[int]
     expected_fail_renderers: List[str] = field(default_factory=list)
     real_xbox_only: bool = False
+    # Optional per-XBE list of additional Metal recipe variants the
+    # orchestrator runs as extra cells. Each entry is a dict:
+    #
+    #   {"name": "<short-id>", "env": {"XEMU_*": "value", ...}}
+    #
+    # The orchestrator runs the canonical Metal recipe AND one extra
+    # cell per entry, applying the env overrides on top of the
+    # canonical recipe. Used by `crtc-publish` to force a second cell
+    # at XEMU_METAL_FRONT_FB_FALLBACK=0 so the matrix exercises BOTH
+    # publish paths the XBE distinguishes (the canonical recipe
+    # already covers fallback=1).
+    additional_metal_recipes: List[dict] = field(default_factory=list)
     raw: dict = field(default_factory=dict)
     dir: Path = field(default=Path("."))
 
@@ -103,6 +115,8 @@ def _from_dict(data: dict, d: Path) -> XbeManifest:
         capture_at_flip_stall_ordinal=data.get("capture_at_flip_stall_ordinal"),
         expected_fail_renderers=list(data.get("expected_fail_renderers", [])),
         real_xbox_only=bool(data.get("real_xbox_only", False)),
+        additional_metal_recipes=list(
+            data.get("additional_metal_recipes", [])),
         raw=data,
         dir=d,
     )

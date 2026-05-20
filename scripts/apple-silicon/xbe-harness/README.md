@@ -97,21 +97,59 @@ scripts/apple-silicon/
 ## How the comparison gate works
 
 Each diag XBE's `manifest.json` declares one or more
-`expected_results` entries keyed by `<renderer>/<scale>/<msaa>` (with
-fallback `any/any/any`). The harness picks the most-specific match,
-materializes the reference PNG (either `real-xbox-capture` from
+`expected_results` entries keyed by
+`<renderer>/<scale>/<msaa>[/fallback=N][/translated=N]` (with fallback
+`any/any/any`). Recipe-aware keys let one XBE assert different
+expected outputs per `XEMU_METAL_FRONT_FB_FALLBACK` /
+`XEMU_METAL_TRANSLATED_PIPELINE` setting — see `crtc-publish` for
+the canonical example. The harness picks the most-specific match
+(see `xbe_compare.select_reference_key`), materializes the reference
+PNG (either `real-xbox-capture` from
 `docs/apple-silicon/xbox-real-references/<id>/<label>.png` or
 `math-derived` from the XBE's `expected.py:<fn>()`), then:
 
 1. For each captured PNG (xemu records many because the XBE renders
-   in a loop), runs `compare-screenshots.py` and parses
-   `changed_pixels_pct` from stdout.
-2. Picks the screenshot with the lowest `changed_pixels_pct` (i.e.
-   the one that landed during the diag's render window, not during
-   Xbox boot or the post-reboot dashboard).
-3. Re-runs the compare on the chosen PNG and writes the artifacts to
-   `<out>/<xbe>/<renderer>/compare/`. Verdict is **pass** if
-   `changed_pixels_pct ≤ --max-changed-pct`, else **fail**.
+   in a loop), runs `xbe_compare.frame_quality_score` to compute
+   per-frame `signal_match_pct` (fraction of non-black-in-reference
+   pixels that match in the captured frame) and `total_match_pct`
+   (fraction of all pixels matching).
+2. Picks the screenshot with the **highest composite score
+   `signal × total`**. Ties are broken by raw signal, then by
+   first-seen. This separates real diag-render frames from
+   happenstance-signal-matching post-reboot dashboard frames (a
+   dashboard frame can score `signal=100, total=0.01 → score=1`
+   while the real render scores `signal=75, total=99.99 → score=7500`).
+   The composite-score selector replaced the older lowest-
+   `changed_pixels_pct` / first-tie selector after the 2026-05-12 T2
+   host-refresh publish exposed the dashboard-frame collision (see
+   decision-log "2026-05-20 evening: xbe-harness frame selector").
+3. Re-runs `compare-screenshots.py` on the chosen PNG to produce
+   the canonical compare artifacts at
+   `<out>/<xbe>/<renderer>[/<variant>]/compare/`. The final
+   PASS/FAIL gate is `changed_pixels_pct ≤ --max-changed-pct` AND
+   `signal_match_pct ≥ 99.0` (with a wider per-channel threshold of
+   140 to tolerate BOX-downsample boundary AA). See
+   `xbe_compare.compare`.
+
+### Multi-recipe cells (additional_metal_recipes)
+
+A manifest can declare `additional_metal_recipes`:
+
+```json
+"additional_metal_recipes": [
+  {"name": "fallback0",
+   "env": {"XEMU_METAL_FRONT_FB_FALLBACK": "0"}}
+]
+```
+
+The orchestrator runs the canonical Metal cell AND one extra cell
+per entry, applying the listed env overrides on top of the
+canonical recipe. Each cell appears in the report's
+`recipe_variant` field and nested under
+`<out>/<xbe>/metal/<variant>/`. Real-Xbox cells ignore variants
+(real HW publishes CRTC regardless of xemu flags). Used by
+`crtc-publish` to gate both publish-path legs from a single matrix
+run (Codex review, 2026-05-20).
 
 ## Per-XBE render loop pattern
 
