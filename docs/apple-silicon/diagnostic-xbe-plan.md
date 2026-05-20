@@ -6,15 +6,17 @@
 > `CLAUDE.md` rule #17, per-feature XBE correctness against this library
 > is the primary loop. The §7 Phase 5 framing ("All N XBEs PASS on Metal"
 > replaces "≤1% per-pixel diff vs GL") is now the M15 default-on gate.
-> 7 of 17 first-wave XBEs are passing on Metal as of 2026-05-20
+> 8 of 17 first-wave XBEs are passing on Metal as of 2026-05-20
 > evening (`pipeline-smoke` Tier-4 plus §4.1 `mirror`, §4.2
 > `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
-> §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`);
-> 2 of 17 ship as `expected_fail` with documented Metal-renderer
-> regression targets (`stencil-ops` §4.10 — 4-of-8 stencil ops
-> broken, task #14; `logic-ops` §4.14 — no GL or Metal logic-op
-> support, feature work). 8 unstarted: §4.7 `texture-format-sweep`,
-> §4.8 `swizzle-mipmap`, §4.9 `blend-matrix`, §4.11
+> §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`,
+> §4.9 `blend-matrix`); 2 of 17 ship as `expected_fail` with
+> documented Metal-renderer regression targets (`stencil-ops`
+> §4.10 — partial fix landed 2026-05-20 late evening, 5/8 ops
+> deterministic; task #14 follow-up open for the residual
+> "first 3 cells per frame BLACK" pattern; `logic-ops` §4.14 —
+> no GL or Metal logic-op support, feature work). 7 unstarted:
+> §4.7 `texture-format-sweep`, §4.8 `swizzle-mipmap`, §4.11
 > `texture-filter-wrap`, §4.12 `combiner-basic`, §4.13
 > `texture-shader-stages`, §4.15 `msaa-aa-factor`, §4.16
 > `texture-dma-ab`. The texture/combiner cluster shares
@@ -33,10 +35,10 @@ stencil-op gap (task #14); §4.14 `logic-ops` shipped as
 `expected_fail` on both Metal and GL (neither implements logic
 ops). New harness wiring `expected_fail_renderers` so the
 rotation distinguishes manifest-declared known regressions from
-real failures. Header status counter: 7 of 17 first-wave PASS,
+real failures. Header status counter: 8 of 17 first-wave PASS,
 2 of 17 expected_fail (renderer regression targets documented).
 Status: SHIPPING. Plan was originally PLANNING (Codex-revalidated
-post-v2 2026-05-06); 7 of 17 first-wave XBEs are now green on
+post-v2 2026-05-06); 8 of 17 first-wave XBEs are now green on
 xemu-Metal and feeding the regression rotation; 2 more are in
 the rotation as expected_fail spec oracles.
 
