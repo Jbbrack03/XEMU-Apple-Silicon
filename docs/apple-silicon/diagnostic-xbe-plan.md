@@ -1,9 +1,23 @@
 # Diagnostic XBE Library — Implementation Plan (v2)
 
-Last updated: 2026-05-06.
-Status: PLANNING. Revised post-Codex review and post real-Xbox
-oracle feasibility research. Codex re-validation pending before any
-nxdk source is written.
+> **2026-05-20 evening — this plan is the binding Metal-renderer
+> development driver.** Per decision-log "2026-05-20 (evening): XBE-first
+> development loop is binding for the Metal renderer" and workspace
+> `CLAUDE.md` rule #17, per-feature XBE correctness against this library
+> is the primary loop. The §7 Phase 5 framing ("All N XBEs PASS on Metal"
+> replaces "≤1% per-pixel diff vs GL") is now the M15 default-on gate.
+> 5 of 16 first-wave XBEs are passing on Metal as of 2026-05-20 evening
+> (`pipeline-smoke`, `mirror`, `color-channel`, `depth-floor`, and the
+> newly shipped `crtc-publish` with two recipe variants); 11 remain
+> plus the second-wave catalog. The retail-title oracle is the final
+> acceptance gate, not a development driver.
+
+Last updated: 2026-05-20 (evening, late) — §4.4 `crtc-publish`
+rewritten to match the shipped solid-color / dominant-draw design;
+header status counter updated to 5 of 16 first-wave PASS.
+Status: SHIPPING. Plan was originally PLANNING (Codex-revalidated
+post-v2 2026-05-06); first 5 of 16 first-wave XBEs are now green on
+xemu-Metal and feeding the regression rotation.
 
 This plan supersedes v1 (committed d57742ef47) which Codex flagged
 BLOCKING because the v1 self-validation contract assumed CPU-side
@@ -515,25 +529,75 @@ expected per-cell color matches depth-test visibility.
 
 **Catches:** SC2 floor-disappearing symptom.
 
-### 4.4 `crtc-publish` — host-side comparison (Tier 1, redesigned per Codex finding #4)
+### 4.4 `crtc-publish` — front-fb publish policy oracle (Tier 1, SHIPPED 2026-05-20 evening)
 
 **Catalog refs:** §H.7, §3b.4, §K.2, §H.5.
 
-Allocate three VRAM color surfaces at distinct addresses A/B/C.
-Render distinctive identifier into A (large "A" letter), then
-switch to B (large "B"), then C (large "C"). Issue `NV097_FLIP_STALL`
-at end of frame, capture host frame.
+**Status:** PASS on xemu-Metal both legs (2026-05-20 evening). The
+canonical Metal recipe + `additional_metal_recipes: [{name:
+"fallback0", env: {XEMU_METAL_FRONT_FB_FALLBACK: "0"}}]` give two
+cells per matrix run, both 0.0% changed at 100% signal + total
+match.
 
-The captured frame shows whichever surface the renderer published.
-Manifest declares per-flag-setting expected reference:
+**Design (final shipped version):**
 
-- `XEMU_METAL_FRONT_FB_FALLBACK=0`: expected = "A" (CRTC-pointed
-  surface).
-- `XEMU_METAL_FRONT_FB_FALLBACK=1`: expected = "C" (most-recent
-  binding fallback).
+Surface A is the pbkit back buffer (CRTC-pointed after pbkit's
+triple-buffer swap rotates this buffer to front). Surfaces B and C
+are pbkit extra buffers requested via `pb_extra_buffers(2)` before
+`xbed_init`; `pb_target_extra_buffer(0/1)` switches the rendering
+target by reprogramming DMA channel 9 base AND pushing
+`NV097_SET_SURFACE_PITCH` (`NV20_TCL_PRIMITIVE_3D_BUFFER_PITCH` =
+`0x20c`, same numeric value as the NV097 method dispatch), which
+reaches xemu's `surface_update` so the Metal renderer re-evaluates
+the bound surface and the new VRAM addr lands in the per-VRAM cache.
 
-(Resolves Codex finding #4: was a category error in v1 — guest-
-side observation can't classify host-side fallback behavior. v2
+Per frame:
+
+1. Clear A to **RED** (0xFFFF0000). 0 marker draws — A.frame_draw_count
+   stays at 0.
+2. Switch to B; clear to **GREEN** (0xFF00FF00); 1 marker draw.
+   B.frame_draw_count = 1.
+3. Switch to C; clear to **BLUE** (0xFF0000FF); 3 marker draws.
+   C.frame_draw_count = 3 — highest count, so C wins
+   `s_fallback_draw_candidate` per `surface.mm:1944-1949`.
+4. `pb_target_back_buffer()` + a no-op `xbed_clear_color_argb(COL_A)`
+   to actually rebind A as `s_color_binding` via
+   `mtl_bind_current_surfaces` (Codex 2026-05-20 review: target_back_buffer
+   alone doesn't trigger a bind; the bind happens lazily on the next
+   clear/draw). The extra clear keeps A.frame_draw_count at 0.
+5. Manually push `NV097_FLIP_STALL` so `pgraph_mtl_flip_stall` fires.
+   pbkit's `pb_finished` does NOT push this method — it uses a
+   `PB_FINISHED` subprog + DPC + direct PCRTC_START write. Without
+   the manual push, the renderer's flip-stall publish path never
+   runs and the fallback policy can't be tested.
+
+The captured front buffer reflects whichever surface the renderer's
+flip-stall handler published. Manifest declares per-flag-setting
+expected reference (math-derived; canonical real-Xbox reference
+pending Tier-1 XBE D:\ fopen fix):
+
+- `real-xbox/any/any`        → `expected.py:default`        (RED — real HW scans CRTC).
+- `gl/any/any`               → `expected.py:default`        (RED — GL has no fallback).
+- `metal/scale=1/msaa=0/fallback=0` → `expected.py:default`        (RED — `publish_display_front_fb` publishes CRTC).
+- `metal/scale=1/msaa=0/fallback=1` → `expected.py:metal_with_fallback` (BLUE — `publish_latest_draw_fallback` publishes candidate C).
+
+**Catches:**
+
+- Stale fallback candidate after rebind. If `publish_latest_draw_fallback`
+  fell through to `s_color_binding` (A, last bound) instead of using
+  `s_fallback_draw_candidate` (C, highest count), the test would
+  publish RED on fallback=1 instead of BLUE.
+- Surface cache cross-contamination — A's binding reused for B/C
+  would show wrong color.
+- `pb_target_extra_buffer`'s `SET_SURFACE_PITCH` push not triggering
+  `surface_update` — would keep drawing into A for all 3 steps and
+  let A win the candidate race.
+- `publish_display_front_fb` resolving `crtc_addr` to the wrong
+  cache entry — fallback=0 leg would show GREEN or BLUE instead of
+  RED.
+
+(Resolves v1 Codex finding #4: was a category error — guest-side
+observation can't classify host-side fallback behavior. v2 / shipped
 uses host capture which sees the actual published frame.)
 
 ### 4.5 `native-quad-tri-depth` — GS-bypass regression gate (Tier 1)

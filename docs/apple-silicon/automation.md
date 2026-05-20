@@ -1,6 +1,15 @@
 # Benchmark Automation
 
-Last updated: 2026-05-19 night (the three oracle-independent tools from
+Last updated: 2026-05-20 (evening, late) (xbe-harness composite-
+score frame selector + `additional_metal_recipes` first-class
+multi-recipe cells; 5 of 16 first-wave Tier-1 XBEs now PASS on
+xemu-Metal — `pipeline-smoke`, `mirror`, `color-channel`,
+`depth-floor`, and the new `crtc-publish` with both
+`XEMU_METAL_FRONT_FB_FALLBACK` legs.)
+
+Pre-2026-05-20 banner preserved below.
+
+Earlier: the three oracle-independent tools from
 the May 19 tooling slice are now in service, and the first full PGR2
 follow-up reruns used them to reject the display-shape publish
 heuristic while keeping the host-refresh publish preservation fix and
@@ -1140,6 +1149,55 @@ and stack:
   time the dump function emits a flip header + binding list.
   Surfaces on the `xemu-perf:` line and in `extract-perf-summary.sh`.
   Use as a smoke gate that the flag is actually firing.
+- `XEMU_METAL_RTT_SIBLING_SYNC={0,1}` (**2026-05-20**, default **OFF**;
+  staged as diagnostic-only pending retail Xbox oracle validation) —
+  enables the GPU-blit-at-bind cross-sibling sync. When two
+  `MtlSurfaceBinding` entries at the same VRAM address share pitch
+  and `nv097_format` but differ in shape (PGR2's late-route pattern:
+  `1278x442` + `1280x480` clip-rect siblings at `0x3c84000` color and
+  `0x38e0000` depth), the cache treats them as separate MTLTextures.
+  Without sync, draws to one sibling are invisible to the other —
+  the composite stage-0 sample of `0x3c84000` resolves to the
+  exact-shape sibling and misses content drawn into the other
+  sibling. Sync runs in `pgraph_mtl_surface_bind_color(_ex)` and
+  `bind_depth(_ex)`. The freshest sibling's `e->texture` (and MSAA
+  companion, if present and sample-count-matched) is GPU-blit-copied
+  into the target's textures over the per-dimension overlap region.
+  Color uses `last_color_draw_seq` (bumped by `note_color_draw`) as
+  the freshness signal; depth uses the new `last_depth_draw_seq`
+  (bumped by `set_draw_dirty_depth`) — `last_use_seq` cannot serve
+  here because it is bumped on every cache hit, including the bind
+  that triggers the sync. Counters
+  `METAL_SIBLING_SYNCS` and `METAL_SIBLING_SYNC_SKIPS` track
+  per-interval activity. **Why default OFF:** the first PGR2-only
+  iteration showed promising local metrics (magenta-inside-the-car
+  artifact closed; aggregate %white pixels dropped ~70% on the same
+  snapshot anchor) but real-time visual observation across multiple
+  tracked titles (Xbox boot logo checkerboarded with missing parts,
+  Halo black-screen throughout, Crimson Skies flickering with
+  missing UI) showed regressions the per-title aggregate stats did
+  NOT catch. The counter-mode metal-canary-regress.sh PASSed because
+  it does not check pixel content (documented limitation). The path
+  stays in tree as opt-in so the diagnostic infrastructure is
+  available for future iteration once a proper multi-title visual
+  validation gate (retail Xbox oracle + temporal capture on every
+  tracked title) is run as a prerequisite to flipping default ON.
+  Validation evidence: `benchmarks/2026-05-20-pgr2-rtt-sibling-sync.md`
+  (PGR2-only iteration; multi-title oracle validation NOT YET RUN).
+  Apple Silicon performance fork; PGR2 RTT correctness slice
+  (in progress, not closed).
+- `METAL_SIBLING_SYNCS` / `METAL_SIBLING_SYNC_SKIPS` (**2026-05-20**) —
+  per-interval delta counts of cross-sibling sync events and
+  skipped considerations. A sync is *executed* when a fresher same-
+  VRAM same-pitch same-format same-aspect sibling exists at bind
+  time and the GPU blit is issued. A *skip* is recorded when the
+  sync was considered but no fresher sibling exists (the common
+  steady-state). Total considerations ≈ syncs + skips, which scales
+  with `METAL_DRAW_PASS_OPENS` × siblings-per-VRAM. On PGR2 with
+  the closed `0x3c84000` sibling pattern: dozens of syncs per
+  interval and tens of thousands of skips. Use the syncs counter to
+  verify the path is firing after `XEMU_METAL_RTT_SIBLING_SYNC` is
+  set.
 - `METAL_FRONT_FB_PUBLISHES` (**M5.9, 2026-05-03; cadence revised T2,
   2026-05-12 evening**): per-interval count of front-fb texture
   pointer **changes** in the Metal renderer's surface cache.
@@ -4452,15 +4510,29 @@ production-readiness gate.
    VALIDATION=1) for Metal; macos-capture.sh sidecar for GL.
    Real-Xbox driver wraps `oracle-orchestrator.py run-diag`:
    FTP-uploads the XBE, agent chainloads, FTP-collects XOSS
-   blob, decodes to PNG. Comparison gate iterates over all
-   captured screenshots (xemu boot + diag-render + post-reboot
-   dashboard) and picks the lowest changed_pixels_pct vs the
-   reference (math-derived from expected.py or
-   real-xbox-canonical from
-   `docs/apple-silicon/xbox-real-references/<id>/`); pass if
-   `changed_pixels_pct ≤ --max-changed-pct` (default 0.5%).
-   See `scripts/apple-silicon/xbe-harness/README.md` for full
-   layout, render-loop pattern, and per-XBE add-new-XBE recipe.
+   blob, decodes to PNG. Frame selection (rewritten 2026-05-20
+   evening) iterates over all captured screenshots (xemu boot +
+   diag-render + post-reboot dashboard) and picks the candidate
+   whose composite `signal_match_pct × total_match_pct` score is
+   highest. Both metrics come from `xbe_compare.frame_quality_score`
+   in a single in-process PIL pass per candidate (~50 ms each).
+   The composite selector replaced the older lowest-
+   `changed_pixels_pct` / first-tie selector after the 2026-05-12
+   T2 host-refresh publish exposed a dashboard-frame collision
+   class (a post-reboot dashboard frame can score
+   `signal=100, total=0.01` for a sparse oracle like `mirror`
+   while the real render scores `signal=75, total=99.99` because
+   of BOX-downsample boundary AA on the signal patch). The final
+   PASS/FAIL gate is `changed_pixels_pct ≤ --max-changed-pct`
+   AND `signal_match_pct ≥ 99.0` (`--max-changed-pct` default
+   `0.5`; m15-visual-gate.sh runs with `1.0` to tolerate AA
+   boundary drift). Per-XBE manifests can declare
+   `additional_metal_recipes` to spawn extra Metal cells with env
+   overrides — used by `crtc-publish` to gate both
+   `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` legs from one matrix
+   invocation. See `scripts/apple-silicon/xbe-harness/README.md`
+   for full layout, render-loop pattern, and per-XBE add-new-XBE
+   recipe.
 
 10. **Mac-side composite-out capture leg (2026-05-06): SHIPPED.**
     `tools/xemu-capture/` (Swift `.app`, bundle ID

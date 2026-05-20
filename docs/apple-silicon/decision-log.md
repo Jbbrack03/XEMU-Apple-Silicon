@@ -1,5 +1,199 @@
 # Decision Log
 
+## 2026-05-20 (evening, late): xbe-harness frame selector — composite signal × total match score replaces signal-first / first-tie selection
+
+**Decision.** Change the xbe-harness per-candidate frame selector
+to maximize composite `signal_match_pct × total_match_pct` rather
+than `signal_match_pct` with a "first-tie" tiebreak. Both metrics
+are computed in-process via the new `xbe_compare.frame_quality_score()`
+(single PIL pass per candidate, ~50 ms each on M3 Ultra). The
+xbe-harness README ("How the comparison gate works") and the
+`xbe_orchestrator.run_matrix` selection loop both reflect this.
+The signal_match_pct gate at the FINAL compare step is unchanged
+(still ≥ 99.0% at the wider per-channel threshold 140).
+
+**Why.** The 2026-05-12 T2 host-refresh publish slice (decision-log
+entry of that date) made `pgraph_mtl_get_framebuffer_surface`
+publish CRTC-pointed content at every host vsync, ~60 Hz vs the
+pre-T2 ~0.33 Hz flip_stall rate. Side effect: post-XBE-reboot
+dashboard frames now show up many more times in the
+`XEMU_METAL_SCREENSHOT_PATH` sequence (Metal screenshot interval =
+15 frames in the harness recipe; over ~5 s the XBE renders 300
+frames + ~2 s for boot + ~5 s for dashboard before the run hits
+its timeout). The previous selector picked the first
+signal-matching candidate in sorted-glob order. The mirror
+oracle's signal pixels are 16 white pixels at (318..321, 48..51).
+A dashboard frame that happens to have white pixels at that
+location scores `signal_match_pct=100, total_match_pct=0.01`. The
+real mirror render scores `signal=75` (boundary AA reduces strict-
+threshold matches at the 4-pixel patch's edges) but `total=99.99`
+(background matches reference). The previous selector picked the
+dashboard frame and the final compare reported
+`changed_pixels_pct=99.99 > max_changed_pct=0.5 → FAIL`. Composite
+`sig × tot` separates the two cleanly: dashboard `100×0.01 = 1`
+vs real render `75×99.99 = 7499`.
+
+Verified end-to-end against the four currently-shipping Tier-1
+XBEs at `--max-changed-pct 1.0 --threshold 8` (m15-visual-gate.sh's
+canonical config): all four PASS via composite selection where
+mirror previously FAILed (`benchmark-runs/xbe-rotation-final-
+20260520T173648Z/`, 5 pass / 0 fail including both crtc-publish
+recipe variants).
+
+**Also shipped this slice (mechanically related, same Codex
+review).** New manifest field `additional_metal_recipes` (list of
+`{name, env}` entries). The orchestrator runs the canonical Metal
+cell plus one extra cell per entry, applying env overrides on top
+of `METAL_CANONICAL_RECIPE`. Each cell appears as
+`{xbe, renderer, recipe_variant, ...}` in the report and writes
+artifacts to `<out>/<xbe>/metal/<variant>/`. Used by
+`crtc-publish` to gate both `XEMU_METAL_FRONT_FB_FALLBACK={0,1}`
+legs from a single matrix invocation (resolves Codex review
+MAJOR finding #1 — fallback=0 was previously only reachable via
+a per-XBE sidecar script outside the standard report).
+
+**Why this and not a per-XBE max_changed_pct field.** A per-XBE
+`max_changed_pct` would have re-greened mirror but not addressed
+the actual selector bug (dashboard frames sneaking into the
+selection). Composite scoring also disambiguates depth-floor /
+color-channel / future XBEs without requiring per-XBE tuning.
+Real-Xbox cells are unaffected — they never had the dashboard-frame
+collision because the agent's `runxbe` chainload bypasses the
+dashboard.
+
+**Combines with rules.** No guessing (rule #1) — the change is
+measurement-driven (mirror.0022 vs mirror.0123 was directly
+observed at `benchmark-runs/xbe-rotation-fix-20260520T*Z/`). No
+doc drift (rule #4) — handoff, oracle-and-xbe rule,
+diagnostic-xbe-plan, and the xbe-harness README all updated this
+slice. Codex-validate non-trivial change (rule #15) — `changes`
+mode review ran (MAJOR finding adopted, MINOR finding adopted,
+out-of-scope §4.4 doc update also adopted).
+
+**Verification.** Re-run the full Tier-1 rotation:
+
+```sh
+cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
+    --renderer metal --max-changed-pct 1.0 --threshold 8 \
+    --out /tmp/xbe-rotation-verify
+# Expect: 5 pass / 0 fail / 0 skip (mirror, color-channel,
+# depth-floor, crtc-publish[canonical], crtc-publish[fallback0])
+```
+
+## 2026-05-20 (evening): XBE-first development loop is binding for the Metal renderer; retail-title oracle is acceptance gate, not development driver
+
+**Decision.** From now on, the primary development loop for the native
+Metal renderer is **bottom-up correctness against the diagnostic-XBE
+library**, not top-down debugging of retail-title rendering. Concretely:
+
+1. Per-feature XBE coverage (diagnostic-xbe-plan.md v2 first wave then
+   second wave) is expanded and audited against Metal at every
+   shipped flag recipe before any new renderer change is attempted in
+   response to a retail-title symptom.
+2. When a retail title misrenders, the response is **not** to tune a
+   patch against that title's metrics. The response is to identify
+   which NV2A feature surface the bug lives on, locate or build the
+   XBE that isolates that feature, fix the renderer there, then
+   re-verify the retail title.
+3. The retail-game oracle (paired GL/Metal diff, temporal-flicker
+   capture, gameplay keyframe alignment, composite A/V) becomes a
+   final acceptance gate run after the XBE library is green — not the
+   thing we chase fix-by-fix.
+
+This supersedes the implicit "fix-the-failing-retail-title" loop the
+project had drifted into during the 2026-05-11 → 2026-05-20 PGR2
+investigation.
+
+**Why.** The 2026-05-20 `XEMU_METAL_RTT_SIBLING_SYNC` slice was the
+canonical demonstration of the failure mode the project's own written
+plan (`diagnostic-xbe-plan.md` §7 Phase 5) was designed to prevent:
+
+- A renderer change tuned against PGR2-only aggregate metrics
+  (~70% drop in %white, ~17% drop in temporal blink rate, magenta-
+  inside-the-car artifact closed) regressed the Xbox boot logo
+  (parts missing, checkerboarded), Halo (black screen throughout),
+  and Crimson Skies (flickering, menu UI completely missing).
+- `metal-canary-regress.sh --mode counters` passed 4/4 because it
+  does not check pixel content.
+- The flag had to be demoted to default-OFF diagnostic-only, and the
+  whole slice was reclassified as "not a fix."
+
+The structural cause is that retail titles exercise dozens of NV2A
+features simultaneously, so a regression in title X tells us neither
+which feature broke nor whether a fix for X will regress title Y.
+Only feature-isolated XBEs answer that question. The 2026-05-12
+(evening) decision already noted that single-frame aggregate stats
+are insufficient evidence — this decision extends that lesson to the
+whole development cadence, not just the validation step.
+
+Combines with rule #1 (no guessing — XBEs supply the data),
+rule #2 (no shortcuts — XBE coverage is the longer correct path
+over per-title metric tuning), rule #5 (build tools when blocked —
+the XBE library IS the tool), rule #8 (no intuition-driven
+optimization — XBE pass/fail replaces "PGR2 looks better").
+
+**What changes operationally.**
+
+- `handoff.md` "START HERE NEXT SESSION" leads with XBE library
+  expansion (remaining 13 of 16 first-wave XBEs + second-wave catalog
+  coverage), not with PGR2 RTT debugging.
+- Workspace `CLAUDE.md` gains rule #17 capturing the XBE-first /
+  retail-oracle-as-acceptance-gate loop.
+- `.claude/rules/renderer-state.md` "Highest-priority next actions"
+  is rewritten to lead with the new loop.
+- `.claude/rules/renderer-metal.md` M15 prerequisites cite XBE
+  saturation as the gating criterion (consistent with
+  `diagnostic-xbe-plan.md` §7 Phase 5).
+- `metal-renderer-plan.md` carries a header banner declaring this
+  pivot and pointing to this entry.
+- M15 default-on prerequisite formally adopts the
+  `diagnostic-xbe-plan.md` §7 Phase 5 framing: *all priority XBEs
+  PASS on Metal* replaces (but does not delete) the
+  "≤1% per-pixel diff vs GL on 5 titles" criterion.
+
+**What does NOT change.**
+
+- The Metal translation layer (`hw/xbox/nv2a/pgraph/mtl/`) is not
+  rebuilt. M0-M14 stand. The 14 `XEMU_METAL_*` flags and 50 counters
+  remain.
+- Retail-title oracle infrastructure (`metal-gl-compare.sh`,
+  `m15-gameplay-visual-compare.py`, `temporal-flicker-analyze.py`,
+  composite capture, oracle agent, OGX360 bridge) is not retired.
+  It is repositioned as the final acceptance gate.
+- The T2 host-refresh publish fix (commits `ca35b96562` +
+  `3ae76a327c`) stays. T2 addressed a presentation-layer cadence bug
+  that no XBE can reproduce — exactly the class of bug for which
+  the retail oracle / boot-animation temporal capture remains the
+  right tool.
+- The Metal VGA-direct fallback (M5.13 / M18) similarly stays on the
+  presentation-layer track — not all bugs are NV2A semantics.
+- `XEMU_METAL_RTT_SIBLING_SYNC` remains where it is (default OFF,
+  diagnostic-only). The 2026-05-19 (night) entry's hypothesis about
+  late `0x3c84000` RTT correctness is **not retracted** — it is
+  paused until XBE coverage isolates the feature surface (candidates:
+  E.13 per-format pitch + image-rect alignment, H.6 IMAGE_BLIT,
+  G.5 Z compression boundary, RT-as-texture sampling correctness
+  XBEs that do not yet exist).
+
+**Verification.** This is a methodology / process decision, not a
+code change. Verification is the cross-doc reconciliation pass that
+ships with it:
+
+- `handoff.md` updated.
+- Workspace `CLAUDE.md` updated.
+- `.claude/rules/renderer-metal.md` updated.
+- `.claude/rules/renderer-state.md` updated.
+- `metal-renderer-plan.md` banner updated.
+- Feedback memory written at
+  `~/.claude/projects/-Users-jbbrack03-XEMU-MacOS/memory/feedback_xbe_first_development.md`
+  and indexed in `MEMORY.md`.
+
+The next session that touches Metal renderer code should land at
+least one new first-wave XBE (`crtc-publish` / `native-quad-tri-depth`
+/ `cmp-vertex-format` are the next three by priority) before any
+retail-title symptom fix is attempted.
+
 ## 2026-05-19 (night): Keep the linear same-VRAM alias copy path; it narrows the PGR2 RTT bug but does not close it
 
 **Decision.** Keep the new Metal texture-binding rule for linear

@@ -1,5 +1,88 @@
 # Handoff
 
+Last updated: 2026-05-20 (evening, late) — first-wave XBE progress.
+The methodology-pivot banner below is preserved. New this session:
+`crtc-publish` shipped + green (both `XEMU_METAL_FRONT_FB_FALLBACK`
+legs), and the xbe-harness frame selector was rewritten around a
+composite `signal × total` match score to disambiguate real
+diag-render frames from happenstance-signal-matching post-reboot
+dashboard frames (which the 2026-05-12 T2 host-refresh publish made
+much more common in screenshot sequences). 5 of 16 first-wave XBEs
+now PASS on xemu-Metal.
+
+**Methodology pivot** (earlier 2026-05-20 evening): per decision-log
+"2026-05-20 (evening): XBE-first development loop is binding for the
+Metal renderer," the project's primary Metal-renderer development
+loop is now bottom-up correctness against the diagnostic-XBE
+library, not top-down debugging of retail-title symptoms. Workspace
+`CLAUDE.md` rule #17 captures the loop. The retail-game oracle
+becomes a final acceptance gate. M15 default-on prerequisite
+formally adopts `diagnostic-xbe-plan.md` §7 Phase 5: all priority
+XBEs PASS on Metal. **Read the new "START HERE NEXT SESSION" block
+below before reaching for any retail-title-driven fix.**
+
+The 2026-05-20 banner that follows is preserved as context for the
+incident that motivated the pivot.
+
+---
+
+## 2026-05-20 banner — XEMU_METAL_RTT_SIBLING_SYNC: motivating evidence for the methodology pivot
+
+**Cross-sibling sync slice STAGED, NOT
+CLOSED.** The 2026-05-20 iteration shipped the `XEMU_METAL_RTT_SIBLING_SYNC`
+flag (currently **default OFF**, opt-in diagnostic) along with new
+counters (`METAL_SIBLING_SYNCS` / `METAL_SIBLING_SYNC_SKIPS`) and a
+new `last_depth_draw_seq` freshness field on `MtlSurfaceBinding`.
+Local PGR2-only metrics improved (magenta-inside-the-car artifact
+closed; ~70% drop in aggregate %white pixels on the same snapshot
+anchor; ~17% drop in temporal blink rate). **However**, real-time
+visual observation across other tracked titles showed regressions
+the PGR2-only metric did NOT catch:
+
+- Xbox boot logo rendered with parts missing (black) and the visible
+  parts checkerboarded.
+- Halo: black screen throughout.
+- Crimson Skies: flickering screens; only the animated background
+  visible; the menu UI was completely missing.
+
+`scripts/apple-silicon/metal-canary-regress.sh --mode counters`
+PASSed 4/4 (PGR2, Rainbow, Halo, Crimson) because it does not check
+pixel content (documented limitation in `.claude/rules/renderer-
+metal.md`). The flag is therefore flipped **default OFF** as a
+diagnostic-only opt-in, and the path is **not** considered a fix.
+
+**Methodology lesson recorded by this slice:** PGR2-only aggregate
+%white / %dark / blink-rate stats are NOT sufficient evidence that
+a Metal renderer change is safe to ship. Every renderer change that
+could affect surface caching, sibling lookup, or RT-as-texture
+sampling MUST go through the retail Xbox oracle on every tracked
+title (boot logo + Crimson + Rainbow + PGR2 + Halo + SC2) before
+the flag flips default ON.
+
+The 2026-05-19 night banner is preserved below for context. The
+underlying PGR2 sibling-divergence diagnosis is still believed
+correct (see `benchmarks/2026-05-20-pgr2-rtt-sibling-sync.md` §"Root
+cause") — but the cross-sibling sync as implemented is not the
+right shape of fix. The next slice should:
+
+- Reproduce the regressions on boot logo / Halo / Crimson with the
+  flag ON, frame-by-frame on the retail oracle.
+- Identify WHY the same blit-at-bind path that helps PGR2's color
+  composite breaks other titles. Hypotheses: (a) the depth-blit
+  between `MTLPixelFormatDepth32Float_Stencil8` textures has Metal
+  semantics this implementation gets wrong (e.g. stencil aspect not
+  carried); (b) the MSAA blit-copy between same-sample-count
+  textures has alignment constraints the code does not honor;
+  (c) some titles legitimately rely on the per-clip-rect sibling
+  isolation that PGR2 happens to break — coalescing siblings
+  causes cross-clip-rect content contamination.
+- Treat the fix as not just "does PGR2 look better" but "does
+  every tracked title render the same vs the oracle".
+
+---
+
+## 2026-05-19 night banner — Apple-aligned workflow + measurement tools
+
 Last updated: 2026-05-19 night — **Apple-aligned Metal workflow
 adopted in the canonical docs**, **three oracle-independent
 measurement tools shipped** (Tool 1 surface-graph dump, Tool 2 gameplay
@@ -141,9 +224,154 @@ PGR2 capture-source hypothesis decisively ruled out; the multi-RT
 compositing concern remains a separate deferred fix (M5.12 / M17)
 that T2 does NOT address.
 
-## START HERE NEXT SESSION — M15 bundle closure
+## 2026-05-20 evening (late) — crtc-publish shipped + xbe-harness frame selector rewritten
 
-Run this first:
+First execution of the new XBE-first loop. Two artifacts shipped:
+
+**`xbe-tests/crtc-publish/` (Tier-1 NV2A diag XBE for §4.4).**
+Front-fb publish policy oracle. Per-frame renders three VRAM color
+surfaces (A=red pbkit back buffer with 0 draws, B=green pbkit extra
+buffer with 1 draw, C=blue pbkit extra buffer with 3 draws), rebinds
+A via a no-op `xbed_clear_color_argb(COL_A)` (so Metal's
+`s_color_binding=A` at flip — `pb_target_back_buffer` alone defers
+the actual bind to the next clear/draw per
+`hw/xbox/nv2a/pgraph/mtl/renderer.c:769/947/1783`; Codex 2026-05-20
+review caught this), and manually pushes `NV097_FLIP_STALL` so
+`pgraph_mtl_flip_stall` actually fires (pbkit's `pb_finished`
+does NOT push that method).
+
+Manifest declares `additional_metal_recipes: [{name: "fallback0",
+env: {XEMU_METAL_FRONT_FB_FALLBACK: "0"}}]` so the orchestrator
+runs both publish-path legs in one matrix invocation. Both PASS on
+xemu-Metal at 0.0% changed / 100% signal + total match:
+
+- canonical (fallback=1) → BLUE (`publish_latest_draw_fallback`
+  selects C, the highest-`frame_draw_count` cache entry).
+- fallback0 (fallback=0) → RED (`publish_display_front_fb` resolves
+  CRTC-pointed addr to A).
+
+See `benchmark-runs/xbe-rotation-final-20260520T173648Z/` for the
+all-green full Tier-1 rotation under `--max-changed-pct 1.0
+--threshold 8` (m15-visual-gate.sh's canonical config).
+
+**xbe-harness composite-score frame selector.**
+`scripts/apple-silicon/xbe-harness/xbe_compare.py` gains
+`frame_quality_score()` (in-process PIL pass returning both
+signal-match and total-match percentages per candidate frame).
+`scripts/apple-silicon/xbe-harness/xbe_orchestrator.py`
+`run_matrix` now selects the candidate maximizing `signal × total`.
+
+Motivating regression: the 2026-05-12 T2 host-refresh publish made
+the post-XBE-reboot dashboard publish at every host vsync, so
+screenshot sequences now include far more dashboard frames. The
+older signal-first / first-tie selector picked dashboard frames
+when their signal pixels happened to match the diag oracle (e.g.
+mirror.0022 had `signal=100, total=0.01` while the real
+mirror.0123 had `signal=75, total=99.99` due to BOX-downsample
+boundary AA). Composite `sig × tot` gives the real render frame
+`75×99.99 = 7499` vs dashboard `100×0.01 = 1`. Documented in
+`scripts/apple-silicon/xbe-harness/README.md` "How the comparison
+gate works" + decision-log "2026-05-20 evening: xbe-harness frame
+selector" (pending).
+
+**New manifest field `additional_metal_recipes`.** Generic harness
+extension (not crtc-publish-specific) — any future XBE can declare
+extra Metal cells with per-variant env overrides. Real-Xbox cells
+ignore variants (real HW publishes CRTC regardless of xemu flags).
+Resolves Codex `changes` review finding #1 — fallback=0 was
+previously only reachable via a per-XBE sidecar wrapper, hiding
+fallback=0 regressions from the standard matrix report.
+
+**Verification (run twice with fresh xemu):**
+
+```sh
+cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
+python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
+    --renderer metal --max-changed-pct 1.0 --threshold 8 \
+    --out /tmp/xbe-rotation-verify
+# Expect: 5 pass / 0 fail / 0 skip (color-channel, crtc-publish[canonical],
+# crtc-publish[fallback0], depth-floor, mirror)
+```
+
+**Next slice (XBE-first loop continues):** `native-quad-tri-depth`
+(§4.5) per `diagnostic-xbe-plan.md`. Catches regressions in the
+closed default-on `XEMU_NATIVE_QUAD` / `XEMU_NATIVE_TRI_DEPTH`
+flags via a GS-bypass grid against an `OP_TRIANGLES` reference.
+
+## START HERE NEXT SESSION — XBE library expansion is the new primary loop
+
+Binding per workspace `CLAUDE.md` rule #17 and decision-log
+"2026-05-20 (evening): XBE-first development loop is binding for the
+Metal renderer." Read both before deviating.
+
+**The loop, in order:**
+
+1. **Pick the next first-wave XBE** by priority order from
+   `diagnostic-xbe-plan.md` §4. As of this entry, **5 of 16
+   first-wave XBEs are passing on Metal** (`pipeline-smoke`,
+   `mirror`, `color-channel`, `depth-floor`, and the newly shipped
+   `crtc-publish` — see "2026-05-20 evening update" block below).
+   The next two by priority are `native-quad-tri-depth` (§4.5),
+   `cmp-vertex-format` (§4.6).
+2. **Build the XBE under `xbe-tests/<id>/`** following the standard
+   skeleton in `diagnostic-xbe-plan.md` §3.4. Each XBE's source-file
+   header derives expected output from the catalog
+   (`nv2a-feature-surface-research.md`); paired `expected.py` encodes
+   the same math.
+3. **Codex-validate the XBE source + manifest** per project rule #15
+   before any nxdk source ships. Run `/codex-validate plan
+   xbe-tests/<id>/main.c xbe-tests/<id>/manifest.json
+   xbe-tests/<id>/expected.py` (or pass the relevant subset as
+   inline scope).
+4. **Run the XBE on xemu-Metal** via `xbe-harness/`. If it PASSes
+   against the math-derived oracle, add it to the harness rotation
+   and proceed to the next XBE.
+5. **If it FAILs on Metal,** that is now a bug-class-isolated fix
+   target. Fix the renderer there. Codex-validate the renderer
+   change per rule #15. Re-run the XBE and confirm PASS. Then
+   re-run the full XBE rotation to confirm no regression on
+   previously green XBEs.
+6. **Only after** the first wave is green do retail-title symptoms
+   feed back into the loop, and only as a guide to *which next XBE*
+   to add to second wave — not as a direct fix target.
+
+**Closed retail-title work is not retried under the new loop until
+the XBE library covers its feature surface.** Specifically, do not
+re-tune `XEMU_METAL_RTT_SIBLING_SYNC` or attempt new PGR2 multi-RT
+compositing fixes until at least the following XBEs exist and PASS
+on Metal:
+
+- `crtc-publish` (§4.4) — host-side fallback-policy verification.
+- `texture-format-sweep` (§4.7) — full 42-code RT/texture surface.
+- `swizzle-mipmap` (§4.8) — texture layout + mip chain.
+- §E.13 per-format pitch + image-rect alignment (second wave).
+- §H.6 IMAGE_BLIT correctness (second wave, Tier 2).
+- An RT-as-texture sampling XBE (does not yet exist — author per
+  the catalog if PGR2 stage-0 `0x3c84000` blocker re-opens after
+  the above are green).
+
+**Currently-running infrastructure that stays useful:** the retail
+oracle, paired GL/Metal diff, temporal-flicker capture, surface-graph
+dump, per-draw RT dump, oracle agent + OGX360 bridge. They become
+acceptance gates run after XBE saturation, not development drivers.
+
+**Required reads before this loop runs:**
+
+- `docs/apple-silicon/diagnostic-xbe-plan.md` v2 (§3, §4, §7).
+- `.claude/rules/oracle-and-xbe.md` (workspace-level rule).
+- `nv2a-feature-surface-research.md` (catalog).
+- The decision-log entry that bound this loop.
+
+The 2026-05-11 → 2026-05-19 M15-bundle-closure context is preserved
+below for diagnostic continuity. It is no longer the next-actions
+list — it is the running state of an investigation that is paused
+until the XBE library catches up.
+
+---
+
+## Preserved — M15 bundle closure context (paused pending XBE-first loop)
+
+Run this first to see the current M15 verdict:
 
 ```sh
 cd /Users/jbbrack03/XEMU_MacOS/xemu-fork
@@ -323,17 +551,31 @@ Next engineering steps, in order:
    PGR2/Rainbow/Crimson p99 jitter, and cold shader compile proof.
    For PGR2 specifically, the live renderer blocker is the late RTT path,
    not more front-fb publish-policy experimentation.
-2. **RTT correctness investigation (the current PGR2 deep fix)**:
-   - Start from
-     `docs/apple-silicon/benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`
-     and `benchmark-runs/20260519-182241-pgr2/`.
-   - Instrument late stage-0 binds of `0x3c84000` in `texture_pg.c` /
-     `texture.mm`; determine whether the failure is wrong source
-     contents, wrong format/alias interpretation, stale sibling views,
-     or incorrect use of the sampled RTT in the final composite draw.
-   - Keep the host-refresh publish preservation fix in `renderer.c`.
-     Do not reintroduce the `0x3b58000` display-shape heuristic unless
-     a future full-sequence validation proves it materially closer to GL.
+2. **RTT correctness investigation — PARTIALLY CLOSED 2026-05-20**:
+   The 2026-05-20 cross-sibling sync slice
+   (`benchmarks/2026-05-20-pgr2-rtt-sibling-sync.md`,
+   flag `XEMU_METAL_RTT_SIBLING_SYNC` default ON, counters
+   `METAL_SIBLING_SYNCS` / `_SKIPS`) identified the root cause: the
+   cache held two separate MtlSurfaceBindings for the same physical
+   Xbox surface (`1278x442` and `1280x480` clip-rect siblings at
+   `0x3c84000` color and `0x38e0000` depth). Draws to one sibling
+   were invisible to the composite-stage sample of the other. The
+   fix GPU-blits the overlap region from the freshest sibling into
+   the target at bind time, covering both single-sample resolve
+   textures and (when sample counts match) MSAA companions.
+   - Closed: the magenta-inside-the-car artifact.
+   - Improved: HUD-bar artifact pixels (~70% reduction in aggregate
+     `%white` over content frames), temporal blink rate (~17%
+     reduction).
+   - **Not closed:** intermittent black slabs in the upper-left,
+     residual red/white HUD bars. These are separate from the
+     sibling-divergence fix; next slice diagnoses the remaining
+     artifact class (working hypothesis: a multi-RT compositing case
+     at one of the smaller HUD-source RTs — see the `0x368x000` /
+     `0x36ax000` family in the postfix5 surface graph).
+   - Still keep the 2026-05-19 host-refresh publish preservation fix
+     in `renderer.c`. Do not reintroduce the `0x3b58000` display-shape
+     heuristic.
 3. After the PGR2 RTT correctness fix lands, rerun PGR2
    through the strict gameplay evidence path. The evidence-producing target is:
 

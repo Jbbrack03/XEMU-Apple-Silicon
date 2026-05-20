@@ -1,5 +1,20 @@
 # Native Metal Renderer — Implementation Plan
 
+> **2026-05-20 evening — methodology pivot, binding.** Per decision-log
+> "2026-05-20 (evening): XBE-first development loop is binding for the
+> Metal renderer," the day-to-day Metal-renderer development loop is now
+> bottom-up correctness against the diagnostic-XBE library
+> (`diagnostic-xbe-plan.md` v2). The retail-game oracle (paired GL/Metal
+> diff, gameplay temporal capture, composite A/V) is the final
+> acceptance gate, not a development driver. M15 default-on prerequisite
+> formally adopts `diagnostic-xbe-plan.md` §7 Phase 5: **all priority
+> XBEs PASS on Metal** replaces (but does not delete) the "≤1% per-pixel
+> diff vs GL on 5 titles" criterion in §4 M15 below. The §4 M15 wording
+> remains as historical context; the new gate is binding. Exempt:
+> presentation-layer bugs that cannot be reproduced through PGRAPH
+> (T2 host-refresh cadence, M5.13 VGA-direct fallback) — those continue
+> under boot-animation temporal capture.
+
 Last updated: 2026-05-19 night (the new tooling slice has already been
 used on the first full PGR2 follow-up. Keep the host-refresh publish
 preservation fix, reject the `0x3b58000` display-shape publish
