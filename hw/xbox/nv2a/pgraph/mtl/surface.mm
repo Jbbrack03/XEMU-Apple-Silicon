@@ -194,6 +194,15 @@ typedef struct MtlSurfaceBinding {
      * fallback publish path. Zero means "never color-drawn". */
     uint64_t last_color_draw_seq;
 
+    /* 2026-05-20: depth-write freshness signal — bumped on every
+     * `set_draw_dirty_depth()` invocation. Mirrors `last_color_draw_seq`
+     * for depth attachments so the cross-sibling sync can identify the
+     * most-recently-drawn depth sibling at a given vram_addr without
+     * conflating with `last_use_seq` (which is bumped on every cache
+     * lookup hit, including the bind that triggers the sync). Zero means
+     * "never depth-drawn". */
+    uint64_t last_depth_draw_seq;
+
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
 
@@ -222,6 +231,26 @@ static uint32_t s_msaa_sample_count = 1;
 /* M11: counters. */
 static _Atomic(uint64_t) s_msaa_resolve_count    = 0;
 static _Atomic(uint64_t) s_msaa_resolve_us_total = 0;
+
+/* 2026-05-20 (M5.12 / M17 followup): cross-sibling-sync counters.
+ *
+ * The renderer cache may hold multiple MtlSurfaceBinding entries at the
+ * same vram_addr+pitch+nv097_format with different shapes (the "alias
+ * sibling" pattern PGR2 hits late in the route: a 1278x442 sibling and a
+ * 1280x480 sibling at vram_addr=0x3c84000 alternate per frame). Each
+ * sibling owns a distinct MTLTexture, so a draw to sibling A is invisible
+ * to a subsequent sample of sibling B even though the guest views both as
+ * the same physical Xbox surface. The cross-sibling sync issues a
+ * GPU-blit copy from the freshest sibling's textures (single-sample +
+ * MSAA companion) into the target sibling's textures whenever a bind
+ * transitions between same-VRAM siblings, so the next draws / samples
+ * see the predecessor's content already in place.
+ *
+ * `s_sibling_sync_count` increments per sync event; `s_sibling_sync_skip`
+ * increments when a sync is requested but no fresher sibling exists.
+ * Gated by env flag `XEMU_METAL_RTT_SIBLING_SYNC` (default on). */
+static _Atomic(uint64_t) s_sibling_sync_count = 0;
+static _Atomic(uint64_t) s_sibling_sync_skip  = 0;
 
 /* The "front" framebuffer texture published to the compositor. */
 static _Atomic(void *) s_front_framebuffer_texture = nullptr;
@@ -695,6 +724,11 @@ static MtlSurfaceBinding *cache_get_at_depth(uint32_t vram_addr)
     }
     return NULL;
 }
+
+/* Forward decl — implementation lives near the M5.10 download API
+ * because it shares the s_render_queue + draw-done fence machinery. */
+static void sync_color_siblings_into(MtlSurfaceBinding *target);
+static void sync_depth_siblings_into(MtlSurfaceBinding *target);
 
 static bool binding_shape_compatible(MtlSurfaceBinding *e, bool is_color,
                                      uint32_t vram_addr,
@@ -1443,6 +1477,13 @@ bool pgraph_mtl_surface_bind_color(uint32_t vram_addr, uint32_t size,
     if (e == NULL) {
         return false;
     }
+    /* 2026-05-20: if another same-VRAM same-pitch same-format color
+     * sibling has fresher content (different clip-rect alias), copy
+     * its texture contents into this binding before the next draws
+     * land. Closes the PGR2 late-route RTT divergence at 0x3c84000
+     * caused by separate MTLTextures per clip-rect sibling holding
+     * disjoint subsets of the same physical Xbox surface. */
+    sync_color_siblings_into(e);
     s_color_binding = e;
     return true;
 }
@@ -1462,6 +1503,12 @@ bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
     if (e == NULL) {
         return false;
     }
+    /* 2026-05-20: cross-sibling sync — depth-attachment companion of
+     * the color-side fix. Uses `last_depth_draw_seq` (bumped by
+     * set_draw_dirty_depth) instead of `last_use_seq` because the
+     * latter is already bumped by the cache_find_or_create_depth call
+     * above. */
+    sync_depth_siblings_into(e);
     s_depth_binding = e;
     return true;
 }
@@ -1483,6 +1530,11 @@ bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
     if (e == NULL) {
         return false;
     }
+    /* 2026-05-20: cross-sibling sync — see bind_color() for the
+     * full rationale. The `_ex` path is the production callsite from
+     * mtl_bind_current_surfaces; non-ex retained for the legacy
+     * single-slot wrappers. */
+    sync_color_siblings_into(e);
     s_color_binding = e;
     return true;
 }
@@ -1504,6 +1556,8 @@ bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
     if (e == NULL) {
         return false;
     }
+    /* 2026-05-20: cross-sibling sync — depth-attachment companion. */
+    sync_depth_siblings_into(e);
     s_depth_binding = e;
     return true;
 }
@@ -2585,6 +2639,300 @@ unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
 }
 
 /* ---------------------------------------------------------------- */
+/* 2026-05-20 (M5.12 / M17 followup): cross-sibling sync. */
+
+static bool sibling_sync_enabled(void)
+{
+    /* Default OFF — the 2026-05-20 first iteration showed promising
+     * PGR2-only metrics (magenta-inside-the-car closed, ~70% drop in
+     * %white pixels across content frames) but real-time observation
+     * across multiple tracked titles (boot logo checkerboarded with
+     * missing parts, Halo black screen throughout, Crimson Skies
+     * flickering + missing UI) showed the path causes regressions
+     * elsewhere. The metal-canary-regress.sh counter-mode passed
+     * because it does NOT check visual content (documented limitation
+     * in `.claude/rules/renderer-metal.md`).
+     *
+     * The diagnostic infrastructure (counters, helper functions, this
+     * sync path) stays in the tree but defaults to OFF until a proper
+     * multi-title visual validation gate is run against the retail
+     * Xbox oracle. Set XEMU_METAL_RTT_SIBLING_SYNC=1 to enable for
+     * targeted PGR2 diagnostic experiments. */
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return s_cached != 0;
+}
+
+/* For the given target binding, find any other same-VRAM same-pitch
+ * same-format same-aspect (color/depth) sibling that has fresher
+ * last_color_draw_seq and copy its texture (and MSAA companion, if both
+ * sides have one with matching sample count) into `target`. The overlap
+ * region is the per-dimension min, anchored at the texture origin.
+ *
+ * Caller MUST already hold `pg->lock` (the renderer-thread invariant)
+ * because we walk the cache linked list and we issue a GPU blit on
+ * s_render_queue using s_color_binding-related pointers.
+ *
+ * No-op when the env flag disables the path, when `target` is NULL,
+ * when no fresher sibling exists, or when sample counts mismatch and
+ * we cannot safely copy both companion textures. */
+static void sync_color_siblings_into(MtlSurfaceBinding *target)
+{
+    if (!s_initialized || target == NULL || !target->is_color ||
+        target->texture == NULL) {
+        return;
+    }
+    if (!sibling_sync_enabled()) {
+        return;
+    }
+
+    MtlSurfaceBinding *source = NULL;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e == target) continue;
+        if (!e->is_color) continue;
+        if (e->vram_addr != target->vram_addr) continue;
+        if (e->pitch    != target->pitch)    continue;
+        if (e->nv097_format != target->nv097_format) continue;
+        if (e->texture == NULL) continue;
+        if (!atomic_load(&e->draw_dirty)) continue;
+        if (e->last_color_draw_seq <= target->last_color_draw_seq) continue;
+        if (source == NULL ||
+            e->last_color_draw_seq > source->last_color_draw_seq) {
+            source = e;
+        }
+    }
+    if (source == NULL) {
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
+    /* Sample-count parity: both sides must have a matching MSAA
+     * companion (or both have none) for the MSAA-side blit to be
+     * legal. Same sample count is the Metal blit precondition. */
+    bool sync_msaa = (source->msaa_texture != NULL &&
+                      target->msaa_texture != NULL &&
+                      source->msaa_sample_count > 1 &&
+                      source->msaa_sample_count ==
+                          target->msaa_sample_count);
+
+    uint32_t copy_w = source->width  < target->width  ? source->width  : target->width;
+    uint32_t copy_h = source->height < target->height ? source->height : target->height;
+    if (copy_w == 0 || copy_h == 0) {
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
+    /* Drain any open render encoder so the source's resolveTexture and
+     * its MSAA companion reflect the latest draws before the blit reads
+     * from them. Then fence the blit's command buffer against the latest
+     * draw-done value for cross-queue ordering. */
+    pgraph_mtl_draw_flush_open_pass();
+    void     *event_handle = NULL;
+    uint64_t  event_value  = 0;
+    pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+    @autoreleasepool {
+        id<MTLTexture> src_ss = (__bridge id<MTLTexture>)source->texture;
+        id<MTLTexture> dst_ss = (__bridge id<MTLTexture>)target->texture;
+        if (src_ss == nil || dst_ss == nil) {
+            return;
+        }
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.sibling_sync";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.sibling_sync_blit";
+        [blit copyFromTexture:src_ss
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(copy_w, copy_h, 1)
+                    toTexture:dst_ss
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+
+        if (sync_msaa) {
+            id<MTLTexture> src_ms = (__bridge id<MTLTexture>)source->msaa_texture;
+            id<MTLTexture> dst_ms = (__bridge id<MTLTexture>)target->msaa_texture;
+            if (src_ms != nil && dst_ms != nil) {
+                [blit copyFromTexture:src_ms
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(copy_w, copy_h, 1)
+                            toTexture:dst_ms
+                     destinationSlice:0
+                     destinationLevel:0
+                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+            }
+        }
+        [blit endEncoding];
+
+        /* Bump the cross-queue draw-done fence as well so subsequent
+         * draw-queue work that loads target->msaa_texture / target->texture
+         * waits on this blit to land. Mirrors the surface_download pattern. */
+        if (event_handle != NULL) {
+            uint64_t next = event_value + 1;
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeSignalEvent:ev value:next];
+            /* No corresponding atomic bump of s_draw_done_value here —
+             * the next open-pass flush will signal a higher value, and
+             * any consumer that already waited on `event_value` is
+             * unaffected. The signal is "belt-and-suspenders" so a
+             * downstream consumer that reads `event_value+1` (rare /
+             * future) still sees the blit complete. */
+        }
+        [cmd commit];
+    }
+
+    /* Adopt source's content age so a back-to-back bind doesn't redo
+     * the same blit. The target is now considered draw_dirty (it has
+     * fresh content from source) so subsequent downloads-to-VRAM or
+     * sample copies pick it up. */
+    target->last_color_draw_seq = source->last_color_draw_seq;
+    atomic_store(&target->draw_dirty, (uint32_t)1);
+    /* Source's draw_dirty stays set — downloads still need to mirror
+     * the source's content back to VRAM when consumers request it. */
+
+    atomic_fetch_add(&s_sibling_sync_count, 1);
+}
+
+uint64_t pgraph_mtl_surface_sibling_syncs(void)
+{
+    return atomic_load(&s_sibling_sync_count);
+}
+
+uint64_t pgraph_mtl_surface_sibling_sync_skips(void)
+{
+    return atomic_load(&s_sibling_sync_skip);
+}
+
+/* Depth-side sibling sync. Same idea as color-side but uses
+ * `last_depth_draw_seq` (bumped only on actual depth writes via
+ * `set_draw_dirty_depth`) as the freshness signal — `last_use_seq`
+ * cannot be used because cache_find_or_create_depth bumps it BEFORE
+ * sync runs, making the target's value the latest. PGR2's depth
+ * sibling pattern at 0x38e0000 (z-buffer for the 0x3c84000 color RT)
+ * shows the same clip-rect alternation as the color side; without
+ * sync, the depth attachment that is about to be re-bound holds the
+ * z-values from its OWN last render pass, missing the freshly written
+ * depth from the other sibling — manifesting as failed depth tests
+ * (missing geometry / dark slabs) on the final composite. */
+static void sync_depth_siblings_into(MtlSurfaceBinding *target)
+{
+    if (!s_initialized || target == NULL || target->is_color ||
+        target->texture == NULL) {
+        return;
+    }
+    if (!sibling_sync_enabled()) {
+        return;
+    }
+
+    MtlSurfaceBinding *source = NULL;
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (e == target) continue;
+        if (e->is_color) continue;
+        if (e->vram_addr != target->vram_addr) continue;
+        if (e->pitch    != target->pitch)    continue;
+        if (e->nv097_format != target->nv097_format) continue;
+        if (e->texture == NULL) continue;
+        if (!atomic_load(&e->draw_dirty)) continue;
+        if (e->last_depth_draw_seq <= target->last_depth_draw_seq) continue;
+        if (source == NULL ||
+            e->last_depth_draw_seq > source->last_depth_draw_seq) {
+            source = e;
+        }
+    }
+    if (source == NULL) {
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
+    bool sync_msaa = (source->msaa_texture != NULL &&
+                      target->msaa_texture != NULL &&
+                      source->msaa_sample_count > 1 &&
+                      source->msaa_sample_count ==
+                          target->msaa_sample_count);
+
+    uint32_t copy_w = source->width  < target->width  ? source->width  : target->width;
+    uint32_t copy_h = source->height < target->height ? source->height : target->height;
+    if (copy_w == 0 || copy_h == 0) {
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
+    pgraph_mtl_draw_flush_open_pass();
+    void     *event_handle = NULL;
+    uint64_t  event_value  = 0;
+    pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+    @autoreleasepool {
+        id<MTLTexture> src_ss = (__bridge id<MTLTexture>)source->texture;
+        id<MTLTexture> dst_ss = (__bridge id<MTLTexture>)target->texture;
+        if (src_ss == nil || dst_ss == nil) {
+            return;
+        }
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.sibling_sync_depth";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+        blit.label = @"xemu.metal.sibling_sync_depth_blit";
+        [blit copyFromTexture:src_ss
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(copy_w, copy_h, 1)
+                    toTexture:dst_ss
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+
+        if (sync_msaa) {
+            id<MTLTexture> src_ms = (__bridge id<MTLTexture>)source->msaa_texture;
+            id<MTLTexture> dst_ms = (__bridge id<MTLTexture>)target->msaa_texture;
+            if (src_ms != nil && dst_ms != nil) {
+                [blit copyFromTexture:src_ms
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(copy_w, copy_h, 1)
+                            toTexture:dst_ms
+                     destinationSlice:0
+                     destinationLevel:0
+                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+            }
+        }
+        [blit endEncoding];
+
+        if (event_handle != NULL) {
+            uint64_t next = event_value + 1;
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cmd encodeSignalEvent:ev value:next];
+        }
+        [cmd commit];
+    }
+
+    target->last_depth_draw_seq = source->last_depth_draw_seq;
+    atomic_store(&target->draw_dirty, (uint32_t)1);
+
+    atomic_fetch_add(&s_sibling_sync_count, 1);
+}
+
+/* ---------------------------------------------------------------- */
 /* M5.10 (2026-05-03): set-draw-dirty + download API. */
 
 void pgraph_mtl_surface_set_draw_dirty_color(void)
@@ -2601,6 +2949,10 @@ void pgraph_mtl_surface_set_draw_dirty_depth(void)
         return;
     }
     atomic_store(&s_depth_binding->draw_dirty, (uint32_t)1);
+    /* Bump the depth-write freshness signal used by the cross-sibling
+     * depth sync. Reuses the same monotonic seq as color so the two
+     * tracks are comparable. */
+    s_depth_binding->last_depth_draw_seq = ++s_use_seq;
 }
 
 /* Helper: download a single entry, then invoke the QEMU-side dirty

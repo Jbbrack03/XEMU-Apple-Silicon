@@ -281,6 +281,18 @@ uint64_t pgraph_mtl_surface_clear_count(void);
 uint64_t pgraph_mtl_surface_front_fb_publishes(void);
 uint64_t pgraph_mtl_surface_cache_entries(void);
 
+/* 2026-05-20: cross-sibling sync counters.
+ *
+ * `_sibling_syncs` increments per executed sibling-sync GPU blit
+ * (a same-VRAM same-pitch same-format same-aspect sibling with fresher
+ * content was found and copied into the about-to-be-rebound entry).
+ * `_sibling_sync_skips` increments when a sync was considered but no
+ * fresher sibling existed (the common case once the cache stabilizes).
+ *
+ * Gated by env flag XEMU_METAL_RTT_SIBLING_SYNC (default on). */
+uint64_t pgraph_mtl_surface_sibling_syncs(void);
+uint64_t pgraph_mtl_surface_sibling_sync_skips(void);
+
 /* Tool 1 (2026-05-19): structured per-flip JSONL surface-graph dump.
  *
  * Emits one "flip" header line followed by one "binding" line per
