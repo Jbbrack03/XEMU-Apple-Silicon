@@ -1,0 +1,41 @@
+{
+  "id": "blend-matrix",
+  "title": "8 common NV2A blend (sfactor, dfactor, equation) combinations",
+  "purpose": "Render an 8-cell 4x2 grid where each cell exercises one of the most-common NV2A blend tuples. Per cell: blend-disabled DST draw paints the cell to DST_COLOR; blend-enabled SRC draw with (sfactor, dfactor, equation) draws SRC_COLOR over it. Math-derived expected output lands on saturated 0/255 cube corners (RED/GREEN/YELLOW/CYAN/MAGENTA/BLUE), so byte-exact across renderers regardless of display gamma. Tuples covered: (1) ONE/ZERO/ADD overwrite (sfactor mapping check); (2) ZERO/ONE/ADD DST-only (dfactor mapping check); (3) ONE/ONE/ADD additive (saturating-add semantics); (4) ONE/ONE/REVERSE_SUBTRACT (DST-SRC clamp); (5) ONE/ONE/SUBTRACT (SRC-DST clamp); (6) SRC_ALPHA/ONE_MINUS_SRC_ALPHA/ADD at alpha=255 (collapses to overwrite via alpha=1; verifies SRC_ALPHA factor mapping); (7) DST_COLOR/ZERO/ADD modulate; (8) ZERO/SRC_COLOR/ADD modulate. v0.1 deliberately uses only alpha=255/0 endpoints to keep all results byte-exact -- mid-range alpha and constant-color factors are second-wave follow-ups. The §4.9 spec describes 128 cells (16 sfactors x 8 dfactor/equation rows); v0.1 narrows to 8 to match the rest of the first-wave 4x2 grid convention while covering the dominant blend modes used by Xbox titles.",
+  "catalog_ref": "§F.1",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\blend-matrix-capture.bin",
+      "ftp_path": "/E/Apps/blend-matrix/blend-matrix-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\blend-matrix-done.txt",
+      "ftp_path": "/E/Apps/blend-matrix/blend-matrix-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

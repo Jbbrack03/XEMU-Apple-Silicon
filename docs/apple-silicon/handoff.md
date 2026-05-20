@@ -1,15 +1,42 @@
 # Handoff
 
-Last updated: 2026-05-20 (evening, latest) — three new XBEs shipped
-this session: §4.5 `native-quad-tri-depth` (green), §4.6
-`cmp-vertex-format` (green), §4.10 `stencil-ops` (expected_fail on
-Metal — Metal stencil-op gap captured, task #14), §4.14 `logic-ops`
-(expected_fail on Metal+GL — both renderers don't implement logic
-ops, task = renderer feature work). **9 of 17 first-wave XBEs now
-shipped (7 green + 2 expected_fail; 8 unstarted).** Two Metal renderer
-correctness gaps captured by the XBE library as tracked follow-ups
-(task #13 Metal flat-shaded OP_QUADS; task #14 Metal stencil-ops
-KEEP/INCRSAT/DECRSAT/DECR). New harness `expected_fail_renderers`
+Last updated: 2026-05-20 (late evening, +blend-matrix) —
+**§4.9 `blend-matrix` XBE shipped GREEN on Metal first-try.** 8-cell 4x2
+grid covering the most-common NV2A blend tuples (ONE/ZERO/ADD,
+ZERO/ONE/ADD, ONE/ONE/ADD, ONE/ONE/REVERSE_SUBTRACT,
+ONE/ONE/SUBTRACT, SRC_ALPHA/ONE_MINUS_SRC_ALPHA/ADD at α=255,
+DST_COLOR/ZERO/ADD modulate, ZERO/SRC_COLOR/ADD modulate). All
+results land on saturated 0/255 cube corners; signal_match=100.0
+on Metal. **10 of 17 first-wave XBEs now shipped on Metal (8 green
++ 2 expected_fail; 7 unstarted).**
+
+Also this session: **task #14 Metal stencil-clear partial fix shipped
+(commit a82ac934e9).** Two stencil correctness fixes: (1) Metal's
+pgraph_mtl_surface_clear now honors the decoded stencil clear value
+from pgraph_get_clear_depth_stencil_value (was hardcoded to 0; lines
+up with gl/draw.c's glClearStencil contract); (2) NV097_CLEAR_SURFACE_Z
+and _STENCIL bits now gate the depth and stencil aspects of the Metal
+render-pass descriptor independently (was a "Z|S" collapse that always
+cleared both aspects together regardless of which bit was set, per
+Codex 2026-05-20 finding). Stencil-ops XBE: pass rate on Metal goes
+from ~3-4/8 non-deterministic to 5/8 deterministic. Residual bug:
+the first 3 cells of every frame render BLACK (cells 0 KEEP / 1 ZERO
+/ 2 REPLACE all fail probe regardless of which op they map to);
+hypothesis is a draw-ordering / async-clear / pipeline-warmup issue
+affecting the first N draws of each frame after the color clear, not
+an op-mapping bug -- needs deeper Metal renderer investigation.
+Stencil-ops stays expected_fail on Metal pending that root cause.
+
+Previous evening (pre-late) shipped three new XBEs: §4.5
+`native-quad-tri-depth` (green), §4.6 `cmp-vertex-format` (green),
+§4.10 `stencil-ops` (expected_fail on Metal — Metal stencil-op gap
+captured, task #14), §4.14 `logic-ops` (expected_fail on Metal+GL —
+both renderers don't implement logic ops, task = renderer feature
+work). **9 of 17 first-wave XBEs now shipped (7 green + 2
+expected_fail; 8 unstarted).** Two Metal renderer correctness gaps
+captured by the XBE library as tracked follow-ups (task #13 Metal
+flat-shaded OP_QUADS; task #14 Metal stencil-ops -- partial fix
+landed late 2026-05-20). New harness `expected_fail_renderers`
 wiring lets the rotation distinguish "manifest-declared known
 regression target" from "real regression" so the green rotation
 stays clean while the spec for missing features is preserved. The methodology-pivot banner
