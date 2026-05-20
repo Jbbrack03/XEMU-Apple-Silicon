@@ -1,0 +1,53 @@
+{
+  "id": "native-quad-tri-depth",
+  "title": "GS-bypass regression gate (NATIVE_QUAD + NATIVE_TRI_DEPTH equivalence + path-activation assertion)",
+  "purpose": "Render three stripe-passes per frame -- PASS 1 OP_QUADS SMOOTH (top half, 12 cells, engages NATIVE_QUAD), PASS 2 OP_TRIANGLES SMOOTH (bottom half rows 0-1, 8 cells, engages NATIVE_TRI_DEPTH smooth path), PASS 3 OP_TRIANGLES FLAT FLAT_SHADE_OP=VERTEX_FIRST (bottom half row 2, 4 cells, engages NATIVE_TRI_DEPTH first-provoking path with TL=EXPECTED + TR/BR/BL=BLACK distractors). Math-derived expected output is the same 4x3 saturated 0/255 RGB grid in both halves: any divergence catches NATIVE_QUAD CPU-triangulation bugs, smooth interpolation bugs, per-fragment depth-path leakage into color, or NATIVE_TRI_DEPTH's first-provoking selection picking the wrong vertex. Pixel-equivalence alone cannot prove the bypass engaged -- a silent GS fallback also produces correct pixels -- so the harness also enforces required_counters_min on NATIVE_QUAD_DRAW + the per-stripe-specific NATIVE_TRI_DEPTH_DRAW_SMOOTH and NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST counters (the aggregate counters are NOT asserted because one pass alone would satisfy them and mask a regression in the other -- Codex 2026-05-20 finding). Counter thresholds (>=100 each) sit well below the ~300 draws-per-counter-per-renderer this XBE emits over its 300-frame render loop. FLAT-shaded OP_QUADS is intentionally NOT tested here -- it exposed a real Metal renderer gap (no GS, no manual CPU flat-color propagation) during initial validation; that coverage is deferred to a follow-up XBE plus a tracked renderer slice. Pure 0/255 RGB so byte-exact across renderers regardless of display gamma. compare_overrides are tightened below one-cell size (cells are 160x80 = 4.17% of frame; max_changed_pct=3.5 + min_signal_match_pct=97.0 leaves ~1.5%/~1.16% headroom above the measured ~2% boundary-AA budget so a whole-cell regression cannot pass -- Codex 2026-05-20 evening, late changes-mode finding #1).",
+  "catalog_ref": "§B.1, §C.5, §K.1, §K.2, §3a.1",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\native-quad-tri-depth-capture.bin",
+      "ftp_path": "/E/Apps/native-quad-tri-depth/native-quad-tri-depth-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\native-quad-tri-depth-done.txt",
+      "ftp_path": "/E/Apps/native-quad-tri-depth/native-quad-tri-depth-done.txt"
+    }
+  },
+  "required_counters_min": {
+    "gl": {
+      "NATIVE_QUAD_DRAW": 100,
+      "NATIVE_TRI_DEPTH_DRAW_SMOOTH": 100,
+      "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST": 100
+    },
+    "metal": {
+      "METAL_NATIVE_QUAD_DRAWS": 100,
+      "NATIVE_TRI_DEPTH_DRAW_SMOOTH": 100,
+      "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST": 100
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.5,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

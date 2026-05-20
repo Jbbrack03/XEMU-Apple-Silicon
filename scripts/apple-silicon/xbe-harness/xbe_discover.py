@@ -43,6 +43,35 @@ class XbeManifest:
     # publish paths the XBE distinguishes (the canonical recipe
     # already covers fallback=1).
     additional_metal_recipes: List[dict] = field(default_factory=list)
+    # Optional per-renderer min-counter assertion. Schema:
+    #
+    #   {"gl":    {"NATIVE_QUAD_DRAW": 100, ...},
+    #    "metal": {"METAL_NATIVE_QUAD_DRAWS": 100, ...}}
+    #
+    # After a run on a given renderer, the harness sums the named
+    # `xemu-perf:` counters across every interval in xemu.log; the
+    # cell PASSes only if every named counter accumulated >= the
+    # declared minimum. real-Xbox cells skip this assertion (no
+    # xemu.log). Used by `native-quad-tri-depth` to prove that
+    # NATIVE_QUAD / NATIVE_TRI_DEPTH bypass paths actually engaged
+    # (pixel-only oracles can't distinguish that from a silent GS
+    # fallback). See diagnostic-xbe-plan.md v2 §4.5 + xbe-harness
+    # README "Counter-based path-activation assertion".
+    required_counters_min: Dict[str, Dict[str, int]] = field(
+        default_factory=dict)
+    # Optional per-XBE pixel-compare gate overrides. Schema:
+    #
+    #   {"threshold":            <int>,   # per-channel byte threshold
+    #    "max_changed_pct":      <float>, # max changed pixels percent
+    #    "min_signal_match_pct": <float>} # min reference-non-black match
+    #
+    # Defaults (when key absent): use the CLI-supplied --threshold /
+    # --max-changed-pct and the harness default min_signal_match_pct=99.0.
+    # Used by grid-pattern XBEs (e.g. `native-quad-tri-depth`) whose
+    # many internal cell-edges produce more retina-downsample AA
+    # boundary pixels than the strict defaults tuned for sparse-signal
+    # XBEs (mirror / depth-floor / crtc-publish) accept.
+    compare_overrides: Dict[str, float] = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
     dir: Path = field(default=Path("."))
 
@@ -117,6 +146,17 @@ def _from_dict(data: dict, d: Path) -> XbeManifest:
         real_xbox_only=bool(data.get("real_xbox_only", False)),
         additional_metal_recipes=list(
             data.get("additional_metal_recipes", [])),
+        required_counters_min={
+            str(renderer): {
+                str(name): int(min_val) for name, min_val in counters.items()
+            }
+            for renderer, counters in
+            data.get("required_counters_min", {}).items()
+        },
+        compare_overrides={
+            str(k): float(v) for k, v in
+            data.get("compare_overrides", {}).items()
+        },
         raw=data,
         dir=d,
     )

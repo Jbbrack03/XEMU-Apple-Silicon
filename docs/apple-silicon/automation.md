@@ -1,11 +1,19 @@
 # Benchmark Automation
 
-Last updated: 2026-05-20 (evening, late) (xbe-harness composite-
-score frame selector + `additional_metal_recipes` first-class
-multi-recipe cells; 5 of 16 first-wave Tier-1 XBEs now PASS on
-xemu-Metal — `pipeline-smoke`, `mirror`, `color-channel`,
-`depth-floor`, and the new `crtc-publish` with both
-`XEMU_METAL_FRONT_FB_FALLBACK` legs.)
+Last updated: 2026-05-20 (evening, +3 XBEs) (Tier-1 XBE library:
+7 of 16 first-wave PASS on xemu-Metal — `pipeline-smoke`,
+`mirror`, `color-channel`, `depth-floor`, `crtc-publish`,
+`native-quad-tri-depth`, `cmp-vertex-format`. 2 of 16 ship as
+`expected_fail` with documented Metal renderer regression targets:
+`stencil-ops` (4 of 8 ops broken — task #14) and `logic-ops`
+(neither GL nor Metal implements logic ops). New xbe-harness
+manifest fields: `required_counters_min` (xemu-perf counter-sum
+gate), `compare_overrides` (per-XBE pixel tolerance applied to
+both selection AND final gate so they share the same tolerance
+model), and `expected_fail_renderers` wiring through the
+orchestrator status rollup. Metal renderer now contributes to
+per-mode `NATIVE_TRI_DEPTH_DRAW_{SMOOTH,FLAT_FIRST}` shared
+NV2A_PROF counters mirroring `gl/draw.c:422-428`.)
 
 Pre-2026-05-20 banner preserved below.
 
@@ -2013,7 +2021,16 @@ threshold. Exit code reflects whether the candidate regresses.
 - `NATIVE_TRI_DEPTH_DRAW_SMOOTH` / `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST`: native
   draws split by shading/provoking-vertex coverage. Flat-shaded draws are
   allowed on the native path only when NV2A is using first-provoking-vertex
-  mode, which matches the OpenGL path's `GL_FIRST_VERTEX_CONVENTION`.
+  mode, which matches the OpenGL path's `GL_FIRST_VERTEX_CONVENTION`. Both
+  counters are renderer-shared `NV2A_PROF_*` profile counters incremented by
+  the GL renderer (`gl/draw.c:422-428`) AND, since 2026-05-20 evening (late),
+  by the Metal renderer (`mtl/renderer.c` immediately after the aggregate
+  `NATIVE_TRI_DEPTH_DRAW`) so the diag-XBE library can discriminate the two
+  native-tri paths via xemu-perf alone without a Metal-specific counter. The
+  `native-quad-tri-depth` Tier-1 XBE (§4.5 of `diagnostic-xbe-plan.md`)
+  asserts both counters > 0 via its `required_counters_min` to prove BOTH
+  the SMOOTH and FLAT_FIRST native-tri-depth paths actually engaged rather
+  than silently falling back to the geometry shader.
 - `NATIVE_TRI_DEPTH_FALLBACK_FLAT` / `NATIVE_TRI_DEPTH_FALLBACK_FLAT_NONFIRST`:
   native-path attempts that stayed on geometry shaders because flat shading is
   still outside the validated native path.

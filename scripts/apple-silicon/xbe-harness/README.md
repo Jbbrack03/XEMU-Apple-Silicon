@@ -131,6 +131,84 @@ PNG (either `real-xbox-capture` from
    140 to tolerate BOX-downsample boundary AA). See
    `xbe_compare.compare`.
 
+### Counter-based path-activation assertion (required_counters_min)
+
+A manifest may declare per-renderer min-counter thresholds. Choose
+counters that uniquely correspond to the code paths under test —
+aggregate `NATIVE_TRI_DEPTH_DRAW` / `METAL_NATIVE_TRI_DEPTH_DRAWS` are
+**insufficient** for multi-path gates (e.g. `native-quad-tri-depth`'s
+SMOOTH and FLAT_FIRST stripes) because one stripe alone would trivially
+satisfy the aggregate min and mask a regression in the other path. The
+GL counter set + the shared `NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_SMOOTH` /
+`NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST` profile counters (also
+incremented by the Metal renderer since 2026-05-20 evening) let a
+manifest gate each provoking-vertex variant independently:
+
+```json
+"required_counters_min": {
+  "gl": {
+    "NATIVE_QUAD_DRAW": 100,
+    "NATIVE_TRI_DEPTH_DRAW_SMOOTH": 100,
+    "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST": 100
+  },
+  "metal": {
+    "METAL_NATIVE_QUAD_DRAWS": 100,
+    "NATIVE_TRI_DEPTH_DRAW_SMOOTH": 100,
+    "NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST": 100
+  }
+}
+```
+
+For a single-path XBE the aggregate counters are fine; the rule of
+thumb is "every distinct path the XBE exercises gets its own counter
+key."
+
+After each cell runs, the harness reads `xemu-perf:` interval lines
+from `cell_dir/xemu.log`, sums every named counter across all
+intervals, and gates the cell PASS on every counter meeting its
+declared min in addition to the pixel oracle. real-Xbox cells skip
+this assertion (xemu counters don't apply on real hardware) and
+manifests that don't declare a per-renderer block skip silently.
+
+Used by `native-quad-tri-depth` to prove that the `XEMU_NATIVE_QUAD`
+and `XEMU_NATIVE_TRI_DEPTH` bypass paths actually engaged. The
+pixel oracle alone cannot distinguish "bypass engaged correctly"
+from "bypass silently fell back to the geometry shader" — both
+paint the same uniform-color cells. The counter assertion closes
+that loophole (Codex 2026-05-20 evening finding).
+
+Each cell's verdict in `summary.json` carries a `counter_assertion`
+key with the observed sums, the declared mins, the number of
+intervals parsed, and a one-line note explaining any shortfall.
+The markdown report also surfaces a compact `counters: pass/fail
+(KEY=sum/req, ...)` line per non-skipped cell.
+
+### Per-XBE compare overrides (compare_overrides)
+
+A manifest may relax (or tighten) the pixel-compare gate per XBE:
+
+```json
+"compare_overrides": {
+  "threshold": 8,
+  "max_changed_pct": 5.0,
+  "min_signal_match_pct": 95.0
+}
+```
+
+The override applies to BOTH the candidate-frame selection
+(`frame_quality_score` uses the overridden threshold) and the final
+PASS/FAIL gate (`compare(...)` uses all three). This keeps the
+"best frame" definition consistent with the gate that ultimately
+accepts or rejects it.
+
+Used by grid-pattern XBEs (e.g. `native-quad-tri-depth`'s 4×3-cell
+layout per half) whose many internal cell boundaries produce more
+retina-downsample AA boundary pixels than the strict defaults tuned
+for sparse-signal XBEs (`mirror`, `crtc-publish`, `depth-floor`,
+`color-channel`). When overrides apply, the report's per-cell
+artifacts line surfaces them explicitly so reviewers don't read the
+header's CLI threshold as the active gate.
+
 ### Multi-recipe cells (additional_metal_recipes)
 
 A manifest can declare `additional_metal_recipes`:

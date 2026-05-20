@@ -259,16 +259,51 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
                         # `benchmark-runs/xbe-rotation-fix-20260520T*Z/`
                         # where dashboard frames had sig=100, tot=0.01
                         # while real mirror frames had sig=75, tot=99.99.
+                        # Compute effective compare params here so frame
+                        # selection and the final gate evaluate frames
+                        # under the SAME tolerance model. Without this,
+                        # a grid-pattern XBE that relaxes max_changed_pct
+                        # via manifest could see frame_quality_score
+                        # pick a frame that's "best" under the strict
+                        # global threshold but worse under the manifest's
+                        # effective gate (Codex 2026-05-20 evening, late
+                        # changes-mode finding #1).
+                        cmp_threshold = int(
+                            m.compare_overrides.get(
+                                "threshold", threshold))
+                        cmp_max_changed = float(
+                            m.compare_overrides.get(
+                                "max_changed_pct", max_changed_pct))
+                        cmp_signal_min = float(
+                            m.compare_overrides.get(
+                                "min_signal_match_pct", 99.0))
+                        if m.compare_overrides:
+                            cell["compare_overrides_applied"] = dict(
+                                m.compare_overrides)
+
                         best_score = -1.0
                         best_signal = -1.0
                         best_total = -1.0
                         best_path: Optional[str] = None
                         n_comparable = 0
                         for cand in candidates:
+                            # Selection and final gate share the same
+                            # effective threshold so the "best" frame
+                            # is the best frame under the gate that
+                            # ultimately accepts it (Codex 2026-05-20
+                            # evening, latest changes-mode finding #1).
+                            # Previously the selector clamped to
+                            # max(threshold, 16) as boundary-AA
+                            # tolerance, but that diverged from the
+                            # final compare's stricter manifest-
+                            # supplied threshold (e.g. cmp-vertex-
+                            # format sets threshold=2 to crisp the
+                            # saturated-corner reads; selection under
+                            # 16 would have masked that intent).
                             sig_pct, tot_pct, _notes = (
                                 xbe_compare.frame_quality_score(
                                     Path(cand), ref_png,
-                                    threshold=max(threshold, 16)))
+                                    threshold=cmp_threshold))
                             # Skip non-comparable frames. `frame_quality_score`
                             # returns (-1.0, -1.0, reason) on size-mismatch
                             # or unexpected byte counts. Without this filter,
@@ -298,22 +333,96 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
                         else:
                             # Re-run the compare with the chosen frame for
                             # the canonical artifact dir + final gate.
+                            # Effective compare params were computed
+                            # before the selection loop so they're
+                            # consistent across both stages.
                             cell["captured_png"] = best_path
                             verdict = xbe_compare.compare(
                                 Path(best_path), ref_png,
                                 out_dir=cell_dir / "compare",
-                                crop=crop, threshold=threshold,
-                                max_changed_pct=max_changed_pct,
+                                crop=crop, threshold=cmp_threshold,
+                                max_changed_pct=cmp_max_changed,
+                                min_signal_match_pct=cmp_signal_min,
                             )
                             cell["verdict"] = verdict.as_dict()
                             cell["best_frame_count"] = len(candidates)
                             cell["best_frame_signal_match_pct"] = best_signal
                             cell["best_frame_total_match_pct"] = best_total
                             cell["status"] = verdict.status
+                            # Optional counter-assertion gate (rule:
+                            # pixel oracle alone can't prove the
+                            # bypass actually engaged -- a silent GS
+                            # fall-through also paints correct pixels).
+                            # When the manifest declares
+                            # required_counters_min for this renderer
+                            # we sum the named xemu-perf counters from
+                            # cell_dir/xemu.log and combine the gate
+                            # with the pixel verdict: cell passes only
+                            # if BOTH the pixel compare AND every
+                            # required counter meet their min. Missing
+                            # required_counters_min skips the assertion
+                            # silently (most XBEs don't need it).
+                            counter_assertion = (
+                                xbe_compare.assert_required_counters(
+                                    m, renderer, cell_dir / "xemu.log"))
+                            cell["counter_assertion"] = (
+                                counter_assertion.as_dict())
+                            if (counter_assertion.status == "fail" and
+                                    cell["status"] == "pass"):
+                                cell["status"] = "fail"
+                                add_note = ("counter-assertion: "
+                                            + counter_assertion.notes)
+                                cell["notes"] = (
+                                    cell["notes"] + " | " + add_note
+                                    if cell["notes"] else add_note)
+                            elif counter_assertion.status == "infra-error":
+                                # Hard-fail an infra-error in counter
+                                # check only when the manifest actually
+                                # declared a requirement for this
+                                # renderer (the helper's
+                                # required_min field captures that:
+                                # empty dict means 'skipped').
+                                if counter_assertion.required_min:
+                                    cell["status"] = "infra-error"
+                                    add_note = ("counter-assertion: "
+                                                + counter_assertion.notes)
+                                    cell["notes"] = (
+                                        cell["notes"] + " | " + add_note
+                                        if cell["notes"] else add_note)
                     except (KeyError, FileNotFoundError, ValueError) as e:
                         cell["status"] = "infra-error"
                         cell["notes"] = (cell["notes"] + " | " if cell["notes"]
                                          else "") + f"reference: {e}"
+                # expected_fail_renderers: a cell that FAILs on a renderer
+                # the manifest explicitly declares as expected-fail is
+                # recorded as `expected_fail` (not `fail`) so the matrix
+                # accurately reflects what is and isn't a regression.
+                # Manifest entries match by either the bare renderer name
+                # ("metal") OR the legacy xemu/<r> prefix ("xemu/metal")
+                # used in §4.14 logic-ops style declarations.
+                #
+                # Gate: only downgrade post-compare *semantic* mismatches.
+                # `run.status == "ok"` rules out pre-compare driver/infra
+                # failures (e.g. xbe_renderers:304 RunResult("fail",
+                # "no-screenshot-captured") when the renderer crashes or
+                # the harness loses the capture). A
+                # `expected_fail_renderers: ["metal"]` XBE that stops
+                # producing screenshots on Metal would otherwise mask a
+                # broken harness/run path as "expected_fail" and keep
+                # the rotation green (Codex 2026-05-20 evening, late
+                # changes-mode finding #2). Pre-compare failures stay
+                # `fail`/`infra-error` so they surface as regressions.
+                if cell["status"] == "fail" and run.status == "ok":
+                    norm = renderer.lower()
+                    fail_set = {s.lower() for s in m.expected_fail_renderers}
+                    if (norm in fail_set or f"xemu/{norm}" in fail_set):
+                        cell["status"] = "expected_fail"
+                        add_note = (
+                            f"manifest expected_fail for {norm}: regression "
+                            f"target documented, does not gate rotation")
+                        cell["notes"] = (
+                            cell["notes"] + " | " + add_note
+                            if cell["notes"] else add_note)
                 report["results"].append(cell)
                 print(f"[xbe-harness]   → {cell['status']} "
                       f"({cell.get('notes', '')})",
@@ -456,6 +565,27 @@ def _format_report_md(report: dict) -> str:
             if "verdict" in c:
                 lines.append(f"  - reference: `{c['verdict']['reference']}`")
                 lines.append(f"  - compare-out: `{c['verdict']['out_dir']}`")
+            overrides = c.get("compare_overrides_applied")
+            if overrides:
+                # Surface the effective per-cell compare gate when the
+                # manifest relaxed (or tightened) it; otherwise the
+                # global CLI threshold shown in the header is the only
+                # signal a reviewer sees, which can imply a cell passed
+                # under stricter rules than were actually applied.
+                pairs = ", ".join(f"{k}={v}" for k, v in overrides.items())
+                lines.append(
+                    f"  - compare-overrides: {pairs} (per-XBE manifest)")
+            ca = c.get("counter_assertion")
+            if ca and ca.get("status") not in (None, "skipped"):
+                # Compact one-line summary so the report stays
+                # scannable. Full sums are in summary.json.
+                sums = ca.get("sums", {})
+                req = ca.get("required_min", {})
+                pairs = ", ".join(
+                    f"{k}={sums.get(k,0)}/{req.get(k,0)}" for k in req)
+                lines.append(
+                    f"  - counters: {ca['status']} ({pairs})"
+                    + (f" — {ca['notes']}" if ca.get('notes') else ""))
     return "\n".join(lines) + "\n"
 
 
@@ -541,13 +671,21 @@ def cmd_run(args) -> int:
                      upload_xbe=not args.no_upload)
     pass_count = sum(1 for c in rep["results"] if c["status"] == "pass")
     fail_count = sum(1 for c in rep["results"] if c["status"] == "fail")
+    expected_fail_count = sum(
+        1 for c in rep["results"] if c["status"] == "expected_fail")
     skip_count = sum(1 for c in rep["results"] if c["status"] == "skip")
     err_count = sum(1 for c in rep["results"]
-                    if c["status"] not in ("pass", "fail", "skip"))
-    print(f"[xbe-harness] {pass_count} pass, {fail_count} fail, "
-          f"{skip_count} skip, {err_count} infra-error", flush=True)
+                    if c["status"] not in
+                    ("pass", "fail", "expected_fail", "skip"))
+    summary = (f"[xbe-harness] {pass_count} pass, {fail_count} fail, "
+               f"{skip_count} skip, {err_count} infra-error")
+    if expected_fail_count:
+        summary += f", {expected_fail_count} expected_fail"
+    print(summary, flush=True)
     print(f"[xbe-harness] report: {out_root}/report.md", flush=True)
-    # Skips are not-applicable, not failures.
+    # Skips and expected_fail are not real failures: skip = "not
+    # applicable to this cell", expected_fail = "manifest-declared
+    # known regression target, doesn't gate rotation".
     return 0 if fail_count == 0 and err_count == 0 else 1
 
 

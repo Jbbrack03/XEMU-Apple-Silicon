@@ -9,17 +9,23 @@ helpers for:
     from manifest.expected_results (real-xbox > math-derived).
   - Decoding XOSS captures pulled from the real Xbox into PNGs the
     compare script understands.
+  - Parsing `xemu-perf:` interval lines from xemu.log to assert
+    that a manifest's declared min counters actually accumulated
+    on the renderer under test (e.g. NATIVE_QUAD_DRAW > 0 to prove
+    a GS bypass actually engaged; pixel-only oracles can't tell
+    that from a silent fall-through).
 """
 from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import struct
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from xbe_discover import XbeManifest
 
@@ -421,3 +427,125 @@ def _parse_changed_pct(stdout: str) -> Optional[float]:
             except ValueError:
                 return None
     return None
+
+
+# ---------- xemu-perf counter parsing + assertion ----------
+
+# `xemu-perf: interval_id=N ...` interval lines carry space-separated
+# KEY=VALUE pairs. The orchestrator's run sets XEMU_PERF_LOG=1 +
+# XEMU_PERF_LOG_INTERVAL_MS=1000, so a 5 s diag-XBE run produces ~5
+# interval lines per renderer. We sum per-counter across every
+# interval and assert against manifest.required_counters_min.
+_PERF_LINE_PREFIX = "xemu-perf: interval_id="
+_PERF_KV_RE = re.compile(r"(\w+)=([0-9]+)\b")
+
+
+@dataclass
+class CounterAssertion:
+    status: str                       # "pass" | "fail" | "infra-error" | "skipped"
+    sums: Dict[str, int]              # observed counter sums (only required-keys)
+    required_min: Dict[str, int]      # what the manifest required
+    intervals_seen: int               # number of xemu-perf interval lines parsed
+    notes: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "sums": dict(self.sums),
+            "required_min": dict(self.required_min),
+            "intervals_seen": self.intervals_seen,
+            "notes": self.notes,
+        }
+
+
+def parse_perf_counter_sums(log_path: Path,
+                            counter_names: List[str]) -> Tuple[Dict[str, int], int]:
+    """Return (per-counter-sum-dict, n_intervals_parsed) for the given
+    counter names by walking `log_path` line-by-line and summing any
+    `KEY=integer` matches whose KEY is in `counter_names`.
+
+    Skips non-interval xemu-perf lines (the orchestrator's setup
+    emits `xemu-perf: metal_screenshot ...`-style banner lines too).
+    Returns 0-sums for keys never observed; callers that need
+    "was the counter ever named at all" distinguish via a None sum.
+    """
+    wanted = set(counter_names)
+    sums: Dict[str, int] = {k: 0 for k in wanted}
+    n_intervals = 0
+    if not log_path.exists():
+        return sums, 0
+    with log_path.open("rb") as fh:
+        for raw in fh:
+            try:
+                line = raw.decode(errors="replace")
+            except Exception:
+                continue
+            if _PERF_LINE_PREFIX not in line:
+                continue
+            n_intervals += 1
+            # Walk KEY=VALUE matches; only sum integer-valued KEYs
+            # we care about (counter values are non-negative integers
+            # in the xemu-perf interval-line format).
+            for m in _PERF_KV_RE.finditer(line):
+                key, val = m.group(1), m.group(2)
+                if key in wanted:
+                    try:
+                        sums[key] += int(val)
+                    except ValueError:
+                        pass
+    return sums, n_intervals
+
+
+def assert_required_counters(manifest: XbeManifest, renderer: str,
+                             log_path: Path) -> CounterAssertion:
+    """Per-renderer counter-assertion gate. Reads the renderer's
+    declaration in `manifest.required_counters_min` (key is the
+    renderer name lowercased, e.g. 'gl' / 'metal'), sums the named
+    counters across all xemu-perf interval lines in `log_path`, and
+    returns CounterAssertion(status='pass'|'fail'|'skipped'|'infra-error').
+
+    Behavior matrix:
+      - Manifest has no required_counters_min for this renderer
+          → status='skipped' (no assertion declared; pixel oracle alone).
+      - Renderer is real-xbox (no xemu.log)
+          → status='skipped' (xemu counters don't apply on real HW).
+      - log_path doesn't exist or has 0 interval lines
+          → status='infra-error'.
+      - All required counters meet their min
+          → status='pass'.
+      - Any required counter falls below its declared min
+          → status='fail' with notes naming the shortfall.
+
+    The orchestrator combines this verdict with the pixel-compare
+    verdict to produce the final cell PASS/FAIL.
+    """
+    r = renderer.lower()
+    if r in ("real-xbox", "real_xbox", "xbox"):
+        return CounterAssertion(
+            status="skipped", sums={}, required_min={}, intervals_seen=0,
+            notes="real-xbox cell: xemu counters do not apply")
+    required = manifest.required_counters_min.get(r) or {}
+    if not required:
+        return CounterAssertion(
+            status="skipped", sums={}, required_min={}, intervals_seen=0,
+            notes=f"manifest declares no required_counters_min for {r}")
+    sums, n_intervals = parse_perf_counter_sums(
+        log_path, list(required.keys()))
+    if n_intervals == 0:
+        return CounterAssertion(
+            status="infra-error", sums=sums, required_min=dict(required),
+            intervals_seen=0,
+            notes=f"no xemu-perf interval lines in {log_path}")
+    shortfalls = [
+        f"{k}={sums.get(k, 0)} < required {required[k]}"
+        for k in required
+        if sums.get(k, 0) < required[k]
+    ]
+    if shortfalls:
+        return CounterAssertion(
+            status="fail", sums=sums, required_min=dict(required),
+            intervals_seen=n_intervals,
+            notes="; ".join(shortfalls))
+    return CounterAssertion(
+        status="pass", sums=sums, required_min=dict(required),
+        intervals_seen=n_intervals)

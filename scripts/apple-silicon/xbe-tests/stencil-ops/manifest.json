@@ -1,0 +1,41 @@
+{
+  "id": "stencil-ops",
+  "title": "8 stencil-op color-probe oracle",
+  "purpose": "Render an 8-cell 4x2 grid where each cell exercises one of the 8 NV2A stencil ops (KEEP/ZERO/REPLACE/INCRSAT/DECRSAT/INVERT/INCR/DECR). Per cell: clear stencil to 0x80, render an op-pass quad (color=BLACK, stencil func=ALWAYS, op applied to FAIL/ZFAIL/ZPASS, ref=0x40), then a probe quad with stencil func=EQUAL+ref=<expected post-op value>. The probe paints the cell's expected color (one of the 7 saturated RGB cube corners avoiding BLACK) when the post-op stencil matches the spec; if the op was mis-implemented the cell stays BLACK. Pure 0/255 RGB so byte-exact across renderers regardless of display gamma. v1 plan's Tier-2 readback proposal was rejected (Codex finding #7) because Metal's surface-download path skips the stencil aspect; this color-probe redesign keeps the verdict inside the visible drawable. Per the §4.10 spec, the chosen initial stencil 0x80 is intentionally in the no-overflow region for INCRSAT/DECRSAT/INCR/DECR; a separate XBE will exercise the saturation boundary at 0xFF/0x00. **FIRST RUN ON METAL (2026-05-20 evening, latest): exposed a real Metal stencil-op correctness gap.** Cells KEEP, INCRSAT, DECRSAT, DECR rendered BLACK on Metal; ZERO, REPLACE, INVERT, INCR rendered correctly. Marked expected_fail on Metal pending the renderer fix (task tracked outside this manifest). GL and real-Xbox cells are expected to PASS unchanged. When the Metal fix lands, remove `metal` from expected_fail_renderers.",
+  "catalog_ref": "§G.4, §G.2, §G.3, §H.5",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\stencil-ops-capture.bin",
+      "ftp_path": "/E/Apps/stencil-ops/stencil-ops-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\stencil-ops-done.txt",
+      "ftp_path": "/E/Apps/stencil-ops/stencil-ops-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 96.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["metal"]
+}

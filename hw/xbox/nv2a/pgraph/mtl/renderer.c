@@ -1731,6 +1731,20 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         if (native_tri) {
             nv2a_profile_inc_counter(NV2A_PROF_NATIVE_TRI_DEPTH_DRAW);
             pgraph_mtl_draw_inc_native_tri_depth_count();
+            /* Per-mode breakdown mirrors gl/draw.c:422-428. Lets a
+             * test (the native-quad-tri-depth XBE) assert that the
+             * specific provoking-vertex path engaged, not just the
+             * aggregate. Eligibility requires either smooth_shading
+             * OR (flat AND first_vertex_is_provoking) per
+             * glsl/geom.c:156, so the second branch always covers
+             * the flat case for an eligible native-tri draw. */
+            if (pg->smooth_shading) {
+                nv2a_profile_inc_counter(
+                    NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_SMOOTH);
+            } else if (pg->first_vertex_is_provoking) {
+                nv2a_profile_inc_counter(
+                    NV2A_PROF_NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST);
+            }
         }
         if (native_quad) {
             nv2a_profile_inc_counter(NV2A_PROF_NATIVE_QUAD_DRAW);

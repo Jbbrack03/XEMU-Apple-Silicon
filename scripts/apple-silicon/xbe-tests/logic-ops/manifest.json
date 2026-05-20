@@ -1,0 +1,41 @@
+{
+  "id": "logic-ops",
+  "title": "16 NV2A color logic-op spec oracle (expected_fail Metal+GL)",
+  "purpose": "Render a 4x4 grid where each cell exercises one of the 16 NV2A color logic ops (CLEAR / AND / AND_REVERSE / COPY / AND_INVERTED / NOOP / XOR / OR / NOR / EQUIV / INVERT / OR_REVERSE / COPY_INVERTED / OR_INVERTED / NAND / SET). DST=mid-gray 0x808080 (uniform clear), SRC=(0x40, 0xC0, 0x80) with intentionally varied per-channel bit patterns. Expected per-channel = src <op> dst computed bitwise. Real Xbox hardware expected to PASS; xemu-GL and xemu-Metal do NOT implement logic ops (both treat the ROP as COPY regardless of NV2A_SET_LOGIC_OP_* per Codex 2026-05-20 confirmation), so both renderers are declared expected_fail in this manifest. The harness records those cells as 'expected_fail' (not 'fail') so the rotation isn't gated. This XBE serves as the SPEC for what each renderer needs when logic-op support is implemented; when the renderer-side fix lands, remove the entry from expected_fail_renderers.",
+  "catalog_ref": "§F.4, §3b.3, §H.5",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\logic-ops-capture.bin",
+      "ftp_path": "/E/Apps/logic-ops/logic-ops-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\logic-ops-done.txt",
+      "ftp_path": "/E/Apps/logic-ops/logic-ops-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 5.0,
+    "min_signal_match_pct": 95.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["metal", "gl"]
+}

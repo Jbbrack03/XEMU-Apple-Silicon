@@ -6,18 +6,39 @@
 > `CLAUDE.md` rule #17, per-feature XBE correctness against this library
 > is the primary loop. The §7 Phase 5 framing ("All N XBEs PASS on Metal"
 > replaces "≤1% per-pixel diff vs GL") is now the M15 default-on gate.
-> 5 of 16 first-wave XBEs are passing on Metal as of 2026-05-20 evening
-> (`pipeline-smoke`, `mirror`, `color-channel`, `depth-floor`, and the
-> newly shipped `crtc-publish` with two recipe variants); 11 remain
-> plus the second-wave catalog. The retail-title oracle is the final
+> 7 of 17 first-wave XBEs are passing on Metal as of 2026-05-20
+> evening (`pipeline-smoke` Tier-4 plus §4.1 `mirror`, §4.2
+> `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
+> §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`);
+> 2 of 17 ship as `expected_fail` with documented Metal-renderer
+> regression targets (`stencil-ops` §4.10 — 4-of-8 stencil ops
+> broken, task #14; `logic-ops` §4.14 — no GL or Metal logic-op
+> support, feature work). 8 unstarted: §4.7 `texture-format-sweep`,
+> §4.8 `swizzle-mipmap`, §4.9 `blend-matrix`, §4.11
+> `texture-filter-wrap`, §4.12 `combiner-basic`, §4.13
+> `texture-shader-stages`, §4.15 `msaa-aa-factor`, §4.16
+> `texture-dma-ab`. The texture/combiner cluster shares
+> infrastructure and warrants an `xbed_lib` extension slice
+> before authoring. The retail-title oracle is the final
 > acceptance gate, not a development driver.
 
-Last updated: 2026-05-20 (evening, late) — §4.4 `crtc-publish`
-rewritten to match the shipped solid-color / dominant-draw design;
-header status counter updated to 5 of 16 first-wave PASS.
+Last updated: 2026-05-20 (evening, +3 XBEs) — §4.5
+`native-quad-tri-depth` shipped (three-pass design + new manifest
+fields `required_counters_min` + `compare_overrides` + Metal-side
+per-mode native-tri counter increments in `mtl/renderer.c`); §4.6
+`cmp-vertex-format` shipped (endpoint-only ±1 corners, narrowed
+from the original (normal+1)*0.5 spec); §4.10 `stencil-ops`
+shipped as `expected_fail` on Metal with documented 4-of-8
+stencil-op gap (task #14); §4.14 `logic-ops` shipped as
+`expected_fail` on both Metal and GL (neither implements logic
+ops). New harness wiring `expected_fail_renderers` so the
+rotation distinguishes manifest-declared known regressions from
+real failures. Header status counter: 7 of 17 first-wave PASS,
+2 of 17 expected_fail (renderer regression targets documented).
 Status: SHIPPING. Plan was originally PLANNING (Codex-revalidated
-post-v2 2026-05-06); first 5 of 16 first-wave XBEs are now green on
-xemu-Metal and feeding the regression rotation.
+post-v2 2026-05-06); 7 of 17 first-wave XBEs are now green on
+xemu-Metal and feeding the regression rotation; 2 more are in
+the rotation as expected_fail spec oracles.
 
 This plan supersedes v1 (committed d57742ef47) which Codex flagged
 BLOCKING because the v1 self-validation contract assumed CPU-side
@@ -604,12 +625,100 @@ uses host capture which sees the actual published frame.)
 
 **Catalog refs:** §B.1, §C.5, §K.1, §K.2.
 
-Render 4×3 grid of quads via `OP_QUADS` with mixed flat-shade
-provoking-vertex selection; render same grid via `OP_TRIANGLES`
-reference. Capture both; pairwise center-pixel match.
+Render three stripe-passes per frame:
+
+- **PASS 1** — top half, OP_QUADS, `SHADE_MODEL_SMOOTH`, 12 cells.
+  Engages `NATIVE_QUAD` (per `glsl/geom.c:162-197` — eligible for
+  smooth + FILL on both faces + QUADS/QUAD_STRIP). Every cell's 4
+  verts carry the same expected color so smooth interpolation
+  produces a uniform cell.
+- **PASS 2** — bottom half rows 0-1, OP_TRIANGLES,
+  `SHADE_MODEL_SMOOTH`, 8 cells. Engages `NATIVE_TRI_DEPTH`'s
+  smooth path (per `glsl/geom.c:135-160`). All 6 verts per cell
+  carry the same expected color.
+- **PASS 3** — bottom half row 2, OP_TRIANGLES, `SHADE_MODEL_FLAT`
+  + `FLAT_SHADE_OP=VERTEX_FIRST`, 4 cells. Engages
+  `NATIVE_TRI_DEPTH`'s first-provoking branch (per
+  `glsl/geom.c:156` — flat is eligible only when
+  `first_vertex_is_provoking`). Per-cell: TL=EXPECTED,
+  TR/BR/BL=BLACK distractor. Each emitted triangle's vertex 0 = TL
+  must propagate via the renderer's manual flat-color path.
+
+The math-derived expected output is the SAME 4×3 grid in both
+halves: each cell takes the same saturated 0/255-RGB color
+regardless of which pass produced it. Top-vs-bottom byte-equality
+is the pixel gate.
+
+**Not exercised** (deferred to a follow-up XBE
+`flat-quad-propagation` + a tracked Metal-renderer slice):
+FLAT-shaded OP_QUADS, where NV2A's quad rule fixes vertex 3 as
+the provoking vertex. `NATIVE_QUAD` is NOT eligible for flat-
+shaded quads (`glsl/geom.c:186`), and Apple Silicon Metal has no
+native geometry-shader stage (`shader_validation.c:206-228`,
+`state.h:29-32`). The first run of this XBE on Metal
+(2026-05-20 evening, late) included a FLAT-quad stripe and
+exposed Metal rendering it all-BLACK — a real correctness gap.
+That stripe has been removed from this XBE so it gates only what
+the renderer claims to support today, and the gap is filed as a
+tracked follow-up (decision-log "2026-05-20 (evening, late):
+native-quad-tri-depth XBE caught Metal FLAT-quad gap").
+
+The two halves are arranged so the math-derived expected output is
+the SAME 4×3 grid in both halves: each stripe's cells take the same
+saturated 0/255 RGB color in the same position, regardless of which
+path produced them. Top-vs-bottom byte-equality after the harness
+crops out the non-relevant non-cell pixels.
+
+**Path-activation assertion (mandatory, not just pixel match).**
+Pixel equivalence alone cannot prove the bypass actually engaged —
+a silent fall-back to the geometry shader can produce the same
+pixels. The manifest declares `required_counters_min` so the
+harness reads `xemu-perf:` interval lines from `xemu.log`, sums
+per-counter across intervals, and asserts BOTH a per-stripe-
+specific counter for the native_tri_depth path (so PASS 3 SMOOTH
+and PASS 4 FLAT_FIRST each contribute and a regression in only
+one path is caught):
+  - GL renderer: `NATIVE_QUAD_DRAW >= 100`,
+    `NATIVE_TRI_DEPTH_DRAW_SMOOTH >= 100`, AND
+    `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST >= 100`.
+  - Metal renderer: `METAL_NATIVE_QUAD_DRAWS >= 100`,
+    `NATIVE_TRI_DEPTH_DRAW_SMOOTH >= 100`, AND
+    `NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST >= 100`.
+
+  (The two `NATIVE_TRI_DEPTH_DRAW_{SMOOTH,FLAT_FIRST}` counters are
+  shared `NV2A_PROF_*` profile counters incremented by both the GL
+  and Metal renderers; the Metal renderer increment was added
+  2026-05-20 evening (late) to `mtl/renderer.c` mirroring
+  `gl/draw.c:422-428` so this XBE could discriminate the SMOOTH and
+  FLAT_FIRST native_tri paths via xemu-perf alone, without a Metal-
+  specific counter. The aggregate `METAL_NATIVE_TRI_DEPTH_DRAWS`
+  counter is intentionally NOT asserted: PASS 3 SMOOTH alone would
+  satisfy any aggregate threshold and mask a PASS 4 FLAT_FIRST
+  regression.)
+
+  - real-Xbox cell: no counter assertion (xemu counters don't apply).
+
+The 100-min thresholds are well below what the XBE produces over its
+300-frame render loop (one draw call per stripe per frame: 300
+`NATIVE_QUAD_DRAW`, ~300 `NATIVE_TRI_DEPTH_DRAW_SMOOTH`, ~300
+`NATIVE_TRI_DEPTH_DRAW_FLAT_FIRST` per renderer at 30+ fps). 100
+gives ~3× cushion against frame-rate slowdowns and harness early-
+termination.
 
 **Closed default-on flag regression gate:** `XEMU_NATIVE_QUAD`,
 `XEMU_NATIVE_TRI_DEPTH`.
+
+**Codex-validated 2026-05-20 evening (late).** Initial v0.1 spec
+("4×3 grid of quads with mixed flat-shade provoking-vertex
+selection; same grid via OP_TRIANGLES reference; pairwise center-
+pixel match") was Codex-flagged BLOCKING for two reasons: (a)
+uniform-per-cell vertex colors with SMOOTH shading make
+diagonal/provoking-vertex choice invisible, and (b) pixel-only
+oracle cannot distinguish "bypass engaged correctly" from "bypass
+silently fell back to GS." The spec above resolves both: the FLAT
+stripe makes provoking-vertex selection visible per primitive, and
+the `required_counters_min` mandate gates path activation
+quantitatively rather than only by visual equivalence.
 
 ### 4.6 `cmp-vertex-format` — packed (11,11,10) decoder (Tier 1)
 
@@ -618,9 +727,32 @@ reference. Capture both; pairwise center-pixel match.
 CMP layout (Codex-resolved per `vertex.c:56`): X bits 0-10, Y bits
 11-21, Z bits 22-31, signed normalized by 1023/1023/511.
 
-Construct CMP-encoded normals at known values; VS projects normal
-to color via `(normal+1)*0.5`; sample expected color per encoded
-input; tolerance ±1 LSB.
+**Shipped 2026-05-20 evening (+3 XBEs).** v1 specified a custom VS
+projecting normal to color via `(normal+1)*0.5` with ±1 LSB
+tolerance to cover intermediate normals. The shipped XBE
+deliberately narrows scope to the 8 ±1-corner CMP encodings —
+their decoded normals land at saturated [0, 1] after the
+framebuffer's natural clamp, producing the 8 corners of the RGB
+cube (RED / GREEN / BLUE / WHITE / YELLOW / CYAN / MAGENTA /
+BLACK) byte-exact across renderers with no display-gamma artifact.
+
+What this catches: bitfield-range / shift-offset bugs, sign-
+extension bugs (the BLACK -1/-1/-1 cell would decode positively
+without sign-extend and saturate to non-BLACK), component-ordering
+bugs (RED ↔ BLUE swap at asymmetric corners), and renderer-path
+divergence between GL's GLSL `bitfieldExtract` decoder
+(`vsh.c:203-208`) and Metal's CPU-side decoder in
+`mtl/vertex.c:130-157`.
+
+What this does NOT catch (fundamental byte-quantization limits,
+documented in the XBE source-file header): sub-LSB divisor errors
+(1023 vs 1024 at the max-positive encoding is ~0.25 LSB,
+invisible at 8-bit quantization) and missing decoder-side clamp of
+the slightly-out-of-range -1024/1023 ≈ -1.001 (the framebuffer's
+[0, 1] clamp subsumes it). Mid-range coverage with a custom
+`(normal+1)*0.5` VS — the original v1 design — remains queued as
+a second-wave follow-up. PASS on Metal verified at
+`/tmp/cmp-vertex-format-firstrun/`.
 
 ### 4.7 `texture-format-sweep` — full 42-code coverage (Tier 1)
 
