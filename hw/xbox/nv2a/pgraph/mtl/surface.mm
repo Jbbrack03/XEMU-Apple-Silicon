@@ -1620,6 +1620,32 @@ bool pgraph_mtl_surface_get_color_surface_info_for(uint32_t vram_addr,
     return true;
 }
 
+bool pgraph_mtl_surface_has_other_color_shape(uint32_t vram_addr,
+                                              uint32_t guest_width,
+                                              uint32_t guest_height,
+                                              uint32_t pitch)
+{
+    if (!s_initialized || guest_width == 0 || guest_height == 0) {
+        return false;
+    }
+
+    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
+        if (!e->is_color || e->vram_addr != vram_addr) {
+            continue;
+        }
+
+        uint32_t ew = e->guest_width ? e->guest_width : e->width;
+        uint32_t eh = e->guest_height ? e->guest_height : e->height;
+        bool same_shape = (ew == guest_width && eh == guest_height &&
+                           (pitch == 0 || e->pitch == pitch));
+        if (!same_shape) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 /* ---------------------------------------------------------------- */
 /* Legacy ensure-color/-depth wrappers. Used by the M2-era clear path
  * that does NOT have a vram_addr (e.g. when no NV097_SET_SURFACE_OFFSET
@@ -1885,16 +1911,20 @@ void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
  * (the present pipeline scales the texture to drawable extent
  * regardless of input dims).
  *
- * Returns true if a publish landed. Bumps METAL_FRONT_FB_PUBLISHES
- * with reason="fallback-dominant-draw". */
-bool pgraph_mtl_surface_publish_latest_draw_fallback(void)
+ * Returns true if a publish landed. Bumps METAL_FRONT_FB_PUBLISHES with
+ * reason="fallback-dominant-draw". */
+bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
+                                                     uint32_t display_height,
+                                                     uint32_t crtc_vram_addr)
 {
     if (!s_initialized) {
         return false;
     }
     MtlSurfaceBinding *e = s_fallback_draw_candidate;
+    const char *reason = "fallback-dominant-draw";
     if (e == NULL || e->texture == NULL) {
         e = s_color_binding;
+        reason = "fallback-current-binding";
     }
     if (e == NULL || e->texture == NULL) {
         fallback_draw_reset();
@@ -1905,15 +1935,17 @@ bool pgraph_mtl_surface_publish_latest_draw_fallback(void)
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_fallback_candidate "
                 "vram_addr=0x%x width=%u height=%u format=%u "
-                "color_draws=%u%s\n",
+                "color_draws=%u reason=%s%s\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)selected_count,
+                e->nv097_format, (unsigned)selected_count, reason,
                 (e == s_color_binding && s_fallback_draw_candidate == NULL)
                     ? " source=current-binding" : "");
     }
-    bool ok = publish_display_binding_front_fb(e, e->width, e->height,
-                                               e->pitch,
-                                               "fallback-dominant-draw");
+    uint32_t publish_width = display_width ? display_width : e->width;
+    uint32_t publish_height = display_height ? display_height : e->height;
+    bool ok = publish_display_binding_front_fb(e, publish_width,
+                                               publish_height, e->pitch,
+                                               reason);
     fallback_draw_reset();
     return ok;
 }

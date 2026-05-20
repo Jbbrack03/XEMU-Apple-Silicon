@@ -10,6 +10,15 @@ Headless Xbox, so dashboard temp readout isn't an option. Built
 oracle-agent v0.4 with new `smc.*` RPC surface (commit pending) to
 read SMC sensors and drive `FANMODE` / `FANSPEED` over TCP 9001.
 
+> Update 2026-05-19: this note is now the **pre-repaste baseline**, not
+> the current-state verdict. See
+> `2026-05-19-retail-oracle-post-repaste-thermal-check.md` for the
+> direct post-repaste recheck on the same v1.6 "P2L" Xbox. That recheck
+> measured 55-56 °C in both auto mode and a 7-minute fan=100% hold and
+> returned the retail oracle to service. The earlier "idle >45 °C by
+> itself proves a thermal fault on this board" interpretation is retired
+> pending any future external calibration.
+
 ## Headline finding
 
 **The fan is working but the thermal envelope is bad.** At Noctua-100%
@@ -135,7 +144,7 @@ the agent's last commanded fan mode/percent, and `fan_raw_rb`
 (commanded-PWM readback) in one line — designed for cheap polling
 loops over a long monitoring window.
 
-## Current state when leaving the session
+## Historical state when leaving the 2026-05-12 session
 
 Fan is at **manual 100%**. The auto-cleanup hook fires only on a
 deliberate `reboot` / `runxbe` through the agent; on a hard power
@@ -149,12 +158,10 @@ python3 scripts/apple-silicon/oracle-client.py raw unsafe.enable
 python3 scripts/apple-silicon/oracle-client.py raw smc.fan val=auto
 ```
 
-Do not run retail-oracle gameplay routes on this Xbox until the
-thermal envelope is resolved — at 57 °C idle, gaming load will push
-M/B temps into the 70-80 °C thermal-trip zone, killing capture runs
-mid-route. The Tier-3 OGX360 hardware bridge and the per-title
-patcher pipelines will continue to develop unblocked because they
-don't require this specific Xbox to be in a runnable state.
+This "do not run retail-oracle gameplay routes" conclusion was
+superseded by the 2026-05-19 post-repaste recheck. Keep this section
+as the historical pre-repaste snapshot only. Current availability is
+documented in `2026-05-19-retail-oracle-post-repaste-thermal-check.md`.
 
 ## Open questions / follow-ups
 

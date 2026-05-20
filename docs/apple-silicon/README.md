@@ -1,10 +1,16 @@
 # Apple Silicon Performance Fork
 
-Last updated: 2026-05-11 evening (PGR2 strict gameplay evidence attempt
-failed; Metal default-on is still blocked). The retail Xbox oracle is production-ready for the
-stable trio: Crimson Skies, Rainbow Six 3, and PGR2 all have live
-`retail-oracle-workflow.py` proofs with `workflow.json` `status=ok`.
-Soul Calibur 2 is deferred as a retail-oracle production gate on the
+Last updated: 2026-05-19 night (Apple-aligned Metal workflow adopted in
+the canonical docs; tooling slice shipped; retail Xbox oracle available
+again after the post-repaste thermal recheck; the late PGR2
+same-VRAM linear-alias bridge now uses `copy-alias` instead of a
+VRAM round-trip; Metal default-on is still blocked). The retail Xbox
+oracle is production-ready
+for the stable trio: Crimson Skies, Rainbow Six 3, and PGR2 all have live
+`retail-oracle-workflow.py` proofs with `workflow.json` `status=ok`, and
+the hardware is back in service after the May 19 repaste validation in
+`benchmarks/2026-05-19-retail-oracle-post-repaste-thermal-check.md`.
+Soul Calibur 2 is still deferred as a retail-oracle production gate on the
 current Xbox image because repeated real-hardware return/IGR proofs leave
 the console offline, but it remains useful for emulator-side renderer and
 performance validation.
@@ -31,25 +37,49 @@ capture and adding source-specific crops to
 85.4635..100.0000% changed pixels and Metal NV2A profile/menu captures
 missing the GL/oracle background detail. SC2/Halo/Rainbow gameplay paired
 diffs are missing, PGR2/Rainbow/Crimson p99 jitter gates fail, cold
-shader compile proof is missing, and the front-fb fallback policy is still
-undecided. The current app build still does not expose QMP/HMP `screendump`;
+shader compile proof is missing, and the front-fb fallback policy is
+resolved to opt-in (not default-on). The current app build still does not
+expose QMP/HMP `screendump`;
 `metal-gl-compare.sh --trigger flip` uses the GL renderer's
 `XEMU_GL_SCREENSHOT_PATH` path and Metal `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`.
 
 Next session should start in `docs/apple-silicon/handoff.md` at
 "START HERE NEXT SESSION — M15 bundle closure". The first concrete task is no
-longer a blind PGR2 rerun: inspect the failed PGR2 contact sheet from
-`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`
-and debug whether `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` is capturing the wrong
-published texture or whether live Metal rendering is missing the PGR2
-profile/menu background. Only after that is understood should PGR2 be rerun
-with strict GL window capture (`XEMU_CAPTURE_WINDOW_PATTERN=xemu`,
-`XEMU_CAPTURE_WINDOW_REQUIRED=1`) and `--gl-crop 112,143,1280,960`.
+longer a capture-source check or the old linear alias-to-VRAM bridge: the
+May 19 follow-up reruns confirmed a real host-refresh publish overwrite bug,
+kept that fix, rejected the tempting `0x3b58000` display-shape publish
+heuristic, replaced the late same-VRAM linear alias bind with
+`path=copy-alias`, and still failed local GL-vs-Metal gameplay compare.
+Start from
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md` and debug
+the copied late stage-0 RTT content/format/use-site for `0x3c84000` in the
+Metal path; retail-oracle PGR2 gameplay work remains deferred until local
+content alignment improves.
 
 Project is still in Metal Phase 1/2 closure work. **The user's stated
 30/60 FPS at 1080p / high-quality AA / correct-colors goals remain met
 today via the GL renderer** with `XEMU_GL_MSAA=4` + `surface_scale=2`;
 Metal remains opt-in until the M15 evidence bundle is complete and green.
+
+## Apple-aligned Metal workflow
+
+When a session touches the native Metal renderer, the project now follows
+Apple's documented migration/debug/profiling loop rather than an ad hoc
+"title symptom first" loop:
+
+1. Reproduce on a stable scene or route.
+2. Turn on validation first (`XEMU_METAL_VALIDATION=1`; use shader
+   validation / post-build fixture validation where relevant).
+3. Capture the failing frame or short sequence with Xcode GPU capture
+   (`.gputrace`) and use Instruments / Metal System Trace to classify the
+   issue as correctness, CPU, GPU, or CPU/GPU overlap.
+4. Use project-specific tools (paired GL/Metal diffs, per-draw RT dumps,
+   oracle triptychs, temporal capture) as reproducer/oracle layers around
+   Apple's tools, not as substitutes for them.
+5. Only optimize after the bottleneck is measured. Re-measure after every
+   meaningful fix.
+
+`metal-porting-workflow.md` is the canonical playbook for this loop.
 
 This directory tracks the Apple Silicon performance fork. The fork goal is not
 to preserve upstream compatibility at all costs. The goal is to make xemu run
@@ -220,8 +250,9 @@ visible regressions point first at the renderer.
 - `metal-porting-workflow.md`: **(2026-05-04)** canonical operating
   playbook for the native Metal renderer port. Five-phase model
   (build & boot → translation correctness → visual parity → perf
-  parity → default-on), daily loop for the active phase, tools index,
-  triage flowchart, phase exit-gate procedures, triangulation
+  parity → default-on), Apple-aligned daily loop for the active phase
+  (validate → capture → classify → optimize → re-measure), tools
+  index, triage flowchart, phase exit-gate procedures, triangulation
   appendix. Read after `handoff.md` when starting a Metal-track
   session.
 - `metal-renderer-plan.md`: **(2026-05-04)** staged Metal renderer

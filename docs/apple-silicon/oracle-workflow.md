@@ -161,17 +161,19 @@ politely after every command, which would silently revert any
 manual curve set via `smc.fan`).
 
 CPU temp register (0x09) and board temp register (0x0a) report
-identical values on v1.6 "P2L" Xyclops boards — there is no usable
-on-die CPU thermal diode on this revision and the SMC drives both
-registers from the motherboard thermistor.
-
-Typical idle target with healthy thermal interface and stock fan:
-26-29 °C M/B. Sustained idle above 45 °C usually indicates degraded
-thermal compound or insufficient airflow. See
-`benchmarks/2026-05-12-noctua-fan-validation.md` for the worked
-example on the project oracle Xbox (Noctua NF-A6x25 FLX swap that
-exposed a separate TIM-degradation issue — fan upgrade alone could
-not bring idle below 57 °C).
+identical values on v1.6 "P2L" Xyclops boards. For this revision,
+treat `smc.temps` as a single board/SMC thermal signal rather than an
+independently calibrated CPU-vs-board pair. The 2026-05-12 Noctua note
+captured this Xbox's pre-repaste hot-idle baseline (65-67 °C auto,
+57 °C after a 7-9 minute fan=100% hold). The 2026-05-19 post-repaste
+recheck brought the same box to 55-56 °C in both auto and manual
+fan=100% runs and returned the retail oracle to service. Do not reuse
+the earlier 26-29 °C / >45 °C community targets as a hard v1.6 gate
+without external calibration; on this board they proved too strict.
+See `benchmarks/2026-05-12-noctua-fan-validation.md` for the
+pre-repaste baseline and
+`benchmarks/2026-05-19-retail-oracle-post-repaste-thermal-check.md`
+for the current-state recheck.
 
 ## How synthetic input drives the M15 gate
 

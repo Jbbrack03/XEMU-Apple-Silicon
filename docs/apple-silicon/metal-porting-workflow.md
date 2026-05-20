@@ -1,10 +1,12 @@
 # Metal Porting Workflow
 
-Last updated: 2026-05-12 (CLAUDE.md compressed; cross-refs to its
-"Stable opt-in" / "Working rules" sections redirected to
-automation.md and the workspace CLAUDE.md respectively. PGR2
-gameplay evidence attempt from 2026-05-11 evening still applies;
-default-on still blocked). This is the canonical operating playbook for the native Metal
+Last updated: 2026-05-19 night (the May 19 follow-up reruns supersede
+the old screenshot-source question: keep the host-refresh publish
+preservation, reject the `0x3b58000` display-shape heuristic, keep the
+new `copy-alias` path for late same-VRAM linear RTT binds, and treat
+the copied stage-0 `0x3c84000` content as the active PGR2 debug target;
+Apple-aligned workflow contract adopted project-wide. Default-on
+remains blocked). This is the canonical operating playbook for the native Metal
 renderer port. It supersedes nothing — `metal-renderer-plan.md` remains the
 slice-level implementation plan (M0–M15), `handoff.md` remains the
 per-session current-state pointer, and `decision-log.md` remains the
@@ -30,25 +32,24 @@ evidence only. The first strict PGR2 sequence attempt also failed:
 shows Metal NV2A title/profile frames with flat or missing background detail
 versus GL/oracle, with 85.4635..100.0000% changed pixels in the relaxed
 diagnostic. Remaining blockers: matched gameplay keyframe diffs are missing
-for Rainbow / SC2 / Halo, PGR2 has a Metal/capture-source divergence to
-debug, Crimson paired diff fails, PGR2 /
+for Rainbow / SC2 / Halo, PGR2 still has a Metal renderer correctness bug
+to debug, Crimson paired diff fails, PGR2 /
 Rainbow / Crimson p99 jitter gates fail, and cold shader compile proof is
-missing. Front-fb fallback policy is resolved (opt-in stays pending the
-multi-RT compositing fix — decision-log "2026-05-11 (evening 2)"). The GL
+missing. Front-fb fallback policy is resolved (opt-in stays while RTT
+correctness is debugged). The GL
 paired leg is now in-renderer via `XEMU_GL_SCREENSHOT_PATH`, and Metal
 paired captures use
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; QMP/HMP `screendump` remains unavailable
 in the current app build.
 
 The next session should not start by re-running static `metal-gl-compare.sh`
-captures or blindly repeating the PGR2 sequence. Start by inspecting the failed
-PGR2 diagnostic contact sheet and deciding whether `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`
-is sampling the wrong published texture or whether the live Metal renderer is
-missing PGR2 profile/menu background content. Then rerun PGR2 using the
-handoff recipe: strict xemu-window GL capture, `--gl-crop 112,143,1280,960`,
-Metal NV2A sequence capture, and `m15-gameplay-visual-compare.py` against the
-existing PGR2 oracle composite. Repeat for Rainbow only after the PGR2 evidence
-artifact is understood.
+captures or blindly repeating the PGR2 sequence. Start from
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`,
+keep the late same-VRAM linear bind on `path=copy-alias`, instrument the
+copied stage-0 `0x3c84000` RTT content/format/use-site in
+`texture_pg.c` / `texture.mm`, and only rerun PGR2 gameplay evidence after
+local GL-vs-Metal alignment materially improves. Repeat for Rainbow only after
+the PGR2 RTT path is understood.
 
 This document was added 2026-05-04 alongside the parallel automation
 slices D1 (this doc) and W1 / W2 / W3 / W4 / W5 (auto-on validation,
@@ -60,6 +61,97 @@ golds; pixel mode preserved as `--mode pixels`. Forward-language
 references to those slices throughout this document mean "introduced
 2026-05-04" — see `handoff.md` for the current implementation status
 of each.
+
+---
+
+## 0. Apple-aligned workflow contract
+
+This project now follows Apple's recommended Metal migration and
+optimization structure as the default operating procedure for renderer
+work. The key rule is simple: **do not jump from symptom to fix.**
+
+### 0.1 Order of operations
+
+For any non-trivial Metal session, follow this order:
+
+1. **Reproduce on a stable scene.**
+   Prefer an existing snapshot, scripted gameplay route, or canary route.
+   The goal is to make the failure repeatable before interpretation starts.
+2. **Turn validation on first.**
+   Use Metal API validation, the M5 shader-validation harness, and any
+   slice-specific assertions before reasoning about performance.
+3. **Capture the failing workload.**
+   Use Xcode GPU Frame Capture / `.gputrace` for a representative failing
+   frame or short window. If the problem is broader than one frame, pair it
+   with Instruments Game Performance / Metal System Trace.
+4. **Classify the problem before changing code.**
+   Put the issue in one bucket:
+   - correctness / render-pass semantics / resource hazard
+   - CPU-bound
+   - GPU-bound
+   - CPU/GPU overlap or pacing
+5. **Use the matching tool for the bucket.**
+   - correctness: validation layer, shader validation, `.gputrace`,
+     dependency/resource inspection, paired visual diff
+   - CPU: Instruments Game Performance, Time Profiler, thread-state and
+     scheduling analysis
+   - GPU: Metal debugger Performance timeline, counters, pipeline
+     statistics, shader profiler, heat maps / shader cost graph where
+     available
+   - overlap / pacing: Instruments Display + GPU tracks, present timing,
+     queue overlap, small-pass overserialization analysis
+6. **Optimize only after measurement.**
+   Change the narrowest thing that the evidence says is dominant.
+7. **Re-measure and document.**
+   Repeat the same capture route after the change. Update `handoff.md`,
+   the dated benchmark note, and `decision-log.md` when the workflow or
+   policy changes.
+
+### 0.2 Role of project-specific tools
+
+Our custom tools remain important, but they are not the first debugger:
+
+- `metal-gl-compare.sh`, gameplay triptychs, and the retail oracle are
+  **correctness oracles**.
+- `XEMU_METAL_DUMP_DRAW_RT` and the surface-graph dump are
+  **localization tools**.
+- `capture-gameplay-temporal.sh` and Visual Flight Recorder are
+  **temporal-behavior tools**.
+- `XEMU_PERF_LOG=1` / `METAL_*` counters are **fast regression surfaces**.
+
+Use them to frame and narrow the question. Use Xcode and Instruments to
+understand why the failure or bottleneck exists on Apple GPUs.
+
+### 0.3 Two default loops
+
+**Correctness loop**
+
+1. Reproduce on a stable route or snapshot.
+2. Run with validation enabled.
+3. Capture a failing frame in Xcode.
+4. Inspect render-pass structure, load/store actions, resources, and the
+   first divergent pass or draw.
+5. Confirm with paired GL/Metal/oracle artifacts.
+6. Fix the semantics bug.
+7. Re-capture and re-diff.
+
+**Performance loop**
+
+1. Reproduce on a stable route or snapshot.
+2. Record Instruments Game Performance / Metal System Trace.
+3. Decide CPU vs GPU vs overlap.
+4. If GPU-bound, inspect counters / timeline / shaders in Xcode.
+5. If CPU-bound, inspect hot threads / scheduling / blocked time.
+6. Fix one dominant bottleneck.
+7. Re-run the same route and compare before/after artifacts.
+
+### 0.4 Required attitude
+
+- Prefer Apple's first-party tools over intuition.
+- Prefer measured classification over title-specific folklore.
+- Prefer one strong artifact bundle over many weak anecdotes.
+- Keep GL as the reference renderer and keep title/oracle tooling as the
+  outer validation shell around the Apple toolchain.
 
 ---
 

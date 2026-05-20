@@ -16,7 +16,7 @@ Every Apple Silicon-specific decision, benchmark, and handoff lives under `docs/
 - `docs/apple-silicon/benchmarking.md` — measurement matrix and retail performance gates.
 - `docs/apple-silicon/benchmarks/<date>-<name>.md` — dated session notes, one per benchmark session. Add a new file for each meaningful run; do not edit older notes.
 
-For Metal renderer work, read after `handoff.md` when the task touches the Metal port: `metal-renderer-plan.md` (slices M0-M15 + validation gates), `metal-api-reference.md`, `emulator-metal-survey.md`, `metal-porting-workflow.md`, `tooling-gap-plan.md`.
+For Metal renderer work, read after `handoff.md` when the task touches the Metal port: `metal-porting-workflow.md` first (Apple-aligned operating loop: validate → capture → classify → optimize → re-measure), then `metal-renderer-plan.md` (slices M0-M15 + validation gates), `metal-api-reference.md`, `emulator-metal-survey.md`, `tooling-gap-plan.md`.
 
 For diagnostic-XBE library / real-Xbox oracle work: `nv2a-feature-surface-research.md`, `diagnostic-xbe-plan.md` v2, `real-xbox-oracle-feasibility.md` (superseded by Phase 1+2+3.0 implementations), `controller-injection-research.md`, `retail-title-patching-strategy.md`, `retail-gameplay-software-paths.md`, `tier2-kernel-shim-viability.md`, `oracle-workflow.md`.
 

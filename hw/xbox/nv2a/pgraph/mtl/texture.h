@@ -128,6 +128,10 @@ void *pgraph_mtl_texture_get_metal_texture(int stage);
 void *pgraph_mtl_texture_get_sampler_state(int stage);
 float pgraph_mtl_texture_get_stage_scale(int stage);
 bool pgraph_mtl_texture_stage_uses_external_surface(int stage);
+/* True when the currently bound stage should use rect-texture coordinate
+ * normalization in the generated shader. External surface bindings are not
+ * always rect-texture views; swizzled RTTs must keep normalized coords. */
+bool pgraph_mtl_texture_stage_uses_rect_tex(int stage);
 
 /* Default sampler used for stages that need an MSL sampler binding
  * (some translated PSH variants reference all 4 sampler slots even when
@@ -188,7 +192,19 @@ bool pgraph_mtl_texture_bind_slot_cached_full(
 bool pgraph_mtl_texture_bind_slot_external(int stage,
                                            void *texture,
                                            float scale,
+                                           bool use_rect_tex,
                                            const PgraphMtlSamplerDesc *sampler);
+bool pgraph_mtl_texture_bind_slot_surface_copy(
+    int stage,
+    uint64_t vram_phys_addr,
+    uint64_t source_byte_length,
+    uint32_t mtl_pixel_format,
+    uint32_t width,
+    uint32_t height,
+    void *source_texture,
+    float scale,
+    bool use_rect_tex,
+    const PgraphMtlSamplerDesc *sampler);
 
 /*
  * Convenience: walk the current PGRAPHState texture stage `stage`

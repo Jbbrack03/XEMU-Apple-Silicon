@@ -1,5 +1,12 @@
 # 2026-05-11 PGR2 M15 Gameplay Evidence Attempt
 
+> Superseded as the current next-step diagnosis by
+> `2026-05-11-pgr2-metal-render-path-diagnostic.md` and then by
+> `2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`. This note still
+> matters as the first strict gameplay-evidence failure, but its
+> "capture-source divergence" framing is historical, not the current
+> project conclusion.
+
 Goal: produce the first strict M15 PGR2 gameplay visual artifact from fresh GL
 and Metal sequences plus the existing real-Xbox oracle composite sequence.
 
@@ -66,8 +73,10 @@ NV2A captures are visually divergent: the selected frames stay around earlier
 title/profile states, and the profile-select background is flat gray/missing
 the GL background detail.
 
-This should be treated as a PGR2 Metal/capture-source divergence to debug, not
-as gameplay parity. Do not count any of these artifacts toward M15.
+This should be treated as an early PGR2 gameplay-evidence failure to debug, not
+as gameplay parity. Do not count any of these artifacts toward M15. The later
+diagnostic work ruled out capture-source error and the May 19 follow-up moved
+the active blocker to late RTT/render-target-as-texture correctness.
 
 ## Follow-Up
 

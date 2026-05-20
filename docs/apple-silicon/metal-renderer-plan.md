@@ -1,14 +1,13 @@
 # Native Metal Renderer — Implementation Plan
 
-Last updated: 2026-05-19 (M5.12/M17 PGR2 multi-RT compositing
-investigation now backed by the surface-graph diagnostic surface
-shipped 2026-05-19 — `XEMU_METAL_SURFACE_GRAPH_DUMP=path` +
-`surface-graph-analyze.py` emit per-flip JSONL of every cached
-`MtlSurfaceBinding` with explicit publish-source attribution,
-replacing the three-runs-with-different-`vram:0x…`-overrides
-workflow that the 2026-05-11 diagnostic used; see
-`benchmarks/2026-05-19-tooling-gap-closure.md` and decision-log
-"2026-05-19"). Prior 2026-05-11: M15 default-on remains blocked by
+Last updated: 2026-05-19 night (the new tooling slice has already been
+used on the first full PGR2 follow-up. Keep the host-refresh publish
+preservation fix, reject the `0x3b58000` display-shape publish
+heuristic, keep the new `copy-alias` path for late same-VRAM linear
+binds, and treat copied stage-0 `0x3c84000` RTT content as the active
+Metal debug target. See
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md` and
+decision-log "2026-05-19 (night)"). Prior 2026-05-11: M15 default-on remains blocked by
 the evidence bundle, not by oracle readiness. Run
 `scripts/apple-silicon/m15-bundle-status.py` before any M15 claim; current
 result is `verdict=incomplete ok=6 fail=5 missing=4` (2026-05-11 evening,
@@ -16,15 +15,16 @@ after the m15-gameplay-* discovery extension and the front-fb fallback
 policy decision-log entry). Oracle production evidence and the stable
 retail trio are green. PGR2 and Rainbow gameplay visual parity are not
 proven; the 2026-05-11 PGR2 capture-source hypothesis is decisively ruled
-out and the failure is in the Metal multi-RT compositing path (see
-`docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`).
+out, and the 2026-05-19 follow-up moved the active blocker from
+"which surface gets published" to RTT correctness in the late composite
+path.
 M15 requires multiple matched gameplay keyframes from controller routes,
 aligned by visual content rather than timestamp, with boot/loading/black/
 static/host-UI frames rejected. Crimson paired diff still fails
 (`changed_pct=14.7560`), SC2/Halo/PGR2/Rainbow gameplay diffs are missing
 or FAIL, PGR2/Rainbow/Crimson p99 jitter gates fail, and cold shader
 compile proof is missing. Front-fb fallback policy is now resolved (stays
-opt-in pending the multi-RT compositing fix). The current
+opt-in while RTT correctness is debugged). The current
 app build does not expose QMP/HMP `screendump`; `metal-gl-compare.sh
 --trigger flip` uses the GL renderer's `XEMU_GL_SCREENSHOT_PATH` path instead.
 Earlier 2026-05-05: SC2 input
@@ -37,6 +37,13 @@ shareable build of xemu. It supersedes nothing; it sequences the
 existing Phase 4 sub-deliverables (4a–4i) in `strategy.md` into
 concrete, gated slices, and adds the architectural decisions reached
 during the 2026-05-02 planning session.
+
+Operational note (2026-05-19 night): implementation slices still live
+here, but day-to-day renderer investigation now follows the Apple-aligned
+workflow in `metal-porting-workflow.md`: validate first, capture the failing
+workload, classify correctness / CPU / GPU / overlap, then optimize and
+re-measure. This plan tells us **what** to build; the workflow doc tells us
+**how** to investigate and land it.
 
 Companion documents written this session:
 

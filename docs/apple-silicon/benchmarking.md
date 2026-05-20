@@ -1,13 +1,13 @@
 # Benchmarking Plan
 
-Last updated: 2026-05-19 (oracle-independent measurement tools shipped
-— gameplay-route temporal capture via `capture-gameplay-temporal.sh`
-unblocks per-tracked-title temporal re-validation under the
-2026-05-12 evening methodology; surface-graph dump via
-`XEMU_METAL_SURFACE_GRAPH_DUMP` + `surface-graph-analyze.py` backs the
-M5.12/M17 PGR2 multi-RT compositing investigation; `lldb-gl-launch.sh`
-captures backtraces for the Halo cold-launch segfault. Tracked-title
-T2-impact reruns themselves remain queued for the next session).
+Last updated: 2026-05-19 night (Apple-aligned Metal workflow adopted in
+the canonical docs; the May 19 tooling slice has now been exercised on a
+full PGR2 follow-up: host-refresh publish preservation stays, the
+`0x3b58000` display-shape heuristic is rejected, late same-VRAM linear
+RTT binds now use `path=copy-alias`, and current benchmarking should
+focus on the copied `0x3c84000` content rather than on screenshot-source
+doubts. See
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`).
 Prior 2026-05-12 evening: added T1/T2 boot-animation temporal
 baseline rows; M15 evidence bundle remains incomplete pending tracked-
 title reruns under T2. Use
@@ -18,14 +18,17 @@ m15-gameplay-* discovery extension and the front-fb fallback policy
 decision-log entry). The oracle-side and stable retail trio evidence is
 green, but title-level paired gameplay Metal-vs-GL validation is not: the
 latest PGR2/Rainbow paired passes are capture/static canaries only, Crimson
-paired diff still fails (`changed_pct=14.7560`), and the 2026-05-11 evening
-PGR2 capture-source diagnostic decisively ruled out the capture path,
-confirming the bug is in Metal's multi-RT compositing path (see
-`docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`).
+paired diff still fails (`changed_pct=14.7560`), and the current PGR2
+reference runs `benchmark-runs/20260519-182241-pgr2/` and
+`benchmark-runs/20260519-201711-pgr2/` still fail strict GL-vs-Metal
+gameplay compare even after the publish overwrite fix and the new
+`copy-alias` path. Late bad frames correlate with repeated stage-0
+sampling of `0x3c84000`; removing the old linear alias-to-VRAM round-trip
+improves alignment modestly but does not restore correctness.
 SC2/Halo/Rainbow gameplay diffs are missing, PGR2/Rainbow/Crimson p99
 jitter gates fail, and cold shader compile proof is missing. The front-fb
-fallback policy is now resolved (stays opt-in pending the multi-RT
-compositing fix). `metal-gl-compare.sh --trigger
+fallback policy is now resolved (stays opt-in while RTT correctness is
+debugged). `metal-gl-compare.sh --trigger
 flip` now uses GL `XEMU_GL_SCREENSHOT_PATH` plus Metal
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for cleaner paired PNGs, but production
 visual evidence still requires controller-driven gameplay sequences, multiple
@@ -38,11 +41,12 @@ stated 30/60 FPS at 1080p goals. Input-latency counters
 opt-in GameController.framework backend.
 
 For the next M15 benchmark session, use the explicit PGR2 recipe in
-`handoff.md`, but first inspect the failed PGR2 diagnostic in
-`benchmark-runs/m15-gameplay-pgr2-windowgl-20260511-182317/diagnostic-relaxed-align/`.
-The immediate benchmark question is whether the Metal NV2A screenshot source is
-wrong or the live Metal renderer is genuinely missing PGR2 profile/menu
-background content. Do not log a gameplay visual PASS from a single
+`handoff.md`, but start from
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md` instead of
+the older screenshot-source question. The immediate benchmark target is the
+copied late RTT/render-target-as-texture path around stage-0 `0x3c84000`.
+Do not reopen the already-removed linear alias-to-VRAM bridge unless new
+evidence demands it. Do not log a gameplay visual PASS from a single
 flip-trigger/static frame or from a relaxed-align diagnostic.
 
 ## Benchmarking Rules
@@ -54,6 +58,30 @@ flip-trigger/static frame or from a relaxed-align diagnostic.
    when possible.
 4. Keep correctness screenshots next to performance measurements.
 5. Do not compare across unrelated emulator settings.
+
+## Apple-first data collection plan
+
+For native Metal benchmarking, the default evidence bundle is now:
+
+1. **Route-level measurement artifact** — benchmark run directory with
+   `xemu-perf:` counters and the exact route/snapshot metadata.
+2. **Apple trace artifact** — Instruments Game Performance / Metal System
+   Trace for the same route when the question is performance or pacing.
+3. **Xcode capture artifact** — `.gputrace` for a representative failing or
+   expensive frame when the question is correctness, GPU cost, or pass
+   structure.
+4. **Project-side comparison artifact** — paired GL/Metal diff, temporal
+   analysis, per-draw RT dump, or oracle triptych as appropriate.
+
+Interpretation order is:
+
+1. classify CPU vs GPU vs overlap vs correctness with Apple's tools
+2. use project artifacts to localize and validate
+3. make one change
+4. re-run the same route and compare before/after
+
+Do not log a Metal optimization conclusion from route counters alone when an
+Instruments trace or `.gputrace` would answer the dominant-cost question.
 
 ## Local Machine
 

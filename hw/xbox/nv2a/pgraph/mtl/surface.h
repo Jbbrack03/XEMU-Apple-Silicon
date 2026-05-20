@@ -136,6 +136,10 @@ bool pgraph_mtl_surface_get_color_surface_info_for(uint32_t vram_addr,
                                                    uint32_t *out_guest_height,
                                                    uint32_t *out_pitch,
                                                    uint32_t *out_format);
+bool pgraph_mtl_surface_has_other_color_shape(uint32_t vram_addr,
+                                              uint32_t guest_width,
+                                              uint32_t guest_height,
+                                              uint32_t pitch);
 
 /*
  * Legacy ensure-color/-depth wrappers. Kept so the M2-era clear path
@@ -417,7 +421,9 @@ unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
  * the full rationale. Gated by `XEMU_METAL_FRONT_FB_FALLBACK=1` at
  * the renderer level. */
 void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write);
-bool pgraph_mtl_surface_publish_latest_draw_fallback(void);
+bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
+                                                     uint32_t display_height,
+                                                     uint32_t crtc_vram_addr);
 
 /* M5.9-followup-B+C: counter accessors. Always-on atomics. */
 uint64_t pgraph_mtl_surface_vram_dirty_hits(void);

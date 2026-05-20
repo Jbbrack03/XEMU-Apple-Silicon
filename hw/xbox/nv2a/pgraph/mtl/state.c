@@ -209,7 +209,7 @@ bool pgraph_mtl_build_pipeline_key(NV2AState *d,
      * on a shader-state dirty event. */
     out_key->shader_state = pgraph_glsl_get_shader_state(pg);
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
-        if (pgraph_mtl_texture_stage_uses_external_surface(i)) {
+        if (pgraph_mtl_texture_stage_uses_rect_tex(i)) {
             out_key->shader_state.psh.rect_tex[i] = true;
         }
     }

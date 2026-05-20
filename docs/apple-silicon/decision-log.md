@@ -1,5 +1,159 @@
 # Decision Log
 
+## 2026-05-19 (night): Keep the linear same-VRAM alias copy path; it narrows the PGR2 RTT bug but does not close it
+
+**Decision.** Keep the new Metal texture-binding rule for linear
+same-VRAM alias siblings: when a render-target-as-texture bind resolves to
+an exact linear surface that has other cached siblings at the same VRAM
+address, sample a GPU-copied texture (`path=copy-alias`) instead of first
+downloading overlapping siblings to guest VRAM and then re-uploading the
+selected surface.
+
+**Why.** The old alias bridge was measurably lossy for the late PGR2
+`0x3c84000` path. Immediately before the bad stage-0 bind, the renderer was
+emitting synthetic dirty events for both siblings at that address:
+
+- one `write_len=2263040` event for the clipped `1278x442` sibling
+- one `write_len=2457600` event for the full `1280x480` sibling
+
+That proved the bind path was round-tripping partial-footprint data through
+guest VRAM before re-uploading the final sampled surface. This was a concrete,
+testable correctness risk, not a hunch.
+
+**Validation evidence.**
+
+- Build + post-build shader gate: `./build.sh -a arm64` PASS, validation
+  `7/7 passed`.
+- Reference rerun:
+  `benchmark-runs/20260519-201711-pgr2/`
+- Strict compare:
+  `benchmark-runs/m15-gameplay-pgr2-linear-alias-copy-gl-compare/summary.json`
+
+Observed effects:
+
+- late stage-0 binds of `0x3c84000` now log
+  `metal_surface_texture ... path=copy-alias`
+- the synthetic `metal_surface_dirty vram_addr=0x3c84000 ...` lines disappear
+  from the late bind window
+- strict GL-vs-Metal alignment improves but still fails:
+  prior best-match distances `0.4925..0.5596` become `0.4505..0.4818`
+
+**What this does NOT mean.** PGR2 is still blocked. The copied late
+composite remains visually wrong (for example
+`benchmark-runs/20260519-201711-pgr2/frames/metal-gameplay.0255.png`
+still shows the giant dark overpass slab and white HUD bars), and the
+gameplay compare remains `INFRA-FAIL`. This change removes one false path and
+improves the evidence, but it does not make Metal production-ready.
+
+**Operational consequence.** Future PGR2 work should debug the copied
+`0x3c84000` content itself (content / format / use-site) rather than spending
+another slice on the already-removed linear alias-to-VRAM bridge.
+
+## 2026-05-19 (late evening): Adopt Apple-aligned Metal workflow as the default investigation loop
+
+**Decision.** Make Apple's documented Metal migration/debug/profiling flow
+the default operating procedure for future renderer sessions. Keep the
+project's custom GL/Metal/oracle tooling, but reposition it as an outer
+reproducer/oracle layer around Xcode GPU capture and Instruments rather than
+as a substitute for them.
+
+**Why.** The repo already had strong custom diagnostics, but the center of
+gravity had drifted toward title-specific symptom chasing. A 2026-05-19
+research pass over Apple's current documentation showed a clearer standard
+workflow:
+
+- validate correctness first (API validation, shader validation)
+- capture the failing workload in Xcode
+- classify the issue as correctness / CPU / GPU / overlap
+- optimize only after measurement
+- re-measure after every fix
+
+That structure is a better default fit for Apple GPUs than an ad hoc loop, and
+it matches project rule #8 ("do not optimize from intuition when Instruments
+or perf counters can answer").
+
+**What changes operationally.**
+
+- `metal-porting-workflow.md` is now explicit about the Apple-aligned loop:
+  reproduce → validate → capture → classify → optimize → re-measure.
+- `handoff.md` now tells future Metal sessions to read the workflow doc after
+  handoff and to use Xcode / Instruments first for non-trivial renderer work.
+- `CLAUDE.md` now states that Metal sessions default to the Apple-aligned
+  operating loop and expands rule #8 to name Xcode GPU capture, the Metal
+  debugger, and Instruments directly.
+- `benchmarking.md` now defines the default evidence bundle for Metal
+  benchmarking: route-level counters, Instruments trace, `.gputrace`, and the
+  relevant project-side comparison artifact.
+- `README.md`, `metal-renderer-plan.md`, and `research.md` were updated so the
+  workflow, implementation plan, and source basis stay in agreement.
+
+**What does NOT change.**
+
+- GL remains the reference renderer and fallback.
+- Retail-oracle gameplay evidence, paired GL/Metal diffing, per-draw RT dumps,
+  temporal capture, and the surface-graph dump remain valid and valuable.
+- The project does not abandon its emulator-specific tooling; it just stops
+  treating that tooling as the only or primary debugger when Apple already
+  provides a stronger first-party answer.
+
+**Verification.** Doc-only slice. Cross-checked that the updated workflow now
+appears in the top-level session guide (`CLAUDE.md`), the fork overview
+(`README.md`), the active session handoff, the canonical Metal workflow doc,
+the benchmarking plan, the Metal implementation plan, and the research notes.
+
+## 2026-05-19 (evening): Retail oracle restored after repaste; retire the v1.6 `>45 °C idle == bad` hard gate
+
+**Decision.** Return the retail Xbox oracle to active development use.
+The post-repaste May 19 recheck does **not** support keeping the box
+blocked on thermal grounds. For this v1.6 "P2L" Xyclops board, retire
+the inherited `>45 °C idle == bad thermal state` rule as a hard gate.
+
+**Why.** The earlier 2026-05-12 note was accurate as a pre-repaste
+baseline, but its interpretation was too aggressive for a 1.6 board:
+we had direct SMC data but no external calibration, and we relied on
+community targets that appear to fit older boards better than Xyclops.
+After the user re-pasted CPU + GPU and confirmed airflow direction, the
+same oracle now measures materially cooler while remaining stable:
+55 °C idle in auto mode (`fan_raw_rb=10`) and 56 °C after a 7-minute
+fan=100% hold, followed by 56 °C one minute after restoring auto.
+Those numbers are ~10-12 °C better than the 2026-05-12 pre-repaste
+baseline (65-67 °C auto, 57 °C at fan=100%).
+
+**What we know.**
+- The read path is real hardware, not dashboard UI logic: the oracle
+  agent reads Xyclops/SMC registers directly via
+  `HalReadSMBusValue(0x20, 0x09/0x0a, ...)`.
+- Raw version bytes identify the SMC as `P2L` on this console.
+- Registers `0x09` and `0x0a` still mirror each other on this board,
+  so we should treat them as one thermal signal, not a calibrated
+  CPU-vs-board pair.
+- No external IR thermometer / thermocouple was available, so this
+  decision is about operational availability, not about establishing
+  an absolute calibration curve for every v1.6.
+
+**Operational consequence.** The retail Xbox oracle is available again
+for real-hardware captures, Tier-1 gates, and oracle-assisted gameplay
+validation. Do not block oracle use solely because `smc.temps` reads
+mid-50s on this v1.6 board. Re-open thermal investigation only if the
+console shows actual symptoms: thermal shutdowns, sustained fan-max
+behavior, route instability, or materially hotter new traces.
+
+**Validation evidence.** See
+`benchmarks/2026-05-19-retail-oracle-post-repaste-thermal-check.md`
+for the full May 19 live probe, including raw SMC reads, the manual
+fan hold, and the post-restore auto reading.
+
+**Supersession scope.**
+- Supersedes the **interpretation** portion of the 2026-05-12 thermal
+  work: the box is no longer considered "thermally compromised pending
+  repaste" and the `>45 °C idle` hard gate is retired for this v1.6.
+- Does **not** supersede the `smc.*` surface itself. The 2026-05-12
+  agent-v0.4 measurement/control work remains valid and is now the
+  live monitoring path for the restored oracle.
+- Supersedes the same-day "oracle offline" assumption in the 2026-05-19
+  tooling slice as current project state; that assumption remains
+  historically correct for why the tooling work was started.
+
 ## 2026-05-19: Tooling slice — oracle-independent measurement closure
 
 **Decision.** Ship three measurement tools to unblock the next round
@@ -10765,3 +10919,87 @@ not a content workaround.
    renderer could still publish at 60 Hz with the wrong texture
    pointer. Strengthening to a publishes/presents ratio remains
    queued (decision-log 2026-05-12 evening, follow-up #5).
+
+## 2026-05-19 late evening: keep the host-refresh publish preservation, reject the display-shape publish heuristic, and move the PGR2 blocker back to RTT correctness
+
+**Decision.** Keep the host-refresh front-fb preservation fix in
+`pgraph_mtl_get_framebuffer_surface()`, but reject the May 19
+display-shape publish heuristic that forced the late PGR2 snapshot to
+prefer the 640×480 format-4 sibling (`0x3b58000`). The surviving PGR2
+snapshot blocker is not pure front-fb selection anymore; it is deeper
+render-target-as-texture correctness around the late `0x3c84000`
+sampling path.
+
+**Evidence.**
+
+- Canonical snapshot anchor was confirmed as
+  `benchmark-runs/20260501-112001-pgr2/xbox_hdd.qcow2`
+  with tag `pgr2_gameplay_b4`. Using the generic profile-prep HDD is a
+  false failure because that image does not contain the snapshot.
+- The new Tool-1 surface graph and Tool-2 temporal captures were used to
+  validate every publish experiment frame-by-frame, not by isolated
+  keyframe sampling. Paper of record:
+  `benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`.
+- The narrowed display-shape heuristic improved the publish graph by
+  switching late flips from `0x3c84000` to `0x3b58000`
+  (`benchmark-runs/pgr2-snapshot-postfix3.surface-graph.jsonl`), but the
+  resulting stable late frames were still wrong: missing geometry, blank
+  HUD text, and bad reflective sampling in
+  `benchmark-runs/20260519-181911-pgr2/frames/metal-gameplay.0125.png`
+  through `.0138.png`. That heuristic is therefore rejected despite the
+  cleaner graph.
+- A real publish-path bug did land: the host-refresh
+  `crtc-refresh` pointer-only publish was clobbering the guest
+  flip-stall fallback choice every vsync. Preserving an already-published
+  fallback frame under `XEMU_METAL_FRONT_FB_FALLBACK=1` turned the late
+  PGR2 image from a transient flash into a stable temporal window.
+  Evidence run:
+  `benchmark-runs/20260519-181911-pgr2/` with flicker summary
+  `mean_changed_pct=0.4290`, `spike_count=2`.
+- After removing the rejected shape heuristic and keeping only the
+  host-refresh preservation, the current reference run is
+  `benchmark-runs/20260519-182241-pgr2/`. The late phase stably publishes
+  `0x3c84000` for 23 flips in a row, but stable frames such as
+  `metal-gameplay.0583.png` still show white HUD bars, corrupted
+  reflections, and broken geometry. The publish path is now stable
+  enough to say the remaining defect is elsewhere.
+- Strict gameplay compare against the matching GL snapshot still returns
+  `INFRA-FAIL` at
+  `benchmark-runs/m15-gameplay-pgr2-postfix5-gl-compare/summary.json`:
+  the best aligned Metal matches are still too far from GL
+  (`alignment_distance=0.4925..0.5596`).
+- Late bad frames correlate with repeated stage-0 sampling of
+  `0x3c84000` through the linear external-surface path:
+  `benchmark-runs/20260519-182241-pgr2/xemu.log`
+  contains repeated
+  `metal_surface_texture stage=0 vram_addr=0x3c84000 ... path=external`.
+- Disabling the surface-texture fast path entirely
+  (`XEMU_METAL_DISABLE_SURFACE_TEX=1`) changes the corruption but does not
+  restore correctness; late frames in
+  `benchmark-runs/20260519-182540-pgr2/frames/` remain badly wrong. That
+  rules out "only the external-surface fast path" as the root cause.
+
+**Rationale.** The May 19 tool additions were meant to prevent exactly this
+kind of false closure. A publish heuristic that looks good in a graph but
+fails on a validated sequence is not shippable. Conversely, the
+host-refresh preservation fix survives that stricter bar because it fixes a
+real transient overwrite bug without changing the underlying scene
+contents. With the publish path stabilized, the highest-signal next slice
+is RTT sampling correctness, not more front-fb policy churn or retail
+oracle runs.
+
+**Follow-up.**
+
+1. Start the next PGR2 slice from
+   `benchmark-runs/20260519-182241-pgr2/` and instrument the late
+   stage-0 `0x3c84000` render-target-as-texture binds in
+   `texture_pg.c` / `texture.mm`.
+2. Determine whether the remaining corruption is caused by wrong source
+   contents, wrong format/alias interpretation, stale sibling views, or
+   incorrect use of the sampled RTT in the final composite draw.
+3. Keep the host-refresh publish preservation in `renderer.c`.
+4. Do not reintroduce the display-shape publish heuristic for
+   `0x3b58000` unless a future full-sequence validation proves it
+   materially closer to GL than the current dominant-draw path.
+5. Do not spend retail-oracle gameplay time on PGR2 until the local
+   GL-vs-Metal compare can align real gameplay keyframes again.

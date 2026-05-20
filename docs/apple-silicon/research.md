@@ -1,6 +1,6 @@
 # Research Notes
 
-Last updated: 2026-05-02
+Last updated: 2026-05-19 night
 
 ## Local Source Findings
 
@@ -646,3 +646,46 @@ xemu's current bottleneck profile.
    see `strategy.md` Phase 2.5 and Phase 4 for the implementation
    roadmap, and `decision-log.md` "2026-05-01: Adopt research-informed
    implementation roadmap" for the binding decision.
+
+## 2026-05-19 research pass — Apple's documented Metal workflow
+
+Apple's current guidance for Metal migration and optimization is more
+structured than "port code, then tune by feel." The common shape across the
+docs is:
+
+1. **Port incrementally.** Keep the legacy renderer alive as a reference path
+   while Metal comes up, and migrate in stages rather than replacing
+   everything blindly.
+2. **Validate correctness first.** Turn on API validation and shader
+   validation before interpreting performance behavior.
+3. **Capture the workload.** Use Xcode GPU Frame Capture / `.gputrace` to
+   inspect the failing frame or short sequence directly.
+4. **Classify the bottleneck.** Use Instruments Game Performance / Metal
+   System Trace plus the Metal debugger to decide whether the problem is CPU,
+   GPU, overlap/pacing, or pure correctness.
+5. **Optimize with a measure → analyze → improve → re-measure loop.**
+   Apple's game-performance docs present this as the primary optimization
+   discipline, not as an optional best practice.
+6. **Use runtime feature detection.** Query `supportsFamily` and device
+   properties rather than keying behavior off GPU names or assumptions.
+7. **Respect Apple GPU render-pass semantics.** Load/store actions, resource
+   hazards, invariant positions, and synchronization rules are correctness
+   issues on Apple GPUs, not optional polish items.
+
+Implication for this fork: the project-specific GL/Metal/oracle tools are
+still justified, but they should sit around Xcode and Instruments rather than
+replacing them. Our paired diffs, per-draw RT dumps, temporal capture, and
+oracle triptychs are strongest when they act as reproducer/oracle layers over
+Apple's first-party validation/capture/profiling loop.
+
+Primary Apple sources reviewed 2026-05-19:
+
+- https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon
+- https://developer.apple.com/documentation/xcode/capturing-a-metal-workload-in-xcode
+- https://developer.apple.com/documentation/xcode/analyzing-the-performance-of-your-metal-app/
+- https://developer.apple.com/documentation/xcode/analyzing-apple-gpu-performance-using-counter-statistics
+- https://developer.apple.com/documentation/xcode/analyzing-apple-gpu-performance-using-a-visual-timeline/
+- https://developer.apple.com/documentation/xcode/optimizing-gpu-performance
+- https://developer.apple.com/documentation/metal/improving-your-games-graphics-performance-and-settings
+- https://developer.apple.com/documentation/metal/mixing-metal-and-opengl-rendering-in-a-view
+- https://developer.apple.com/metal/capabilities/

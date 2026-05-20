@@ -1,11 +1,22 @@
 # Handoff
 
-Last updated: 2026-05-19 — **Three oracle-independent measurement
-tools shipped** (Tool 1 surface-graph dump, Tool 2 gameplay temporal
-capture, Tool 3 LLDB-attached GL leg). Retail Xbox oracle is offline
-pending thermal repaste; this slice closes the measurement gaps that
-were blocking the next round of M15 default-on evidence work so it
-can proceed without the oracle.
+Last updated: 2026-05-19 night — **Apple-aligned Metal workflow
+adopted in the canonical docs**, **three oracle-independent
+measurement tools shipped** (Tool 1 surface-graph dump, Tool 2 gameplay
+temporal capture, Tool 3 LLDB-attached GL leg), the retail Xbox oracle
+is available again after the post-repaste thermal recheck, and the
+current PGR2 snapshot blocker has been re-measured again. The
+host-refresh publish path no longer clobbers fallback-published frames
+every host vsync, and the late `0x3c84000` stage-0 bind no longer
+round-trips same-VRAM linear alias siblings through guest VRAM before
+sampling (`path=copy-alias` now replaces the old external alias path).
+That change improves strict GL-vs-Metal alignment distance modestly, but
+PGR2 is still not visually correct: stable late frames remain corrupted
+and local gameplay compare still fails. See
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md` for
+the current paper of record and
+`benchmarks/2026-05-19-retail-oracle-post-repaste-thermal-check.md`
+for the retail-oracle hardware state.
 
 - **Tool 1 (`XEMU_METAL_SURFACE_GRAPH_DUMP=path` + analyzer
   `surface-graph-analyze.py`)** — per-flip JSONL of every cached
@@ -34,11 +45,38 @@ adopted; `/codex-validate changes` MINOR ISSUES → doc/dead-code fixes
 adopted). See decision-log "2026-05-19" for the full adopt/deflect
 trail.
 
-**Tracked-title impact still unverified.** The 2026-05-12 T2 fix's
-hypothesized improvement on PGR2 / Rainbow / Crimson paired-diff
-FAILs remains queued for next session — these tools provide the
-measurement infrastructure but the actual reruns + analysis are a
-separate slice.
+**Tracked-title impact is now partially re-measured, not resolved.**
+The May 19 PGR2 reruns confirmed one real fix and one rejected heuristic:
+
+- keep the host-refresh publish preservation in `renderer.c`
+  (prevents `crtc-refresh` from stomping a fallback-published frame
+  every vsync)
+- do **not** keep the display-shape heuristic that forced late PGR2
+  flips onto `0x3b58000`; it improved the graph and still failed
+  full-sequence visual validation
+
+The surviving PGR2 blocker is now believed to be RTT/sample correctness
+around late stage-0 use of `0x3c84000`, not pure front-fb selection and
+not the old lossy alias-to-VRAM bridge. The new linear-alias copy path
+removes that bridge and improves the compare artifact, but the copied
+late composite still diverges too far from GL. Retail-oracle gameplay
+validation for PGR2 remains deferred until local GL-vs-Metal content
+alignment improves.
+
+**Workflow discipline for future Metal sessions (binding unless a task is
+explicitly doc-only):**
+
+- Read `metal-porting-workflow.md` after this file whenever the session
+  touches the native Metal renderer.
+- Use Apple's tool loop first: validation on, Xcode GPU capture for the
+  failing frame, Instruments / Metal System Trace to classify CPU vs GPU
+  vs overlap, then optimize and re-measure.
+- Treat project tools (`metal-gl-compare.sh`, temporal capture, per-draw RT
+  dump, oracle triptychs, surface-graph dump) as reproducer/oracle layers
+  around Xcode and Instruments, not as replacements for them.
+- Do not promote a renderer hypothesis from a single static frame when
+  Xcode capture, counters, or a short trace can answer the question more
+  directly.
 
 Pre-2026-05-19 banner preserved below.
 
@@ -90,8 +128,10 @@ Earlier this session (still relevant):
   single-frame MSAA4 canary PASSes demoted to smoke; temporal-flicker
   analysis now required.
 - Oracle-agent v0.4 thermal/fan surface (prior session, still
-  uncommitted): retail oracle Xbox thermally compromised pending
-  repaste — see `benchmarks/2026-05-12-noctua-fan-validation.md`.
+  uncommitted): pre-repaste hot-idle baseline captured at
+  `benchmarks/2026-05-12-noctua-fan-validation.md`. Current
+  availability is superseded by the 2026-05-19 post-repaste recheck
+  at `benchmarks/2026-05-19-retail-oracle-post-repaste-thermal-check.md`.
 
 Prior 2026-05-11 state remains: M15 bundle checklist-gated and not
 closed. Retail oracle workflow production-ready on Crimson / Rainbow /
@@ -118,6 +158,10 @@ landed:
 verdict=incomplete ok=6 fail=5 missing=4
 ```
 
+Before making any new Metal code-change decision, read
+`docs/apple-silicon/metal-porting-workflow.md` and follow its Apple-aligned
+debug loop for the blocker you are touching.
+
 What is green:
 
 - Composite visual/oracle gate:
@@ -136,6 +180,14 @@ What is green:
 
 What blocks M15 default-on:
 
+- PGR2 current state after the 2026-05-19 reruns: the host-refresh
+  overwrite bug is fixed and should stay fixed, but the display-shape
+  publish heuristic that forced late flips onto `0x3b58000` is rejected.
+  The current reference run is `benchmark-runs/20260519-182241-pgr2/`;
+  stable late frames still show white HUD bars, corrupted reflections,
+  and missing geometry, and strict gameplay compare still fails at
+  `benchmark-runs/m15-gameplay-pgr2-postfix5-gl-compare/summary.json`.
+  Treat late stage-0 RTT sampling of `0x3c84000` as the live blocker.
 - PGR2 and Rainbow gameplay visual parity are **not proven**. The 2026-05-11
   PGR2/Rainbow paired passes are capture/static-canary evidence only:
   `benchmark-runs/20260511-152831-metal-gl-compare-pgr2/summary.json`
@@ -156,9 +208,9 @@ What blocks M15 default-on:
   blocked: the GL leg segfaulted before any `xemu-perf` interval or
   `gl_screenshot_written`, while the Metal leg did write its flip-1200 PNG.
 - Cold shader compile proof is still missing.
-- Front-fb fallback policy is RESOLVED (opt-in stays; multi-RT compositing
-  fix deferred to future Metal slice). See decision-log "2026-05-11
-  (evening 2)".
+- Front-fb fallback policy is RESOLVED (opt-in stays). The active deep
+  fix is RTT correctness, not front-fb policy churn. See decision-log
+  "2026-05-19 late evening".
 
 Important tooling finding:
 
@@ -267,25 +319,22 @@ Next engineering steps, in order:
    composite-visual/oracle-gate and the per-title MSAA4 canary PASSes
    are now flagged as methodology-insufficient pending temporal-
    flicker re-runs. The remaining gaps are PGR2/Rainbow/Crimson
-   gameplay visual diffs (PGR2 is FAIL and blocked by multi-RT
-   compositing — and now also blocked by the boot-animation evidence
-   that the bug class is more fundamental than PGR2-specific),
-   SC2/Halo missing paired evidence, PGR2/Rainbow/Crimson p99 jitter,
-   and cold shader compile proof.
-2. **Multi-RT compositing investigation (the deferred PGR2 deep fix)**:
-   - Identify PGR2's final-composite surface by shape — 640×480
-     format-4 surfaces 0x3c84000 / 0x3b58000 are the prime suspects per
-     the diagnostic surface map.
-   - Track NV097_IMAGE_BLIT and similar composite ops — current PGR2
-     run shows `METAL_IMAGE_BLITS=0`, so the composite is a draw, not a
-     blit. Find which draw call writes the final image.
-   - Verify surface-as-texture for vram_addr=0 — the `texture.mm:294`
-     early return is correct for the texture cache, but
-     `texture_pg.c:1183` should still take the surface-as-texture path;
-     confirm `has_compatible_surface` is true for PGR2's profile-screen
-     background quad. Run with `XEMU_METAL_DIAG_SURFACE_TEX=1` for
-     `metal_surface_texture` log lines.
-3. After the PGR2 multi-RT compositing fix lands, rerun PGR2
+   gameplay visual diffs, SC2/Halo missing paired evidence,
+   PGR2/Rainbow/Crimson p99 jitter, and cold shader compile proof.
+   For PGR2 specifically, the live renderer blocker is the late RTT path,
+   not more front-fb publish-policy experimentation.
+2. **RTT correctness investigation (the current PGR2 deep fix)**:
+   - Start from
+     `docs/apple-silicon/benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`
+     and `benchmark-runs/20260519-182241-pgr2/`.
+   - Instrument late stage-0 binds of `0x3c84000` in `texture_pg.c` /
+     `texture.mm`; determine whether the failure is wrong source
+     contents, wrong format/alias interpretation, stale sibling views,
+     or incorrect use of the sampled RTT in the final composite draw.
+   - Keep the host-refresh publish preservation fix in `renderer.c`.
+     Do not reintroduce the `0x3b58000` display-shape heuristic unless
+     a future full-sequence validation proves it materially closer to GL.
+3. After the PGR2 RTT correctness fix lands, rerun PGR2
    through the strict gameplay evidence path. The evidence-producing target is:
 
    ```sh
@@ -8825,27 +8874,15 @@ scripts/apple-silicon/run-benchmark.sh flat-tri-depth \
 
 Recommended next implementation shape:
 
-- The flat-tri-depth begin/bind/flush logging has been added and validated.
-  The mismatch was a perf-window artifact; graceful final perf flushing now
-  captures the flat XBE tail.
-- Treat `XEMU_NATIVE_TRI_DEPTH=1` and `XEMU_NATIVE_QUAD=1` as the completed
-  geometry-shader bypass slices for smooth-fill triangle and quad/quad-strip
-  primitives. Do not re-prove either slice unless triangle or quad code
-  changes; the snapshot triplet at
-  `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md` is the
-  current paper of record.
-- The next session's first task is to identify what is making PGR2 slow at
-  the `pgr2_gameplay_b4` snapshot (16.56 FPS with both bypass slices on,
-  zero geometry-shader draws). Use Instruments and the existing
-  `XEMU_PERF_LOG=1` counters to measure i386 TCG, NV2A PGRAPH command
-  processing, surface/texture upload, and fragment shader work in turn.
-  Capture a dated benchmark note with the dominant cost before any code
-  change.
-- Defer further geometry-shader removal slices (flat-quad bypass,
-  nonfill polygon modes, line/point primitive bypass) until a benchmark
-  exercises that combination meaningfully. Today none of the
-  Crimson/Rainbow/PGR2 routes do.
-- Compare future renderer changes against R1/R2/R3, the route notes, the
-  baseline-metrics file, and the PGR2 snapshot triplet
+- This legacy flat-tri-depth note is superseded as next-session guidance.
+  Use the current banner and `START HERE NEXT SESSION — M15 bundle closure`
+  section above instead.
+- The live renderer task is late PGR2 RTT correctness around stage-0
+  `0x3c84000` sampling, documented in
+  `docs/apple-silicon/benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`.
+- Keep the host-refresh publish preservation fix; do not restore the
+  rejected `0x3b58000` display-shape heuristic without a new full
+  frame-by-frame proof.
+- Compare future renderer changes against the baseline-metrics file and the PGR2 snapshot triplet
   `docs/apple-silicon/benchmarks/2026-05-01-pgr2-native-quad.md` before
   trying Vulkan-over-Metal.

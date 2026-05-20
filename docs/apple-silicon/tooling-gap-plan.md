@@ -1,15 +1,15 @@
 # Tooling gap plan
 
-Last updated: 2026-05-19 (oracle-independent measurement closure — three
-gaps closed: surface-graph dump backing M5.12/M17 PGR2 multi-RT
-investigation; gameplay-route temporal capture via
-`capture-gameplay-temporal.sh` for the per-tracked-title temporal
-re-validation required by the 2026-05-12 evening methodology; LLDB-
-attached GL leg via `lldb-gl-launch.sh` + `metal-gl-compare.sh
---gl-attach-lldb` for the Halo cold-launch segfault. See
-`benchmarks/2026-05-19-tooling-gap-closure.md` and decision-log
-"2026-05-19"). Prior 2026-05-11: M15 checklist + paired-capture
-finding.
+Last updated: 2026-05-19 night (the May 19 tooling gaps are now closed
+in practice as well as on paper. The first follow-up PGR2 reruns used
+the new surface-graph and temporal tooling to keep the host-refresh
+publish preservation fix, reject the `0x3b58000` display-shape
+heuristic, land the new `copy-alias` path for late same-VRAM linear
+binds, and narrow the live blocker to copied RTT correctness around
+stage-0 `0x3c84000` sampling. See
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md` and
+decision-log "2026-05-19 (night)"). Prior 2026-05-11: M15 checklist
+and paired-capture finding.
 
 This note records the feedback gaps that matter for the Metal backend and how
 to close them without turning every Codex session into a pile of background
@@ -305,8 +305,8 @@ the Xbox. As of 2026-05-11 it reports:
   gameplay diffs are still missing.
 - P99 jitter: PGR2/Rainbow/Crimson fail the current bundle criteria.
 - Cold shader compile proof is still open. Front-fb fallback policy is
-  resolved as of 2026-05-11 evening (opt-in stays; multi-RT compositing
-  fix deferred — see decision-log "2026-05-11 (evening 2)").
+  resolved as of 2026-05-11 evening (opt-in stays; current deep fix is the
+  RTT path described in the 2026-05-19 follow-up note).
 
 Tooling note: attempting to move the GL leg of `metal-gl-compare.sh` to QMP
 framebuffer capture on 2026-05-11 proved that this app build does not expose
@@ -314,9 +314,9 @@ framebuffer capture on 2026-05-11 proved that this app build does not expose
 support and an HMP/PPM fallback for builds that do expose screendump. The
 paired diff harness has since moved the `--trigger flip` GL leg to
 `XEMU_GL_SCREENSHOT_PATH` and the Metal leg to
-`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; the remaining tooling gap is gameplay
-sequence capture, keyframe selection, and content-aligned GL/Metal/oracle
-comparison.
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a`; those tooling gaps are now closed well
+enough to say the remaining issue is renderer correctness rather than
+artifact collection.
 
 Closure path:
 
@@ -335,9 +335,9 @@ Closure path:
 ## Gap 5: oracle-independent measurement closure — **CLOSED 2026-05-19**
 
 Three measurement gaps were blocking the next round of M15 default-on
-evidence work while the retail Xbox oracle is offline (thermal repaste
-pending). The 2026-05-19 slice closed all three with oracle-independent
-tools (decision-log "2026-05-19";
+evidence work while the retail Xbox oracle was offline at the start of
+the slice (thermal repaste pending at that time). The 2026-05-19 slice
+closed all three with oracle-independent tools (decision-log "2026-05-19";
 `benchmarks/2026-05-19-tooling-gap-closure.md`).
 
 Closed pieces:

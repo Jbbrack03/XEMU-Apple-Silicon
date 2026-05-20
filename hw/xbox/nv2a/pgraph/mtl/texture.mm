@@ -46,6 +46,8 @@
 #import <Metal/Metal.h>
 
 extern "C" void *xemu_metal_get_device(void);
+extern "C" void pgraph_mtl_draw_get_done_event_state(void **out_event,
+                                                     uint64_t *out_value);
 
 /* NV2A_MAX_TEXTURES is 4 in pgraph.h; mirror locally to keep this .mm
  * file's compile independent of nv2a_int.h. */
@@ -89,6 +91,7 @@ static void *s_stage_texture[MTL_TEX_MAX_STAGES];
 static void *s_stage_sampler[MTL_TEX_MAX_STAGES];
 static float s_stage_scale[MTL_TEX_MAX_STAGES];
 static bool  s_stage_external_surface[MTL_TEX_MAX_STAGES];
+static bool  s_stage_rect_tex[MTL_TEX_MAX_STAGES];
 
 /* Upload-ring staging buffers. Independent from mtl/buffer.mm's draw
  * ring so the upload encoder doesn't contend for the same backing. */
@@ -445,6 +448,7 @@ bool pgraph_mtl_texture_init(void)
     memset(s_stage_texture, 0, sizeof(s_stage_texture));
     memset(s_stage_sampler, 0, sizeof(s_stage_sampler));
     memset(s_stage_external_surface, 0, sizeof(s_stage_external_surface));
+    memset(s_stage_rect_tex, 0, sizeof(s_stage_rect_tex));
     for (int i = 0; i < MTL_TEX_MAX_STAGES; i++) {
         s_stage_scale[i] = 1.0f;
     }
@@ -501,6 +505,7 @@ void pgraph_mtl_texture_finalize(void)
     memset(s_stage_texture, 0, sizeof(s_stage_texture));
     memset(s_stage_sampler, 0, sizeof(s_stage_sampler));
     memset(s_stage_external_surface, 0, sizeof(s_stage_external_surface));
+    memset(s_stage_rect_tex, 0, sizeof(s_stage_rect_tex));
     for (int i = 0; i < MTL_TEX_MAX_STAGES; i++) {
         s_stage_scale[i] = 1.0f;
     }
@@ -547,6 +552,7 @@ bool pgraph_mtl_texture_bind_slot(int stage,
     s_stage_sampler[stage] = smp_state;
     s_stage_scale[stage] = 1.0f;
     s_stage_external_surface[stage] = false;
+    s_stage_rect_tex[stage] = false;
 
     /* Texture cache lookup. */
     TextureCacheEntry *cached = find_tex_entry(vram_phys_addr,
@@ -652,6 +658,7 @@ void pgraph_mtl_texture_invalidate_addr(uint64_t vram_phys_addr)
                 s_stage_texture[stage] = NULL;
                 s_stage_scale[stage] = 1.0f;
                 s_stage_external_surface[stage] = false;
+                s_stage_rect_tex[stage] = false;
             }
         }
         release_tex_entry(e);
@@ -694,6 +701,7 @@ void pgraph_mtl_texture_invalidate_range(uint64_t vram_phys_addr,
                 s_stage_texture[stage] = NULL;
                 s_stage_scale[stage] = 1.0f;
                 s_stage_external_surface[stage] = false;
+                s_stage_rect_tex[stage] = false;
             }
         }
         release_tex_entry(e);
@@ -706,6 +714,7 @@ void pgraph_mtl_texture_invalidate_range(uint64_t vram_phys_addr,
 bool pgraph_mtl_texture_bind_slot_external(int stage,
                                            void *texture,
                                            float scale,
+                                           bool use_rect_tex,
                                            const PgraphMtlSamplerDesc *sampler)
 {
     if (!s_init || stage < 0 || stage >= MTL_TEX_MAX_STAGES ||
@@ -725,7 +734,109 @@ bool pgraph_mtl_texture_bind_slot_external(int stage,
     s_stage_sampler[stage] = smp_state;
     s_stage_scale[stage] = (scale > 0.0f) ? scale : 1.0f;
     s_stage_external_surface[stage] = true;
+    s_stage_rect_tex[stage] = use_rect_tex;
     atomic_fetch_add(&s_cache_hits, 1);
+    return true;
+}
+
+bool pgraph_mtl_texture_bind_slot_surface_copy(
+    int stage,
+    uint64_t vram_phys_addr,
+    uint64_t source_byte_length,
+    uint32_t mtl_pixel_format,
+    uint32_t width,
+    uint32_t height,
+    void *source_texture,
+    float scale,
+    bool use_rect_tex,
+    const PgraphMtlSamplerDesc *sampler)
+{
+    if (!s_init || stage < 0 || stage >= MTL_TEX_MAX_STAGES ||
+        width == 0 || height == 0 || source_texture == NULL) {
+        return false;
+    }
+
+    void *smp_state = s_default_sampler;
+    if (sampler) {
+        smp_state = get_sampler(sampler);
+        if (smp_state == NULL) {
+            smp_state = s_default_sampler;
+        }
+    }
+    s_stage_sampler[stage] = smp_state;
+    s_stage_scale[stage] = (scale > 0.0f) ? scale : 1.0f;
+    s_stage_external_surface[stage] = false;
+    s_stage_rect_tex[stage] = use_rect_tex;
+
+    TextureCacheEntry *cached = find_tex_entry(vram_phys_addr,
+                                               source_byte_length,
+                                               width, height,
+                                               mtl_pixel_format,
+                                               false, 1);
+    void *dst_handle = cached ? cached->texture : NULL;
+    if (cached != NULL) {
+        atomic_fetch_add(&s_cache_hits, 1);
+    } else {
+        atomic_fetch_add(&s_cache_miss, 1);
+        dst_handle = pgraph_mtl_heap_alloc_texture_2d(width, height,
+                                                      /*levels=*/1,
+                                                      mtl_pixel_format);
+        if (dst_handle == NULL) {
+            return false;
+        }
+    }
+
+    @autoreleasepool {
+        void *event_handle = NULL;
+        uint64_t event_value = 0;
+        pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+
+        id<MTLTexture> src = (__bridge id<MTLTexture>)source_texture;
+        id<MTLTexture> dst = (__bridge id<MTLTexture>)dst_handle;
+        if (src == nil || dst == nil) {
+            if (cached == NULL) {
+                pgraph_mtl_heap_release_texture(dst_handle);
+            }
+            return false;
+        }
+
+        id<MTLCommandBuffer> cb = [s_upload_queue commandBuffer];
+        cb.label = @"xemu.metal.tex_surface_copy_cb";
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLEvent> ev = (__bridge id<MTLEvent>)event_handle;
+            [cb encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        blit.label = @"xemu.metal.tex_surface_copy_blit";
+        [blit copyFromTexture:src
+                  sourceSlice:0
+                  sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(width, height, 1)
+                    toTexture:dst
+             destinationSlice:0
+             destinationLevel:0
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+
+        uint64_t signal_value =
+            atomic_fetch_add(&s_upload_fence_value, 1) + 1;
+        [cb encodeSignalEvent:s_upload_fence_event value:signal_value];
+        [cb commit];
+    }
+
+    if (cached == NULL) {
+        TextureCacheEntry *e = insert_tex_entry(vram_phys_addr,
+                                                source_byte_length,
+                                                width, height,
+                                                mtl_pixel_format,
+                                                false, 1,
+                                                dst_handle);
+        s_stage_texture[stage] = e->texture;
+    } else {
+        s_stage_texture[stage] = cached->texture;
+    }
     return true;
 }
 
@@ -762,6 +873,7 @@ bool pgraph_mtl_texture_bind_slot_full(int stage,
     s_stage_sampler[stage] = smp_state;
     s_stage_scale[stage] = 1.0f;
     s_stage_external_surface[stage] = false;
+    s_stage_rect_tex[stage] = false;
 
     /* Cache lookup uses level-0 face-0 dimensions as a proxy. */
     const PgraphMtlTextureLevel *l0 = &per_level[0];
@@ -901,6 +1013,7 @@ bool pgraph_mtl_texture_bind_slot_cached_full(
     s_stage_sampler[stage] = smp_state;
     s_stage_scale[stage] = 1.0f;
     s_stage_external_surface[stage] = false;
+    s_stage_rect_tex[stage] = false;
 
     atomic_fetch_add(&s_cache_hits, 1);
     s_stage_texture[stage] = cached->texture;
@@ -937,6 +1050,14 @@ bool pgraph_mtl_texture_stage_uses_external_surface(int stage)
         return false;
     }
     return s_stage_external_surface[stage];
+}
+
+bool pgraph_mtl_texture_stage_uses_rect_tex(int stage)
+{
+    if (stage < 0 || stage >= MTL_TEX_MAX_STAGES) {
+        return false;
+    }
+    return s_stage_rect_tex[stage];
 }
 
 void *pgraph_mtl_texture_get_default_sampler(void)

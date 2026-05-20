@@ -1114,7 +1114,11 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
      * users see actual scene content for titles that need it. */
     (void)published;
     if (use_front_fb_fallback) {
-        pgraph_mtl_surface_publish_latest_draw_fallback();
+        unsigned int display_w = 0, display_h = 0;
+        mtl_get_display_dimensions(d, &display_w, &display_h);
+        pgraph_mtl_surface_publish_latest_draw_fallback(display_w,
+                                                        display_h,
+                                                        (uint32_t)crtc_addr);
     }
 
     /* Tool 1 (2026-05-19): structured per-flip surface-graph dump for
@@ -2201,10 +2205,13 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
      * never take renderer_lock, so renderer_lock → pg->lock is safe;
      * no AB-BA deadlock is possible. */
     qemu_mutex_lock(&d->pgraph.lock);
-    bool published = pgraph_mtl_surface_publish_front_fb_pointer_only(
-        (uint32_t)crtc_addr, "crtc-refresh");
-    (void)published;
     int has_fb = pgraph_mtl_surface_has_front_framebuffer();
+    if (!(mtl_front_fb_fallback_enabled() && has_fb)) {
+        bool published = pgraph_mtl_surface_publish_front_fb_pointer_only(
+            (uint32_t)crtc_addr, "crtc-refresh");
+        (void)published;
+        has_fb = pgraph_mtl_surface_has_front_framebuffer();
+    }
     qemu_mutex_unlock(&d->pgraph.lock);
 
     return has_fb;

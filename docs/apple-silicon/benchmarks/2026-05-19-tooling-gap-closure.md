@@ -1,5 +1,11 @@
 # 2026-05-19 — Tooling-gap closure: three oracle-independent measurement tools
 
+> Postscript, later on 2026-05-19: the retail Xbox oracle returned to
+> service after the repaste validation documented in
+> `2026-05-19-retail-oracle-post-repaste-thermal-check.md`. The
+> "oracle is offline" framing below is historical context for why this
+> tooling slice was started.
+
 ## Motivation
 
 Three measurement gaps were blocking the next round of M15 default-on

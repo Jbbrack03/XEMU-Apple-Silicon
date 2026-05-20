@@ -97,6 +97,12 @@ static void mtl_after_texture_surface_download(void *opaque,
     memory_region_set_client_dirty(d->vram, (hwaddr)vram_addr,
                                    (hwaddr)byte_size,
                                    DIRTY_MEMORY_NV2A_TEX);
+    /* Surface-cache siblings at the same VRAM address are separate Metal
+     * textures today. When a draw-dirty sibling is downloaded to VRAM so a
+     * texture view can sample it, mark every overlapping sibling dirty_vram
+     * as well so the subsequent upload_if_dirty_at() refreshes those alias
+     * views from the downloaded bytes. */
+    pgraph_mtl_surface_mark_dirty_overlapping(vram_addr, byte_size);
 }
 
 static bool texture_range_dirty(NV2AState *d, hwaddr addr, size_t size)
@@ -1057,6 +1063,11 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
         surface_texture_pitch_compatible(surface_pitch, &s) &&
         !mtl_disable_surface_texture_fastpath() &&
         !mtl_disable_surface_texture_addr((uint32_t)offset);
+    bool has_shape_alias_siblings =
+        has_compatible_surface &&
+        pgraph_mtl_surface_has_other_color_shape((uint32_t)offset,
+                                                 s.width, s.height,
+                                                 /*pitch=*/0);
     bool self_sample =
         has_compatible_surface &&
         pgraph_mtl_surface_get_color_vram_addr() == (uint32_t)offset;
@@ -1147,6 +1158,18 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
         }
     }
 
+    if (has_compatible_surface && has_shape_alias_siblings && !f.linear) {
+        /* The same VRAM region can legitimately appear as multiple
+         * render-target/texture shapes in PGR2 (for example a just-drawn
+         * 640x480 RT immediately rebound as a 1280x480 rect texture view).
+         * Bridge any freshly drawn sibling through VRAM before we sample the
+         * compatible surface texture so the alias view does not read stale
+         * Metal-side contents from an older sibling texture object. */
+        pgraph_mtl_surface_download_in_range_if_dirty(
+            (uint32_t)offset, (uint32_t)texture_length, d->vram_ptr,
+            mtl_after_texture_surface_download, d);
+    }
+
     if (!has_compatible_surface && !texture_possibly_dirty &&
         pgraph_mtl_texture_bind_slot_cached_full(
             stage, (uint64_t)offset, (uint64_t)texture_length,
@@ -1182,23 +1205,36 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
 
     if (has_compatible_surface && !self_sample) {
         float scale = 1.0f;
-        if (guest_w != 0 && surface_w >= guest_w) {
-            scale = (float)surface_w / (float)guest_w;
-        }
-
+        bool use_surface_copy = !f.linear || has_shape_alias_siblings;
+        const char *surface_tex_path = f.linear
+            ? (use_surface_copy ? "copy-alias" : "external")
+            : "copy";
         pgraph_mtl_draw_flush_open_pass();
         pgraph_mtl_surface_upload_if_dirty_at((uint32_t)offset,
                                               d->vram_ptr);
-        bool bound = pgraph_mtl_texture_bind_slot_external(stage, surface_tex,
-                                                           scale, &sd);
+        bool bound;
+        if (!use_surface_copy) {
+            if (guest_w != 0 && surface_w >= guest_w) {
+                scale = (float)surface_w / (float)guest_w;
+            }
+            bound = pgraph_mtl_texture_bind_slot_external(stage, surface_tex,
+                                                          scale, true, &sd);
+        } else {
+            if (f.linear && guest_w != 0 && surface_w >= guest_w) {
+                scale = (float)surface_w / (float)guest_w;
+            }
+            bound = pgraph_mtl_texture_bind_slot_surface_copy(
+                stage, (uint64_t)offset, (uint64_t)texture_length, mtl_fmt,
+                surface_w, surface_h, surface_tex, scale, f.linear, &sd);
+        }
         if (bound && getenv("XEMU_METAL_DIAG_SURFACE_TEX")) {
             fprintf(stderr,
                     "xemu-perf: metal_surface_texture stage=%d "
                     "vram_addr=0x%llx guest=%ux%u scaled=%ux%u "
-                    "surface_fmt=%u texture_fmt=%u scale=%.3f\n",
+                    "surface_fmt=%u texture_fmt=%u scale=%.3f path=%s\n",
                     stage, (unsigned long long)offset,
                     guest_w, guest_h, surface_w, surface_h,
-                    surface_fmt, s.color_format, scale);
+                    surface_fmt, s.color_format, scale, surface_tex_path);
         }
         pg->texture_dirty[stage] = false;
         return bound;

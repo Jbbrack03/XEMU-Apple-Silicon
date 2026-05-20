@@ -1,5 +1,12 @@
 # 2026-05-11 — PGR2 Metal Render-Path Diagnostic (Capture-Source Ruled Out)
 
+> Update 2026-05-19 late evening: this note still stands as the point where
+> capture-source error was ruled out, but the active next-step framing is now
+> narrower. See `2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`: keep
+> the host-refresh publish preservation fix, reject the `0x3b58000`
+> display-shape heuristic, and treat late stage-0 `0x3c84000` RTT sampling as
+> the live blocker.
+
 Goal: Resolve handoff "Next engineering steps" #1 — decide whether
 `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` is sampling the wrong published
 texture or whether live Metal rendering is missing the PGR2 profile/menu
@@ -14,10 +21,11 @@ surface holds non-image data when sampled. The current
 `XEMU_METAL_FRONT_FB_FALLBACK=1` mechanism cannot bridge PGR2's
 profile-screen scene rendering on its own.
 
-PGR2 paired gameplay visual parity remains FAIL. The deep fix requires
-multi-RT compositing investigation that is deferred to a future Metal
-slice. See decision-log "2026-05-11: Front-fb fallback policy stays
-opt-in" for the policy outcome.
+PGR2 paired gameplay visual parity remains FAIL. This established that the
+problem was deeper than screenshot-source selection. The later 2026-05-19
+follow-up further narrowed the active fix from general "multi-RT compositing
+investigation" to RTT/render-target-as-texture correctness around late
+stage-0 sampling of `0x3c84000`.
 
 ## Method
 

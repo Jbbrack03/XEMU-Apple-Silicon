@@ -1,14 +1,14 @@
 # Benchmark Automation
 
-Last updated: 2026-05-19 (three oracle-independent tools added —
-`XEMU_METAL_SURFACE_GRAPH_DUMP` + `surface-graph-analyze.py` for
-per-flip MtlSurfaceBinding dumps backing the M5.12/M17 PGR2 multi-RT
-investigation; `capture-gameplay-temporal.sh` thin wrapper for
-gameplay-route PNG-every-frame capture via the new
-`XEMU_BENCH_TEMPORAL_CAPTURE` launcher mode;
-`lldb-gl-launch.sh` + `metal-gl-compare.sh --gl-attach-lldb` for the
-Halo cold-launch segfault path via the new `XEMU_BENCH_LAUNCHER_PREFIX`
-hook. Codex-reviewed plan + changes; see decision-log "2026-05-19").
+Last updated: 2026-05-19 night (the three oracle-independent tools from
+the May 19 tooling slice are now in service, and the first full PGR2
+follow-up reruns used them to reject the display-shape publish
+heuristic while keeping the host-refresh publish preservation fix and
+landing the new `copy-alias` path for late same-VRAM linear binds. The
+remaining blocker is renderer correctness in the copied late RTT path
+around stage-0 sampling of `0x3c84000`, not missing measurement
+infrastructure; see decision-log "2026-05-19 (night)" and
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`).
 Prior 2026-05-12 update: gate-discovery extension + diagnostic vs evidence
 split landed; paired capture source fixed in prior session; gameplay parity
 still unproven; CLAUDE.md compressed and cross-refs to its "Stable opt-in"
@@ -21,8 +21,8 @@ for the stable trio, but M15 default-on is not closed:
 (2026-05-11 evening). Known blockers are missing or FAIL gameplay visual
 diffs for PGR2/Rainbow/SC2/Halo, Crimson paired-diff failure,
 PGR2/Rainbow/Crimson p99 jitter failures, and missing cold shader compile
-proof. The front-fb fallback policy is now resolved (opt-in pending the
-multi-RT compositing fix — see decision-log "2026-05-11 (evening 2)").
+proof. The front-fb fallback policy is now resolved (opt-in; the active
+blocker is RTT correctness, not policy churn).
 The current app build still does not expose QMP/HMP `screendump`, but
 `--trigger flip` paired runs now use the GL renderer's
 `XEMU_GL_SCREENSHOT_PATH` path instead of macOS window capture, and the Metal

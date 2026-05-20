@@ -1,35 +1,31 @@
 # Strategy
 
-Last updated: 2026-05-12 evening (T2 front-fb publish fix landed —
-commits `ca35b96562` + `3ae76a327c`; the Metal renderer now publishes
-per host vsync instead of only per guest `NV097_FLIP_STALL`, which
-restores PGRAPH-rendered content for tracked titles. M15 default-on
-is still checklist-gated and not closed; the BIOS-animation portion
-of the boot capture still falls through to the missing VGA fallback
-path, and tracked-title gameplay impact is unverified pending
-Crimson / PGR2 reruns. See decision-log "2026-05-12 (evening 2)" and
-`benchmarks/2026-05-12-metal-boot-animation-temporal-baseline.md`).
+Last updated: 2026-05-19 night (the May 19 follow-up reruns kept the
+host-refresh publish preservation fix, rejected the late-PGR2
+display-shape publish heuristic, replaced the old same-VRAM linear
+alias-to-VRAM bridge with `path=copy-alias`, and moved the active
+blocker to copied RTT correctness around late stage-0 sampling of
+`0x3c84000`. See decision-log "2026-05-19 (night)" and
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`).
 Retail Xbox oracle proof is production-ready for the stable trio
 (Crimson Skies / Rainbow Six 3 / PGR2), but the Metal default-on bundle is
 not closed: `scripts/apple-silicon/m15-bundle-status.py` currently reports
 `verdict=incomplete ok=6 fail=5 missing=4` (2026-05-11 evening, after
 the same-day m15-gameplay-* discovery extension and the front-fb fallback
 policy decision-log entry). PGR2 and Rainbow gameplay visual parity are
-not proven; the 2026-05-11 evening PGR2 capture-source diagnostic
-decisively ruled out the capture path and pinned the failure on Metal's
-multi-RT compositing pipeline. The CRTC-pointed surface holds residual
-boot-state contents and the dominant-draw fallback surface contains
-non-image data when sampled — see
-`docs/apple-silicon/benchmarks/2026-05-11-pgr2-metal-render-path-diagnostic.md`
-and decision-log "2026-05-11 (evening 2)". M15 requires
+not proven; the 2026-05-11 diagnostic ruled out capture-source error,
+and the 2026-05-19 follow-up reruns narrowed the surviving defect to the
+late RTT/render-target-as-texture path rather than pure publish choice.
+Current reference run `benchmark-runs/20260519-182241-pgr2/` keeps
+publishing `0x3c84000` stably for 23 late flips, yet stable frames still
+show white HUD bars, bad reflections, and missing geometry. M15 requires
 multiple matched gameplay keyframes from
 controller routes, aligned by visual content rather than timestamp, with
 boot/loading/black/static/host-UI frames rejected. Crimson paired diff still
 fails (`changed_pct=14.7560`), SC2/Halo/Rainbow gameplay diffs are missing,
 and PGR2/Rainbow/Crimson p99 jitter gates fail. Cold shader compile
 proof is still open. Front-fb fallback policy is resolved (opt-in stays
-pending the multi-RT compositing fix — decision-log "2026-05-11
-(evening 2)"). The current app build
+while the RTT correctness work continues). The current app build
 does not
 expose QMP/HMP `screendump`; `metal-gl-compare.sh --trigger flip` uses the
 GL renderer's `XEMU_GL_SCREENSHOT_PATH` path instead. **GL renderer remains
@@ -41,11 +37,13 @@ input-latency counters.
 
 Immediate strategy for the next session: close evidence quality before
 claiming renderer parity, but do not spend the first loop on another blind
-PGR2 rerun. Start from the failed PGR2 diagnostic contact sheet, determine
-whether `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` is sampling the wrong published
-texture or whether live Metal itself lacks the PGR2 profile/menu background,
-then rerun PGR2 with strict GL window capture plus `--gl-crop`. Rainbow
-follows only after the PGR2 artifact pipeline is trustworthy again.
+PGR2 rerun or on retail-oracle capture. Start from
+`benchmarks/2026-05-19-pgr2-snapshot-publish-and-rtt-followup.md`,
+keep the late same-VRAM linear bind on `path=copy-alias`, instrument the
+copied stage-0 `0x3c84000` RTT content/format/use-site in
+`texture_pg.c` / `texture.mm`, and only rerun gameplay evidence after local
+GL-vs-Metal content alignment materially improves. Rainbow follows only after
+the PGR2 RTT path is trustworthy again.
 
 ## North Star
 
