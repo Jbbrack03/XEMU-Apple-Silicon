@@ -1,5 +1,104 @@
 # Decision Log
 
+## 2026-05-21 (morning): §4.12 combiner-basic / §4.16 texture-dma-ab / §4.8 swizzle-mipmap XBEs shipped + Metal renderer LOD-clamp + LOD-bias fix + xbe-harness `metal_canonical_overrides` field
+
+**Decision.** Ship three new diagnostic XBEs and the supporting
+Metal renderer / harness changes:
+
+- **§4.12 `combiner-basic` v0.1** — single-stage NV2A register-combiner
+  4×4 grid (4 input mappings × 4 output scale modifiers) at fixed
+  DIFFUSE=(0.25, 0.5, 0.75, 1.0). Math-derived oracle byte-exact;
+  PASS on Metal. Codex MINOR ISSUES adopted in-session (narrowed
+  SUM-vs-MUX claim; manifest no longer overclaims [-1,1] clamp).
+
+- **§4.16 `texture-dma-ab` v0.1** — DMA channel selector smoke
+  under pbkit's default DMA aliasing. Documents the encoding (0=A,
+  2=B per `pgraph.c:2679-2680`; not the natural 0/1) and the
+  pbkit-aliasing caveat. PASS on Metal as a non-zero-CONTEXT_DMA
+  round-trip smoke + documentation oracle. v0.2 + task #18 needed
+  for proper per-channel base-address regression gate. Codex
+  BLOCKING on initial cut (selector 1→2; aliasing; nv2a screenshot
+  source) — all three findings adopted in-session.
+
+- **§4.8 `swizzle-mipmap` v0.2** — 64x64 SZ_A8R8G8B8 with 7-level
+  mip chain; pre-swizzled 2×2 quadrant pattern per mip with per-mip
+  tint ramp; single bind with MIPMAP_LEVELS=7, per-cell LOD clamp.
+  Ships as `expected_fail_renderers: ["xemu/gl", "xemu/metal"]`
+  because it catches REAL renderer correctness gaps that are now
+  tracked: task #16 (Metal swizzled-texture intra-mip sampling
+  collapses to texel 0 — cells show correct per-mip tint ramp
+  proving the new LOD-clamp fix works, but the 4-sub-quad UV
+  variation returns Q0 only) and task #17 (GL renders BLACK for
+  cells with MIN_LOD_CLAMP = MAX_LOD_CLAMP > 0). Codex BLOCKING on
+  v0.1 (per-cell MIPMAP_LEVELS=1 rebind sidestepped xemu's
+  mip-chain code); BLOCKING on v0.2 with two findings (max_lod=0
+  sentinel overload + lod_bias not written to descriptor) — both
+  adopted in-session. The XBE remains useful as a spec oracle.
+
+- **Metal renderer fix:**
+  `mtl/texture_pg.c::build_sampler_desc_from_pg` now honors guest
+  writes to `SET_TEXTURE_CONTROL0` MIN_LOD_CLAMP / MAX_LOD_CLAMP
+  via MTLSamplerDescriptor's `lodMinClamp` / `lodMaxClamp`. Adds
+  `MIPMAP_LOD_BIAS` propagation via the existing
+  `pgraph_convert_lod_bias_to_float` helper (was computed but
+  never written). `texture.mm::build_sampler` no longer overloads
+  `max_lod == 0` as "unbounded"; callers wanting open clamp pass
+  FLT_MAX explicitly (prewarm path updated).
+
+- **xbe-harness `metal_canonical_overrides` manifest field** —
+  per-XBE env-var overrides merged into the Metal canonical recipe
+  (was only available via `additional_metal_recipes`, which spawns
+  extra cells). Used by combiner-basic + swizzle-mipmap to pin
+  `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so the captured frame is the
+  linear NV2A surface, not the sRGB-encoded drawable. Drawable
+  remains the default for XBEs whose cells use only 0/255
+  endpoints (gamma neutral).
+
+**Status.** 14 of 17 first-wave XBEs PASS on Metal + 2 expected_fail
+(logic-ops feature work + swizzle-mipmap regression target). 2
+unstarted: §4.13 texture-shader-stages (19 NV2A texture shader
+modes; needs combiner-helper + texture-shader-stage infrastructure;
+significant scope deferred), §4.15 msaa-aa-factor (deferred).
+
+**M15 default-on prerequisite progress.** Per
+`metal-renderer-plan.md` §4 + decision-log 2026-05-20 evening, the
+gate is "all priority XBEs PASS on Metal." Today: 14 PASS / 2
+expected_fail (one feature work, one tracked-regression spec) / 2
+unstarted. Strictly: gate not yet met. Pragmatically: this slice
+closed 2 of the 5 previously-unstarted XBEs and identified the
+remaining renderer-side blockers (tasks #16, #17, #18) that need
+investigation before §4.13 / §4.15 are worth authoring.
+
+**Tracked follow-ups:**
+- Task #16 (Metal): SZ_A8R8G8B8 swizzled-texture intra-mip
+  sampling. Per-cell mip-N selection works; intra-mip UV variation
+  collapses to texel (0, 0). Needs Metal renderer investigation
+  (texture upload path? sampler config? per-fragment UV not
+  reaching the shader?). Captured by swizzle-mipmap; verified
+  cell 0 on GL renders the 4-quadrant pattern correctly, so the
+  XBE design is valid and the bug is Metal-specific.
+- Task #17 (GL): MIN_LOD_CLAMP = MAX_LOD_CLAMP > 0 renders BLACK.
+  xemu's GL renderer code path SHOULD work (BASE_LEVEL = min,
+  upload covers all levels, MAX_LEVEL = levels-1). Needs deeper
+  diagnosis.
+- Task #18 (xbed_lib): proper §4.16 v0.2 needs guest-side
+  RAMIN/DMA-object setup helper.
+
+**Why this matters.** XBE-first methodology (workspace `CLAUDE.md`
+rule #17) makes per-feature XBE PASS the M15 default-on gate, not
+retail-title metrics. Each XBE shipped here closes a specific
+NV2A feature-surface gap or captures a renderer-side regression
+target. The two expected_fail XBEs together with the four tracked
+follow-up tasks form an explicit punch list before M15 default-on
+can flip — much clearer than the prior "tracked-title gameplay
+visual diff" gate.
+
+**Sync.** xbe-harness's manifest schema in `xbe_discover.py`
+updated to document `metal_canonical_overrides`. handoff.md and
+decision-log.md kept in agreement (project rule #4).
+
+---
+
 ## 2026-05-20 (late evening, +texture-filter-wrap): §4.11 shipped expected_fail; new Metal renderer gap (task #15) — per-vertex TEX0 attribute not propagating per-cell
 
 **Decision.** §4.11 `texture-filter-wrap` v0.1 ships as

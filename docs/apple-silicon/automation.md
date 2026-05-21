@@ -4604,9 +4604,19 @@ production-readiness gate.
    `additional_metal_recipes` to spawn extra Metal cells with env
    overrides — used by `crtc-publish` to gate both
    `XEMU_METAL_FRONT_FB_FALLBACK={0,1}` legs from one matrix
-   invocation. See `scripts/apple-silicon/xbe-harness/README.md`
-   for full layout, render-loop pattern, and per-XBE add-new-XBE
-   recipe.
+   invocation. Per-XBE manifests can ALSO declare
+   `metal_canonical_overrides` (2026-05-21) — a dict of env-var
+   overrides merged into the Metal canonical recipe for the
+   canonical cell (and propagated to any `additional_metal_recipes`
+   variants where per-variant entries still win on collision). Used
+   by `combiner-basic` and `swizzle-mipmap` to pin
+   `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so the captured frame is the
+   linear NV2A surface, not the sRGB-encoded drawable (gamma diverges
+   from math-derived oracle for non-saturated cell values).
+   Drawable remains the default for XBEs whose cells use only 0/255
+   endpoints (gamma neutral: gamma(0)=0, gamma(1)=1). See
+   `scripts/apple-silicon/xbe-harness/README.md` for full layout,
+   render-loop pattern, and per-XBE add-new-XBE recipe.
 
 10. **Mac-side composite-out capture leg (2026-05-06): SHIPPED.**
     `tools/xemu-capture/` (Swift `.app`, bundle ID
