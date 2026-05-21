@@ -4631,7 +4631,10 @@ production-readiness gate.
    by `combiner-basic` and `swizzle-mipmap` to pin
    `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so the captured frame is the
    linear NV2A surface, not the sRGB-encoded drawable (gamma diverges
-   from math-derived oracle for non-saturated cell values).
+   from math-derived oracle for non-saturated cell values), and by
+   `msaa-aa-factor` (2026-05-21 mid-day) to pin `XEMU_METAL_MSAA=2`
+   on the canonical Metal cell (with `XEMU_METAL_MSAA=4` exercised as
+   an `additional_metal_recipes` variant `msaa4`).
    Drawable remains the default for XBEs whose cells use only 0/255
    endpoints (gamma neutral: gamma(0)=0, gamma(1)=1). See
    `scripts/apple-silicon/xbe-harness/README.md` for full layout,

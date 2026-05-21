@@ -8,13 +8,15 @@
 > PASS on Metal" replaces "≤1% per-pixel diff vs GL") is now the M15
 > default-on gate.
 >
-> **14 of 17 first-wave XBEs PASS on Metal + 2 expected_fail. 2
-> unstarted.** Three new XBEs shipped 2026-05-21: §4.12 `combiner-basic`
+> **15 of 17 first-wave XBEs PASS on Metal + 2 expected_fail. 1
+> unstarted.** Four new XBEs shipped 2026-05-21: §4.12 `combiner-basic`
 > (PASS, byte-exact), §4.8 `swizzle-mipmap` v0.2 (expected_fail Metal+GL;
 > SPEC oracle for tasks #16 + #17), §4.16 `texture-dma-ab` v0.1
-> (pbkit-aliased smoke; PASS).
+> (pbkit-aliased smoke; PASS), §4.15 `msaa-aa-factor` v0.1 (path-
+> activation + edge-AA-band SMOKE; PASS on canonical msaa=2 +
+> msaa4 variant).
 >
-> **PASS on Metal (14):** `pipeline-smoke` Tier-4 plus §4.1 `mirror`,
+> **PASS on Metal (15):** `pipeline-smoke` Tier-4 plus §4.1 `mirror`,
 > §4.2 `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
 > §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`,
 > §4.7 `texture-format-sweep` v0.1, §4.9 `blend-matrix`, §4.10
@@ -23,8 +25,11 @@
 > closed -- was a test authoring bug, not a Metal gap), `flat-quad-
 > propagation` regression gate that validates the task #13 CPU-side
 > flat-color propagation fix in `mtl/vertex.c`, §4.12 `combiner-basic`
-> v0.1 (4×4 mapping × scale grid, NEW), §4.16 `texture-dma-ab` v0.1
-> (DMA-A vs DMA-B selector smoke under pbkit channel aliasing, NEW).
+> v0.1 (4×4 mapping × scale grid), §4.15 `msaa-aa-factor` v0.1
+> (MSAA path-activation + edge-AA-band SMOKE under canonical msaa=2
+> + msaa4 variant; per-mode profile + AA-band lower-bound deferred
+> to v0.2 per Codex 2026-05-21 finding, NEW), §4.16 `texture-dma-ab` v0.1
+> (DMA-A vs DMA-B selector smoke under pbkit channel aliasing).
 >
 > **expected_fail (2):** §4.14 `logic-ops` -- neither GL nor Metal
 > implements NV2A logic-ops; XBE serves as the SPEC for what each
@@ -35,11 +40,12 @@
 > MAX_LOD_CLAMP > 0). Ships as SPEC oracle; flips to PASS once
 > tasks #16 + #17 close.
 >
-> **Unstarted (2):** §4.13 `texture-shader-stages` (19 NV2A texture
+> **Unstarted (1):** §4.13 `texture-shader-stages` (19 NV2A texture
 > shader modes; needs combiner-helper + texture-shader-stage
-> infrastructure; significant scope deferred), §4.15
-> `msaa-aa-factor` (needs AA mode iteration). Both deferred pending
-> task #16 + #17 fixes; see handoff.md for the priority order.
+> infrastructure; significant scope deferred). §4.15 `msaa-aa-factor`
+> v0.1 shipped 2026-05-21; v0.2 per-mode keyed expected_results + AA-
+> band lower-bound is queued as a second-wave follow-up. See handoff.md
+> for the priority order.
 >
 > Renderer + harness changes shipped 2026-05-21:
 > - **Metal LOD-clamp + LOD-bias renderer fix** in
@@ -879,6 +885,32 @@ implement.
 High-contrast diagonal edge at sub-pixel angle; per AA mode
 (none/2×/4×); sample edge perpendicular; expected gradient
 profile per mode.
+
+**v0.1 shipped 2026-05-21 (NARROWED SCOPE per Codex 2026-05-21
+finding).** v0.1 renders one solid-WHITE triangle (60,60)-(60,420)-
+(580,240) on solid-BLACK; the two diagonals advance ~0.346 px/px so
+every column inside [60,580] places the edge at a distinct sub-pixel
+position. The XBE is MSAA-agnostic; `XEMU_METAL_MSAA` on the host
+renderer governs whether the edge resolves to a hard step or per-
+coverage gradient. v0.1 is structured as a **MSAA path-activation +
+edge-AA-band PRESENT smoke test**, NOT the full per-mode gradient-
+profile test the spec ultimately calls for. Two Metal cells per matrix
+run: canonical (`XEMU_METAL_MSAA=2`) + `msaa4` variant
+(`additional_metal_recipes`). Hard-step math oracle with
+`compare_overrides.max_changed_pct=3.0` absorbs the ~0.7-0.9% AA band.
+Counter gate: `METAL_MSAA_RESOLVE_COUNT >= 100` AND
+`METAL_MSAA_SAMPLE_COUNT >= 12` (sum across intervals; rules out the
+"sample-count silently coerced to 1" regression class). Validation:
+canonical PASS changed_pct=0.7855%, msaa4 PASS changed_pct=0.8626%
+(monotonically wider band with more samples — the expected signature).
+
+**v0.2 deferred follow-up** (queued as second-wave): (a) per-mode
+keyed `expected_results` so a 4× → 2× collapse fails; (b) positive
+lower-bound assertion on AA-band pixel count (rejects a pure hard-step
+output even when the upper compare bound is met); (c) optional edge-
+perpendicular probe lines with renderer-tolerant gradient-shape
+oracle. Both Codex MAJOR-severity findings from 2026-05-21 adopted as
+v0.2 work (see decision-log entry for the slice).
 
 ### 4.16 `texture-dma-ab` — DMA channel A vs B (Tier 1, redesigned per Codex finding #8)
 

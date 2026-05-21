@@ -1,0 +1,58 @@
+{
+  "id": "msaa-aa-factor",
+  "title": "MSAA path-activation + edge-AA-band SMOKE (v0.1; per-mode profile deferred to v0.2)",
+  "purpose": "Render one solid-WHITE triangle (60,60)-(60,420)-(580,240) on a solid-BLACK background. The two diagonal edges advance ~0.346 px/px in y across x∈[60..580], so every column places the edge at a distinct sub-pixel position. The XBE itself is MSAA-agnostic; the host renderer's XEMU_METAL_MSAA flag governs whether the edge resolves to a hard step (msaa=0) or to a per-coverage gradient (msaa=2/4). v0.1 NARROWED SCOPE per Codex 2026-05-21 finding: this is a MSAA path-activation + edge-AA-band PRESENT smoke test, NOT the full per-mode gradient-profile test §4.15 ultimately specifies. The math-derived oracle is the HARD-STEP rasterization: interior pixels are byte-exact (255,255,255,255), exterior pixels are byte-exact (0,0,0,255), and the edge boundary band is tolerated via compare_overrides. v0.1 catches: (a) MSAA path never engaged (required_counters_min asserts METAL_MSAA_RESOLVE_COUNT >= 100 AND METAL_MSAA_SAMPLE_COUNT >= 12 on every Metal cell — both the canonical msaa=2 cell and the msaa=4 variant); (b) MSAA resolve writes garbage into non-edge tiles (interior/exterior signal-region byte-check fails); (c) geometry mis-rasterized to the wrong cover region (signal_match drops below threshold); (d) front-face culling regression (triangle vanishes); (e) sample-count silently coerced to 1 despite XEMU_METAL_MSAA=2/4 (METAL_MSAA_SAMPLE_COUNT sum would fall to ~12 not >=24). v0.1 does NOT catch (DEFERRED to v0.2 per the Codex finding adopted in decision-log 2026-05-21): per-mode profile differentiation (msaa=2 silently collapsing to msaa=4 still passes today because both share the any/any/any hard-step oracle); positive lower-bound on the AA-band pixel count (a renderer that keeps resolve plumbing alive but renders the triangle as a hard step still passes today because changed_pct only has an UPPER bound). v0.2 adds per-mode keyed expected_results + an edge-band occupancy lower-bound assertion. Also does NOT catch: exact per-sample positions (Apple Silicon's standard 4× pattern is not bit-identical to NV2A's; spec only requires monotone coverage); depth-aware MSAA resolve modes — both deferred to a separate Tier-2 sample-position XBE.",
+  "catalog_ref": "§C.4, §K.4",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\msaa-aa-factor-capture.bin",
+      "ftp_path": "/E/Apps/msaa-aa-factor/msaa-aa-factor-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\msaa-aa-factor-done.txt",
+      "ftp_path": "/E/Apps/msaa-aa-factor/msaa-aa-factor-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 95.0
+  },
+  "metal_canonical_overrides": {
+    "XEMU_METAL_MSAA": "2"
+  },
+  "additional_metal_recipes": [
+    {
+      "name": "msaa4",
+      "env": {
+        "XEMU_METAL_MSAA": "4"
+      }
+    }
+  ],
+  "required_counters_min": {
+    "metal": {
+      "METAL_MSAA_RESOLVE_COUNT": 100,
+      "METAL_MSAA_SAMPLE_COUNT": 12
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

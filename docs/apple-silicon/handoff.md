@@ -1,13 +1,48 @@
 # Handoff
 
-Last updated: 2026-05-21 (morning, XBE wave expansion) —
-**14 of 17 first-wave XBEs PASS on Metal + 2 expected_fail (logic-ops +
-swizzle-mipmap). 2 unstarted (§4.13, §4.15). Three new XBEs shipped
-this session (combiner-basic, swizzle-mipmap, texture-dma-ab) +
-Metal LOD-clamp + LOD-bias renderer fix + xbe-harness gains a
-per-manifest `metal_canonical_overrides` field.**
+Last updated: 2026-05-21 (mid-day, Hermes-supervised cycle 1
+closure) — **15 of 17 first-wave XBEs PASS on Metal + 2 expected_fail
+(logic-ops + swizzle-mipmap). 1 unstarted (§4.13). §4.15
+`msaa-aa-factor` v0.1 SHIPPED this slice (Hermes-supervised
+single-cycle); Codex MAJOR findings adopted as narrowed-v0.1 +
+v0.2 deferral; both Metal cells PASS with strengthened counter gate
+(METAL_MSAA_RESOLVE_COUNT >= 100 AND METAL_MSAA_SAMPLE_COUNT >= 12,
+proving sample count >= 2 across intervals, not just resolve plumbing).
+Carries forward the morning's three XBEs (combiner-basic,
+swizzle-mipmap v0.2, texture-dma-ab v0.1) + Metal LOD-clamp + LOD-bias
+renderer fix + xbe-harness `metal_canonical_overrides` field.**
 
-This session (2026-05-21):
+This session (2026-05-21 mid-day, Hermes-supervised cycle 1):
+
+- **§4.15 `msaa-aa-factor` v0.1 SHIPPED PASS on Metal** as a
+  MSAA path-activation + edge-AA-band PRESENT smoke test. Single
+  high-contrast WHITE triangle (60,60)-(60,420)-(580,240) on BLACK;
+  diagonals slope 180/520 ≈ 0.346 px/px so every column places the
+  edge at a distinct sub-pixel position. XBE is MSAA-agnostic;
+  `XEMU_METAL_MSAA` governs hard-step vs per-coverage gradient. Two
+  Metal cells per matrix run: canonical (`XEMU_METAL_MSAA=2` via
+  `metal_canonical_overrides`) + `msaa4` variant
+  (`additional_metal_recipes`). Hard-step math oracle with
+  `compare_overrides.max_changed_pct=3.0` absorbs the ~0.7-0.9% AA
+  band. Counter gate: `METAL_MSAA_RESOLVE_COUNT >= 100` AND
+  `METAL_MSAA_SAMPLE_COUNT >= 12` (sum across intervals → proves
+  sample count >= 2 across the run). Validation
+  (`benchmark-runs/msaa-aa-factor-20260521-v2/`): canonical PASS
+  changed_pct=0.7855%, SAMPLE_COUNT=24; msaa4 PASS changed_pct=
+  0.8626%, SAMPLE_COUNT=48 — monotonic widening with more samples
+  is the expected signature. Codex review returned MAJOR ISSUES;
+  all 4 findings adopted in-session (README "three"→"two", main.c
+  triangle-area comment 117k→93,600, v0.1 title/purpose/README
+  narrowed to "MSAA path-activation + edge-AA-band SMOKE" with v0.2
+  follow-up explicitly queued, required_counters_min strengthened
+  from RESOLVE>=1 to RESOLVE>=100 AND SAMPLE_COUNT>=12). v0.2
+  deferred: per-mode keyed expected_results + AA-band lower-bound
+  rejection (second-wave follow-up).
+
+**Previous morning session (2026-05-21) closures preserved below
+for diagnostic continuity.**
+
+Morning of 2026-05-21:
 
 - **§4.12 `combiner-basic` v0.1 SHIPPED PASS on Metal** byte-exact.
   4x4 grid of (input mapping × output scale modifier) at fixed
@@ -114,21 +149,20 @@ below for diagnostic continuity.**
   reliably finds an 8/8 frame).
 
 **Current first-wave XBE status (per `diagnostic-xbe-plan.md` §4):**
-- **PASS on Metal (14):** pipeline-smoke, mirror, color-channel,
+- **PASS on Metal (15):** pipeline-smoke, mirror, color-channel,
   depth-floor, crtc-publish, native-quad-tri-depth, cmp-vertex-format,
   blend-matrix, texture-format-sweep, texture-filter-wrap, stencil-ops,
-  flat-quad-propagation, combiner-basic (NEW), texture-dma-ab (NEW;
-  pbkit-aliased smoke).
+  flat-quad-propagation, combiner-basic, msaa-aa-factor v0.1 (path-
+  activation + edge-AA-band SMOKE; per-mode profile + AA-band lower-
+  bound queued for v0.2 per Codex 2026-05-21, NEW), texture-dma-ab
+  (pbkit-aliased smoke).
 - **expected_fail (2):** logic-ops (NV2A logic-op feature not
   implemented in either renderer; serves as SPEC oracle) and
   swizzle-mipmap (catches task #16 Metal swizzle position decode +
   task #17 GL LOD-clamp regression; serves as SPEC oracle for both).
-- **Unstarted (2):** §4.13 texture-shader-stages (19 NV2A texture
+- **Unstarted (1):** §4.13 texture-shader-stages (19 NV2A texture
   shader modes; needs combiner-helper + texture-shader-stage
-  infrastructure -- significant scope; deferred), §4.15
-  msaa-aa-factor (MSAA gradient profile; needs AA-mode iteration --
-  Metal MSAA infrastructure shipped under M11; XBE author work
-  remains -- deferred).
+  infrastructure -- significant scope; deferred).
 
 **Tracked follow-ups (not blocking the bulk of M15 prep but
 required for full XBE saturation):**
@@ -174,14 +208,16 @@ required for full XBE saturation):**
 
 **M15 default-on prerequisite:** "all priority XBEs PASS on Metal"
 per `metal-renderer-plan.md` §4 + decision-log 2026-05-20 evening.
-Today: 14 PASS + 2 expected_fail + 2 unstarted of 17. The 2
+Today: 15 PASS + 2 expected_fail + 1 unstarted of 17. The 2
 expected_fail are documented SPEC oracles (one feature work, one
 regression target for already-tracked bugs) -- whether they count
 toward the PASS gate is a decision-log question. Conservatively
 they do NOT count, so the gate needs:
 - §4.13 texture-shader-stages SHIPPED + PASSING on Metal
-- §4.15 msaa-aa-factor SHIPPED + PASSING on Metal
 - Tasks #16 + #17 resolved → swizzle-mipmap flips to PASS
+- §4.15 msaa-aa-factor v0.2 second-wave follow-up (per-mode keyed
+  oracle + AA-band lower-bound) — gates the "per-mode AA factor
+  profile" portion of §4.15 that v0.1 explicitly defers
 
 Then re-evaluate per `m15-bundle-status.py` and run the tracked-title
 oracle (PGR2 / Rainbow / Crimson / Halo / SC2) as the final

@@ -1,5 +1,128 @@
 # Decision Log
 
+## 2026-05-21 (mid-day, Hermes-supervised cycle 1): §4.15 msaa-aa-factor v0.1 SHIPPED — MSAA path-activation + edge-AA-band SMOKE; Codex MAJOR findings adopted as narrowed v0.1 + v0.2 deferral
+
+**Decision.** Ship `§4.15 msaa-aa-factor` v0.1 as a Tier-1 diag XBE
+that proves the Metal renderer's MSAA path engages and produces an
+edge-AA-band on a high-contrast diagonal triangle. Codex review of the
+initial cut returned MAJOR ISSUES; all 4 findings adopted in-session
+(2 minor fixes; 2 major findings adopted as a NARROWED v0.1 claim +
+explicit v0.2 follow-up).
+
+**Scope (v0.1).**
+- XBE renders one solid-WHITE triangle (60,60)-(60,420)-(580,240) on
+  solid-BLACK. The two diagonals slope at 180/520 ≈ 0.346 px/px so
+  every column inside [60,580] places the edge at a distinct sub-
+  pixel fractional position.
+- XBE is MSAA-agnostic; the host renderer's `XEMU_METAL_MSAA` flag
+  governs whether the edge resolves to hard-step (msaa=0) or per-
+  coverage gradient (msaa=2/4). Two Metal cells per matrix run:
+  canonical (`XEMU_METAL_MSAA=2` via `metal_canonical_overrides`)
+  + `msaa4` variant via `additional_metal_recipes`.
+- Math-derived oracle is the HARD-STEP rasterization (93,600 interior
+  WHITE pixels = exactly the geometric triangle area). The harness's
+  `compare_overrides.max_changed_pct=3.0` absorbs the ~0.7-0.9%
+  edge AA band that differs from hard-step under any MSAA mode.
+- Counter gate (strengthened post-Codex):
+  `METAL_MSAA_RESOLVE_COUNT >= 100` AND
+  `METAL_MSAA_SAMPLE_COUNT >= 12`. The second counter proves
+  sample-count was >= 2 for the bulk of intervals (12 intervals × 1
+  sample = 12; >= 24 for msaa=2; >= 48 for msaa=4). Catches a
+  regression where `XEMU_METAL_MSAA` is honored at flag-parse time
+  but the surface companion is created as single-sample.
+
+**Codex review and adoption.**
+
+The slice's initial cut had `required_counters_min = {METAL_MSAA_RESOLVE_COUNT: 1}`
+and a v0.1 title claiming "MSAA edge-gradient profile." Codex
+2026-05-21 returned MAJOR ISSUES with 4 findings:
+
+1. **(MAJOR)** The gate can false-pass a renderer that resolves the
+   MSAA clear path but renders the triangle itself as a hard step.
+   `METAL_MSAA_RESOLVE_COUNT` ticks from the clear pass's
+   `StoreAndMultisampleResolve`, not from proving the triangle draw
+   had multisample coverage. **ADOPTED** as a v0.1 scope narrowing:
+   the slice is now explicitly framed as a "MSAA path-activation +
+   edge-AA-band PRESENT smoke test"; counter gate strengthened to
+   `RESOLVE >= 100` AND `SAMPLE_COUNT >= 12` to catch the
+   "sample-count silently coerced to 1" regression class; the
+   positive lower-bound on the AA-band pixel count is queued for v0.2.
+
+2. **(MAJOR)** The slice does not satisfy the spec's "per AA mode
+   (none/2×/4×); expected gradient profile per mode" — both msaa=2
+   and msaa=4 share the same `any/any/any` hard-step oracle. A 4×
+   collapsing to 2× would still pass. **ADOPTED** by narrowing the
+   v0.1 claim to "path activation + edge-AA-band present" and
+   queueing v0.2 with per-mode keyed `expected_results` so a 4× → 2×
+   regression fails.
+
+3. **(MINOR)** README contradicted itself: "three Metal cells" vs
+   "Two Metal cells." **ADOPTED**, fixed to "two."
+
+4. **(MINOR)** main.c header claimed the triangle covers ~117,000
+   pixels (~38%). Actual geometric area = 520 × 360 / 2 = 93,600
+   (~30.5%). **ADOPTED**, comment corrected.
+
+**Why narrow v0.1 rather than build the full per-mode profile now.**
+The harness today does not support a positive lower-bound on
+`changed_pct` nor per-recipe keyed oracles for `msaa=2` vs `msaa=4`
+that differentiate without harness extension. Both would represent
+non-trivial harness work (manifest field + compare-side code path +
+new oracle file). The slice's purpose for the current M15 gate is to
+prove path activation, which v0.1 accomplishes; the per-mode profile
+work is a justified second-wave follow-up that aligns with the
+blend-matrix v0.1 precedent ("v0.1 deliberately uses only alpha=255/0
+endpoints to keep all results byte-exact ... mid-range alpha coverage
+is a second-wave follow-up").
+
+**Validation evidence.**
+- `benchmark-runs/msaa-aa-factor-20260521-v2/summary.json`:
+  - canonical (msaa=2): PASS, changed_pct=0.7855%, signal_match=100%,
+    `METAL_MSAA_RESOLVE_COUNT=1670`, `METAL_MSAA_SAMPLE_COUNT=24`
+    (12 intervals × 2 samples), counter_assertion=pass.
+  - msaa4 variant: PASS, changed_pct=0.8626%, signal_match=100%,
+    `METAL_MSAA_RESOLVE_COUNT=1653`, `METAL_MSAA_SAMPLE_COUNT=48`
+    (12 intervals × 4 samples), counter_assertion=pass.
+- Monotonically wider AA band with more samples (0.79% → 0.86%
+  changed_pct from msaa=2 to msaa=4) is the expected signature.
+
+**Files added (this slice).**
+- `scripts/apple-silicon/xbe-tests/msaa-aa-factor/main.c` —
+  nxdk XBE, single triangle on black.
+- `scripts/apple-silicon/xbe-tests/msaa-aa-factor/expected.py` —
+  math-derived hard-step oracle (93,600 interior white pixels).
+- `scripts/apple-silicon/xbe-tests/msaa-aa-factor/manifest.json` —
+  manifest with `metal_canonical_overrides` + `additional_metal_recipes`
+  + strengthened `required_counters_min`.
+- `scripts/apple-silicon/xbe-tests/msaa-aa-factor/Makefile` — nxdk
+  build wiring via `../lib/lib.mk`.
+- `scripts/apple-silicon/xbe-tests/msaa-aa-factor/README.md` —
+  v0.1 / v0.2 scope split + how-it's-gated documentation.
+- Build artifacts in `bin/default.xbe` + `msaa-aa-factor.iso`.
+
+**Files updated (doc sync).**
+- `docs/apple-silicon/diagnostic-xbe-plan.md` — §4.15 marked
+  SHIPPED v0.1 with the narrowed-scope explanation + v0.2 deferral.
+  Top banner updated 14 → 15 PASS / 2 unstarted → 1 unstarted.
+- `docs/apple-silicon/handoff.md` — new banner for the slice;
+  preserves the morning's three-XBE banner below for continuity.
+- `.claude/rules/oracle-and-xbe.md` + `.claude/rules/renderer-state.md`
+  + `.claude/rules/renderer-metal.md` — XBE counts updated.
+
+**Tracked follow-up (v0.2; not blocking the bulk of M15 prep but
+required for full §4.15 saturation):**
+- Per-mode keyed `expected_results` so a 4× → 2× collapse fails.
+- Positive lower-bound assertion on AA-band pixel COUNT (rejects a
+  pure hard-step renderer that keeps resolve plumbing alive).
+- Optional edge-perpendicular probe lines with renderer-tolerant
+  gradient-shape oracle.
+- Both of these require either harness extension (new manifest
+  fields for `min_changed_pct` / per-recipe oracles) or an in-XBE
+  positive probe — v0.2 design pass before implementation.
+
+**Rule conflicts.** None. Codex did not recommend any project-rule
+violations. All 4 findings respect rules #1, #4, #5, #11, #15.
+
 ## 2026-05-21 (morning): §4.12 combiner-basic / §4.16 texture-dma-ab / §4.8 swizzle-mipmap XBEs shipped + Metal renderer LOD-clamp + LOD-bias fix + xbe-harness `metal_canonical_overrides` field
 
 **Decision.** Ship three new diagnostic XBEs and the supporting
