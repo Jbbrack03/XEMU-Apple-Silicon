@@ -1,0 +1,37 @@
+{
+  "id": "texture-dma-ab",
+  "title": "Texture-stage DMA channel selector A vs B -- pbkit-aliased smoke (v0.1)",
+  "purpose": "Allocate a 1x1 SZ_A8R8G8B8 texture (single RED pixel). Render a left and right half-screen quad. Left half binds the texture with FORMAT_CONTEXT_DMA = 0 (channel A); right half with = 2 (channel B per pgraph.c:2679-2680, which only promotes CONTEXT_DMA == 2 to internal dma_select=1; the natural field encoding 0/1/2/3 collapses to 0=A, 2=B). v0.1 is a SMOKE TEST UNDER PBKIT-DEFAULT ALIASING: nxdk's pbkit configures both SET_CONTEXT_DMA_A and SET_CONTEXT_DMA_B to point at the SAME RAMIN object (#3) which resolves to base 0 of VRAM. So this v0.1 cannot distinguish a routing regression that swaps dma_a and dma_b internally -- both channels alias the same VRAM. v0.1 IS useful as a non-zero-CONTEXT_DMA round-trip smoke (CONTEXT_DMA=2 doesn't crash the texture-bind path and produces correct RED output) and as a documentation oracle for the correct field encoding + the aliasing caveat. v0.1 is NOT a regression gate for per-channel base-address translation. v0.2 (tracked task #18) needs an xbed_dma helper that writes a custom DMA object to RAMIN at a distinct base, lets the XBE configure DMA B independently from A, and verifies both halves render identical content from their respective bases.",
+  "catalog_ref": "§E.14",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\texture-dma-ab-capture.bin",
+      "ftp_path": "/E/Apps/texture-dma-ab/texture-dma-ab-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\texture-dma-ab-done.txt",
+      "ftp_path": "/E/Apps/texture-dma-ab/texture-dma-ab-done.txt"
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}
