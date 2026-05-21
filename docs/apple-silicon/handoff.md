@@ -1,14 +1,26 @@
 # Handoff
 
-Last updated: 2026-05-20 (late evening, +blend-matrix) —
-**§4.9 `blend-matrix` XBE shipped GREEN on Metal first-try.** 8-cell 4x2
-grid covering the most-common NV2A blend tuples (ONE/ZERO/ADD,
-ZERO/ONE/ADD, ONE/ONE/ADD, ONE/ONE/REVERSE_SUBTRACT,
-ONE/ONE/SUBTRACT, SRC_ALPHA/ONE_MINUS_SRC_ALPHA/ADD at α=255,
-DST_COLOR/ZERO/ADD modulate, ZERO/SRC_COLOR/ADD modulate). All
-results land on saturated 0/255 cube corners; signal_match=100.0
-on Metal. **10 of 17 first-wave XBEs now shipped on Metal (8 green
-+ 2 expected_fail; 7 unstarted).**
+Last updated: 2026-05-20 (late evening, +texture infra +
+§4.7 texture-format-sweep) —
+**§4.7 `texture-format-sweep` v0.1 XBE shipped GREEN on Metal.**
+Caught + triggered a Metal renderer fix: LU_IMAGE_A8B8G8R8 /
+B8G8R8A8 / R8G8B8A8 (and SZ_ swizzled variants) were missing from
+`mtl/format.c`'s format-to-MTLPixelFormat table, so the texture
+sampled as INVALID and cells 2/3 rendered GREEN instead of BLUE/
+WHITE. 23-line table addition; per-byte channel decode for these
+formats was already correct in `mtl_convert_texture_data_bgra8`.
+Built on the new xbed_lib texture infrastructure shipped same
+session (xbed_texture.{h,c} + xbed_tex_{vs,ps}.{cg,inl} +
+xbed_load_textured_shaders). **11 of 17 first-wave XBEs now
+shipped on Metal (9 PASS + 2 expected_fail; 6 unstarted).**
+
+Earlier this session: **§4.9 `blend-matrix` XBE shipped GREEN
+on Metal first-try.** 8-cell 4x2 grid covering the most-common
+NV2A blend tuples (ONE/ZERO/ADD, ZERO/ONE/ADD, ONE/ONE/ADD,
+ONE/ONE/REVERSE_SUBTRACT, ONE/ONE/SUBTRACT, SRC_ALPHA/
+ONE_MINUS_SRC_ALPHA/ADD at α=255, DST_COLOR/ZERO/ADD modulate,
+ZERO/SRC_COLOR/ADD modulate). All results land on saturated
+0/255 cube corners; signal_match=100.0 on Metal.
 
 Also this session: **task #14 Metal stencil-clear partial fix shipped
 (commit a82ac934e9).** Two stencil correctness fixes: (1) Metal's
