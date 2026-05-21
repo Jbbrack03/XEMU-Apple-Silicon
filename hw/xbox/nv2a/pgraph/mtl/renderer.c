@@ -487,6 +487,11 @@ static _Atomic uint64_t s_texture_bind_us_total  = 0;
  * still in flight. Independent of s_pipeline_translated_fb (which
  * counts permanent build failures). */
 static _Atomic uint64_t s_draws_skipped_pending  = 0;
+/* Task #13: counts draws where CPU-side flat-color propagation
+ * triggered (FLAT-shaded OP_QUADS / OP_QUAD_STRIP with NV2A's
+ * default LAST-vertex provoking convention). Validates that the
+ * propagation path actually engages when expected. */
+static _Atomic uint64_t s_flat_quad_propagations  = 0;
 
 static inline void mtl_add_elapsed_us(_Atomic uint64_t *counter,
                                       int64_t start_us)
@@ -1410,6 +1415,47 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     }
     int64_t dispatch_start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
 
+    /* Task #13: CPU-side flat-color propagation for FLAT-shaded
+     * OP_QUADS / OP_QUAD_STRIP. Apple Silicon Metal has no
+     * geometry-shader stage, and the native_quad fast-path explicitly
+     * rejects flat-shaded quads (glsl/geom.c:181-188) because the
+     * A-C diagonal cannot put vertex 3 first in both emitted
+     * triangles -- and crucially vertex 3 is only present in ONE
+     * of the two emitted triangles, so even reordering can't make
+     * Metal's [[flat]] qualifier (first-vertex convention) produce
+     * the NV2A LAST-vertex-provoking flat color for both triangles.
+     *
+     * Approach: replicate vertex 3's DIFFUSE / SPECULAR /
+     * BACK_DIFFUSE / BACK_SPECULAR across vertices 0/1/2 in each
+     * quad. The rasterizer then sees uniform color across each
+     * triangle under smooth interpolation -- functionally equivalent
+     * to NV2A's flat shading with vertex 3 provoking.
+     *
+     * After propagation we temporarily set pg->smooth_shading=true
+     * so the GLSL native_quad_supported check accepts the path
+     * (no geometry shader needed). The saved value is restored
+     * after the encode so cross-renderer state stays consistent.
+     */
+    bool   saved_smooth_shading = pg->smooth_shading;
+    bool   did_flat_quad_propagation = false;
+    /* QUAD_STRIP excluded -- vertex sharing makes single-pass CPU
+     * propagation incorrect (Codex 2026-05-20 review). See
+     * pgraph_mtl_propagate_flat_quad_colors for the long form. */
+    if (!pg->smooth_shading && !pg->first_vertex_is_provoking &&
+        pg->primitive_mode == PRIM_TYPE_QUADS) {
+        did_flat_quad_propagation =
+            pgraph_mtl_propagate_flat_quad_colors(pg,
+                (MtlAttributeStream *)streams, vcount);
+        if (did_flat_quad_propagation) {
+            pg->smooth_shading = true;
+            /* Recompute native_quad eligibility now that we have
+             * effectively-smooth color streams. native_tri eligibility
+             * is unaffected (we only changed shading-mode for quads). */
+            native_quad = mtl_native_quad_eligible(pg);
+            atomic_fetch_add(&s_flat_quad_propagations, 1);
+        }
+    }
+
     uint32_t variant = (native_tri || native_quad)
                            ? MTL_DRAW_VARIANT_NATIVE_DEPTH
                            : MTL_DRAW_VARIANT_PASSTHROUGH;
@@ -1464,6 +1510,9 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
         atomic_fetch_add(&s_draws_skipped_pending, 1);
         pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
                                       saved_swizzle);
+        if (did_flat_quad_propagation) {
+            pg->smooth_shading = saved_smooth_shading;
+        }
         mtl_add_elapsed_us(&s_dispatch_us_total, dispatch_start_us);
         return;
     }
@@ -1785,6 +1834,9 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
      * attribute. */
     pgraph_mtl_restore_attr_masks(pg, saved_uniform, saved_compressed,
                                   saved_swizzle);
+    if (did_flat_quad_propagation) {
+        pg->smooth_shading = saved_smooth_shading;
+    }
     mtl_add_elapsed_us(&s_dispatch_us_total, dispatch_start_us);
 }
 
@@ -2456,4 +2508,12 @@ uint64_t pgraph_mtl_texture_bind_us_total(void)
 uint64_t pgraph_mtl_draws_skipped_pending_count(void)
 {
     return atomic_load(&s_draws_skipped_pending);
+}
+
+/* Task #13 counter — draws where CPU-side flat-quad color propagation
+ * fired (FLAT-shaded OP_QUADS / OP_QUAD_STRIP with NV2A's default
+ * LAST-vertex provoking convention). */
+uint64_t pgraph_mtl_flat_quad_propagations_count(void)
+{
+    return atomic_load(&s_flat_quad_propagations);
 }

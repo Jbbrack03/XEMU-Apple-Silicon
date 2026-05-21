@@ -113,6 +113,9 @@ static uint64_t s_baseline_surface_graph_dumps;
  * (XEMU_METAL_RTT_SIBLING_SYNC). */
 static uint64_t s_baseline_sibling_syncs;
 static uint64_t s_baseline_sibling_sync_skips;
+/* Task #13 — CPU-side flat-color propagation for OP_QUADS / OP_QUAD_STRIP
+ * (Apple Silicon Metal has no geometry-shader stage). */
+static uint64_t s_baseline_flat_quad_propagations;
 
 /* Weak monotonic counter accessors. Defined for-real in the Metal
  * renderer; default to zero when Metal is not compiled in (e.g. on
@@ -251,6 +254,10 @@ __attribute__((weak)) uint64_t pgraph_mtl_shaders_compile_async_failed(void)
     return 0;
 }
 __attribute__((weak)) uint64_t pgraph_mtl_draws_skipped_pending_count(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_flat_quad_propagations_count(void)
 {
     return 0;
 }
@@ -535,6 +542,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t cc_completed     = pgraph_mtl_shaders_compile_completed();
     uint64_t cc_async_failed  = pgraph_mtl_shaders_compile_async_failed();
     uint64_t draws_skipped    = pgraph_mtl_draws_skipped_pending_count();
+    uint64_t flat_quad_propag = pgraph_mtl_flat_quad_propagations_count();
     uint64_t draws_uber       = pgraph_mtl_draws_using_ubershader_count();
     uint64_t sc_loads         = pgraph_mtl_disk_cache_loads();
     uint64_t sc_hits          = pgraph_mtl_disk_cache_hits();
@@ -731,6 +739,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                         s_baseline_sibling_syncs;
     uint64_t sibling_sync_skips_delta = sibling_sync_skips_total -
                                         s_baseline_sibling_sync_skips;
+    uint64_t flat_quad_propag_delta   = flat_quad_propag -
+                                        s_baseline_flat_quad_propagations;
 
     s_baseline_draw             = draw_total;
     s_baseline_draw_indexed     = draw_indexed;
@@ -799,6 +809,7 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_surface_graph_dumps       = surface_graph_dumps_total;
     s_baseline_sibling_syncs             = sibling_syncs_total;
     s_baseline_sibling_sync_skips        = sibling_sync_skips_total;
+    s_baseline_flat_quad_propagations    = flat_quad_propag;
     /* Reset the per-interval max after we've snapshotted it. */
     pgraph_mtl_present_jitter_us_max_reset();
 
@@ -842,7 +853,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            draw_rt_dumps_delta |
                            surface_graph_dumps_delta |
                            sibling_syncs_delta |
-                           sibling_sync_skips_delta;
+                           sibling_sync_skips_delta |
+                           flat_quad_propag_delta;
     if (total_delta == 0) {
         return;
     }
@@ -914,7 +926,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_DRAW_RT_DUMPS=%llu"
             " METAL_SURFACE_GRAPH_DUMPS=%llu"
             " METAL_SIBLING_SYNCS=%llu"
-            " METAL_SIBLING_SYNC_SKIPS=%llu",
+            " METAL_SIBLING_SYNC_SKIPS=%llu"
+            " METAL_FLAT_QUAD_PROPAGATIONS=%llu",
             (unsigned long long)draw_delta,
             (unsigned long long)indexed_delta,
             (unsigned long long)tri_delta,
@@ -987,5 +1000,6 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)draw_rt_dumps_delta,
             (unsigned long long)surface_graph_dumps_delta,
             (unsigned long long)sibling_syncs_delta,
-            (unsigned long long)sibling_sync_skips_delta);
+            (unsigned long long)sibling_sync_skips_delta,
+            (unsigned long long)flat_quad_propag_delta);
 }

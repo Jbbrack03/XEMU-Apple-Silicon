@@ -484,3 +484,91 @@ void pgraph_mtl_restore_attr_masks(PGRAPHState *pg,
     pg->compressed_attrs = prev_compressed_attrs;
     pg->swizzle_attrs    = prev_swizzle_attrs;
 }
+
+/* Task #13: copy the four Float4 components of stream[slot][src_vert] over
+ * stream[slot][dst_vert]. Helper for pgraph_mtl_propagate_flat_quad_colors. */
+static inline void mtl_copy_attr4(MtlAttributeStream *stream,
+                                  unsigned int dst_vert,
+                                  unsigned int src_vert)
+{
+    if (stream == NULL || stream->data == NULL) {
+        return;
+    }
+    float *data = stream->data;
+    data[dst_vert * 4 + 0] = data[src_vert * 4 + 0];
+    data[dst_vert * 4 + 1] = data[src_vert * 4 + 1];
+    data[dst_vert * 4 + 2] = data[src_vert * 4 + 2];
+    data[dst_vert * 4 + 3] = data[src_vert * 4 + 3];
+}
+
+bool pgraph_mtl_propagate_flat_quad_colors(PGRAPHState *pg,
+                                           MtlAttributeStream streams[
+                                               MTL_VERTEX_NUM_ATTRIBUTES],
+                                           unsigned int vertex_count)
+{
+    if (pg == NULL || streams == NULL || vertex_count == 0) {
+        return false;
+    }
+
+    /* Only fire for QUADS / QUAD_STRIP with FLAT shading + NV2A's
+     * default LAST-vertex (vertex 3) provoking convention. Smooth-shaded
+     * quads already interpolate per-vertex correctly; FIRST-vertex
+     * provoking flat-shaded quads work directly under Metal's
+     * [[flat]] qualifier (which uses first-vertex convention). */
+    if (pg->smooth_shading || pg->first_vertex_is_provoking) {
+        return false;
+    }
+
+    enum ShaderPrimitiveMode prim =
+        (enum ShaderPrimitiveMode)pg->primitive_mode;
+    /* QUAD_STRIP intentionally excluded: adjacent quads share vertices
+     * (quad i = [2i..2i+3], quad i+1 = [2i+2..2i+5]) so a single
+     * vertex cannot carry two different flat colors for neighboring
+     * quads. The GS handles this by emitting per-quad triangles with
+     * their own (duplicated) vertices. CPU-side propagation can't
+     * replicate that without duplicating the entire vertex array,
+     * which would require restructuring the streams + index buffer
+     * downstream. Filed as a follow-up (second-wave XBE +
+     * vertex-duplication path) -- Codex 2026-05-20 review. */
+    if (prim != PRIM_TYPE_QUADS) {
+        return false;
+    }
+
+    /* DIFFUSE (slot 3), SPECULAR (slot 4), BACK_DIFFUSE (slot 5),
+     * BACK_SPECULAR (slot 6) participate in flat-color propagation per
+     * NV2A's flat-shade model. FOG and other per-vertex slots are not
+     * affected by smooth-vs-flat shading. */
+    static const int k_flat_slots[] = {
+        NV2A_VERTEX_ATTR_DIFFUSE,
+        NV2A_VERTEX_ATTR_SPECULAR,
+        NV2A_VERTEX_ATTR_BACK_DIFFUSE,
+        NV2A_VERTEX_ATTR_BACK_SPECULAR,
+    };
+    const size_t n_flat_slots =
+        sizeof(k_flat_slots) / sizeof(k_flat_slots[0]);
+
+    bool did_work = false;
+
+    /* PRIM_TYPE_QUADS only -- QUAD_STRIP excluded above (see comment). */
+    unsigned int quads = vertex_count / 4;
+    if (quads == 0) {
+        return false;
+    }
+    for (size_t k = 0; k < n_flat_slots; k++) {
+        int slot = k_flat_slots[k];
+        MtlAttributeStream *s = &streams[slot];
+        if (s->data == NULL) {
+            continue;
+        }
+        for (unsigned int i = 0; i < quads; i++) {
+            unsigned int base = i * 4;
+            unsigned int prov = base + 3;
+            mtl_copy_attr4(s, base + 0, prov);
+            mtl_copy_attr4(s, base + 1, prov);
+            mtl_copy_attr4(s, base + 2, prov);
+        }
+        did_work = true;
+    }
+
+    return did_work;
+}

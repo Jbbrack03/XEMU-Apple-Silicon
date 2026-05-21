@@ -181,6 +181,48 @@ void pgraph_mtl_set_attr_masks_inline_buffer(struct PGRAPHState *pg,
                                              uint16_t *prev_compressed_attrs,
                                              uint16_t *prev_swizzle_attrs);
 
+/*
+ * Task #13: CPU-side flat-color propagation for OP_QUADS.
+ *
+ * Apple Silicon Metal has no geometry-shader stage, so the GL renderer's
+ * GS-driven flat-color propagation (manually copying vertex 3's DIFFUSE/
+ * SPECULAR across vertices 0/1/2 of each quad before triangulation) is
+ * not available. The native_quad fast-path also explicitly rejects
+ * flat-shaded quads (glsl/geom.c:181-188) because the A-C diagonal
+ * triangulation cannot put vertex 3 first in BOTH emitted triangles
+ * under Metal's [[flat]] qualifier (first-vertex convention) -- and
+ * for QUADS, vertex 3 is only present in ONE of the two triangles,
+ * so even reordering can't satisfy flat shading for both.
+ *
+ * The CPU-propagation approach: for QUADS with !smooth_shading and
+ * first_vertex_is_provoking == false (NV2A's default LAST-vertex
+ * provoking convention), replicate vertex 3's (the provoking vertex's)
+ * DIFFUSE / SPECULAR / BACK_DIFFUSE / BACK_SPECULAR across vertices
+ * 0/1/2 of each quad in the decoded Float4 streams. The rasterizer
+ * then sees a "smooth" interpolation with all 4 corners holding the
+ * same color -- which is exactly the flat-shaded outcome.
+ *
+ * QUAD_STRIP is INTENTIONALLY excluded: adjacent quads share vertices
+ * (quad i = [2i..2i+3], quad i+1 = [2i+2..2i+5]), so a single shared
+ * vertex cannot carry two different flat colors. CPU-side propagation
+ * would need to duplicate the entire vertex array first. Deferred as
+ * a follow-up XBE (flat-quad-strip-propagation, second wave).
+ *
+ * Caller must invoke this AFTER pgraph_mtl_collect_all_vertex_streams
+ * and only when:
+ *   - primitive_mode is PRIM_TYPE_QUADS, AND
+ *   - !pg->smooth_shading, AND
+ *   - !pg->first_vertex_is_provoking.
+ *
+ * Returns true if propagation occurred (caller should then treat the
+ * draw as smooth-shaded for shader-state purposes); false if no
+ * propagation was needed.
+ */
+bool pgraph_mtl_propagate_flat_quad_colors(struct PGRAPHState *pg,
+                                           MtlAttributeStream streams[
+                                               MTL_VERTEX_NUM_ATTRIBUTES],
+                                           unsigned int vertex_count);
+
 #ifdef __cplusplus
 }
 #endif
