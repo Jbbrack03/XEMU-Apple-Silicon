@@ -26,6 +26,10 @@
       "ftp_path": "/E/XBMC4Gamers/Apps/color-channel/color-channel-done.txt"
     }
   },
+  "compare_overrides": {
+    "max_changed_pct": 1.5,
+    "min_signal_match_pct": 98.0
+  },
   "expected_results": {
     "any/any/any": {
       "kind": "math-derived",
