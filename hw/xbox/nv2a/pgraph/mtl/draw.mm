@@ -78,6 +78,29 @@ static inline void mtl_draw_wait_upload_fence(id<MTLCommandBuffer> cb,
     [cb encodeWaitForEvent:ev value:value];
 }
 
+/* Task #14 residual fix: gate the draw command buffer on the latest
+ * surface_clear so loadAction=Load reads cleared depth/stencil
+ * contents. Clears run on s_render_queue, draws on s_draw_queue --
+ * cross-queue ordering is NOT guaranteed without an explicit fence.
+ * The stencil-ops XBE caught this as non-deterministic 1-5/8 cells
+ * PASS on Metal. Skipped when the fence value is 0 — no clear has
+ * yet signaled, so there is nothing to wait on. Counterpart in
+ * surface.mm (signal in pgraph_mtl_surface_clear). */
+extern "C" void pgraph_mtl_surface_get_clear_done_event_state(
+    void **out_event, uint64_t *out_value);
+
+static inline void mtl_draw_wait_clear_fence(id<MTLCommandBuffer> cb)
+{
+    void    *event_handle = NULL;
+    uint64_t value        = 0;
+    pgraph_mtl_surface_get_clear_done_event_state(&event_handle, &value);
+    if (event_handle == NULL || value == 0) {
+        return;
+    }
+    id<MTLSharedEvent> ev = (__bridge id<MTLSharedEvent>)event_handle;
+    [cb encodeWaitForEvent:ev value:value];
+}
+
 static id<MTLDevice>       s_device;
 static id<MTLCommandQueue> s_draw_queue;
 static bool                s_initialized = false;
@@ -711,6 +734,10 @@ open_pass_ensure(void *color_tex, void *depth_tex,
         s_open_cmd = [s_draw_queue commandBuffer];
         s_open_cmd.label = @"xemu.metal.coalesced_draw";
         mtl_draw_wait_upload_fence(s_open_cmd, upload_fence_value);
+        /* Task #14 residual fix: also wait for the latest clear to
+         * complete on s_render_queue so loadAction=Load picks up
+         * cleared depth/stencil values. */
+        mtl_draw_wait_clear_fence(s_open_cmd);
         s_open_upload_fence_value = upload_fence_value;
 
         s_open_enc = [s_open_cmd renderCommandEncoderWithDescriptor:desc];

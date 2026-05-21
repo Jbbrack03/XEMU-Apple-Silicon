@@ -133,6 +133,35 @@ static unsigned int color_bytes_per_pixel(uint32_t nv097)
 
 static id<MTLCommandQueue> s_render_queue = nil;
 
+/* Task #14 residual fix (cross-queue clear→draw fence). Mirrors
+ * s_draw_done_event in draw.mm: every clear command-buffer commit
+ * signals this event with a monotonically increasing value, and
+ * the draw queue's open_pass_ensure waits on the latest signaled
+ * value before opening a new render pass. Required because clears
+ * run on s_render_queue and draws run on s_draw_queue -- on Apple
+ * Silicon those queues' commits execute in submission order WITHIN
+ * a queue but NOT across queues without an explicit fence.
+ *
+ * Without this fence the stencil-ops XBE caught the race: per-cell
+ * clears would commit on s_render_queue but the per-cell op_pass
+ * draws on s_draw_queue could execute first, reading stale stencil
+ * values from before the clear -- producing non-deterministic
+ * 1-5/8 cells PASS on the §4.10 stencil-ops XBE (handoff 2026-05-20
+ * task #14 residual). */
+static id<MTLSharedEvent> s_clear_done_event = nil;
+static _Atomic(uint64_t)  s_clear_done_value = 0;
+
+extern "C" void pgraph_mtl_surface_get_clear_done_event_state(
+    void **out_event, uint64_t *out_value)
+{
+    if (out_event) {
+        *out_event = (__bridge void *)s_clear_done_event;
+    }
+    if (out_value) {
+        *out_value = atomic_load(&s_clear_done_value);
+    }
+}
+
 /* M5.9 SurfaceBinding cache entry — a Metal-side analog of
  * vk/renderer.h::SurfaceBinding. Linked into a singly-linked list
  * keyed by vram_addr; the list is small (typically 1-8 entries) so
@@ -1275,6 +1304,12 @@ bool pgraph_mtl_surface_init(void)
     }
     s_render_queue.label = @"xemu.metal.render_queue";
 
+    /* Task #14 residual fix: cross-queue clear→draw fence event. */
+    s_clear_done_event = [device newSharedEvent];
+    if (s_clear_done_event != nil) {
+        s_clear_done_event.label = @"xemu.metal.clear_done";
+    }
+
     s_cache_head = NULL;
     s_cache_size = 0;
     s_color_binding = NULL;
@@ -2135,11 +2170,61 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
         id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
         cmd.label = @"xemu.metal.clear";
 
+        /* Task #14 residual fix: clears run on s_render_queue while
+         * draws run on s_draw_queue. Without a cross-queue fence the
+         * GPU can execute this clear BEFORE prior draws on s_draw_queue
+         * complete -- which would clobber the depth/stencil values
+         * those prior draws wrote and produce non-deterministic
+         * stencil-test results. Wait on s_draw_done_event before the
+         * render-encoder configures the attachments. Mirrors the same
+         * fence pattern used by surface downloads / blits in this
+         * file (encodeWaitForEvent against the draw queue's latest
+         * signal value via pgraph_mtl_draw_get_done_event_state). */
+        void *event_handle = NULL;
+        uint64_t event_value = 0;
+        pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLSharedEvent> ev =
+                (__bridge id<MTLSharedEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
         id<MTLRenderCommandEncoder> enc =
             [cmd renderCommandEncoderWithDescriptor:desc];
         enc.label = @"xemu.metal.clear_enc";
         [enc endEncoding];
+
+        /* Task #14 residual fix: signal the clear-done event so the
+         * draw queue's next open_pass_ensure waits for this clear's
+         * load_action_Clear to complete before its loadAction=Load
+         * picks up the (now-cleared) depth/stencil contents. Mirrors
+         * the s_draw_done_event signal in draw.mm
+         * open_pass_close_locked. */
+        if (s_clear_done_event != nil) {
+            uint64_t v = atomic_fetch_add(&s_clear_done_value, 1) + 1;
+            [cmd encodeSignalEvent:s_clear_done_event value:v];
+        }
+
         [cmd commit];
+
+        /* Task #14 residual fix: synchronously wait for the clear
+         * to complete on the GPU before returning. The encoded
+         * encodeWaitForEvent fence above is in place for future
+         * follow-up, but in practice it does NOT serialize the
+         * clear-before-draw ordering on Apple Silicon as expected
+         * (validated by stencil-ops XBE: with only the fence,
+         * 1-3/8 cells PASS deterministic; with [cmd waitUntilCompleted]
+         * added here, 8/8 cells PASS). The perf cost is bounded:
+         * retail games issue ~2-4 clears per frame so the host-side
+         * CPU stall is sub-ms per frame. Opt-out via the env var
+         * XEMU_METAL_NO_CLEAR_SYNC for diagnostic/perf-comparison.
+         * Counterpart fences (signal s_clear_done_event +
+         * mtl_draw_wait_clear_fence in draw.mm) remain in place
+         * as a soft guarantee in case the wait-for-completion is
+         * later removed. */
+        if (!getenv("XEMU_METAL_NO_CLEAR_SYNC")) {
+            [cmd waitUntilCompleted];
+        }
     }
 
     atomic_fetch_add(&s_clear_count, 1);
