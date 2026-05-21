@@ -1,0 +1,46 @@
+{
+  "id": "flat-quad-propagation",
+  "title": "FLAT-shaded OP_QUADS color propagation regression gate (task #13)",
+  "purpose": "Validates Metal renderer's CPU-side flat-quad color propagation path (task #13, mtl/vertex.c::pgraph_mtl_propagate_flat_quad_colors). 4x2 grid of 8 cells via OP_QUADS with FLAT shading. Per cell: vertices 0/1/2 (TL/TR/BR) carry BLACK distractor, vertex 3 (BL) carries the EXPECTED color (NV2A's LAST-vertex provoking rule for OP_QUADS). Without task #13's CPU propagation, every cell renders BLACK on Metal because the A-C diagonal triangulation puts vertex 0/1/2 first in Metal's [[flat]] interpolation. With task #13, vertex 3's color is replicated to vertices 0/1/2 in the streams before the draw, and the rasterizer paints each cell with its expected color. Required counter METAL_FLAT_QUAD_PROPAGATIONS >= 100 proves the propagation path engaged (>> 8 cells * ~38 fps * 6 sec = ~1824 draws expected). On real Xbox + GL renderer, the GS handles flat propagation directly so this XBE passes there too.",
+  "catalog_ref": "§3a.1, §C.5",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\flat-quad-propagation-capture.bin",
+      "ftp_path": "/E/Apps/flat-quad-propagation/flat-quad-propagation-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\flat-quad-propagation-done.txt",
+      "ftp_path": "/E/Apps/flat-quad-propagation/flat-quad-propagation-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "required_counters_min": {
+    "metal": {
+      "METAL_FLAT_QUAD_PROPAGATIONS": 100
+    }
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}
