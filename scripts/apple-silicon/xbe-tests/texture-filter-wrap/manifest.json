@@ -1,0 +1,41 @@
+{
+  "id": "texture-filter-wrap",
+  "title": "texture wrap (CLAMP_TO_EDGE vs REPEAT) + NEAREST filter oracle",
+  "purpose": "8-cell 4x2 grid sampling a 4x4 quadrant texture (TL=RED, TR=GREEN, BL=BLUE, BR=WHITE in 2x2 quadrants of texels). All vertices in each cell share the SAME UV so smooth interpolation yields constant UV; NEAREST filter then picks one texel deterministically. Row 0 uses wrap=CLAMP_TO_EDGE with in-range UVs (0.125/0.625) hitting each of the 4 quadrants directly. Row 1 uses wrap=REPEAT (NV097 ADDRESS U/V = 1) with UVs offset by +1.0 in U; if WRAP works, the offset wraps back to the row-0 sample positions, producing the SAME R/G/B/W pattern. If WRAP is mis-implemented (e.g. silently treated as CLAMP_TO_EDGE), row 1 would render the right-edge quadrants (GREEN/WHITE) instead of left-edge (RED/BLUE). The §4.11 spec also calls for LINEAR filter + 4 additional wrap modes (MIRROR, CLAMP, BORDER, plus CYLINDER variants); v0.1 narrows to NEAREST + CLAMP_TO_EDGE + REPEAT to keep the output byte-exact (LINEAR produces sub-texel fractional outputs that need compare_overrides tolerance). Builds on the xbed_lib texture infrastructure (xbed_texture_bind_stage0 + xbed_load_textured_shaders) shipped same session. **2026-05-20 late evening (initial Metal run): EXPECTED_FAIL on Metal.** All 8 cells render RED (the (0,0) texel color) regardless of UV. Hypothesis: the per-vertex TEX0 attribute (slot 9 in NV097 vertex array, Float2 stride 36) is not propagating through the Metal vertex shader to the fragment shader correctly -- the texture sample always lands on texel (0,0). Task #15 (new follow-up): investigate Metal TEX0 attribute interpolation. texture-format-sweep doesn't expose this because each cell uses a uniform-color texture (UV (0,0) returns same color as any other UV). Real Xbox + GL renderer expected to PASS.",
+  "catalog_ref": "§E.3, §E.4",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\texture-filter-wrap-capture.bin",
+      "ftp_path": "/E/Apps/texture-filter-wrap/texture-filter-wrap-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\texture-filter-wrap-done.txt",
+      "ftp_path": "/E/Apps/texture-filter-wrap/texture-filter-wrap-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["metal"]
+}
