@@ -1,0 +1,44 @@
+{
+  "id": "combiner-basic",
+  "title": "Single-stage NV2A register-combiner: input mapping × output scale grid",
+  "purpose": "Render a 4-col × 4-row grid of 16 cells where each cell exercises one (input mapping × output scale modifier) combination of the NV2A register-combiner stage 0. Per cell: fixed DIFFUSE = (0.25, 0.5, 0.75, 1.0); A = map(DIFFUSE), B = 1, C = 0, D = 0; SUM = AB + CD = mapped(DIFFUSE); SUM_DST = R0; R0 = clamp(scale(SUM), -1, 1); final combiner D = R0 -> fragColor.rgb = clamp(R0, 0, 1). Columns: UNSIGNED_IDENTITY / UNSIGNED_INVERT / EXPAND_NORMAL / EXPAND_NEGATE. Rows: IDENTITY / SHIFTLEFT_1 / SHIFTLEFT_2 / NOSHIFT_BIAS. Math-derived expected pixel per cell uses each DIFFUSE channel as an independent input: 0.25 / 0.5 / 0.75 -> 64 / 128 / 191 after raw 8-bit quantization at IDENTITY scale; clamps to {0, 255} for the SHIFTLEFT and BIAS rows where the magnitude pushes the result outside [0, 1]. Catches wrong A_MAP, wrong scale OP, sign-flip on EXPAND_NORMAL vs EXPAND_NEGATE, and final D_SOURCE pointing somewhere other than R0. Does NOT exercise the MUX path (MUX_ENABLE = 0 on every cell -- covered by second-wave `combiner-mux`) or the [-1, 1] stage clamp (no stage 1 reads R0 -- covered by second-wave `combiner-multi-stage`). Skipped from the §D catalog (deferred to second-wave coverage XBEs): HALFBIAS / SIGNED mappings, SHIFTLEFT_1_BIAS / SHIFTRIGHT_1 scales, DOT_PRODUCT operations, BLUE_TO_ALPHA flags, alpha-combiner-only path, C0/C1 per-stage constants, multi-stage chaining, and final-combiner E*F / SPECLIT / EF_PROD / COMPLEMENT corners.",
+  "catalog_ref": "§D.1-D.7",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\combiner-basic-capture.bin",
+      "ftp_path": "/E/Apps/combiner-basic/combiner-basic-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\combiner-basic-done.txt",
+      "ftp_path": "/E/Apps/combiner-basic/combiner-basic-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "metal_canonical_overrides": {
+    "XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}

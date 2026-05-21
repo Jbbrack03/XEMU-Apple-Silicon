@@ -72,6 +72,23 @@ class XbeManifest:
     # boundary pixels than the strict defaults tuned for sparse-signal
     # XBEs (mirror / depth-floor / crtc-publish) accept.
     compare_overrides: Dict[str, float] = field(default_factory=dict)
+    # Optional per-XBE Metal canonical-recipe env overrides applied to
+    # the FIRST (and only, when no additional_metal_recipes) Metal cell.
+    # Use when an XBE needs to deviate from the default Metal recipe
+    # for correctness reasons that apply to every renderer-leg of the
+    # cell. Schema:
+    #
+    #   {"XEMU_*": "value", ...}
+    #
+    # Concrete use case (combiner-basic): XEMU_METAL_SCREENSHOT_SOURCE
+    # = nv2a so the captured frame is the linear NV2A surface, not
+    # the drawable (BGRA8Unorm_sRGB) which would gamma-encode any
+    # non-saturated cell value. This keeps the Metal capture aligned
+    # with the real-Xbox agent screenshot (also linear) and with the
+    # math-derived oracle (linear). The drawable source remains the
+    # default for XBEs whose cells use only 0/255 endpoints (gamma
+    # neutral: gamma(0)=0, gamma(1)=1).
+    metal_canonical_overrides: Dict[str, str] = field(default_factory=dict)
     raw: dict = field(default_factory=dict)
     dir: Path = field(default=Path("."))
 
@@ -156,6 +173,10 @@ def _from_dict(data: dict, d: Path) -> XbeManifest:
         compare_overrides={
             str(k): float(v) for k, v in
             data.get("compare_overrides", {}).items()
+        },
+        metal_canonical_overrides={
+            str(k): str(v) for k, v in
+            data.get("metal_canonical_overrides", {}).items()
         },
         raw=data,
         dir=d,

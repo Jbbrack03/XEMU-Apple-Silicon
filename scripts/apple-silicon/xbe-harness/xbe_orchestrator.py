@@ -169,15 +169,30 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
             # via the per-XBE sidecar wrapper, hiding fallback=0
             # regressions from the standard report (Codex review,
             # 2026-05-20).
-            variants: List[Tuple[str, Dict[str, str]]] = [("canonical", {})]
+            # Per-manifest Metal canonical-recipe overrides flow into
+            # the canonical cell's flag_recipe (and propagate to any
+            # additional_metal_recipes variants — `additional` env
+            # entries still win when keys collide because the per-
+            # variant entry is applied last). Used by combiner-basic
+            # to set XEMU_METAL_SCREENSHOT_SOURCE=nv2a so the captured
+            # frame is the linear NV2A surface, not the sRGB-encoded
+            # drawable (gamma diverges from the math oracle for non-
+            # saturated cell values).
+            canonical_overrides: Dict[str, str] = {}
+            if renderer.lower() == "metal":
+                canonical_overrides = dict(m.metal_canonical_overrides)
+            variants: List[Tuple[str, Dict[str, str]]] = [
+                ("canonical", canonical_overrides)
+            ]
             if renderer.lower() == "metal":
                 for entry in m.additional_metal_recipes:
                     name = entry.get("name") or "extra"
                     env = entry.get("env") or {}
                     if not isinstance(env, dict):
                         continue
-                    variants.append((str(name),
-                                     {str(k): str(v) for k, v in env.items()}))
+                    merged = {**canonical_overrides,
+                              **{str(k): str(v) for k, v in env.items()}}
+                    variants.append((str(name), merged))
 
             for variant_label, variant_overrides in variants:
                 # When there are no extra variants, keep the original
