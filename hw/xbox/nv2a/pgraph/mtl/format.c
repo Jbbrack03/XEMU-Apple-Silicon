@@ -44,9 +44,32 @@ uint32_t pgraph_mtl_texture_color_format_to_mtl(unsigned int nv2a_color_format,
     case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_X8R8G8B8:
         return PGRAPH_MTL_PIXEL_FORMAT_BGRA8UNORM;
 
+    /* Linear permuted-channel 32-bit formats. The §4.7
+     * texture-format-sweep XBE caught these as missing on 2026-05-20
+     * late evening: without a mapping entry the format hit the
+     * INVALID branch and Metal couldn't sample correctly. The actual
+     * per-byte channel decode is handled by mtl_convert_texture_data_
+     * bgra8 in texture_pg.c (cases at lines 463-489). Adding the
+     * mapping here makes those converter cases reachable. Linear
+     * variants only -- the swizzled SZ_A8B8G8R8 / SZ_B8G8R8A8 /
+     * SZ_R8G8B8A8 do exist but aren't exercised by v0.1, add them
+     * when an XBE covers swizzled permutations. */
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_A8B8G8R8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_B8G8R8A8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LU_IMAGE_R8G8B8A8:
+        return PGRAPH_MTL_PIXEL_FORMAT_BGRA8UNORM;
+
     /* Swizzled ARGB8888-class — needs unswizzle then BGRA upload. */
     case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8:
     case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_X8R8G8B8:
+        if (out_needs_unswizzle) *out_needs_unswizzle = true;
+        return PGRAPH_MTL_PIXEL_FORMAT_BGRA8UNORM;
+
+    /* Swizzled permuted-channel 32-bit formats. Same conversion path
+     * as the linear variants above, plus unswizzle. */
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8B8G8R8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_B8G8R8A8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R8G8B8A8:
         if (out_needs_unswizzle) *out_needs_unswizzle = true;
         return PGRAPH_MTL_PIXEL_FORMAT_BGRA8UNORM;
 
