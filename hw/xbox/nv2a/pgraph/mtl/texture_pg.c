@@ -928,6 +928,7 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
 
 static void build_sampler_desc_from_pg(PGRAPHState *pg, int stage,
                                        unsigned int levels,
+                                       const TextureShape *shape,
                                        PgraphMtlSamplerDesc *sd)
 {
     uint32_t filter = pgraph_reg_r(pg, NV_PGRAPH_TEXFILTER0 + stage * 4);
@@ -951,9 +952,39 @@ static void build_sampler_desc_from_pg(PGRAPHState *pg, int stage,
         translate_addr_mode(GET_MASK(address, NV_PGRAPH_TEXADDRESS0_ADDRP));
 
     sd->max_anisotropy = 1;
-    sd->lod_bias = 0.0f;
-    sd->min_lod = 0.0f;
-    sd->max_lod = (levels > 1) ? (float)(levels - 1) : 0.0f;
+    /* MIPMAP_LOD_BIAS is a signed 13-bit fixed-point /256 value
+     * (NV_PGRAPH_TEXFILTER0_MIPMAP_LOD_BIAS). Convert and pass to
+     * the Metal sampler so guest bias mirrors the GL renderer's
+     * glSamplerParameterf(GL_TEXTURE_LOD_BIAS, ...). */
+    unsigned int lod_bias_raw =
+        GET_MASK(filter, NV_PGRAPH_TEXFILTER0_MIPMAP_LOD_BIAS);
+    sd->lod_bias = pgraph_convert_lod_bias_to_float(lod_bias_raw);
+    /* MIN_LOD_CLAMP / MAX_LOD_CLAMP map to MTLSamplerDescriptor's
+     * lodMinClamp / lodMaxClamp. The TextureShape's min_mipmap_level
+     * / max_mipmap_level come from `pgraph_get_texture_shape` which
+     * already clamps them to [0, levels-1]. xemu's GL renderer uses
+     * GL_TEXTURE_BASE_LEVEL = min_mipmap_level + GL_TEXTURE_MAX_LEVEL
+     * = levels - 1; on Metal we instead clamp via the sampler's
+     * lod range (single-mip-of-chain sampling). Mirrors how Metal
+     * surfaces the clamps to the GPU sampler hardware.
+     *
+     * Pre-2026-05-21 the Metal renderer hardcoded min_lod=0 /
+     * max_lod=levels-1 unconditionally, silently ignoring guest
+     * SET_TEXTURE_CONTROL0 MIN/MAX_LOD_CLAMP writes. The
+     * `swizzle-mipmap` §4.8 diag XBE caught this. */
+    if (shape != NULL) {
+        unsigned int max_level = (levels > 0) ? (levels - 1) : 0;
+        unsigned int min_lvl = shape->min_mipmap_level;
+        unsigned int max_lvl = shape->max_mipmap_level;
+        if (min_lvl > max_level) min_lvl = max_level;
+        if (max_lvl > max_level) max_lvl = max_level;
+        if (min_lvl > max_lvl)   min_lvl = max_lvl;
+        sd->min_lod = (float)min_lvl;
+        sd->max_lod = (float)max_lvl;
+    } else {
+        sd->min_lod = 0.0f;
+        sd->max_lod = (levels > 1) ? (float)(levels - 1) : 0.0f;
+    }
     sd->border_color = 0; /* TransparentBlack - custom border deferred. */
     (void)border_argb;
 }
@@ -1135,7 +1166,7 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     }
 
     PgraphMtlSamplerDesc sd;
-    build_sampler_desc_from_pg(pg, stage, levels, &sd);
+    build_sampler_desc_from_pg(pg, stage, levels, &s, &sd);
 
     bool texture_possibly_dirty = false;
     if (!has_compatible_surface || self_sample) {

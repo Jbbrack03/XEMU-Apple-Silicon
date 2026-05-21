@@ -160,7 +160,14 @@ static void *build_sampler(const PgraphMtlSamplerDesc *d)
             desc.maxAnisotropy = d->max_anisotropy;
         }
         desc.lodMinClamp = d->min_lod;
-        desc.lodMaxClamp = (d->max_lod > 0.0f) ? d->max_lod : FLT_MAX;
+        /* Pass through max_lod literally. Pre-2026-05-21 this overloaded
+         * `0.0f` as the "unbounded" sentinel via `(d->max_lod > 0.0f) ?
+         * d->max_lod : FLT_MAX`, which masked guest MAX_LOD_CLAMP = 0
+         * writes (i.e. "clamp to mip 0"). Callers that want an open
+         * clamp now pass FLT_MAX explicitly. Caught by swizzle-mipmap
+         * §4.8. */
+        desc.lodMaxClamp = d->max_lod;
+        desc.lodBias     = d->lod_bias;
         desc.normalizedCoordinates = YES;
         if (d->addr_u == MTLSamplerAddressModeClampToBorderColor ||
             d->addr_v == MTLSamplerAddressModeClampToBorderColor ||
@@ -237,7 +244,12 @@ static void prewarm_sampler_cache(void)
                 d.addr_u = d.addr_v = d.addr_w = addr_modes[ai];
                 d.max_anisotropy = 1;
                 d.min_lod = 0.0f;
-                d.max_lod = 0.0f;
+                /* Prewarm against an "open" max-LOD so the cached
+                 * sampler matches the variant most retail draws hit
+                 * (full mip chain, no clamp). Was implicit before via
+                 * the now-removed `(max > 0) ? max : FLT_MAX` overload
+                 * in build_sampler(). */
+                d.max_lod = FLT_MAX;
                 (void)get_sampler(&d);
             }
         }
