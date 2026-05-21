@@ -2918,6 +2918,22 @@ behavior. See
 
 ## Diagnostic Toggles
 
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits two diagnostic
+streams to stderr (logged into `xemu.log` when the benchmark harness is in
+use): (1) for every Metal vertex-attribute stream collected in
+`pgraph_mtl_collect_all_vertex_streams` for slot 9 (TEX0) with stride=44
+(the xbed-library textured-vertex layout), dumps the per-vertex decoded
+Float4 for up to 30 elements with `metal_attrib_stream slot=...` /
+`slot=N k=K v=(...)` markers. (2) for every `decode_face_levels` of an
+SZ_A8R8G8B8 swizzled texture with 7 mip levels (the swizzle-mipmap XBE's
+shape) and per-mip W,H >= 2, dumps the 4-quadrant-center bytes of the
+post-unswizzle buffer for up to 28 calls with
+`metal_unswizzle_dump w=... Q0=... Q1=... Q2=... Q3=...` markers. Used
+to verify the CPU-side data ARRIVING at the Metal renderer is what the
+XBE writes — narrows the §4.8 swizzle-mipmap intra-mip-sampling bug
+investigation. Output is large (up to ~3000 lines) but env-gated. Do not
+ship enabled.
+
 `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` keeps triangle-family geometry shaders in
 use, but bypasses their depth-plane and slope calculation. This is intentionally
 not a correctness path. It is a temporary diagnostic for separating "geometry

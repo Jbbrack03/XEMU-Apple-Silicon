@@ -326,6 +326,35 @@ void pgraph_mtl_collect_all_vertex_streams(NV2AState *d,
 
         streams_out[i].data = out;
         streams_out[i].bytes = bytes;
+
+        /* 2026-05-21 task #16 diagnostic: log per-slot decoded streams
+         * when XEMU_METAL_DIAG_ATTRIB_DUMP is set. Filter to slot 9
+         * (TEX0) only since that's what swizzle-mipmap exercises;
+         * also require stride=44 (matches our TexVertex layout) so
+         * dashboard / boot-anim draws don't bury the data. */
+        const char *diag_env = getenv("XEMU_METAL_DIAG_ATTRIB_DUMP");
+        if (diag_env && i == 9 && attr->stride == 44) {
+            static unsigned int diag_count = 0;
+            if (diag_count < 16) {
+                fprintf(stderr,
+                        "xemu-perf: metal_attrib_stream slot=%d min=%u "
+                        "num=%u count=%u stride=%u src=%d\n",
+                        i, min_element, num_elements, attr->count,
+                        attr->stride, (int)source);
+                unsigned int dump_n = num_elements < 30 ? num_elements : 30;
+                for (uint32_t k = 0; k < dump_n; k++) {
+                    fprintf(stderr,
+                            "xemu-perf:   slot=%d k=%u "
+                            "v=(%.4f, %.4f, %.4f, %.4f)\n",
+                            i, k,
+                            (double)out[k * 4 + 0],
+                            (double)out[k * 4 + 1],
+                            (double)out[k * 4 + 2],
+                            (double)out[k * 4 + 3]);
+                }
+                diag_count++;
+            }
+        }
     }
 }
 

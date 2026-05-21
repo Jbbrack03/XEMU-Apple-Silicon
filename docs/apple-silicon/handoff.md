@@ -135,8 +135,33 @@ required for full XBE saturation):**
 - Task #16: Metal SZ_A8R8G8B8 sampling collapses to texel (0, 0).
   Captured by swizzle-mipmap. Manifests as cell-level mip ramp
   working (LOD clamp now honored, per the 2026-05-21 renderer fix)
-  but intra-mip 2x2 quadrant sampling returning Q0 only.
-  Investigate Metal texture upload + sampling for swizzled formats.
+  but intra-mip 2x2 quadrant sampling returning Q0 only. **DEEPER
+  DIAGNOSIS 2026-05-21 (research pass):** CPU data ARRIVING at
+  the Metal renderer is correct (per
+  `XEMU_METAL_DIAG_ATTRIB_DUMP=1` instrumentation): per-vertex
+  slot-9 stream has 4 distinct UV groups per cell; per-mip
+  unswizzled texture buffer has 4 distinct quadrant colors. The
+  bug is in the **pipeline-key / vertex-descriptor** path: when
+  the GLSL→SPIR-V→MSL pipeline emits its `vertex_main0_in` struct,
+  many compiled pipelines declare ONLY `float4 v0
+  [[attribute(0)]];` — no `v9 [[attribute(9)]]`. The vertex
+  shader then reads slot 9 as `float4 v9 = _60.inlineValue[8]`
+  (a CONSTANT uniform value, not a per-vertex stream). A subset of
+  pipelines (e.g. pipeline-0013 in the dump) DO include the v9
+  attribute and read `in.v9` correctly — so the bug is selective.
+  Mechanism likely: pipeline-key state-snapshot timing, where the
+  shader gets compiled before slot 9 is flagged as "streaming" (or
+  the `uniform_attrs` mask bit-9 is set spuriously). PT0-override
+  diagnostic (now reverted) showed `pT0 = (x_screen/640,
+  y_screen/480, ...)` linear gradient instead of per-sub-quad
+  constant, consistent with the slot 9 attribute not flowing
+  through the vertex stream. **Fix candidate:** investigate
+  `mtl/state.c::pipeline_key_build` around line 258-280 — verify
+  slot 9 is included in `out_key->attrs[i]` when the XBE binds
+  it. Also `pgraph_mtl_collect_all_vertex_streams` flagging logic
+  in `vertex.c`. The env-gated diagnostic
+  `XEMU_METAL_DIAG_ATTRIB_DUMP=1` is the regression gate (now
+  documented in `automation.md`).
 - Task #17: GL renderer renders BLACK when MIN_LOD_CLAMP =
   MAX_LOD_CLAMP > 0. xemu's `pgraph_get_texture_shape` truncates
   `levels = MIN(levels, max_mipmap_level + 1)` and the GL upload

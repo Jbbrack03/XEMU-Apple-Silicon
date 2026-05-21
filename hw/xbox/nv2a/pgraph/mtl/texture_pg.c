@@ -864,6 +864,39 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
             uint8_t *unswizzled = (uint8_t *)g_malloc(swizzled_size);
             unswizzle_rect(p, w, h, unswizzled, pitch, f.bytes_per_pixel);
 
+            /* 2026-05-21 task #16 diag — dump 4 quadrant centers of
+             * the unswizzled buffer for SZ_A8R8G8B8 textures, so we
+             * can verify the CPU-side unswizzle produced the 4
+             * distinct colors swizzle-mipmap writes. */
+            if (s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8
+                && s.levels == 7 && w >= 2 && h >= 2
+                && getenv("XEMU_METAL_DIAG_ATTRIB_DUMP")) {
+                static unsigned int diag_count = 0;
+                if (diag_count < 28) {
+                    unsigned int hw = w / 2, hh = h / 2;
+                    unsigned int q0 = (hh/2) * pitch + (hw/2) * 4;
+                    unsigned int q1 = (hh/2) * pitch + (hw + hw/2) * 4;
+                    unsigned int q2 = (hh + hh/2) * pitch + (hw/2) * 4;
+                    unsigned int q3 = (hh + hh/2) * pitch + (hw + hw/2) * 4;
+                    fprintf(stderr,
+                            "xemu-perf: metal_unswizzle_dump w=%u h=%u "
+                            "Q0=(B%02x G%02x R%02x A%02x) "
+                            "Q1=(B%02x G%02x R%02x A%02x) "
+                            "Q2=(B%02x G%02x R%02x A%02x) "
+                            "Q3=(B%02x G%02x R%02x A%02x)\n",
+                            w, h,
+                            unswizzled[q0+0], unswizzled[q0+1],
+                            unswizzled[q0+2], unswizzled[q0+3],
+                            unswizzled[q1+0], unswizzled[q1+1],
+                            unswizzled[q1+2], unswizzled[q1+3],
+                            unswizzled[q2+0], unswizzled[q2+1],
+                            unswizzled[q2+2], unswizzled[q2+3],
+                            unswizzled[q3+0], unswizzled[q3+1],
+                            unswizzled[q3+2], unswizzled[q3+3]);
+                    diag_count++;
+                }
+            }
+
             size_t converted_size = 0;
             uint8_t *converted = pgraph_convert_texture_data(
                 s, unswizzled, palette_data, w, h, 1, pitch, 0,
