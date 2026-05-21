@@ -61,6 +61,15 @@ void          xbed_load_viewport_matrix(void);
  * (already in window coordinates) + DIFFUSE → COLOR. */
 void          xbed_load_default_shaders(void);
 
+/* Textured VS / PS upload. The shaders are baked into
+ * `lib/xbed_tex_vs.inl` and `lib/xbed_tex_ps.inl`; the VS passes
+ * POSITION + DIFFUSE + TEXCOORD0 through; the PS samples stage 0
+ * via TEXCOORD0 and modulates by DIFFUSE (set DIFFUSE = white to
+ * see the raw texture sample). Use with `xbed_texture_bind_stage0`
+ * from `xbed_texture.h`. Stage 0 must be set up BEFORE the first
+ * draw issued with these shaders bound. */
+void          xbed_load_textured_shaders(void);
+
 /* Geometry helpers: clear all 16 attribute slots to TYPE_F (so unused
  * slots don't leak prior state), then bind individual attributes. */
 void          xbed_clear_all_attribs_to_float(void);

@@ -1,0 +1,15 @@
+// xbed textured PS — sample stage 0 with TEXCOORD0 and modulate by
+// the interpolated DIFFUSE. For the simplest case (DIFFUSE = white
+// from a per-vertex (1,1,1,1) color) the output is the raw texture
+// sample. For diag XBEs that want to weight or tint the sample,
+// supply a non-white DIFFUSE in the vertex stream.
+struct vOut {
+    float4 col  : COLOR;
+    float2 tex0 : TEXCOORD0;
+};
+
+float4 main(vOut I, uniform sampler2D colorMap) : COLOR
+{
+    float4 sample = tex2D(colorMap, I.tex0.xy);
+    return sample * I.col;
+}

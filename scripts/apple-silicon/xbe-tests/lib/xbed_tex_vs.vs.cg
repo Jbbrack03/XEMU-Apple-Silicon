@@ -1,0 +1,31 @@
+// xbed textured VS — passes POSITION + DIFFUSE + TEXCOORD0 through.
+// Position is in clip space (-1..+1 with +Y up, Z in [0,1]);
+// m_viewport mapped from clip to window coords by the runtime's
+// xbed_load_viewport_matrix(). DIFFUSE forwards as COLOR;
+// TEXCOORD0 forwards as TEXCOORD0 for the fragment side to sample
+// from stage 0.
+struct vIn {
+    float4 color    : DIFFUSE;
+    float4 tex0     : TEXCOORD0;
+    float4 position : POSITION;
+};
+
+struct vOut {
+    float4 col  : COLOR;
+    float4 tex0 : TEXCOORD0;
+    float4 pos  : POSITION;
+};
+
+vOut main(vIn I, uniform float4x4 m_viewport)
+{
+    vOut result;
+    float4 position;
+
+    position = mul(float4(I.position.xyz, 1.0f), m_viewport);
+    position.xyz = position.xyz / position.w;
+
+    result.col  = I.color;
+    result.tex0 = I.tex0;
+    result.pos  = position;
+    return result;
+}

@@ -25,7 +25,9 @@ SRCS += $(XBED_LIB_DIR)/xbed_runtime.c \
         $(XBED_LIB_DIR)/xbed_texture.c
 
 SHADER_OBJS += $(XBED_LIB_DIR)/vs.inl \
-               $(XBED_LIB_DIR)/ps.inl
+               $(XBED_LIB_DIR)/ps.inl \
+               $(XBED_LIB_DIR)/xbed_tex_vs.inl \
+               $(XBED_LIB_DIR)/xbed_tex_ps.inl
 
 # Preprocessor needs to find the lib's headers from the test's main.c.
 # The lib's own .c files use plain `#include "vs.inl"` (resolved by
