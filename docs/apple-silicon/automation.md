@@ -1,13 +1,22 @@
 # Benchmark Automation
 
-Last updated: 2026-05-20 (evening, +3 XBEs) (Tier-1 XBE library:
-7 of 16 first-wave PASS on xemu-Metal — `pipeline-smoke`,
+Last updated: 2026-05-20 (late evening) (Tier-1 XBE library:
+9 of 17 first-wave PASS on xemu-Metal — `pipeline-smoke`,
 `mirror`, `color-channel`, `depth-floor`, `crtc-publish`,
-`native-quad-tri-depth`, `cmp-vertex-format`. 2 of 16 ship as
-`expected_fail` with documented Metal renderer regression targets:
-`stencil-ops` (4 of 8 ops broken — task #14) and `logic-ops`
-(neither GL nor Metal implements logic ops). New xbe-harness
-manifest fields: `required_counters_min` (xemu-perf counter-sum
+`native-quad-tri-depth`, `cmp-vertex-format`, `blend-matrix`,
+`texture-format-sweep` v0.1. 3 of 17 ship as `expected_fail`
+with documented Metal renderer regression targets:
+`stencil-ops` (cell-0/1/2 BLACK pattern — task #14 partial fix
+landed for clearStencil-value bug), `logic-ops` (neither GL nor
+Metal implements logic ops — feature work), `texture-filter-wrap`
+(per-vertex TEX0 not propagating per-cell — task #15). Shipped
+this slice (2026-05-20 late evening): xbed_lib texture
+infrastructure (`xbed_texture.{c,h}` + `xbed_tex_{vs,ps}.{cg,inl}`
++ `xbed_load_textured_shaders`); Metal renderer fix for missing
+LU/SZ A8B8G8R8 / B8G8R8A8 / R8G8B8A8 format-table entries
+(caught by texture-format-sweep on first run); Metal stencil-clear
+honor-value + per-aspect Z/STENCIL gating fix (task #14 partial).
+New xbe-harness manifest fields: `required_counters_min` (xemu-perf counter-sum
 gate), `compare_overrides` (per-XBE pixel tolerance applied to
 both selection AND final gate so they share the same tolerance
 model), and `expected_fail_renderers` wiring through the
@@ -4502,12 +4511,32 @@ production-readiness gate.
      0/255 colors only — byte-exact across renderers regardless
      of any display-side gamma table. Catches depth-test /
      depth-write / Y-mirror regressions.
-   All three share `xbe-tests/lib/` (xbed_runtime + xbed_capture
-   + passthrough vs.vs.cg/ps.ps.cg) so a new diag XBE is ~150
-   lines of test-specific code on top. Each XBE is paired with
-   `expected.py` (math-derived audit oracle) and `manifest.json`
-   (per-(renderer, flag-recipe) expected_results). Rebuild via
-   `make` after `eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)"`.
+   All XBEs share `xbe-tests/lib/` so a new diag XBE is ~150-300
+   lines of test-specific code on top. The shared lib provides:
+
+   - `xbed_runtime.{c,h}` — pbkit init, default render state,
+     viewport matrix, frame loop helpers,
+     `xbed_load_default_shaders` (POSITION + DIFFUSE passthrough),
+     `xbed_load_textured_shaders` (POSITION + DIFFUSE + TEXCOORD0
+     passthrough, samples stage 0 at TEX0, modulates by DIFFUSE).
+     Shader inlines compiled from `vs.vs.cg`/`ps.ps.cg` (default)
+     and `xbed_tex_vs.vs.cg`/`xbed_tex_ps.ps.cg` (textured) via
+     `cgc` + `vp20compiler`/`fp20compiler`.
+   - `xbed_capture.{c,h}` — XOSS capture frame + reboot helpers.
+   - `xbed_input_synth.{c,h}` — Tier-1 retail-input shim.
+   - `xbed_texture.{c,h}` — 2026-05-20 late evening: texture-stage
+     binder for diag XBEs needing texture sampling.
+     `xbed_texture_bind_stage0(params)` emits the full NV097 stage-
+     0 setup atomically (OFFSET / FORMAT / ADDRESS / CONTROL0 /
+     CONTROL1 / FILTER / IMAGE_RECT) in one pb_begin/pb_end pair
+     and explicitly disables stages 1..3 to prevent cross-XBE
+     state leakage. `xbed_texture_init_argb8888_defaults` is the
+     convenience populator for linear A8R8G8B8 case.
+
+   Each XBE is paired with `expected.py` (math-derived audit
+   oracle) and `manifest.json` (per-(renderer, flag-recipe)
+   expected_results). Rebuild via `make` after
+   `eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)"`.
 
 9. Real Xbox oracle production harness (2026-05-06): **SHIPPED.**
    `scripts/apple-silicon/xbe-harness/` — top-level driver that

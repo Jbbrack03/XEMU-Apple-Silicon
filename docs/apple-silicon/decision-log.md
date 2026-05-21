@@ -1,5 +1,173 @@
 # Decision Log
 
+## 2026-05-20 (late evening, +texture-filter-wrap): §4.11 shipped expected_fail; new Metal renderer gap (task #15) — per-vertex TEX0 attribute not propagating per-cell
+
+**Decision.** §4.11 `texture-filter-wrap` v0.1 ships as
+`expected_fail_renderers: ["metal"]`. The XBE was built on the
+new xbed_lib texture infrastructure (see "2026-05-20 (late
+evening, +texture infra + §4.7)" entry below): 8-cell 4x2 grid
+sampling a 4x4 quadrant texture with constant UV per cell;
+NEAREST filter; row 0 uses CLAMP_TO_EDGE with in-range UVs, row
+1 uses REPEAT with UVs offset by +1.0 in U. Both rows should
+render the same R/G/B/W pattern if wrap=REPEAT works correctly.
+
+**Result on Metal.** All 8 cells render the (0,0) texel (RED)
+regardless of cell UV. The per-vertex TEX0 attribute (slot 9 in
+the NV097 vertex array, Float2 stride 36) is not propagating
+through Metal's vertex pipeline to the fragment shader -- every
+fragment samples texel (0,0) instead of the per-cell intended
+texel. The §4.7 `texture-format-sweep` XBE doesn't expose this
+because each of its cells uses a UNIFORM-color texture (UV (0,0)
+returns the same color as any other UV would). GL + real Xbox
+expected to PASS unchanged.
+
+**Filed as task #15** (renderer follow-up): investigate Metal
+TEX0 attribute interpolation. Likely candidates: the texture-aware
+shaders' TEXCOORD0 slot mapping; Metal vertex layout in
+`mtl/shaders.mm` / `mtl/draw.mm` for slot 9; the cgc-generated
+inline VS at `xbe-tests/lib/xbed_tex_vs.inl` mapping v[9] to
+the output TEX0 (compile warning was "Vertex attribute register
+v[8] (TEX0) will be mapped to hardware register v[9]" -- worth
+double-checking the Metal-side slot routing matches that).
+
+**State after this entry.** 12 of 17 first-wave XBEs shipped on
+Metal (9 PASS + 3 expected_fail; 5 unstarted). Remove `"metal"`
+from `expected_fail_renderers` when task #15 is fixed; the GL
+leg and real-Xbox capture remain authoritative for the
+per-quadrant pattern.
+
+**Why XBE-first methodology worked here.** texture-filter-wrap
+v0.1 was a focused next-after-§4.7 XBE that surfaced a gap that
+texture-format-sweep could not detect because of its uniform-
+texture design. The bug class is probably already affecting
+retail titles that use per-vertex UVs (most of them), but was
+invisible against retail-title temporal evidence. The diagnostic
+XBE makes the failure deterministic and minimum-repro.
+
+---
+
+## 2026-05-20 (late evening, +texture infra + §4.7): xbed_lib texture-stage helpers + textured shaders + §4.7 `texture-format-sweep` v0.1 shipped GREEN on Metal + Metal LU/SZ A8B8G8R8 / B8G8R8A8 / R8G8B8A8 format fix
+
+**Decision.** Three commits, one slice. Builds the texture-cluster
+infrastructure that was identified as blocking 5 of the 6 unstarted
+first-wave XBEs (§4.7/4.8/4.11/4.13/4.16):
+
+1. **`scripts/apple-silicon/xbe-tests/lib/xbed_texture.{h,c}`**
+   (commit `836566c5c8`). Stage-0 texture binder + disable-all-stages
+   helper + ARGB8888-defaults populator. Emits the full NV097
+   stage-0 setup atomically (OFFSET / FORMAT / ADDRESS / CONTROL0 /
+   CONTROL1 / FILTER / IMAGE_RECT) in one `pb_begin`/`pb_end` pair
+   and explicitly disables stages 1..3 to prevent cross-XBE state
+   leakage. Bit layouts cross-checked against `hw/xbox/nv2a/nv2a_regs.h`
+   + `nxdk/lib/pbkit/nv_regs.h` + nxdk's `samples/mesh/main.c`
+   stage-0 sequence.
+
+2. **`scripts/apple-silicon/xbe-tests/lib/xbed_tex_{vs,ps}.{cg,inl}`
+   + `xbed_load_textured_shaders()`** (commit `eaf21220a2`).
+   Textured VS that passes POSITION + DIFFUSE + TEXCOORD0 through
+   to the PS; fp20-compiled PS that samples stage 0 via TEXCOORD0
+   and modulates by the interpolated DIFFUSE. `lib.mk` updates so
+   every diag XBE links the new sources and the inl pair is built
+   alongside the default `vs.inl` / `ps.inl`.
+
+3. **§4.7 `texture-format-sweep` v0.1 + `mtl/format.c` fix**
+   (commit `57373b8754`). v0.1 covers 4 linear 32-bit-per-pixel
+   formats (LU_IMAGE_A8R8G8B8 / X8R8G8B8 / A8B8G8R8 / B8G8R8A8)
+   plus 4 cells that repeat A8R8G8B8 at additional cube-corner
+   colors for full 8-signal-cell coverage. Second wave will
+   expand to the remaining 38 of 42 NV2A texture color formats.
+
+**Renderer fix triggered by the XBE.** First run of §4.7 on Metal
+showed cells 2 (BLUE A8B8G8R8) and 3 (WHITE B8G8R8A8) rendering
+GREEN instead of the target colors. Root cause: `mtl/format.c`'s
+`pgraph_mtl_texture_color_format_to_mtl` switch had no entries
+for LU_IMAGE_A8B8G8R8 / LU_IMAGE_B8G8R8A8 / LU_IMAGE_R8G8B8A8
+(or their SZ_ swizzled variants), so these format codes hit the
+`default: PGRAPH_MTL_PIXEL_FORMAT_INVALID` branch and Metal
+sampled the texture incorrectly. The per-byte channel decode for
+these formats already existed correctly in
+`mtl_convert_texture_data_bgra8` (`texture_pg.c:463-489`); only
+the format-table entry was missing, which is why the bug was
+silent in retail titles that happen not to use the permuted-
+channel ARGB families. 23-line table addition makes those
+converter cases reachable.
+
+**Verification.** Full Metal rotation post-fix:
+9 pass / 0 fail / 0 skip / 0 infra-error / 2 expected_fail
+(logic-ops + stencil-ops). texture-format-sweep all 8 cells PASS
+(RED, GREEN, BLUE, WHITE, YELLOW, CYAN, MAGENTA, RED).
+
+**State after this entry.** 11 of 17 first-wave XBEs shipped on
+Metal (9 PASS + 2 expected_fail). Texture-cluster infrastructure
+ready for §4.8 / §4.11 / §4.13 / §4.16 (each needs additional
+piece: §4.8 swizzled-layout encoder, §4.13 combiner setup, §4.16
+NV_DMA channel-B configuration). The combiner-helper extension
+(`xbed_combiner.{h,c}`) is the next infra slice (~2 hrs);
+§4.12 / §4.13 / §4.7 second-wave (DXT) all need it.
+
+**XBE-first methodology working as designed.** The §4.7 XBE
+caught + triggered a 23-line renderer fix on first run. The
+infrastructure investment (xbed_texture API + shaders) is
+amortized across the remaining texture-cluster XBEs.
+
+---
+
+## 2026-05-20 (late evening, task #14 partial): Metal stencil-clear now honors NV097 stencil value + per-aspect Z/STENCIL gating
+
+**Decision.** Ship a 2-piece partial fix for Metal stencil-op
+correctness (commit `a82ac934e9`), surfaced by the §4.10
+`stencil-ops` XBE (which still ships expected_fail on Metal —
+this fix improves but does NOT close the residual symptom).
+
+1. **`pgraph_mtl_surface_clear` honors the decoded stencil
+   value.** Was hardcoded to `desc.stencilAttachment.clearStencil = 0`,
+   ignoring `pgraph_get_clear_depth_stencil_value`'s output. New
+   signature accepts a `stencil` int parameter; renderer.c passes
+   the decoded value through. Mirrors GL's `gl/draw.c`
+   `glClearStencil(gl_clear_stencil)` contract.
+
+2. **Per-aspect Z vs STENCIL gating.** NV097_CLEAR_SURFACE_Z and
+   NV097_CLEAR_SURFACE_STENCIL bits now configure the depth and
+   stencil aspects of the Metal render-pass descriptor
+   independently (per Codex 2026-05-20 changes-mode finding #1).
+   Previously the two were collapsed via `write_zeta = Z|S` and
+   the renderer always cleared both aspects whenever either bit
+   was set, which diverged from `gl/draw.c::pgraph_gl_clear_surface`
+   (gates each via the corresponding bit independently).
+   Combined depth+stencil textures preserve the unattached aspect
+   across the render pass.
+
+**Outcome on stencil-ops XBE.** Pass-rate on Metal goes from
+~3-4/8 non-deterministic (only ZERO / REPLACE / INVERT / INCR
+worked, by coincidence with stencil-uniformly-0 start) to 5/8
+deterministic (INCRSAT / DECRSAT / INVERT / INCR / DECR pass).
+Cells 0 (KEEP), 1 (ZERO), 2 (REPLACE) still render BLACK at the
+start of every frame.
+
+**Residual bug (task #14 follow-up).** 136 of 140 captured frames
+have 0/8 cells passing in isolation runs of stencil-ops; only
+~3-5/8 in best-frame selections. The first-three-cells-per-frame
+BLACK pattern is suspicious — hypothesis is a render-pass
+ordering / async-clear / pipeline-warmup issue specific to the
+first N draws after a frame's color clear, NOT an op-mapping bug.
+Needs deeper Metal renderer investigation. The XBE stays
+expected_fail on Metal until root-caused.
+
+**Why XBE-first methodology worked here.** The stencil-ops XBE
+was authored before this fix and shipped expected_fail; the XBE
+made the failure isolable and reproducible. Without it, the
+"hardcoded clearStencil=0" bug would likely have been invisible
+in retail titles (most titles clear Z+S together so the missing
+stencil value doesn't matter, or use stencil values close enough
+to 0 that the mis-clear was hidden).
+
+**Codex review applied.** Two-line `cmp_max_changed` /
+`min_signal_match_pct` thresholds tightened; per-aspect gating
+split is finding #1 itself; manifest description updated for
+nondeterminism (finding #2).
+
+---
+
 ## 2026-05-20 (evening, +3 XBEs): cmp-vertex-format / stencil-ops / logic-ops shipped, expected_fail_renderers wiring, two Metal renderer gaps captured
 
 **Decision.** Continuation of the XBE-first loop. Three more first-
