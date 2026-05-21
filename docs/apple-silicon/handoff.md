@@ -1,7 +1,21 @@
 # Handoff
 
-Last updated: 2026-05-20 (late evening, +texture infra +
-§4.7 texture-format-sweep) —
+Last updated: 2026-05-20 (late evening, +texture-filter-wrap) —
+**§4.11 `texture-filter-wrap` v0.1 shipped as expected_fail on
+Metal.** Caught a new Metal renderer gap (task #15): all 8 cells
+render texel (0,0) (RED) regardless of per-cell UV. The per-vertex
+TEX0 attribute (slot 9, Float2 stride 36) is not propagating
+through Metal's vertex pipeline to the fragment shader. The
+similar texture-format-sweep XBE doesn't expose this because each
+of its cells uses a uniform-color texture (UV (0,0) returns the
+same color as any other UV). GL + real Xbox expected to PASS
+unchanged. v0.1 scope: NEAREST filter + CLAMP_TO_EDGE + REPEAT.
+LINEAR + MIRROR/CLAMP/BORDER deferred to second wave.
+
+**State: 12 of 17 first-wave XBEs shipped on Metal (9 PASS + 3
+expected_fail; 5 unstarted).**
+
+Earlier this session:
 **§4.7 `texture-format-sweep` v0.1 XBE shipped GREEN on Metal.**
 Caught + triggered a Metal renderer fix: LU_IMAGE_A8B8G8R8 /
 B8G8R8A8 / R8G8B8A8 (and SZ_ swizzled variants) were missing from
