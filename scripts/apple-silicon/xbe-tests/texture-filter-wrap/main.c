@@ -36,26 +36,28 @@
  * deterministically picks one quadrant. The wrap mode is set per
  * cell via xbed_texture_bind_stage0 params.
  *
- * Cell layout (UV interpretation: U = 0.125 picks col 0; 0.625 picks
- * col 2; 0.125+1 picks col 0 after WRAP; etc.):
+ * Cell layout. NV2A linear (LU_IMAGE_) textures use TEXEL-UNIT
+ * (unnormalized) UV coordinates: U=0.5 picks texel column 0; U=2.5
+ * picks texel column 2; U=2.5+TEX_W=6.5 picks texel column 2 after
+ * WRAP. (The renderer's norm0() divides UVs by texSize before
+ * sampling; this matches the nxdk mesh sample's UV convention.)
  *
  *   Cell  Wrap            UV              Expected texel  Color
  *   ----  --------------  --------------  --------------  -----
- *   0     CLAMP_TO_EDGE   (0.125, 0.125)  (0, 0)          RED
- *   1     CLAMP_TO_EDGE   (0.625, 0.125)  (2, 0)          GREEN
- *   2     CLAMP_TO_EDGE   (0.125, 0.625)  (0, 2)          BLUE
- *   3     CLAMP_TO_EDGE   (0.625, 0.625)  (2, 2)          WHITE
- *   4     WRAP            (1.125, 0.125)  (0, 0)          RED
- *   5     WRAP            (1.625, 0.125)  (2, 0)          GREEN
- *   6     WRAP            (1.125, 0.625)  (0, 2)          BLUE
- *   7     WRAP            (1.625, 0.625)  (2, 2)          WHITE
+ *   0     CLAMP_TO_EDGE   (0.5, 0.5)      (0, 0)          RED
+ *   1     CLAMP_TO_EDGE   (2.5, 0.5)      (2, 0)          GREEN
+ *   2     CLAMP_TO_EDGE   (0.5, 2.5)      (0, 2)          BLUE
+ *   3     CLAMP_TO_EDGE   (2.5, 2.5)      (2, 2)          WHITE
+ *   4     WRAP            (4.5, 0.5)      (0, 0)          RED
+ *   5     WRAP            (6.5, 0.5)      (2, 0)          GREEN
+ *   6     WRAP            (4.5, 2.5)      (0, 2)          BLUE
+ *   7     WRAP            (6.5, 2.5)      (2, 2)          WHITE
  *
  * Both rows render the same R/G/B/W pattern -- row 0 via direct
  * in-range UV sampling (CLAMP_TO_EDGE is a no-op for in-range UV),
- * row 1 via UV offset by 1 in U axis and wrap=WRAP. If WRAP is
+ * row 1 via UV offset by TEX_W=4 in U axis and wrap=WRAP. If WRAP is
  * mis-implemented (e.g. treated as CLAMP_TO_EDGE), row 1 would
- * show GREEN GREEN WHITE WHITE (UV clamped to 0.875 → col 3
- * which is GREEN/WHITE).
+ * clamp to U=3.5 → col 3 which is GREEN/WHITE, exposing the bug.
  *
  * --- Catches --------------------------------------------------------
  *
@@ -128,19 +130,27 @@ typedef struct {
     uint8_t  expected_rgba[4];
 } Cell;
 
+/* NV2A LU_IMAGE_ textures use TEXEL-UNIT (unnormalized) UV coords,
+ * matching the NV2A texture-shader pipeline (PS_TEXTUREMODES_2D_PROJECTIVE
+ * + the renderer's norm0() = coord / texSize divisor; see glsl/psh.c).
+ * The nxdk mesh sample confirms this convention (its UVs are integer
+ * pixel positions like (44, 143)). The TEX_W=4 texture is sampled at
+ * (0.5, 0.5) for texel (0,0) and (2.5, 0.5) for texel (2,0) etc.; the
+ * +TEX_W=+4 offset for the WRAP row sends sampling back to the same
+ * texels via SET_TEXTURE_ADDRESS=WRAP. */
 static const Cell k_cells[GRID_CELLS] = {
     /* Row 0 -- CLAMP_TO_EDGE with in-range UVs sampling each
      * quadrant directly. */
-    { { 0.125f, 0.125f }, WRAP_CLAMP_TO_EDGE, { 0xFF, 0x00, 0x00, 0xFF } }, /* RED */
-    { { 0.625f, 0.125f }, WRAP_CLAMP_TO_EDGE, { 0x00, 0xFF, 0x00, 0xFF } }, /* GREEN */
-    { { 0.125f, 0.625f }, WRAP_CLAMP_TO_EDGE, { 0x00, 0x00, 0xFF, 0xFF } }, /* BLUE */
-    { { 0.625f, 0.625f }, WRAP_CLAMP_TO_EDGE, { 0xFF, 0xFF, 0xFF, 0xFF } }, /* WHITE */
-    /* Row 1 -- WRAP with UV offset by 1 in U axis; the wrap brings
-     * sampling back to the same quadrants as row 0. */
-    { { 1.125f, 0.125f }, WRAP_REPEAT,        { 0xFF, 0x00, 0x00, 0xFF } }, /* RED */
-    { { 1.625f, 0.125f }, WRAP_REPEAT,        { 0x00, 0xFF, 0x00, 0xFF } }, /* GREEN */
-    { { 1.125f, 0.625f }, WRAP_REPEAT,        { 0x00, 0x00, 0xFF, 0xFF } }, /* BLUE */
-    { { 1.625f, 0.625f }, WRAP_REPEAT,        { 0xFF, 0xFF, 0xFF, 0xFF } }, /* WHITE */
+    { { 0.5f, 0.5f }, WRAP_CLAMP_TO_EDGE, { 0xFF, 0x00, 0x00, 0xFF } }, /* RED   texel(0,0) */
+    { { 2.5f, 0.5f }, WRAP_CLAMP_TO_EDGE, { 0x00, 0xFF, 0x00, 0xFF } }, /* GREEN texel(2,0) */
+    { { 0.5f, 2.5f }, WRAP_CLAMP_TO_EDGE, { 0x00, 0x00, 0xFF, 0xFF } }, /* BLUE  texel(0,2) */
+    { { 2.5f, 2.5f }, WRAP_CLAMP_TO_EDGE, { 0xFF, 0xFF, 0xFF, 0xFF } }, /* WHITE texel(2,2) */
+    /* Row 1 -- WRAP with UV offset by +TEX_W=+4 in U axis; the wrap
+     * brings sampling back to the same texels as row 0. */
+    { { 4.5f, 0.5f }, WRAP_REPEAT,        { 0xFF, 0x00, 0x00, 0xFF } }, /* RED   wrapped */
+    { { 6.5f, 0.5f }, WRAP_REPEAT,        { 0x00, 0xFF, 0x00, 0xFF } }, /* GREEN wrapped */
+    { { 4.5f, 2.5f }, WRAP_REPEAT,        { 0x00, 0x00, 0xFF, 0xFF } }, /* BLUE  wrapped */
+    { { 6.5f, 2.5f }, WRAP_REPEAT,        { 0xFF, 0xFF, 0xFF, 0xFF } }, /* WHITE wrapped */
 };
 
 static void *s_tex_vram;
