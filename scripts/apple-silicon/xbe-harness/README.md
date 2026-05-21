@@ -229,6 +229,32 @@ canonical recipe. Each cell appears in the report's
 `crtc-publish` to gate both publish-path legs from a single matrix
 run (Codex review, 2026-05-20).
 
+### Per-XBE canonical-recipe overrides (metal_canonical_overrides)
+
+A manifest can also declare `metal_canonical_overrides` (2026-05-21):
+
+```json
+"metal_canonical_overrides": {
+  "XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"
+}
+```
+
+The orchestrator merges these env-var entries into the Metal
+canonical recipe — i.e., they apply to the SINGLE canonical cell
+(and propagate to any `additional_metal_recipes` variants, where
+the per-variant `env` entries still win on key collision). Use
+this when the XBE needs to deviate from the default Metal recipe
+for a correctness reason that applies to every renderer-leg of
+the cell, not for an extra-cell variant.
+
+Concrete use case: `combiner-basic` and `swizzle-mipmap` pin
+`XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so the captured frame is the
+linear NV2A surface (not the BGRA8Unorm_sRGB drawable, which
+gamma-encodes non-saturated cell values and diverges from both
+the math-derived oracle and the real-Xbox agent screenshot).
+The drawable source stays the default for XBEs whose cells use
+only 0/255 endpoints (gamma neutral: gamma(0)=0, gamma(1)=1).
+
 ## Per-XBE render loop pattern
 
 Each diag XBE's `main()` follows this shape (see `mirror/main.c` for

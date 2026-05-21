@@ -1,6 +1,9 @@
 # Benchmark Automation
 
-Last updated: 2026-05-20 (late evening) (Tier-1 XBE library:
+Last updated: 2026-05-21 (morning, XBE wave expansion) —
+`XEMU_METAL_DIAG_ATTRIB_DUMP` diagnostic + xbe-harness
+`metal_canonical_overrides` field documented. Previous:
+2026-05-20 (late evening) (Tier-1 XBE library:
 9 of 17 first-wave PASS on xemu-Metal — `pipeline-smoke`,
 `mirror`, `color-channel`, `depth-floor`, `crtc-publish`,
 `native-quad-tri-depth`, `cmp-vertex-format`, `blend-matrix`,

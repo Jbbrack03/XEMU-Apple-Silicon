@@ -1,6 +1,6 @@
 # Diagnostic XBE Library — Implementation Plan (v2)
 
-> **2026-05-20 late evening (+3 closures) — this plan is the binding
+> **2026-05-21 (morning, XBE wave expansion) — this plan is the binding
 > Metal-renderer development driver.** Per decision-log "2026-05-20
 > (evening): XBE-first development loop is binding for the Metal renderer"
 > and workspace `CLAUDE.md` rule #17, per-feature XBE correctness against
@@ -8,37 +8,66 @@
 > PASS on Metal" replaces "≤1% per-pixel diff vs GL") is now the M15
 > default-on gate.
 >
-> **12 of 17 first-wave XBEs PASS on Metal + 1 expected_fail (logic-ops
-> only).** Tasks #13, #14, #15 closed this session via the XBE-first
-> loop (see decision-log "2026-05-20 (late evening, +3 closures)").
+> **14 of 17 first-wave XBEs PASS on Metal + 2 expected_fail. 2
+> unstarted.** Three new XBEs shipped 2026-05-21: §4.12 `combiner-basic`
+> (PASS, byte-exact), §4.8 `swizzle-mipmap` v0.2 (expected_fail Metal+GL;
+> SPEC oracle for tasks #16 + #17), §4.16 `texture-dma-ab` v0.1
+> (pbkit-aliased smoke; PASS).
 >
-> **PASS on Metal (12):** `pipeline-smoke` Tier-4 plus §4.1 `mirror`,
+> **PASS on Metal (14):** `pipeline-smoke` Tier-4 plus §4.1 `mirror`,
 > §4.2 `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
 > §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`,
 > §4.7 `texture-format-sweep` v0.1, §4.9 `blend-matrix`, §4.10
 > `stencil-ops` (task #14 closed via cross-queue sync fix in
 > `mtl/surface.mm`), §4.11 `texture-filter-wrap` v0.1 (task #15
-> closed -- was a test authoring bug, not a Metal gap), plus the
-> new `flat-quad-propagation` regression gate that validates the
-> task #13 CPU-side flat-color propagation fix in `mtl/vertex.c`.
+> closed -- was a test authoring bug, not a Metal gap), `flat-quad-
+> propagation` regression gate that validates the task #13 CPU-side
+> flat-color propagation fix in `mtl/vertex.c`, §4.12 `combiner-basic`
+> v0.1 (4×4 mapping × scale grid, NEW), §4.16 `texture-dma-ab` v0.1
+> (DMA-A vs DMA-B selector smoke under pbkit channel aliasing, NEW).
 >
-> **expected_fail (1):** §4.14 `logic-ops` -- neither GL nor Metal
+> **expected_fail (2):** §4.14 `logic-ops` -- neither GL nor Metal
 > implements NV2A logic-ops; XBE serves as the SPEC for what each
-> renderer needs. Feature work, not a Metal-only gap.
+> renderer needs. Feature work, not a Metal-only gap. §4.8
+> `swizzle-mipmap` v0.2 (NEW) -- catches REAL renderer correctness
+> gaps in BOTH renderers (task #16 Metal intra-mip swizzle collapses
+> all UVs to texel 0; task #17 GL renders BLACK for MIN_LOD_CLAMP =
+> MAX_LOD_CLAMP > 0). Ships as SPEC oracle; flips to PASS once
+> tasks #16 + #17 close.
 >
-> **Unstarted (4):** §4.8 `swizzle-mipmap` (needs swizzled-layout
-> encoder), §4.12 `combiner-basic` (needs combiner-helper),
-> §4.13 `texture-shader-stages` (needs both), §4.15
-> `msaa-aa-factor` (needs AA mode iteration), §4.16 `texture-dma-ab`
-> (needs NV_DMA channel-B setup). Each needs new shared `xbed_lib`
-> infrastructure before authoring.
+> **Unstarted (2):** §4.13 `texture-shader-stages` (19 NV2A texture
+> shader modes; needs combiner-helper + texture-shader-stage
+> infrastructure; significant scope deferred), §4.15
+> `msaa-aa-factor` (needs AA mode iteration). Both deferred pending
+> task #16 + #17 fixes; see handoff.md for the priority order.
+>
+> Renderer + harness changes shipped 2026-05-21:
+> - **Metal LOD-clamp + LOD-bias renderer fix** in
+>   `mtl/texture_pg.c::build_sampler_desc_from_pg` + `mtl/texture.mm`.
+>   Was hardcoded; now honors guest `SET_TEXTURE_CONTROL0` MIN/MAX_LOD_CLAMP
+>   and `MIPMAP_LOD_BIAS`. Per-cell mip ramp in swizzle-mipmap proves
+>   the fix.
+> - **xbe-harness `metal_canonical_overrides`** manifest field. Per-XBE
+>   env-var overrides merged into the Metal canonical recipe; used by
+>   combiner-basic + swizzle-mipmap to pin
+>   `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` for linear capture.
+> - **`XEMU_METAL_DIAG_ATTRIB_DUMP`** env-gated diagnostic that
+>   narrowed task #16 to a pipeline-key issue (see handoff.md +
+>   automation.md).
 >
 > The §4.7 v0.1 covers 4 linear 32-bit format codes (A8R8G8B8,
 > X8R8G8B8, A8B8G8R8, B8G8R8A8); second wave will expand to the full
 > 42-code surface. The retail-title oracle is the final acceptance
 > gate, not a development driver.
 
-Last updated: 2026-05-20 (evening, +3 XBEs) — §4.5
+Last updated: 2026-05-21 (morning, XBE wave expansion) —
+combiner-basic / swizzle-mipmap v0.2 / texture-dma-ab shipped +
+Metal LOD-clamp + LOD-bias renderer fix + xbe-harness
+`metal_canonical_overrides` field + `XEMU_METAL_DIAG_ATTRIB_DUMP`
+diagnostic narrowed task #16 to a pipeline-key /
+vertex-descriptor issue (slot 9 attribute selectively omitted by
+spirv-cross MSL emission). Previous banner:
+2026-05-20 (evening, +3 XBEs) — §4.5
 `native-quad-tri-depth` shipped (three-pass design + new manifest
 fields `required_counters_min` + `compare_overrides` + Metal-side
 per-mode native-tri counter increments in `mtl/renderer.c`); §4.6
