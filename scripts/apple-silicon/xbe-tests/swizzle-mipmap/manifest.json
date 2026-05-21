@@ -1,0 +1,45 @@
+{
+  "id": "swizzle-mipmap",
+  "title": "SZ_A8R8G8B8 mip-chain offset + per-mip LOD-clamped sampling + intra-mip swizzle decode oracle",
+  "purpose": "Allocate a 64x64 SZ_A8R8G8B8 texture with a 7-level mip chain (64x64 -> 1x1) in xemu's expected mip layout (linear sum of prior mip sizes; see hw/xbox/nv2a/pgraph/texture.c:178-186). Pre-swizzle each mip with a 4-quadrant non-uniform pattern (4 distinct tinted colors) using NV2A's Z-order swizzle masks (mirror of hw/xbox/nv2a/pgraph/swizzle.c). Per mip N (0..6), apply per-mip tint (255 -> 32) to base RGBA so cell N shows a distinct shade. Bind the full mip chain ONCE per cell (MIPMAP_LEVELS=7); per cell, only the SET_TEXTURE_CONTROL0 MIN_LOD_CLAMP / MAX_LOD_CLAMP fields are rewritten to force sampling at mip N. Filter is BOX_NEARESTLOD + NEAREST tap so the sampler picks exactly one mip with no inter-mip interpolation and no intra-mip filtering. Per cell, draw 4 sub-quads each sampling a fixed quadrant UV (TL/TR/BL/BR centers in [0..1] normalized space); expected cell paint is the 2x2 quadrant pattern of mip N. Cell 7 is unused; retains BLACK clear. Catches MIN/MAX_LOD_CLAMP not honored (Metal pre-2026-05-21 fix: all cells sampled mip 0), mip-chain offset off-by-one (cell N shows mip N+/-1's tint), SZ_A8R8G8B8 intra-mip swizzle mis-addressing (quadrant positions swap), channel mis-route at smaller base sizes, and mip 6 (1x1) degenerate dim handling.",
+  "catalog_ref": "§E.5, §E.9, §E.1",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\swizzle-mipmap-capture.bin",
+      "ftp_path": "/E/Apps/swizzle-mipmap/swizzle-mipmap-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\swizzle-mipmap-done.txt",
+      "ftp_path": "/E/Apps/swizzle-mipmap/swizzle-mipmap-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 5.0,
+    "min_signal_match_pct": 95.0
+  },
+  "metal_canonical_overrides": {
+    "XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["xemu/gl", "xemu/metal"],
+  "expected_fail_notes": "v0.2 ships as expected_fail on both renderers because it catches REAL renderer correctness gaps. Metal: when sampling SZ_A8R8G8B8 swizzled textures (any mip), all UVs collapse to texel (0, 0) regardless of UV input; verified by running on 2026-05-21 where cell 0 (mip 0, 4 sub-quads with distinct UVs 0.25/0.75 x 0.25/0.75) returns Q0 (red) for all 4 quadrants but cells 1-6 (LOD-clamped to different mips) DO show per-mip tints proving LOD clamp works. Task #16 captures the intra-mip swizzle position decoding gap. GL: cell 0 (mip 0) renders the 4-quadrant pattern correctly, but cells 1-6 (MIN_LOD_CLAMP = MAX_LOD_CLAMP = N>0) render BLACK -- the renderer truncates `levels = MIN(levels, max_mipmap_level + 1)` in pgraph_get_texture_shape and then uploads/samples wrong data. Task #17. The XBE remains useful as a spec oracle for both renderers and the Metal LOD-clamp fix shipped 2026-05-21 enabled cell-level per-mip discrimination (visible per-cell tint ramp on Metal even with broken intra-mip swizzle)."
+}
