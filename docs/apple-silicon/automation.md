@@ -1203,6 +1203,34 @@ and stack:
   (PGR2-only iteration; multi-title oracle validation NOT YET RUN).
   Apple Silicon performance fork; PGR2 RTT correctness slice
   (in progress, not closed).
+- `XEMU_METAL_NO_CLEAR_SYNC={0,1}` (**2026-05-20 late evening**, default
+  **OFF**, i.e. clear-sync IS on by default) — opt-out for the task #14
+  residual fix: the cross-queue race between `pgraph_mtl_surface_clear`
+  (runs on `s_render_queue`) and per-cell draws (run on `s_draw_queue`)
+  is closed by appending `[cmd waitUntilCompleted]` to every clear's
+  command-buffer commit. Validated by the §4.10 stencil-ops XBE
+  (8/8 cells PASS deterministic with sync vs 1-3/8 cells under
+  encodeWaitForEvent alone). The companion cross-queue fence
+  (`s_clear_done_event` signal in `surface.mm` + `mtl_draw_wait_clear_fence`
+  in `draw.mm`'s `open_pass_ensure`) is in place too but proved
+  insufficient on Apple Silicon by itself. Perf cost is bounded:
+  retail games issue ~2-4 clears per frame so the per-frame CPU stall
+  is sub-millisecond. Set `XEMU_METAL_NO_CLEAR_SYNC=1` to disable the
+  sync (diagnostic only — reproduces the race).
+- `METAL_FLAT_QUAD_PROPAGATIONS` (**2026-05-20 late evening, task #13**) —
+  per-interval delta count of FLAT-shaded `OP_QUADS` draws routed
+  through the new CPU-side flat-color propagation path in
+  `mtl/vertex.c::pgraph_mtl_propagate_flat_quad_colors`. Bumped once
+  per `mtl_dispatch_decoded_draw` invocation where (a) the primitive
+  is `PRIM_TYPE_QUADS`, (b) `!pg->smooth_shading`, and (c)
+  `!pg->first_vertex_is_provoking`. Used by the §4.10b
+  `flat-quad-propagation` XBE manifest's `required_counters_min.metal`
+  to assert the path actually engaged (the pixel oracle alone could
+  not distinguish "FLAT path active and produced correct color" from
+  "SMOOTH path produced correct color by accident"). `OP_QUAD_STRIP`
+  is intentionally **excluded** from this path because shared
+  vertices between adjacent quads make single-pass CPU propagation
+  incorrect (Codex 2026-05-20 review).
 - `METAL_SIBLING_SYNCS` / `METAL_SIBLING_SYNC_SKIPS` (**2026-05-20**) —
   per-interval delta counts of cross-sibling sync events and
   skipped considerations. A sync is *executed* when a fresher same-

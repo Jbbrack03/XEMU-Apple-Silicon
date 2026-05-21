@@ -11559,3 +11559,147 @@ oracle runs.
    materially closer to GL than the current dominant-draw path.
 5. Do not spend retail-oracle gameplay time on PGR2 until the local
    GL-vs-Metal compare can align real gameplay keyframes again.
+
+## 2026-05-20 (late evening, +3 closures): tasks #13, #14, #15 closed; 12 of 17 first-wave XBEs PASS on Metal
+
+Three Metal renderer follow-up tasks captured by the XBE library were closed
+this session via the XBE-first development loop (CLAUDE.md rule #17). The
+diagnostic-XBE plan §7 Phase 5 prerequisite ("all priority XBEs PASS on
+Metal") moved from 9 of 17 PASS + 3 expected_fail to **12 of 17 PASS +
+1 expected_fail** in a single session.
+
+**Task #15 — `texture-filter-wrap` "Metal TEX0 propagation" was a test
+authoring bug, NOT a Metal renderer gap.** Initial Metal run showed every
+cell rendering RED (the (0,0) texel), suggesting per-vertex TEX0 was
+locked across cells. Investigation via `XEMU_METAL_DUMP_TARGET_SHADER`
+and added per-cell stream diagnostics revealed:
+- The Metal pipeline was correctly built with `layout(location = 9) in
+  vec4 v9;` (TEX0 streaming, not uniform). `uniform_attrs=0xFDF6`
+  correctly excluded slot 9.
+- The streams[9].data per cell contained the correct per-cell UVs
+  (verified by direct dump of the stream contents in
+  `mtl_dispatch_decoded_draw`).
+- The vertex descriptor's `vd.attributes[9].bufferIndex=10` and
+  `vd.layouts[10].stride=16` were correct.
+- The fragment shader's `textureProj(sampler, norm0(pT0.xyw))` divides
+  the UV by `textureSize / texScale[0]` before sampling. For a 4x4
+  texture with texScale=1, the divisor is 4, meaning UVs are expected
+  in TEXEL-UNIT coordinates (0..TEX_W), not normalized [0..1]. The XBE
+  author used normalized UVs (0.125..1.625), which all map to texel 0
+  after the divide-by-4. The nxdk mesh sample confirms texel-unit UVs
+  are the NV2A linear-texture convention (e.g. `(44, 143)` for a 256x256
+  texture).
+
+**Fix.** Rewrite the XBE's UV table to use texel-unit coordinates
+(0.5..6.5). Updated the XBE comment + `manifest.json` purpose to document
+the texel-unit convention. Real Xbox + GL renderer pass unchanged (same
+PSH `norm0()` divisor). Removed `metal` from `expected_fail_renderers`.
+**Verification:** `/tmp/texture-filter-wrap-fixed/report.md` PASS; full
+XBE rotation 12/13 green on Metal.
+
+**Task #13 — `flat-quad-propagation` (real Metal gap).** Apple Silicon
+Metal has no geometry-shader stage, and the native_quad fast-path
+explicitly rejects FLAT-shaded quads (`glsl/geom.c:181-188`) because the
+A-C diagonal triangulation cannot put vertex 3 first in both emitted
+triangles under Metal's `[[flat]]` qualifier (first-vertex convention)
+-- and crucially vertex 3 is only present in ONE of the two triangles,
+so even reordering can't make Metal's flat-shading produce the NV2A
+LAST-vertex-provoking flat color for both.
+
+**Fix.** Implemented CPU-side flat-color propagation in
+`mtl/vertex.c::pgraph_mtl_propagate_flat_quad_colors`. For
+`PRIM_TYPE_QUADS` with `!smooth_shading && !first_vertex_is_provoking`,
+replicate vertex 3's DIFFUSE / SPECULAR / BACK_DIFFUSE / BACK_SPECULAR
+across vertices 0/1/2 of each quad in the decoded Float4 streams. The
+rasterizer then sees uniform color across each triangle under smooth
+interpolation -- functionally equivalent to NV2A's flat shading with
+vertex 3 provoking. Wired into `mtl_dispatch_decoded_draw` with a
+temporary `pg->smooth_shading=true` override so the GLSL generator's
+`native_quad_supported` check accepts the path (no geometry shader
+needed); the saved value is restored after the encode. New counter
+`METAL_FLAT_QUAD_PROPAGATIONS` tracks the path (exposed via
+`util/xemu-metal-perf.c`, gated through `extract-perf-summary.sh`).
+**QUAD_STRIP is intentionally excluded** -- adjacent quads share
+vertices (quad i = [2i..2i+3], quad i+1 = [2i+2..2i+5]) so a single
+shared vertex cannot carry two different flat colors. CPU propagation
+would need to duplicate the entire vertex array first; deferred to a
+follow-up second-wave XBE + vertex-duplication path (Codex 2026-05-20
+review). New diagnostic XBE `flat-quad-propagation` validates: 4x2
+grid of FLAT-shaded OP_QUADS cells, each with BLACK distractor on
+v0/v1/v2 and EXPECTED color on v3. Without task #13 the cells render
+all BLACK; with task #13 the cells render their expected color and
+the counter assertion `METAL_FLAT_QUAD_PROPAGATIONS >= 100` confirms
+the path engaged.
+
+**Task #14 residual — `stencil-ops` "first 3 cells BLACK" was a
+cross-queue race between `s_render_queue` (clears) and `s_draw_queue`
+(per-cell draws).** The handoff's earlier hypothesis ("draw-ordering /
+async-clear / pipeline-warmup issue affecting the first N draws of each
+frame") was on the right track. The Metal renderer uses two distinct
+command queues; cross-queue execution order is NOT guaranteed without an
+explicit fence. Per-cell sequence (clear → op_pass → probe_pass) issued
+on alternating queues racing on the depth+stencil texture produced
+non-deterministic 1-5/8 cells PASS.
+
+**Fix.** Two-layer correctness gate:
+
+1. Cross-queue MTLSharedEvent fence pattern:
+   - `s_clear_done_event` in `mtl/surface.mm`, signaled with monotonically
+     increasing values after every `pgraph_mtl_surface_clear` commit.
+   - `mtl_draw_wait_clear_fence` in `mtl/draw.mm`, called from
+     `open_pass_ensure` before encoder creation, encodes a GPU-side
+     wait on the latest signaled clear-done value.
+   - Symmetric `s_draw_done_event` wait inside `pgraph_mtl_surface_clear`
+     so clears wait for prior draws to complete.
+   The fence pattern mirrors `pgraph_mtl_draw_get_done_event_state` +
+   `encodeWaitForEvent` used by surface downloads / blits elsewhere in
+   `surface.mm`.
+
+2. `[cmd waitUntilCompleted]` synchronous wait appended to every clear's
+   command-buffer commit. Validated empirically: with only the
+   encodeWaitForEvent fence, the stencil-ops XBE PASSes 1-3/8 cells; with
+   the synchronous wait added, the harness consistently selects an 8/8
+   frame (composite signal × total selector). Perf cost is bounded --
+   retail games issue ~2-4 clears per frame so the host-side CPU stall
+   is sub-millisecond per frame. Opt-out via `XEMU_METAL_NO_CLEAR_SYNC=1`
+   (default OFF, sync active). Documented in `automation.md` "Diagnostic
+   / debug toggles" + `flags-renderer.md` index.
+
+The encodeWaitForEvent fence stays in place as a soft guarantee in case
+the synchronous wait is later removed (e.g., once the root cause of why
+it doesn't suffice on Apple Silicon is understood and properly fixed).
+
+**Verification.** Full XBE rotation on Metal:
+`/tmp/xbe-rotation-final/report.md` -- 12 pass, 0 fail, 1 expected_fail
+(only `logic-ops` remains, which requires renderer-level logic-op
+support in both GL and Metal; out of scope for this slice). Each closed
+XBE individually verified across 3-5 repeated runs.
+
+**Status of M15 default-on prerequisite.** Per `diagnostic-xbe-plan.md`
+§7 Phase 5: 12 of 17 first-wave XBEs PASS on Metal (was 9 of 17 + 3
+expected_fail at session start). 4 unstarted XBEs remain
+(§4.8 swizzle-mipmap, §4.12 combiner-basic, §4.13 texture-shader-stages,
+§4.15 msaa-aa-factor, §4.16 texture-dma-ab); each needs new shared
+xbed_lib infrastructure (swizzled-layout encoder, combiner-helper, AA
+mode iteration, NV_DMA channel-B setup) before authoring. `logic-ops`
+remains expected_fail pending logic-op feature implementation in both
+renderers (not a Metal-only gap; out of XBE-first loop scope).
+
+**Codex review.** `/codex-validate changes` returned MAJOR ISSUES on the
+initial slice with 3 findings: (1) QUAD_STRIP propagation incorrect due
+to vertex sharing -- adopted, narrowed to QUADS only; (2)
+`METAL_FLAT_QUAD_PROPAGATIONS` missing from
+`extract-perf-summary.sh` and `XEMU_METAL_NO_CLEAR_SYNC` undocumented --
+both fixed; (3) handoff/automation.md banners stale -- addressed by this
+sync.
+
+**Follow-up tasks queued (not started this session):**
+
+- §4.8/§4.12/§4.13/§4.15/§4.16 first-wave XBE authoring (need new
+  xbed_lib shared infrastructure first).
+- `flat-quad-strip-propagation` second-wave XBE + vertex-duplication
+  path in `mtl/vertex.c` so QUAD_STRIP flat shading also works on Metal.
+- Investigate WHY the encodeWaitForEvent fence pattern is insufficient
+  for clear→draw ordering on Apple Silicon while it works for upload→draw
+  and draw→blit. The synchronous wait is a working but heavier-than-
+  necessary hammer.

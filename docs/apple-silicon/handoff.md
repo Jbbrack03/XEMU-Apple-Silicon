@@ -1,19 +1,81 @@
 # Handoff
 
-Last updated: 2026-05-20 (late evening, +texture-filter-wrap) —
-**§4.11 `texture-filter-wrap` v0.1 shipped as expected_fail on
-Metal.** Caught a new Metal renderer gap (task #15): all 8 cells
-render texel (0,0) (RED) regardless of per-cell UV. The per-vertex
-TEX0 attribute (slot 9, Float2 stride 36) is not propagating
-through Metal's vertex pipeline to the fragment shader. The
-similar texture-format-sweep XBE doesn't expose this because each
-of its cells uses a uniform-color texture (UV (0,0) returns the
-same color as any other UV). GL + real Xbox expected to PASS
-unchanged. v0.1 scope: NEAREST filter + CLAMP_TO_EDGE + REPEAT.
-LINEAR + MIRROR/CLAMP/BORDER deferred to second wave.
+Last updated: 2026-05-20 (late evening, +3 closures) —
+**Tasks #13, #14, #15 closed. 12 of 17 first-wave XBEs PASS on Metal
++ 1 expected_fail (logic-ops only, feature work).** Plus a new
+`flat-quad-propagation` regression-gate XBE shipped this session
+validates the task #13 fix.
 
-**State: 12 of 17 first-wave XBEs shipped on Metal (9 PASS + 3
-expected_fail; 5 unstarted).**
+- **Task #15 — `texture-filter-wrap` "Metal TEX0 propagation" was a
+  test authoring bug, NOT a Metal renderer gap.** The XBE used
+  normalized [0..1] UVs but the PSH's `norm0()` divides UVs by
+  `textureSize / texScale[0]`, expecting TEXEL-UNIT [0..TEX_W] UVs.
+  All UVs in [0..1] mapped to texel 0 = RED. Fix: rewrite UVs in
+  texel-unit space (0.5..6.5 for the 4x4 texture). Removed `metal`
+  from `expected_fail_renderers`. PASS on Metal. The nxdk mesh
+  sample confirms texel-unit UVs as the linear-texture convention.
+
+- **Task #13 — Metal FLAT-shaded OP_QUADS (real renderer gap).**
+  Added CPU-side flat-color propagation in
+  `mtl/vertex.c::pgraph_mtl_propagate_flat_quad_colors`. For
+  `PRIM_TYPE_QUADS` with `!smooth_shading && !first_vertex_is_provoking`,
+  replicates vertex 3's DIFFUSE / SPECULAR / BACK_DIFFUSE /
+  BACK_SPECULAR across vertices 0/1/2. Then sets
+  `pg->smooth_shading=true` temporarily so the native_quad fast
+  path accepts the draw (no GS needed). New counter
+  `METAL_FLAT_QUAD_PROPAGATIONS` validates path activation. New
+  `flat-quad-propagation` XBE (BLACK distractors on v0/v1/v2,
+  expected color on v3) PASSes with counter assertion confirming
+  the propagation engaged. **QUAD_STRIP intentionally excluded** --
+  vertex sharing makes single-pass CPU propagation incorrect
+  (Codex 2026-05-20 review); deferred to follow-up second-wave XBE
+  + vertex-duplication path.
+
+- **Task #14 residual — `stencil-ops` "first 3 cells BLACK" was a
+  cross-queue race** between `s_render_queue` (clears) and
+  `s_draw_queue` (per-cell draws). Fix has two layers: (1)
+  `s_clear_done_event` MTLSharedEvent fence (signal in
+  `pgraph_mtl_surface_clear`, wait via `mtl_draw_wait_clear_fence`
+  in `open_pass_ensure`) symmetric to the existing `s_draw_done_event`
+  fence; (2) `[cmd waitUntilCompleted]` synchronous wait appended
+  to every clear's commit because the encodeWaitForEvent fence
+  alone proved insufficient on Apple Silicon (validated:
+  1-3/8 cells PASS with fence only; 8/8 with sync). Opt-out via
+  `XEMU_METAL_NO_CLEAR_SYNC=1`; default OFF (sync active). Perf
+  cost is sub-millisecond per frame for retail games. Removed
+  `metal` from `expected_fail_renderers`. **stencil-ops PASS
+  deterministic on Metal** in the harness (composite frame selector
+  reliably finds an 8/8 frame).
+
+**Current first-wave XBE status (per `diagnostic-xbe-plan.md` §4):**
+- **PASS on Metal (12):** pipeline-smoke, mirror, color-channel,
+  depth-floor, crtc-publish, native-quad-tri-depth, cmp-vertex-format,
+  blend-matrix, texture-format-sweep, texture-filter-wrap (task #15
+  closed), stencil-ops (task #14 closed), flat-quad-propagation
+  (NEW, validates task #13).
+- **expected_fail (1):** logic-ops -- neither GL nor Metal implements
+  NV2A logic-ops; serves as SPEC oracle. Feature work, not a Metal
+  gap; out of XBE-first loop scope.
+- **Unstarted (4):** §4.8 swizzle-mipmap (needs swizzled-layout
+  encoder), §4.12 combiner-basic (needs combiner-helper),
+  §4.13 texture-shader-stages (needs both), §4.15 msaa-aa-factor
+  (needs AA mode iteration), §4.16 texture-dma-ab (needs NV_DMA
+  channel-B setup). Each needs new shared `xbed_lib` infrastructure
+  before authoring.
+
+**Codex review.** `/codex-validate changes` returned MAJOR ISSUES
+on the initial slice; adopted all 3 findings in-session:
+QUAD_STRIP narrowed to QUADS only; counter+flag documentation
+added; this banner is the sync. See decision-log
+"2026-05-20 (late evening, +3 closures)".
+
+Previous banner (texture-filter-wrap initial expected_fail) is
+superseded; older banners preserved below for diagnostic
+continuity.
+
+---
+
+## Previous banner — texture-filter-wrap shipped expected_fail (now superseded by task #15 closure above)
 
 Earlier this session:
 **§4.7 `texture-format-sweep` v0.1 XBE shipped GREEN on Metal.**

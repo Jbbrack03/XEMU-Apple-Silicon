@@ -1,30 +1,42 @@
 # Diagnostic XBE Library — Implementation Plan (v2)
 
-> **2026-05-20 evening — this plan is the binding Metal-renderer
-> development driver.** Per decision-log "2026-05-20 (evening): XBE-first
-> development loop is binding for the Metal renderer" and workspace
-> `CLAUDE.md` rule #17, per-feature XBE correctness against this library
-> is the primary loop. The §7 Phase 5 framing ("All N XBEs PASS on Metal"
-> replaces "≤1% per-pixel diff vs GL") is now the M15 default-on gate.
-> 9 of 17 first-wave XBEs are passing on Metal as of 2026-05-20
-> late evening (`pipeline-smoke` Tier-4 plus §4.1 `mirror`, §4.2
-> `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
+> **2026-05-20 late evening (+3 closures) — this plan is the binding
+> Metal-renderer development driver.** Per decision-log "2026-05-20
+> (evening): XBE-first development loop is binding for the Metal renderer"
+> and workspace `CLAUDE.md` rule #17, per-feature XBE correctness against
+> this library is the primary loop. The §7 Phase 5 framing ("All N XBEs
+> PASS on Metal" replaces "≤1% per-pixel diff vs GL") is now the M15
+> default-on gate.
+>
+> **12 of 17 first-wave XBEs PASS on Metal + 1 expected_fail (logic-ops
+> only).** Tasks #13, #14, #15 closed this session via the XBE-first
+> loop (see decision-log "2026-05-20 (late evening, +3 closures)").
+>
+> **PASS on Metal (12):** `pipeline-smoke` Tier-4 plus §4.1 `mirror`,
+> §4.2 `color-channel`, §4.3 `depth-floor`, §4.4 `crtc-publish`,
 > §4.5 `native-quad-tri-depth`, §4.6 `cmp-vertex-format`,
-> §4.7 `texture-format-sweep` v0.1, §4.9 `blend-matrix`);
-> 2 of 17 ship as `expected_fail` with
-> documented Metal-renderer regression targets (`stencil-ops`
-> §4.10 — partial fix landed 2026-05-20 late evening, 5/8 ops
-> deterministic; task #14 follow-up open for the residual
-> "first 3 cells per frame BLACK" pattern; `logic-ops` §4.14 —
-> no GL or Metal logic-op support, feature work). 6 unstarted:
-> §4.8 `swizzle-mipmap`, §4.11 `texture-filter-wrap`, §4.12
-> `combiner-basic`, §4.13 `texture-shader-stages`, §4.15
-> `msaa-aa-factor`, §4.16 `texture-dma-ab`. The §4.7 v0.1 covers
-> 4 linear 32-bit format codes (A8R8G8B8, X8R8G8B8, A8B8G8R8,
-> B8G8R8A8); second wave will expand to the full 42-code surface. The texture/combiner cluster shares
-> infrastructure and warrants an `xbed_lib` extension slice
-> before authoring. The retail-title oracle is the final
-> acceptance gate, not a development driver.
+> §4.7 `texture-format-sweep` v0.1, §4.9 `blend-matrix`, §4.10
+> `stencil-ops` (task #14 closed via cross-queue sync fix in
+> `mtl/surface.mm`), §4.11 `texture-filter-wrap` v0.1 (task #15
+> closed -- was a test authoring bug, not a Metal gap), plus the
+> new `flat-quad-propagation` regression gate that validates the
+> task #13 CPU-side flat-color propagation fix in `mtl/vertex.c`.
+>
+> **expected_fail (1):** §4.14 `logic-ops` -- neither GL nor Metal
+> implements NV2A logic-ops; XBE serves as the SPEC for what each
+> renderer needs. Feature work, not a Metal-only gap.
+>
+> **Unstarted (4):** §4.8 `swizzle-mipmap` (needs swizzled-layout
+> encoder), §4.12 `combiner-basic` (needs combiner-helper),
+> §4.13 `texture-shader-stages` (needs both), §4.15
+> `msaa-aa-factor` (needs AA mode iteration), §4.16 `texture-dma-ab`
+> (needs NV_DMA channel-B setup). Each needs new shared `xbed_lib`
+> infrastructure before authoring.
+>
+> The §4.7 v0.1 covers 4 linear 32-bit format codes (A8R8G8B8,
+> X8R8G8B8, A8B8G8R8, B8G8R8A8); second wave will expand to the full
+> 42-code surface. The retail-title oracle is the final acceptance
+> gate, not a development driver.
 
 Last updated: 2026-05-20 (evening, +3 XBEs) — §4.5
 `native-quad-tri-depth` shipped (three-pass design + new manifest
