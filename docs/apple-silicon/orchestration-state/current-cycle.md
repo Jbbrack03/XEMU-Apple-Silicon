@@ -3,6 +3,7 @@
 - Cycle: 14 (CLOSED — GL replay of the §H.6 `image-blit` residual, inconclusive for the renderer-agnostic-race hypothesis but informative about a GL-side capture gap).
 - Started: 2026-05-22 11:42 CDT.
 - Closed: 2026-05-22 11:58 CDT.
+- Closure commit: `f6273c9cba`.
 - State: CLOSED / GL replay executed, dashboard never reached the GL front surface in any of four flip-stall ordinals.
 - Owner: Claude Code (hermes_xemu_live_20260522_114212).
 - Bounded goal: Run the existing `image-blit.iso` harness flow under `XEMU_RENDERER=GL` to test whether the cycle-13 PFIFO ↔ vCPU dispatch-race hypothesis reproduces renderer-agnostically on GL.

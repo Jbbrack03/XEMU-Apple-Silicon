@@ -7,3 +7,4 @@
 - No source-code changes were made. Codex validation was not required by this slice. Doc/state sync is complete.
 - Next-cycle recommendation: pursue one of the two scoped follow-ups in `current-cycle.md` §"Next-slice recommendation" — preferred is (b) a guest-side per-cell oracle output channel that surfaces the XBE's `image-blit: cell N PASS|FAIL` debugPrint to xemu stderr, which makes the renderer-agnostic question testable without first solving the GL capture-path question. Either follow-up is non-trivial and will require Codex validation before close.
 - Artifact root for cycle 14: `benchmark-runs/xbe-harness-20260522-{164520,164833,165223,165521,165726}-cycle14-gl-*` (xemu logs + screenshots + harness summaries).
+- Closure commit: `f6273c9cba` ("docs/state: cycle-14 closed — GL image-blit replay inconclusive on §H.6 race hypothesis (GL capture-path gap upstream of the test)").
