@@ -1,25 +1,18 @@
 # Validation Status
 
-- Active slice: cycle-13 §H.6 `image-blit` residual code-path audit + state-sync closure (doc-only slice).
-- Validation state: **CLOSED — all closure gates met.**
+- Active slice: cycle-14 GL replay for the §H.6 `image-blit` residual.
+- Validation state: **CLOSED — bounded GL replay executed; outcome documented; cell-by-cell pattern comparison against Metal not achievable in this slice; next-slice recommendation in `current-cycle.md`.**
 
-## Closure gates
+## Planned gates for this slice
 
-- [x] Fresh worker receipt posted after canonical-doc read (handoff.md, decision-log.md, orchestration-workflow.md, four orchestration-state files).
-- [x] Dirty files inspected and confirmed doc-only: `docs/apple-silicon/{handoff.md, decision-log.md, orchestration-state/*}`. Zero `xemu-fork/hw/` content. Zero `xemu-fork/scripts/apple-silicon/` content.
-- [x] All load-bearing audit citations spot-verified against the live tree:
-  - `grep -rn '0x400700\|PGRAPH_STATUS' hw/xbox/nv2a/` returns ZERO hits (PGRAPH_STATUS is never published anywhere under `hw/xbox/nv2a/`).
-  - `hw/xbox/nv2a/nv2a.c:247-248` — `qemu_thread_create("nv2a.pfifo_thread", pfifo_thread, ...)`.
-  - `hw/xbox/nv2a/pfifo.c` — `pfifo_write` ~84-110 → `pfifo_kick` ~112-115 (`qemu_cond_broadcast(&d->pfifo.fifo_cond)`); `pfifo_run_puller` ~226-272 acquires `d->pgraph.lock` and dispatches `pgraph_method`.
-  - `hw/xbox/nv2a/pgraph/pgraph.c:115-150` — `pgraph_read` fast path returns `qatomic_read(&pg->regs_[addr])` with no acquire barrier.
-  - `hw/xbox/nv2a/pgraph/mtl/{blit.c:215-220, renderer.c:2525}` — `perform_blit_cpu` CPU memcpy + `.image_blit = pgraph_mtl_image_blit` registration.
-  - `include/qemu/atomic.h:77-84` — `qatomic_read` = `__atomic_load_n(..., __ATOMIC_RELAXED)`.
-  - `nxdk/lib/pbkit/outer.h:461-462` — `NV_PGRAPH_STATUS = 0x00400700`, `NV_PGRAPH_STATUS_NOT_BUSY = 0`.
-  - `nxdk/lib/pbkit/pbkit.c:486-494` — `pb_wait_until_gr_not_busy` busy-poll body.
-  - `nxdk/lib/pbkit/pbkit_dma.c:55-58` — `pb_agp_access` returns `fb | AGP_MEMORY_REMAP`.
-  - `XEMU_PGRAPH_FAST_READ` default-on per `.claude/rules/flags-renderer.md` and `.claude/rules/renderer-state.md` (closed slice).
-- [x] Clean doc-only commit landed for the cycle-13 audit. Slice commit hash: `0bd85f70fe` (recorded in this follow-up state-sync commit; the closure commit cannot reference its own SHA).
-- [x] `current-cycle.md`, `claude-status.md`, `validation-status.md`, `handoff-summary.md` resynced to durable CLOSED records before close (Codex HIGH finding from cycle-12 respected — no ACTIVE/PENDING scaffolding in git history).
-- [x] Repo left clean at slice close (final `git status --short` expected empty after the state-sync follow-up commit).
-- [N/A] Codex validation: doc-only slice, no `xemu-fork/hw/` or `xemu-fork/scripts/apple-silicon/` source change → rule #15 trivial-doc exemption applies.
-- [N/A] Visual / real-Xbox oracle validation: doc-only audit, no new renderer claim. Real-Xbox oracle parity check is staged for cycle-14 follow-on once the diagnostic flag flips all 8 cells green locally.
+- [x] Fresh worker receipt posted after canonical-doc read (see `current-cycle.md` §"Worker receipt").
+- [x] GL replay executed through the existing harness with artifacts/logs sufficient to characterize what the GL leg produces vs the prior Metal result. Four runs total: one sidecar `macos-capture.sh` attempt (failed on macOS Screen Recording TCC gate) and three in-renderer `XEMU_GL_SCREENSHOT_PATH` + `XEMU_CAPTURE_AT_FLIP_STALL` captures at ordinals 120 / 280 / 340 / 450.
+- [x] Canonical docs/state updated with the GL outcome and the resulting conclusion. Outcome: the GL in-renderer screenshot path consistently captures a pre-dashboard "boot-logo-class" frame, regardless of the chosen flip-stall ordinal. fs=280 and fs=340 from independent xemu runs are byte-identical; fs=450 (post-reboot) differs only marginally. The image-blit dashboard, present on Metal v0.3 baseline frame 0124, never lands on the GL front-surface lookup in this experiment. Consequently the cycle-13 PFIFO ↔ vCPU dispatch-race hypothesis is **neither confirmed nor falsified** by the bounded GL leg.
+- [x] No code changes were made; Codex validation is **not** mandatory for this slice.
+- [x] Tree left clean and the slice-close commit explains the change set.
+
+## Notes
+
+- This was a bounded validation slice. The empirical finding (GL capture-path stuck on the early surface) is not by itself evidence for or against the dispatch-race framing; it just means the chosen experiment couldn't decide the question. A separate, bounded, source-touching slice is required to make the renderer-agnostic claim testable. See `current-cycle.md` §"Next-slice recommendation" for the two candidate follow-ups (GL sequence capture, or guest-side per-cell oracle output channel).
+- Any future source-touching slice triggered from this finding will be non-trivial and so Codex validation will be mandatory before close.
+- Real-Xbox / oracle validation remains a later gate for any claim that goes beyond the renderer-agnostic confirmation experiment, irrespective of this slice's verdict.
