@@ -1,16 +1,113 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 15 — **§H.6 cycle-13 race
-hypothesis CONFIRMED renderer-agnostic** via new opt-in
-host-visible guest-log channel `XEMU_GUEST_LOG=1` / IO port
-0xE9. Both GL and Metal legs of `image-blit.iso` produce
-identical `pass=3/8 mask=0x31` (cells 0/4/5 PASS) first-run
-under the new channel; cycle-11 follow-up item #1 ("Re-run
-image-blit on GL") is now CLOSED. Cycle-13 follow-up item #2
-(`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) is the next bounded slice;
-expected to flip all 8 cells green on both renderers. M15
-overall still **NOT MET** pending §H.6 full close, §G.5,
-RT-as-texture.
+Last updated: 2026-05-22 (cycle 17 — **`XEMU_DIAG_PGRAPH_STATUS_DRAIN`
+LANDED**; §H.6 IMAGE_BLIT race window closed renderer-agnostically.
+Under the flag, image-blit.iso flips from cycle-15's `pass=3/8
+mask=0x31` to `pass=8/8 mask=0xff` on Metal (4 boots) and GL
+(15 boots). Cycle-11 follow-up item #2 — CLOSED. Cycle-11
+follow-up item #3 (real-Xbox parity check on the diag flag) is
+the next bounded slice; gates the default-on / long-term-fix
+decision. M15 overall still **NOT MET** pending §H.6 default-on
+shape, §G.5, RT-as-texture.
+
+## 2026-05-22 (cycle 17) — `XEMU_DIAG_PGRAPH_STATUS_DRAIN` lands; §H.6 race window closed renderer-agnostically
+
+**Status: SHIPPED (opt-in diagnostic only; default OFF).**
+
+**Slice.** Implement the cycle-13 follow-up item #2 promised by
+both cycle 13 and cycle 15: an opt-in diagnostic flag that
+publishes a meaningful `NV_PGRAPH_STATUS` busy bit so the Xbox
+guest's `pb_wait_until_gr_not_busy()` actually waits until PFIFO
+has drained the pushbuffer, instead of exiting on the first
+iteration against a permanently-zero register.
+
+**What landed.**
+
+- `hw/xbox/nv2a/pgraph/pgraph.c` — new `pgraph_status_drain_enabled()`
+  cached env-var helper (mirrors `pgraph_fast_read_enabled()` at
+  `pgraph.c:97-113`) and an early-return branch at the top of
+  `pgraph_read()`. When the flag is on AND `addr == NV_PGRAPH_STATUS`,
+  returns `STATE_BUSY` (bit 0) iff `dma_put != dma_get` **and** the
+  PFIFO pusher is currently eligible to drain. The eligibility gate
+  mirrors `pfifo_run_pusher`'s top-of-function guard
+  (`hw/xbox/nv2a/pfifo.c:309-313`) plus its inner stall set
+  (`pfifo_pusher_stall_reasons`, `pfifo.c:283-294`): `PUSH0_ACCESS` /
+  `DMA_PUSH_ACCESS` set, `DMA_PUSH_STATUS` (suspended) clear,
+  `NV_PGRAPH_FIFO_ACCESS` set, `pgraph.waiting_for_nop` and
+  `pgraph.waiting_for_context_switch` both clear.
+- `hw/xbox/nv2a/nv2a_regs.h` — adds `NV_PGRAPH_STATUS = 0x00000700`
+  and `NV_PGRAPH_STATUS_STATE_BUSY = (1<<0)`.
+- `scripts/apple-silicon/xbe-harness/xbe_renderers.py` — opt-in
+  `XBE_HARNESS_TIMEOUT_SECONDS` env-var override for the
+  `timeout_seconds` parameter (default 35 s unchanged). Necessary
+  because the flag adds latency to every `pb_wait_until_gr_not_busy()`
+  call and the GL leg's BIOS/pbkit boot needs ~120 s to complete one
+  XBE pass under the flag.
+- `scripts/apple-silicon/xbe-harness/README.md` — documents the
+  override (Codex finding #2).
+- `docs/apple-silicon/automation.md` — full flag description +
+  validation-evidence subsection.
+- `.claude/rules/flags-renderer.md` + `.claude/rules/flags-bench.md`
+  — 1-line index entries.
+
+**Validation evidence.**
+
+| Run | Boots | Per-boot tally | Cycle-15 baseline |
+|---|---:|:---:|:---:|
+| Metal (35 s harness window, flag ON) | 4 | `pass=8/8 mask=0xff` | `pass=3/8 mask=0x31` |
+| GL (120 s harness window, flag ON) | 15 | `pass=8/8 mask=0xff` | `pass=3/8 mask=0x31` |
+| Metal (baseline, flag OFF) | 2 | `pass=3/8 mask=0x31` | — |
+| GL (baseline, flag OFF) | 2 | `pass=3/8 mask=0x31` | — |
+
+- Metal flag-on: `benchmark-runs/cycle17-status-drain-metal-PASS-gl-timeout-20260522/image-blit/metal/xemu.log`.
+- GL flag-on: `benchmark-runs/cycle17-status-drain-gl-long-timeout-20260522/image-blit/gl/xemu.log`.
+- Metal baseline: `benchmark-runs/cycle17-baseline-no-drain-metal-20260522/image-blit/metal/xemu.log`.
+- GL baseline: `benchmark-runs/cycle17-baseline-gl-only-20260522/image-blit/gl/xemu.log`.
+- Two failed-iteration evidence dirs preserved for the
+  eligibility-gate lesson:
+  `benchmark-runs/cycle17-status-drain-FIRST-ATTEMPT-too-aggressive-20260522/`
+  (no gate — guest hung at BIOS) and
+  `benchmark-runs/cycle17-status-drain-2nd-attempt-also-hung-20260522/`
+  (PUSH0/DMA_PUSH gates only — still hung; needed
+  `NV_PGRAPH_FIFO_ACCESS` + `waiting_for_nop` +
+  `waiting_for_context_switch`).
+
+**Cycle 13 race hypothesis — DEFINITIVELY CONFIRMED.** The §H.6
+IMAGE_BLIT 5/8 FAIL residual was the predicted PFIFO ↔ vCPU
+dispatch race against missing `NV_PGRAPH_STATUS` publication.
+Publishing a meaningful busy bit (gated on actual drain eligibility)
+flips every previously-FAIL cell to PASS on both renderers, with
+zero changes to `gl/blit.c` / `mtl/blit.c` / `vk/blit.c`. This
+also closes cycle-11 follow-up item #2.
+
+**Codex validation.** `/codex-validate changes` returned MINOR
+ISSUES (one medium, one low). Both adopted before close (see
+`decision-log.md` 2026-05-22 cycle 17 entry).
+
+**Cycle 11 follow-up list status update.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED cycle 15.
+- ✅ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — **CLOSED by this slice.**
+  Diagnostic ships opt-in; default-on / long-term fix shape pending.
+- ⏭ #3 (Real-Xbox oracle parity check) — promoted to next bounded
+  slice. Gates the default-on / busy-bit-vs-PFIFO-barrier decision.
+
+**M15 default-on Gate 2 status — IMPROVED.**
+
+- §E.13 per-format pitch + image-rect alignment — MET (cycle 10).
+- §H.6 IMAGE_BLIT — **PARTIAL → MET under the flag (cycle 17),
+  default-off pending real-Xbox parity.**
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+XBE first-wave Metal count unchanged at **17 of 18 PASS on Metal
++ 1 expected_fail SPEC** (`logic-ops`). Second-wave coverage now
+**2 MET + 1 PARTIAL out of 4** (with image-blit MET conditional on
+the flag).
+
+Cycle 15 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 15) — §H.6 renderer-agnostic confirmation + reusable host-visible guest-log channel
 

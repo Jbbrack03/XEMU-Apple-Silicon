@@ -70,7 +70,12 @@ scripts/apple-silicon/
      `macos-capture.sh` window screencapture every 2 s (no in-renderer
      PNG writer for GL).
 4. Wait `timeout_seconds` (default 35 s) — long enough for Xbox boot
-   (~10 s) + diag XBE render loop (300 frames ≈ 5 s) + a margin.
+   (~10 s) + diag XBE render loop (300 frames ≈ 5 s) + a margin. Set
+   `XBE_HARNESS_TIMEOUT_SECONDS=<int>` (cycle 17, 2026-05-22) to
+   override the default when running diag flags that add per-call
+   wait latency — notably `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`, where
+   the cycle-15 GL leg needs ~120 s to complete one XBE
+   boot-to-tally pass instead of the usual ~25 s.
 5. QMP-quit cleanly; SIGTERM/KILL fallback.
 6. Return the directory of captured PNGs to the harness.
 

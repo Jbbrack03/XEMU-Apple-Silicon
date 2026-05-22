@@ -1,5 +1,133 @@
 # Decision Log
 
+## 2026-05-22 (cycle 17): `XEMU_DIAG_PGRAPH_STATUS_DRAIN` lands — §H.6 IMAGE_BLIT race window closed **renderer-agnostically**, 3/8 → 8/8 mask=0xff on Metal AND GL
+
+**Decision.** Ship the opt-in `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`
+diagnostic flag promised by the cycle-13 / cycle-15 follow-up plan.
+With the flag on, `pgraph_read(NV_PGRAPH_STATUS)` (PGRAPH-relative
+addr `0x700` = absolute `0x00400700`) returns
+`NV_PGRAPH_STATUS_STATE_BUSY` (bit 0) whenever PFIFO has un-drained
+pushbuffer work AND the pusher is currently eligible to drain it.
+Default OFF; the register stays permanently `0` (unchanged historical
+behavior). Implementation is confined to ~80 lines in
+`hw/xbox/nv2a/pgraph/pgraph.c` + 2 lines (the new define) in
+`hw/xbox/nv2a/nv2a_regs.h`.
+
+The eligibility gate mirrors `pfifo_run_pusher`'s top-of-function
+guard (`hw/xbox/nv2a/pfifo.c:309-313`) **plus** its inner stall set
+(`pfifo_pusher_stall_reasons`, `hw/xbox/nv2a/pfifo.c:283-294`):
+`PUSH0_ACCESS` set, `DMA_PUSH_ACCESS` set, `DMA_PUSH_STATUS`
+(suspended) clear, `NV_PGRAPH_FIFO_ACCESS` set,
+`pgraph.waiting_for_nop` clear, `pgraph.waiting_for_context_switch`
+clear. When any gate fails the diagnostic returns `0` (NOT_BUSY) —
+otherwise the guest's `pb_wait_until_gr_not_busy()` would spin
+forever because DMA_GET could not converge to DMA_PUT in that state.
+Cycle-17 ate two failed iterations on this point before the full
+gate set landed (evidence preserved at
+`benchmark-runs/cycle17-status-drain-FIRST-ATTEMPT-too-aggressive-20260522/`
+and `benchmark-runs/cycle17-status-drain-2nd-attempt-also-hung-20260522/`
+— black screens, no XBE output).
+
+**Validation evidence.**
+
+| Run                              | Boots | Per-boot tally | Cycle-15 baseline |
+|----------------------------------|------:|:--------------:|:----------------:|
+| Metal (35 s harness window)      | 4     | `pass=8/8 mask=0xff` | `pass=3/8 mask=0x31` |
+| GL (120 s harness window)        | 15    | `pass=8/8 mask=0xff` | `pass=3/8 mask=0x31` |
+
+Metal run: `benchmark-runs/cycle17-status-drain-metal-PASS-gl-timeout-20260522/image-blit/metal/xemu.log`.
+GL run: `benchmark-runs/cycle17-status-drain-gl-long-timeout-20260522/image-blit/gl/xemu.log`.
+The GL leg needed the new
+`XBE_HARNESS_TIMEOUT_SECONDS=120` override (`xbe_renderers.py`
+`run_xemu()` env-var, documented in
+`scripts/apple-silicon/xbe-harness/README.md` + `flags-bench.md`)
+because the flag adds wait latency to every
+`pb_wait_until_gr_not_busy()` call, and BIOS / pbkit boot is slower
+on GL; the default 35 s window was not enough for the GL leg to
+complete one XBE boot-to-tally pass under the flag. Baseline (no
+flag) Metal and GL runs in
+`benchmark-runs/cycle17-baseline-no-drain-metal-20260522/` and
+`benchmark-runs/cycle17-baseline-gl-only-20260522/` reconfirm
+`pass=3/8 mask=0x31` — the cycle-15 verdict is reproducible on
+this build before the flag, AND moves to `pass=8/8 mask=0xff` after
+the flag, on the same xemu binary, with no other changes.
+
+**What this closes.**
+
+- **Cycle 13 hypothesis CONFIRMED.** §H.6 IMAGE_BLIT was a PFIFO ↔
+  vCPU dispatch race against missing NV_PGRAPH_STATUS publication.
+  Publishing a meaningful busy bit (gated on drain eligibility) flips
+  every previously-FAIL cell to PASS on both renderers, with zero
+  changes to `gl/blit.c` / `mtl/blit.c` / `vk/blit.c`.
+- **Cycle 11 follow-up item #2 — CLOSED.** Was the highest-priority
+  next bounded slice after cycle 15.
+- **§H.6 IMAGE_BLIT — closeable via this path.** M15 Gate-2
+  second-wave coverage: §H.6 moves PARTIAL → MET under the flag.
+  Default-on for production is a separate decision (see below).
+
+**Cycle 11 follow-up item #3 (real-Xbox oracle parity) is now the
+next bounded step.** The local fix flips all 8 cells green on xemu,
+but the long-term shape of the fix — either a properly published
+PGRAPH busy bit OR a default-on PFIFO barrier — depends on whether
+real Xbox hardware shows busy-bit semantics that match this
+diagnostic. Without that parity check, default-on risks
+"fixed on xemu but diverges from real hardware." The XBE library
+already has the `oracle-orchestrator.py capture-reference --xbe
+image-blit` path; the bounded next step is to run that with the
+diagnostic flag on, compare against real-Xbox, and decide the
+long-term fix shape.
+
+**Codex validation.** `/codex-validate changes` returned **MINOR
+ISSUES** (one medium, one low). Both adopted before close:
+
+1. (Medium) Control-plane / docs out of sync — `automation.md` had
+   declared cycle 17 validated while orchestration-state files still
+   said "in progress", `handoff.md` still called the slice "next
+   bounded", and `decision-log.md` had no cycle-17 entry. **Adopted**:
+   this cycle-17 decision-log entry; `handoff.md` cycle-17 section;
+   orchestration-state files flipped to CLOSED.
+2. (Low) New `XBE_HARNESS_TIMEOUT_SECONDS` harness knob undocumented
+   in `scripts/apple-silicon/xbe-harness/README.md`. **Adopted**:
+   added to the README's "Wait" step and cross-referenced from
+   `flags-bench.md`.
+
+**Files shipped.**
+
+- `hw/xbox/nv2a/pgraph/pgraph.c` — `pgraph_status_drain_enabled()`
+  cached env-var helper + early-return branch at the top of
+  `pgraph_read()`.
+- `hw/xbox/nv2a/nv2a_regs.h` — `NV_PGRAPH_STATUS = 0x00000700` +
+  `NV_PGRAPH_STATUS_STATE_BUSY = (1<<0)`.
+- `scripts/apple-silicon/xbe-harness/xbe_renderers.py` — opt-in
+  `XBE_HARNESS_TIMEOUT_SECONDS` env override for `timeout_seconds`.
+- `scripts/apple-silicon/xbe-harness/README.md` — documents the
+  override.
+- `docs/apple-silicon/automation.md` — diagnostic-flag section +
+  evidence summary.
+- `.claude/rules/flags-renderer.md` + `.claude/rules/flags-bench.md`
+  — 1-line index entries.
+
+**Not shipped (kept as deferred follow-ups).**
+
+- Real-Xbox parity check on `image-blit.iso` under the flag (gates
+  default-on).
+- Default-on flip for the flag and/or replacement with a properly
+  published busy bit or a PFIFO barrier — pending parity result.
+
+**Combines with rules.** #1 (no guessing — validated against the
+cycle-15 baseline twice on the same build, eligibility gates derived
+from the actual pusher conditions, not invented), #2 (no shortcuts —
+two failed attempts iterated to the full gate set rather than
+declaring blocker after the first hang), #4 (no doc drift —
+adopted Codex finding #1), #5 (tool built when existing toolset was
+the limit — `XBE_HARNESS_TIMEOUT_SECONDS` makes long-latency diag
+flags usable through the existing harness), #15 (Codex mandatory
+before non-trivial close — completed), #17 (XBE-first development
+loop — the diagnostic XBE library is what proved the fix
+renderer-agnostically).
+
+---
+
 ## 2026-05-22 (cycle 15): §H.6 `image-blit` is **renderer-agnostic** — host-visible guest-log channel adopted as reusable Tier-2 oracle output path
 
 **Decision.** Adopt a small opt-in host-visible guest-log channel

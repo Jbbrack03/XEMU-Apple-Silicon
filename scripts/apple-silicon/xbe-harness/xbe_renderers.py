@@ -173,6 +173,15 @@ def run_xemu(manifest: XbeManifest, renderer: str,
 
     cfg = _build_xemu_toml(work_dir, scratch_hdd, manifest.iso_path,
                            surface_scale)
+    # Cycle-17: allow per-run timeout override for diagnostic flags that
+    # add wait latency (e.g. XEMU_DIAG_PGRAPH_STATUS_DRAIN). Default 35s
+    # is unchanged for normal flag combinations.
+    env_timeout = os.environ.get("XBE_HARNESS_TIMEOUT_SECONDS")
+    if env_timeout:
+        try:
+            timeout_seconds = int(env_timeout)
+        except ValueError:
+            pass
     # QMP UNIX-socket paths cap at ~104 bytes on macOS; benchmark-runs
     # nesting (m15-gate-<UTC>/04-tier1-matrix/<xbe>/<renderer>/) blows
     # past that. Use /tmp directly with a short unique filename.

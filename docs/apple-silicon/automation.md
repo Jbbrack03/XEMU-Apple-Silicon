@@ -3054,6 +3054,74 @@ logging for flat-path debugging. It records shade/provoking method state plus
 the live PGRAPH fields and bound shader state at shader bind, draw begin, and
 draw flush. Leave it off for timing runs.
 
+`XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` synthesises a meaningful
+`NV_PGRAPH_STATUS` (`0x00400700`) read for the guest. Default OFF. With
+the flag on, `pgraph_read(NV_PGRAPH_STATUS)` returns
+`NV_PGRAPH_STATUS_STATE_BUSY` (bit 0 set) whenever PFIFO has un-drained
+pushbuffer work
+(`d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] != d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`)
+**and the pusher is currently eligible to drain it** (matches
+`pfifo_run_pusher`'s top-of-function guard at
+`hw/xbox/nv2a/pfifo.c:309-313` plus its inner stall set at
+`hw/xbox/nv2a/pfifo.c:283-294`: `PUSH0_ACCESS` set, `DMA_PUSH_ACCESS`
+set, `DMA_PUSH_STATUS` (suspended) clear, `NV_PGRAPH_FIFO_ACCESS` set,
+`pgraph.waiting_for_nop` clear, `pgraph.waiting_for_context_switch`
+clear). When any of those eligibility gates fail the diagnostic
+returns `0` (NOT_BUSY) — the historical xemu behavior — because
+DMA_GET would never converge to DMA_PUT in that state and the guest's
+spin would never exit. Eligibility gating is essential: an earlier
+cycle-17 attempt that did not gate hung the BIOS / pbkit very early
+in boot (frames stay black, no XBE output). Without the flag the
+register is permanently `0` because xemu never publishes it, so the
+Xbox guest's `pb_wait_until_gr_not_busy()` exits on the first
+iteration and the vCPU can read VRAM before the PFIFO puller has
+executed the pushed IMAGE_BLIT or similar PGRAPH-resident op. The
+flag closes that dispatch-race window across all renderers (race
+lives in shared PFIFO/PGRAPH machinery, not in `gl/blit.c` /
+`mtl/blit.c` / `vk/blit.c`). Validation channel: pair with
+`XEMU_GUEST_LOG=1` and the cycle-15 host-visible log channel. PFIFO
+and PGRAPH state are read with `qatomic_read` (relaxed semantics) —
+strict race-freedom is not the goal; the goal is to make the busy
+bit non-zero often enough for the guest spin to converge after each
+drain-eligible push.
+
+Diagnostic only; not currently default-on because the long-term fix
+is either a properly published PGRAPH busy bit or a default-on
+barrier — to be decided once a real-Xbox parity check confirms a
+similar busy semantics on hardware. The flag adds wait latency to
+every `pb_wait_until_gr_not_busy()` call, including the many that
+pbkit / the BIOS make during boot, so XBE runs with the flag are
+noticeably slower; pair with `XBE_HARNESS_TIMEOUT_SECONDS=120` (or
+similar) when running through the xbe-harness so the boot completes
+within one harness-run window.
+
+See `decision-log.md` 2026-05-22 cycle 13 + cycle 17 entries and
+the implementation in `hw/xbox/nv2a/pgraph/pgraph.c`
+(`pgraph_status_drain_enabled()` + the early-return branch in
+`pgraph_read`). Activation banner (logged once when enabled):
+
+```
+xemu-perf: pgraph_status_drain=1 source=XEMU_DIAG_PGRAPH_STATUS_DRAIN
+```
+
+### Validation evidence (cycle 17, 2026-05-22)
+
+- Metal leg (35 s harness window):
+  `benchmark-runs/cycle17-status-drain-metal-PASS-gl-timeout-20260522/image-blit/metal/xemu.log`
+  — **4 consecutive boots all `tally pass=8/8 mask=0xff`**. Baseline
+  without the flag was `pass=3/8 mask=0x31` (cycle 15).
+- GL leg (120 s harness window via `XBE_HARNESS_TIMEOUT_SECONDS=120`):
+  `benchmark-runs/cycle17-status-drain-gl-long-timeout-20260522/image-blit/gl/xemu.log`
+  — **15 consecutive boots all `tally pass=8/8 mask=0xff`**. Baseline
+  without the flag was `pass=3/8 mask=0x31` (cycle 15).
+- Renderer-agnostic close: confirms the cycle-13 hypothesis that
+  the §H.6 IMAGE_BLIT 5/8 FAIL residual was a PFIFO ↔ vCPU dispatch
+  race against missing NV_PGRAPH_STATUS publication, not a per-
+  renderer `blit.c` bug. The §H.6 closeout path is now empirically
+  validated; the remaining question for default-on is the long-term
+  shape of the fix (real-Xbox parity check + busy-bit publish vs.
+  default barrier).
+
 ## Guest-side log channel (cycle 15, 2026-05-22)
 
 `XEMU_GUEST_LOG={0,1}` — opt-in host-visible diagnostic log channel.

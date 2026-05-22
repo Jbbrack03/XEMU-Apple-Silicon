@@ -112,11 +112,99 @@ static bool pgraph_fast_read_enabled(void)
     return enabled;
 }
 
+/*
+ * Cycle-17 diagnostic: when XEMU_DIAG_PGRAPH_STATUS_DRAIN=1, publish
+ * NV_PGRAPH_STATUS as "busy" (STATE_BUSY bit set) whenever PFIFO has
+ * un-drained pushbuffer work (CACHE1_DMA_PUT != CACHE1_DMA_GET). The
+ * Xbox guest's pbkit `pb_wait_until_gr_not_busy()` polls this register
+ * and exits on zero; without this flag the bit is permanently zero
+ * (xemu never publishes it), so the spin exits on the first iteration
+ * and the vCPU can read VRAM before the PFIFO puller has executed the
+ * pushed IMAGE_BLIT. This forces the spin to actually wait. Default
+ * OFF so retail runs are unaffected. See `decision-log.md` 2026-05-22
+ * cycle 13 + cycle 17 entries.
+ */
+static bool pgraph_status_drain_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_DIAG_PGRAPH_STATUS_DRAIN");
+        enabled = value && value[0] && strcmp(value, "0") != 0;
+        if (enabled) {
+            fprintf(stderr,
+                    "xemu-perf: pgraph_status_drain=1 "
+                    "source=XEMU_DIAG_PGRAPH_STATUS_DRAIN\n");
+        }
+        initialized = true;
+    }
+
+    return enabled;
+}
+
 uint64_t pgraph_read(void *opaque, hwaddr addr, unsigned int size)
 {
     NV2AState *d = (NV2AState *)opaque;
     PGRAPHState *pg = &d->pgraph;
     uint64_t r = 0;
+
+    /*
+     * Cycle-17 diagnostic. With XEMU_DIAG_PGRAPH_STATUS_DRAIN=1 the
+     * NV_PGRAPH_STATUS register is synthesised: it returns
+     * STATE_BUSY (bit 0 set) while PFIFO has un-drained pushbuffer
+     * work AND the pusher is currently eligible to drain it. xemu
+     * otherwise never publishes this register, so pbkit's
+     * `pb_wait_until_gr_not_busy` spin exits on the first iteration
+     * and lets the vCPU read VRAM before the PFIFO puller has
+     * executed the pushed IMAGE_BLIT.
+     *
+     * Eligibility mirrors `pfifo_run_pusher`'s early-return guard
+     * (`hw/xbox/nv2a/pfifo.c:309-313`) AND its inner stall set
+     * (`pfifo_pusher_stall_reasons`, `hw/xbox/nv2a/pfifo.c:283-294`):
+     * the pusher only advances DMA_GET when `PUSH0_ACCESS` and
+     * `DMA_PUSH_ACCESS` are set, `DMA_PUSH_STATUS` (suspended) is
+     * clear, the PGRAPH FIFO_ACCESS bit is set, and PGRAPH is not
+     * `waiting_for_nop`. If any of those gates are not satisfied
+     * DMA_GET would never converge to DMA_PUT and we would hang the
+     * guest on the busy poll (BIOS / pbkit early-init hits this —
+     * observed cycle 17 first attempts). Treat that as NOT_BUSY (the
+     * historical xemu behavior) so the diagnostic only stretches the
+     * wait window for the case it is meant to address.
+     *
+     * The PFIFO and PGRAPH state are read with relaxed semantics —
+     * race-free synchronisation is not the goal; the goal is to
+     * make the busy bit non-zero often enough for the guest spin
+     * to converge after each drain-eligible push.
+     */
+    if (pgraph_status_drain_enabled() && addr == NV_PGRAPH_STATUS) {
+        uint32_t push0 =
+            qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_PUSH0]);
+        uint32_t dma_push =
+            qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUSH]);
+        uint32_t dma_put =
+            qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT]);
+        uint32_t dma_get =
+            qatomic_read(&d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]);
+        uint32_t pgraph_fifo =
+            qatomic_read(&pg->regs_[NV_PGRAPH_FIFO]);
+        bool waiting_for_nop = qatomic_read(&pg->waiting_for_nop);
+        bool waiting_for_ctx = qatomic_read(&pg->waiting_for_context_switch);
+
+        bool pusher_eligible =
+            GET_MASK(push0, NV_PFIFO_CACHE1_PUSH0_ACCESS) &&
+            GET_MASK(dma_push, NV_PFIFO_CACHE1_DMA_PUSH_ACCESS) &&
+            !GET_MASK(dma_push, NV_PFIFO_CACHE1_DMA_PUSH_STATUS) &&
+            (pgraph_fifo & NV_PGRAPH_FIFO_ACCESS) &&
+            !waiting_for_nop &&
+            !waiting_for_ctx;
+
+        r = (pusher_eligible && dma_put != dma_get)
+                ? NV_PGRAPH_STATUS_STATE_BUSY
+                : 0;
+        nv2a_reg_log_read(NV_PGRAPH, addr, size, r);
+        return r;
+    }
 
     /*
      * Fast path: simple register reads return a uint32_t snapshot without

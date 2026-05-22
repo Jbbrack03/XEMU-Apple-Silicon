@@ -256,6 +256,8 @@
 #define NV_PGRAPH_CTX_CACHE3                             0x000001A0
 #define NV_PGRAPH_CTX_CACHE4                             0x000001C0
 #define NV_PGRAPH_CTX_CACHE5                             0x000001E0
+#define NV_PGRAPH_STATUS                                 0x00000700
+#   define NV_PGRAPH_STATUS_STATE_BUSY                          (1 << 0)
 #define NV_PGRAPH_TRAPPED_ADDR                           0x00000704
 #   define NV_PGRAPH_TRAPPED_ADDR_MTHD                        0x00001FFF
 #   define NV_PGRAPH_TRAPPED_ADDR_SUBCH                       0x00070000

@@ -1,26 +1,33 @@
 # Validation Status
 
-- Active slice: cycle-16 cleanup/commit pass for the finished cycle-15 guest-log implementation.
-- Validation state: **CLOSED — packaging gates met, cycle-15 implementation committed at `7b847dfab9` with one minor in-slice header-docstring correction.**
+- Active slice: cycle 17 — `XEMU_DIAG_PGRAPH_STATUS_DRAIN` (CLOSED 2026-05-22).
+- Validation state: **CLOSED — every required gate green.**
 
-## Gates for this slice
+## Required gates for this slice — all met
 
-- [x] Fresh worker receipt posted after canonical-doc read (see `current-cycle.md` §"Worker receipt").
-- [x] Existing cycle-15 diff reviewed for packaging cleanliness at content level (not stat-only); one minor `hw/xbox/xbox.h` docstring drift identified and fixed in-slice (mention of a runtime port-override env var that the `.c` implementation never honored — Codex finding #2 was adopted in the .c but the header comment lagged).
-- [x] Safe outcome produced: clean commit `7b847dfab9` containing exactly the cycle-15 scope (17 paths: 1 new file + 16 modified). No leaks; no `git add -A`.
-- [x] Orchestration-state files updated again before slice closure so docs match reality.
+- [x] Fresh worker receipt posted after canonical-doc read and reflected in `current-cycle.md` plus `claude-status.md`.
+- [x] Bounded implementation attempt kept tight to the documented PFIFO/PGRAPH busy-publication hypothesis (`hw/xbox/nv2a/pgraph/pgraph.c` + `nv2a_regs.h`; harness `XBE_HARNESS_TIMEOUT_SECONDS` env-var added for the long-latency diag case).
+- [x] Concrete validation evidence captured through the host-visible guest-log channel on Metal (4 boots, `pass=8/8 mask=0xff`) and GL (15 boots, `pass=8/8 mask=0xff`).
+- [x] Mandatory Codex validation completed (`/codex-validate changes`, verdict MINOR ISSUES, both findings adopted; marker recorded at `.claude/state/codex-validate-last-run`).
+- [x] Canonical docs synced before closure (`handoff.md`, `decision-log.md`, `automation.md`, `xbe-harness/README.md`, all orchestration-state files, `.claude/rules/flags-renderer.md` + `flags-bench.md`).
 
-## Codex re-validation decision
+## Cycle-17 evidence index
 
-Not triggered. Rationale:
+| Leg | Flag | Tally | Run dir |
+|---|---|---|---|
+| Metal | ON  | `pass=8/8 mask=0xff` × 4 boots  | `benchmark-runs/cycle17-status-drain-metal-PASS-gl-timeout-20260522/image-blit/metal/xemu.log` |
+| GL    | ON  | `pass=8/8 mask=0xff` × 15 boots | `benchmark-runs/cycle17-status-drain-gl-long-timeout-20260522/image-blit/gl/xemu.log` |
+| Metal | OFF | `pass=3/8 mask=0x31` × 2 boots  | `benchmark-runs/cycle17-baseline-no-drain-metal-20260522/image-blit/metal/xemu.log` |
+| GL    | OFF | `pass=3/8 mask=0x31` × 2 boots  | `benchmark-runs/cycle17-baseline-gl-only-20260522/image-blit/gl/xemu.log` |
 
-- Cycle 15 implementation was already Codex-validated with all three MAJOR ISSUES findings adopted (see decision-log cycle-15 entry).
-- Cycle-16 in-slice change is a header-comment correction to align `hw/xbox/xbox.h` with the already-validated `xbox_guest_log.c` implementation behavior. No logic change; no new flags; no new code paths.
-- Rule #15 enforcement threshold is "non-trivial uncommitted code in `xemu-fork/` >30 lines on renderer/TCG/NV2A/build/apple-silicon scripts." A ~10-line header-docstring correction does not meet that bar.
-- Reasonable to record: any future renderer-touching slice (e.g. the upcoming `XEMU_DIAG_PGRAPH_STATUS_DRAIN` work) will require its own Codex pass before close.
+Two failed-iteration evidence dirs preserved for the eligibility-gate lesson (see `decision-log.md` cycle-17 entry):
+
+- `benchmark-runs/cycle17-status-drain-FIRST-ATTEMPT-too-aggressive-20260522/` — no gate, BIOS hangs.
+- `benchmark-runs/cycle17-status-drain-2nd-attempt-also-hung-20260522/` — PUSH0/DMA_PUSH gates only, also hangs.
 
 ## Carry-forward context
 
-- Cycle 15 delivered the meaningful technical milestone: a reusable host-visible guest-log path and renderer-agnostic confirmation that the remaining image-blit residual is upstream of either renderer.
-- This slice closed it cleanly so the next implementation session can start from a stable boundary.
-- Next bounded slice: Cycle-13 follow-up item #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`). Codex MANDATORY.
+- Cycle 15 established the reusable guest-log channel and confirmed the remaining image-blit residual is renderer-agnostic.
+- Cycle 16 packaged that milestone cleanly.
+- Cycle 17 (this slice) closes the cycle-13 race hypothesis empirically; cycle-11 follow-up item #2 is CLOSED.
+- Cycle-11 follow-up item #3 (real-Xbox oracle parity check) is the next bounded slice and gates the default-on / long-term-fix decision.

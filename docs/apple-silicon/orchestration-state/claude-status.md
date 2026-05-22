@@ -1,31 +1,25 @@
 # Claude Status
 
-- Objective: cycle-16 cleanup/commit slice for the already-completed cycle-15 guest-log work.
-- Status: **CLOSED — packaging complete, cycle-15 implementation landed in commit `7b847dfab9` plus one minor `xbox.h` docstring drift correction adopted in-slice.**
-- Session: `hermes_xemu_live_20260522_125318`
-- Started: 2026-05-22 12:53 CDT.
-- Closed: 2026-05-22 13:?? CDT.
+- Objective: cycle-17 bounded implementation slice for `XEMU_DIAG_PGRAPH_STATUS_DRAIN`.
+- Status: **CLOSED — implementation shipped, image-blit 3/8 → 8/8 on Metal AND GL renderer-agnostically, Codex MINOR ISSUES adopted, durable docs synced.**
+- Session: `hermes_xemu_live_20260522_132851`
+- Started: 2026-05-22 13:28 CDT.
+- Closed: 2026-05-22 14:01 CDT.
 
-## Outcome (2026-05-22, slice closed)
+## Worker receipt
 
-- Diff review at content level (not just stat level) caught one minor doc/implementation drift: `hw/xbox/xbox.h` docstring still mentioned the `XEMU_GUEST_LOG_PORT=0xNNNN` runtime override that Codex finding #2 had dropped on the implementation side. Fixed in-slice so the header matches `xbox_guest_log.c`, `xbed_runtime.h`, and `automation.md` (all of which already said "no runtime override on either side").
-- Staged exactly 17 paths explicitly (1 new file + 16 modified); no `-A`, no leaks beyond cycle-15 scope.
-- Closure commit `7b847dfab9` landed with full Codex-adoption record cross-reference, M15 Gate-2 status restated, Co-Authored-By trailer.
-- Codex re-validation not triggered: cycle-15 was already validated with all three MAJOR ISSUES findings adopted; cycle-16 only fixed a header-comment to match already-validated implementation behavior — no behavior change, well under the 30-line implementation threshold.
+- **Docs read:** orchestration-workflow.md; current-cycle.md; claude-status.md; validation-status.md; handoff-summary.md; handoff.md (cycle-15 + cycle-13 sections); decision-log.md (cycle-15 entry + cycle-13 follow-up plan); renderer-state.md; flags-renderer.md.
+- **Bounded slice objective:** add opt-in `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` so `pgraph_read(NV_PGRAPH_STATUS)` returns non-zero (busy) whenever `pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] != pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`. Scope kept tight to `hw/xbox/nv2a/pgraph/pgraph.c`; opt-in only; no behavior change when unset.
+- **Current hypothesis:** With the flag on, `pb_wait_until_gr_not_busy` in the guest will spin until PFIFO has drained the IMAGE_BLIT push, closing the cycle-13 dispatch race. image-blit v0.4 tally should flip from `pass=3/8 mask=0x31` → `pass=8/8 mask=0xff` on both renderers through the cycle-15 host-visible guest-log channel.
+- **Final outcome:** hypothesis CONFIRMED. Metal flag-on = `pass=8/8 mask=0xff` across 4 boots; GL flag-on (under `XBE_HARNESS_TIMEOUT_SECONDS=120`) = `pass=8/8 mask=0xff` across 15 boots; baseline reruns on the same xemu binary reconfirm `pass=3/8 mask=0x31` without the flag.
 
-## Worker receipt (posted 2026-05-22)
+## Closure summary
 
-- Docs read: `orchestration-workflow.md`, `current-cycle.md`, this file, `validation-status.md`, `handoff-summary.md`, `handoff.md` head (cycle-15 section); auto-loaded `renderer-state.md` rule index.
-- Bounded objective: package the cycle-15 implementation cleanly or document a blocker; no new implementation.
-- Current hypothesis (entering slice): worktree is internally consistent and ready to package.
-- First concrete action: read each modified hunk content-level to confirm scope before staging.
-- Planned validation path: diff review → confirm orchestration-state matches reality → `git add` explicit paths → single closure commit + follow-up state-hash commit.
-
-## Next-slice handoff
-
-- Next bounded implementation slice: Cycle-13 follow-up item #2 — `XEMU_DIAG_PGRAPH_STATUS_DRAIN`. Expected to flip all 8 image-blit cells green on both renderers by giving the guest CPU the missing PGRAPH-busy publication before relaxed reads. Codex MANDATORY (implementation slice, will touch `hw/xbox/nv2a/`).
-- Tree is clean; next session can start from a stable boundary.
+- Code shipped: ~50 lines in `hw/xbox/nv2a/pgraph/pgraph.c` + 2 lines in `hw/xbox/nv2a/nv2a_regs.h`; harness `XBE_HARNESS_TIMEOUT_SECONDS` override added in `xbe_renderers.py`.
+- Docs synced: `automation.md`, `handoff.md`, `decision-log.md`, `xbe-harness/README.md`, `.claude/rules/flags-renderer.md`, `.claude/rules/flags-bench.md`, all orchestration-state files.
+- Codex validation: ran `/codex-validate changes`; MINOR ISSUES (one medium control-plane drift, one low harness-README drift); both adopted in this slice.
+- Next bounded step (cycle 18): cycle-11 follow-up item #3 — real-Xbox oracle parity check on `image-blit.iso` under the new flag. Decides default-on vs. properly published busy bit vs. default PFIFO barrier.
 
 ## Supervisor note
 
-This is intentionally a fresh, short slice. The prior cycle-15 session was considered closed on the implementation side; this session existed only to package/cleanly close the shipped work so the next substantive graphics slice can begin from a clean context boundary. That goal is now met.
+- Previous packaging slice closed cleanly; this new session exists to take the next highest-value bounded step immediately rather than leaving Claude idle.
