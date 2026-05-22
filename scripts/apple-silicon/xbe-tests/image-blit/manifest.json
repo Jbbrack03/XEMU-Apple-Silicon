@@ -1,0 +1,42 @@
+{
+  "id": "image-blit",
+  "title": "NV_IMAGE_BLIT (0x9F) SRCCOPY guest-VRAM oracle (v0.2 — 8-cell rect/offset sweep, bounded partial Metal)",
+  "purpose": "Tier-2 NV2A diag XBE covering §H.6 (`NV_IMAGE_BLIT` class 0x9F + `NV_CONTEXT_SURFACES_2D` class 0x62) per `nv2a-feature-surface-research.md`. 4x2 dashboard grid (160x240 cells); each cell encodes one IMAGE_BLIT verdict from a CPU-side oracle that compared destination VRAM byte-by-byte against the expected blit result. Single LE_A8R8G8B8 color format, SRCCOPY operation only. Source surface is a CPU-painted 32x32 buffer with four 16x16 quadrants (RED/GREEN/BLUE/WHITE); each destination surface is 64x64 sentinel-gray (0xFF808080), large enough to detect any over-write past the declared rect. The 8 cells sweep (in_x/in_y, out_x/out_y, width, height) across baseline / size / src-offset / dst-offset / both-offsets / degenerate-width / degenerate-height combinations. After each blit the XBE calls pb_wait_until_gr_not_busy(), reads dst VRAM via pb_agp_access() (cache-coherent linear remap), and verifies every pixel inside the declared dst rect equals the corresponding src pixel and every pixel outside the rect remains sentinel. Per-cell verdict is rendered as a green (0xFF00FF00) PASS or red (0xFFFF0000) FAIL rectangle; the host harness's strict byte-exact compare against the math-derived oracle (8 green cells) fails immediately if any single blit misbehaves. M15 default-on second-wave Gate 2 coverage per `metal-renderer-plan.md` + `renderer-metal.md`. Catalog reference: §H.6 in nv2a-feature-surface-research.md (`NV09F_SET_OBJECT/SET_CONTEXT_SURFACES/SET_OPERATION/CONTROL_POINT_IN/CONTROL_POINT_OUT/SIZE` + `NV062_SET_OBJECT/SET_CONTEXT_DMA_IMAGE_SOURCE/SET_CONTEXT_DMA_IMAGE_DESTIN/SET_COLOR_FORMAT/SET_PITCH/SET_OFFSET_SOURCE/SET_OFFSET_DESTIN`). pbkit pre-bind makes this XBE self-contained: SUBCH_3=ChannelID 16 (0x9F), SUBCH_4=ChannelID 17 (0x62). v0.2: routes IMAGE_SOURCE / IMAGE_DESTIN through pbkit handles 3/4 (base=0, Limit=MAXRAM, untouched by `set_draw_buffer()`) — NOT 9/11, which `pb_init->pb_target_back_buffer()->set_draw_buffer()` reprograms to point at the back buffer with `limit=height*pitch-1` (`lib/pbkit/pbkit.c:1611-1668,3260`). Verified via `-trace events=nv2a_dma_map`. v0.2 status: bounded partial on Metal — 3 of 8 cells PASS byte-correct (0, 4, 5; all `width==height==8` with `(in_x,in_y) ≤ (4,4)`); 5 fail (1, 2, 3, 6, 7). Residual hypothesis points at shared blit copy/clip math (`mtl/blit.c:181-233`) or `nv_clip_gpu_tile_blit` against UnleashX-inherited PFB tile registers. See README §Status for full per-cell verdict + next-session investigation list.",
+  "catalog_ref": "§H.6",
+  "self_validation_tier": 2,
+  "oracle_priority": ["math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\image-blit-capture.bin",
+      "ftp_path": "/E/Apps/image-blit/image-blit-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\image-blit-done.txt",
+      "ftp_path": "/E/Apps/image-blit/image-blit-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["metal"],
+  "expected_fail_notes": "v0.2 bounded partial 2026-05-22 cycle 11: 3/8 cells PASS (cells 0, 4, 5 — width==height==8 with (in_x,in_y) <= (4,4)); 5/8 FAIL (cells 1, 2, 3, 6, 7). Original v0.1 9/11-handle assertion at blit.c:170 RESOLVED via channel-3/4 fix (set_draw_buffer reprograms 9/11 to back-buffer limit; verified via -trace events=nv2a_dma_map). Residual 5-cell failure root cause NOT yet grounded — next slice investigates shared blit copy/clip path or PFB-tile clipping. Per-cell verdict matrix lives in README.md §Status."
+}

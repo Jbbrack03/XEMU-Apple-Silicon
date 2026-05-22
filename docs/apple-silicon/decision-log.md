@@ -1,5 +1,139 @@
 # Decision Log
 
+## 2026-05-22 (cycle 11): §H.6 `image-blit` v0.2 — bounded partial on Metal; channel 9/11 → 3/4 root cause grounded
+
+**Decision.** Ship `xbe-tests/image-blit/` v0.2 as a **bounded
+partial** — 3 of 8 cells PASS byte-correct on Metal, 5 fail.
+Ship now because the original blocking failure (assert at
+`mtl/blit.c:170 source_offset < source_dma_len`) is fully resolved
+and the residual 5-cell mismatch needs a dedicated follow-up slice
+to ground (likely a shared blit copy/clip-math bug or PFB tile
+state inherited from the chainloading dashboard).
+
+**Original failure (v0.1).** v0.1 routed NV062 source/destin DMA
+through pbkit handles 9 and 11, on the (carry-forward) assumption
+that those carry `base=0, Limit=MAXRAM` from
+`pb_create_dma_ctx` at `lib/pbkit/pbkit.c:2647-2649`. On Metal,
+the FIRST IMAGE_BLIT asserted at
+`hw/xbox/nv2a/pgraph/mtl/blit.c:170`
+(`source_offset < source_dma_len`) and aborted xemu.
+`METAL_IMAGE_BLITS = 0`. Crash artifact at
+`benchmark-runs/xbe-harness-20260522-071449/`.
+
+**Root cause (qemu-trace-grounded).** `pb_init` calls
+`pb_target_back_buffer()` at `lib/pbkit/pbkit.c:3260`, which calls
+`set_draw_buffer()` (`pbkit.c:1611-1668`). `set_draw_buffer`
+**reprograms PRAMIN for `pb_DmaChID9Inst` and `pb_DmaChID11Inst`**:
+
+- `addr = framebuffer_base`
+- `limit = height * pitch - 1`
+
+For a 640×480 LE_A8R8G8B8 back buffer the limit becomes
+`0x0012BFFF` (= 1.2 MiB), not `MAXRAM`. Confirmed by running
+xemu standalone with `-trace events=nv2a_dma_map`: the entry for
+sDmaObject9 shows `addr=0x03BD4000 limit=0x0012BFFF` immediately
+before the assertion. The XBE's source buffer is outside that
+1.2 MiB window, so `source_offset >= source_dma_len` trips the
+assert. Channels 9 and 11 are pbkit-reserved scratch DMA contexts
+for the back/front buffer aperture; they are NOT general-purpose
+RAM channels after `pb_init` returns. (The carry-forward
+"sDmaObject9/11 are MAXRAM-mapped" assumption was wrong because it
+read only `pb_create_dma_ctx` and missed the
+`set_draw_buffer()` reprogram at `pb_init` tail.)
+
+**Fix (v0.2, this cycle).** Switch to pbkit handles 3 and 4 in
+`xbe-tests/image-blit/nv2a_regs_image_blit.h`:
+
+- `IMAGE_BLIT_DMA_HANDLE_SRC = 3` (was 9)
+- `IMAGE_BLIT_DMA_HANDLE_DST = 4` (was 11)
+
+Channels 3 and 4 are created with `base=0, Limit=MAXRAM` at
+`pbkit.c:2643,2645` and pbkit never reprograms them after
+`pb_init`. NV062 does not validate the class of the source/dest
+DMA channel (`pgraph_mtl_image_blit` only calls `nv_dma_map`), so
+class-3D (channel 3) and class-3 (channel 4) are both legal NV062
+source/dest channels. v0.2 also conservatively replaces
+`HighestAcceptableAddress = 0x3FFB000` with `MAXRAM` in the XBE's
+three `MmAllocateContiguousMemoryEx` call sites to match pbkit's
+own pattern (`pbkit.c:2297-2305`) and remove a tail-of-RAM
+unsafety; that change was a disproved hypothesis from earlier this
+cycle but is kept because it's strictly conservative.
+
+**Result on Metal (v0.2).** No more assertion crash. 278 frames
+captured (vs 66 in the crashing run). Best frame
+`image-blit.0124.png` at
+`benchmark-runs/xbe-harness-20260522-075241/image-blit/metal/`.
+`signal_match_pct = 37.5000` (3 of 8 cells solid green PASS).
+`changed_pixels_pct = 62.7083`.
+
+| Cell | In(x,y) | Out(x,y) | W×H   | Verdict     |
+|------|---------|----------|-------|-------------|
+| 0    | (0,0)   | (0,0)    | 8×8   | **PASS**    |
+| 1    | (0,0)   | (0,0)    | 16×16 | FAIL        |
+| 2    | (0,0)   | (0,0)    | 32×32 | FAIL        |
+| 3    | (8,8)   | (0,0)    | 8×8   | FAIL        |
+| 4    | (0,0)   | (4,4)    | 8×8   | **PASS**    |
+| 5    | (4,4)   | (8,8)    | 8×8   | **PASS**    |
+| 6    | (0,0)   | (0,0)    | 1×16  | FAIL        |
+| 7    | (0,0)   | (0,0)    | 16×1  | FAIL        |
+
+PASS cells share `width == height == 8 AND (in_x, in_y) ≤ (4, 4)`.
+FAIL cells fall outside that envelope.
+
+**METAL_IMAGE_BLITS=0 is expected for this XBE.** The counter only
+increments after the OPTIONAL GPU-side cached-texture copy path
+(`surface.mm:3322`). For an XBE that allocates fresh VRAM buffers
+never bound as render targets, the surface cache is empty for
+src/dst and `pgraph_mtl_surface_blit_copy` takes Path C at
+`surface.mm:3218-3222` and returns without incrementing the
+counter. The authoritative path is the CPU memcpy at
+`mtl/blit.c:215-221`, which runs unconditionally. README has been
+updated to flag this so future sessions don't chase the wrong
+suspect.
+
+**Manifest changes.** `manifest.json` declares
+`expected_fail_renderers = ["metal"]` with an `expected_fail_notes`
+block citing this entry, so the matrix runner treats v0.2 as
+known-not-green on Metal rather than a regression. The full
+per-cell verdict matrix lives in
+`xbe-tests/image-blit/README.md` §Status.
+
+**Codex validation.** v0.2 → Codex MAJOR ISSUES (2026-05-22 cycle
+11) — README/manifest were initially stale (still documented 9/11
+and "shipped cleanly"), `expected_fail_renderers` was empty,
+claude-status still treated METAL_IMAGE_BLITS=0 as a dispatch
+failure suspect. All three findings adopted in this cycle: README
++ manifest + claude-status synced to the v0.2 bounded-partial
+state; `expected_fail_renderers = ["metal"]` set; counter-zero
+expectation documented.
+
+**M15 default-on Gate 2 status update.**
+- §E.13 per-format pitch + image-rect alignment — **MET** (cycle 10).
+- §H.6 IMAGE_BLIT — **PARTIAL** (this cycle; 3/8 cells green).
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+XBE first-wave Metal count unchanged at **17 of 18 PASS on Metal +
+1 expected_fail SPEC** (`logic-ops`). Second-wave coverage now
+reads **1 MET + 1 PARTIAL out of 4**.
+
+**Highest-value next bounded slice.** Either complete §H.6 (ground
+the 5-cell residual failure on Metal, then either fix the renderer
+or revise the XBE oracle) OR move to §G.5 / RT-as-texture and
+treat the 5-cell failure as a tracked follow-up. Suggested
+investigation steps for §H.6 cycle 12:
+1. Re-run image-blit on GL — if same 5-cell pattern, bug is in
+   shared blit copy/clip math; if different, Metal-specific.
+2. Inspect `nv_clip_gpu_tile_blit` (`nv2a.c:89-107`) against the
+   runtime PFB tile registers UnleashX inherits/sets.
+3. Diff `mtl/blit.c:181-233` against `gl/blit.c:123-187` and
+   `vk/blit.c:127-191` (shared math + clip handling).
+4. Add a per-cell first-mismatch debug encode to the dashboard
+   (out-of-band color in the FAIL cell) so the residual pixel
+   reveals itself in the captured PNG.
+
+---
+
 ## 2026-05-22 (cycle 10): §E.13 `texture-pitch-alignment` v0.2 — first second-wave Gate 2 slice PASSes byte-correct on Metal (after Codex MAJOR addressed)
 
 **Decision.** Ship `xbe-tests/texture-pitch-alignment/` v0.2 as the
