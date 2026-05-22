@@ -1,5 +1,86 @@
 # Decision Log
 
+## 2026-05-21 (mid-day, late): formalize Hermes/Claude/Codex orchestration workflow in `orchestration-workflow.md`
+
+**Decision.** Promote the Hermes supervision model already in use this
+2026-05-21 cycle into a canonical workflow document at
+`docs/apple-silicon/orchestration-workflow.md`. Link it from the
+`README.md` Documentation Map and add it to the workspace `CLAUDE.md`
+"Other reference material" list so rule #4 (no doc drift) covers it.
+
+**Scope.** The new doc defines:
+
+- **Roles.** Claude Code = primary implementation worker (deep
+  context inside its own session). Hermes = orchestrator / quality
+  gate (assignment framing, validation requirement, doc-sync
+  requirement, escalation). Codex = required external validator
+  for non-trivial slices (rule #15 already binding). Real-Xbox
+  oracle = hardware witness for any renderer-correctness or
+  M15/default-on claim.
+- **Artifact-over-transcript rule.** Hermes must supervise via
+  compact structured artifacts and evidence files, NOT by replaying
+  Claude's full transcript. Recommended orchestration-state files:
+  `project-state.md`, `current-cycle.md`, `claude-status.md`,
+  `validation-status.md`, `blockers.md`, `handoff-summary.md`.
+- **Loops.** Single supervised cycle (human-attended) +
+  long-running unattended orchestration (many fresh Hermes passes,
+  not one infinitely accumulating conversation).
+- **Validation gates.** Always-required (exit criteria, git diff
+  review, local builds/tests, canonical-doc updates); non-trivial
+  implementation (Codex validation + finding adoption);
+  renderer-correctness (paired GL/Metal evidence + oracle workflow
+  + aligned-keyframe visual parity).
+- **Permission-bypass policy.** Throughput tool only; bounded by
+  workspace + assignment scope.
+- **Telegram escalation triggers.** Block, milestone, gate failure,
+  drift, risky branching decision.
+- **Anti-drift rules.** Sync docs, append-only evidence, no
+  self-certification of completion.
+
+**Why now.** The 2026-05-21 mid-day cycle was the first run of the
+"Hermes supervises a Claude Code worker via Telegram + structured
+state" pattern end-to-end (handoff banner already self-labels
+"Hermes-supervised cycle 1 closure"). Capturing the rules of that
+loop in a canonical doc prevents the next cycle from reinventing
+them or drifting into the forbidden "paste Claude's full transcript
+into Hermes" anti-pattern, and gives both the worker and the
+orchestrator a single source of truth for permission-bypass,
+validation gates, and escalation triggers.
+
+**Why a separate doc rather than expanding workspace `CLAUDE.md`.**
+The workspace `CLAUDE.md` already carries 17 working rules; adding
+~300 lines of orchestration mechanics there would dilute the
+working-rules surface. Splitting orchestration into its own
+workflow doc mirrors the existing pattern (`metal-porting-workflow.md`
+for the Metal renderer loop, `oracle-workflow.md` for hardware
+oracle pipeline, `automation.md` for the benchmark harness and
+flag surface).
+
+**Files added (this slice).**
+
+- `docs/apple-silicon/orchestration-workflow.md` — new canonical
+  workflow doc (~300 lines).
+
+**Files updated (this slice).**
+
+- `docs/apple-silicon/README.md` — Documentation Map link block for
+  `orchestration-workflow.md`, placed adjacent to
+  `metal-porting-workflow.md` to mirror the doc-order pattern.
+- `docs/apple-silicon/handoff.md` — added a line to the
+  "This session (2026-05-21 mid-day, Hermes-supervised cycle 1)"
+  list noting the orchestration-workflow.md ship.
+- `../CLAUDE.md` (workspace-root, not in any git tree) — added
+  `orchestration-workflow.md` to the flat "Other reference material"
+  list per rule #4.
+
+**No code change.** Pure doc / workflow scaffolding slice. No
+Codex validation gate (doc-only, well under the 30-line aggregate
+non-trivial code threshold); no oracle gate (no renderer or
+correctness claim). Pairs with handoff.md "This session
+(2026-05-21 mid-day, Hermes-supervised cycle 1)" closure.
+
+**Status.** SHIPPED.
+
 ## 2026-05-21 (mid-day, Hermes-supervised cycle 1): §4.15 msaa-aa-factor v0.1 SHIPPED — MSAA path-activation + edge-AA-band SMOKE; Codex MAJOR findings adopted as narrowed v0.1 + v0.2 deferral
 
 **Decision.** Ship `§4.15 msaa-aa-factor` v0.1 as a Tier-1 diag XBE

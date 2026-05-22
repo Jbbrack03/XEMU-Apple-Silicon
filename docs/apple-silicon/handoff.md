@@ -39,6 +39,19 @@ This session (2026-05-21 mid-day, Hermes-supervised cycle 1):
   deferred: per-mode keyed expected_results + AA-band lower-bound
   rejection (second-wave follow-up).
 
+- **`docs/apple-silicon/orchestration-workflow.md` SHIPPED** as the
+  canonical workflow for supervising Claude Code on this repo without
+  context-window collapse. Defines Hermes (orchestrator) / Claude
+  (worker) / Codex (validator) / real-Xbox-oracle (hardware witness)
+  roles, the artifact-over-transcript rule, required orchestration-state
+  files, supervised-cycle vs unattended-cycle loops, validation gates,
+  permission-bypass policy, anti-drift rules, and Telegram escalation
+  triggers. Linked from `README.md` Documentation Map and added to the
+  workspace `CLAUDE.md` reference list. Formalizes the Hermes
+  supervision model already in use this 2026-05-21 cycle. No code
+  change; pairs with decision-log "2026-05-21 (mid-day, late):
+  formalize Hermes/Claude/Codex orchestration workflow."
+
 **Previous morning session (2026-05-21) closures preserved below
 for diagnostic continuity.**
 
