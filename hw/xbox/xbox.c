@@ -339,6 +339,10 @@ void xbox_init_common(MachineState *machine,
     /* FIXME: Stub the memory controller */
     pci_create_simple(pci_bus, PCI_DEVFN(0, 3), "pci-testdev");
 
+    /* Opt-in `xemu-guest-log:` IO-port sink for Tier-2 diagnostic XBEs;
+     * inert unless XEMU_GUEST_LOG=1 is set. See xbox_guest_log.c. */
+    xbox_guest_log_init();
+
     if (pci_bus_out) {
         *pci_bus_out = pci_bus;
     }

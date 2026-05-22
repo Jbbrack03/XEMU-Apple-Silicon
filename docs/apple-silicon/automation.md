@@ -3054,6 +3054,54 @@ logging for flat-path debugging. It records shade/provoking method state plus
 the live PGRAPH fields and bound shader state at shader bind, draw begin, and
 draw flush. Leave it off for timing runs.
 
+## Guest-side log channel (cycle 15, 2026-05-22)
+
+`XEMU_GUEST_LOG={0,1}` — opt-in host-visible diagnostic log channel.
+Default OFF (`0`). When set to `1`, xemu installs a small IO-port sink
+at port `0xE9` (`hw/xbox/xbox_guest_log.c`); every byte the guest writes
+to that port accumulates into a per-line buffer and flushes to xemu
+stderr (and therefore into `xemu.log`) with an `xemu-guest-log:`
+prefix when it sees `\n`, `\0`, or fills 512 bytes. Reads return
+`0xE9` so the guest can probe for the device. Renderer-agnostic; the
+channel is wired at the machine level and does not depend on the GL
+or Metal renderer, so it survives renderer-side display-capture gaps.
+
+Activation banner (logged once at xemu start when enabled):
+
+```
+xemu-guest-log: enabled on IO port 0x00e9 (fixed; guest-side helper writes the same port; lines flushed to stderr on '\n')
+```
+
+The port is fixed at `0xE9` end-to-end; there is intentionally no
+runtime override on either side, because a host-side change without
+a matching rebuild of the XBE library would silently disconnect the
+channel. If you need to move it, change BOTH `XBOX_GUEST_LOG_IOPORT`
+in `hw/xbox/xbox_guest_log.c` AND `XBED_HOST_LOG_PORT` in
+`scripts/apple-silicon/xbe-tests/lib/xbed_runtime.h`, then rebuild
+xemu and the XBE library.
+
+Guest-side helpers are in `scripts/apple-silicon/xbe-tests/lib/`:
+`xbed_host_log_write(line)` emits one line via inline `outb`;
+`xbed_host_log_writef(fmt, ...)` formats then emits one line.
+Both are safe to call unconditionally — on real Xbox hardware (or on
+upstream xemu without this device wired in) the OUT is silently
+absorbed by unmapped IO space, so no guest-side guard is needed.
+
+Intended use: Tier-2 diagnostic XBEs whose per-cell oracle verdicts
+otherwise live only in the on-screen framebuffer dashboard and
+therefore depend on GL/Metal screenshot capture. Pair with a grep
+filter on `xemu.log`:
+
+```sh
+grep -n '^xemu-guest-log:' .../xemu.log
+```
+
+See also `hw/xbox/xbox_guest_log.c`,
+`scripts/apple-silicon/xbe-tests/lib/xbed_runtime.h`, and
+`scripts/apple-silicon/xbe-tests/image-blit/main.c` for the first
+adopter (cycle 15 closed via the renderer-agnostic §H.6 PASS/FAIL
+match it produced).
+
 ## Snapshot Runs
 
 The launcher can create and restore named VM snapshots through the QMP socket

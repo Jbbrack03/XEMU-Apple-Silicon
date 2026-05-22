@@ -29,6 +29,25 @@ void xbox_init_common(MachineState *machine,
                       PCIBus **pci_bus_out,
                       ISABus **isa_bus_out);
 
+/*
+ * xbox_guest_log_init — install the opt-in `xemu-guest-log:` host sink
+ * on guest IO port 0xE9. Enabled by `XEMU_GUEST_LOG=1`. Idempotent;
+ * a second call is a no-op. Renderer-agnostic; safe to call regardless
+ * of whether the env var is set (returns silently if not).
+ *
+ * The port is fixed end-to-end (no runtime override on either side);
+ * the guest-side helper in
+ * `scripts/apple-silicon/xbe-tests/lib/xbed_runtime.h` writes to the
+ * same compile-time constant, so a host-only override would silently
+ * disconnect the channel. To move the port, change BOTH sides and
+ * rebuild xemu plus the XBE library.
+ *
+ * Intended for Tier-2 diagnostic XBEs whose per-cell oracle verdicts
+ * otherwise depend on GL/Metal screenshot capture. See
+ * `hw/xbox/xbox_guest_log.c` and `docs/apple-silicon/automation.md`.
+ */
+void xbox_guest_log_init(void);
+
 #define TYPE_XBOX_MACHINE MACHINE_TYPE_NAME("xbox")
 
 #define XBOX_MACHINE(obj) \

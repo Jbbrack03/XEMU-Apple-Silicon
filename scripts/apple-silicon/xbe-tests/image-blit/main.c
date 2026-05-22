@@ -418,6 +418,17 @@ static int oracle_check_cell(int idx,
                     (unsigned)cell->in_x, (unsigned)cell->in_y,
                     (unsigned)cell->out_x, (unsigned)cell->out_y,
                     (unsigned)cell->width, (unsigned)cell->height);
+                /* Cycle 15: mirror the per-cell first-mismatch line through
+                 * the host-visible log channel so it survives a broken
+                 * screenshot path. Inert if XEMU_GUEST_LOG is unset. */
+                xbed_host_log_writef(
+                    "image-blit: cell %d mismatch dst@(%u,%u) got=0x%08lx "
+                    "expected=0x%08lx in=(%u,%u) out=(%u,%u) wxh=%ux%u",
+                    idx, (unsigned)x, (unsigned)y,
+                    (unsigned long)got, (unsigned long)expected,
+                    (unsigned)cell->in_x, (unsigned)cell->in_y,
+                    (unsigned)cell->out_x, (unsigned)cell->out_y,
+                    (unsigned)cell->width, (unsigned)cell->height);
                 return 0;
             }
         }
@@ -433,6 +444,13 @@ static void run_one_blit_cell(int idx)
     s_cell_pass[idx] = oracle_check_cell(idx, &k_cells[idx], s_dst_vram[idx]);
     debugPrint("image-blit: cell %d %s\n", idx,
                s_cell_pass[idx] ? "PASS" : "FAIL");
+    /* Cycle 15: mirror the per-cell verdict through the host-visible log
+     * channel. Renderer-agnostic: this is the path that lets the §H.6
+     * race hypothesis be evaluated under both GL and Metal without
+     * depending on screenshot capture. Inert if XEMU_GUEST_LOG is
+     * unset (the OUT instruction is then a silent no-op). */
+    xbed_host_log_writef("image-blit: cell %d %s", idx,
+                         s_cell_pass[idx] ? "PASS" : "FAIL");
 }
 
 static inline void dash_vert(DashVertex *v, int x_w, int y_w,
@@ -595,7 +613,12 @@ static void render_dashboard_frame(uint32_t frame_idx, void *ctx)
 int main(void)
 {
     if (xbed_init(WIN_W, WIN_H) != XBED_OK) return 1;
-    debugPrint("image-blit v0.3 (cycle 12 first-mismatch diag encoding)\n");
+    debugPrint("image-blit v0.4 (cycle 15 host-visible oracle channel)\n");
+    /* Cycle 15: anchor line so harness/grep can confirm the
+     * host-visible log channel reached at least once during this run.
+     * Inert if XEMU_GUEST_LOG is unset. */
+    xbed_host_log_write("image-blit: begin v0.4 host-log channel "
+                        "(cycle 15; cells=0..7)");
 
     /* Vertex storage for the 8-cell dashboard quads. Allocated up
      * front but only populated after the per-cell verdicts land.
@@ -654,6 +677,24 @@ int main(void)
      * partially-initialized 3D pipeline state on subchannel 0. */
     for (int idx = 0; idx < GRID_CELLS; idx++) {
         run_one_blit_cell(idx);
+    }
+
+    /* Cycle 15: emit a single-line tally through the host channel so
+     * the harness can read the verdict total even if the per-cell
+     * lines are filtered. Format `image-blit: tally pass=N/8 mask=0xXX`
+     * with the mask bit-N set iff cell N passed. */
+    {
+        unsigned pass_count = 0;
+        unsigned mask = 0;
+        for (int idx = 0; idx < GRID_CELLS; idx++) {
+            if (s_cell_pass[idx]) {
+                pass_count++;
+                mask |= (1u << (unsigned)idx);
+            }
+        }
+        xbed_host_log_writef(
+            "image-blit: tally pass=%u/%d mask=0x%02x",
+            pass_count, GRID_CELLS, mask);
     }
 
     /* Phase 2: now set up the 3D pipeline for the dashboard. Default

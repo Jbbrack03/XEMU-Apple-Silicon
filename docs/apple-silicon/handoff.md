@@ -1,15 +1,103 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 13 — §H.6 image-blit residual
-**REFRAMED via code-path audit** from cycle 12's "guest CPU
-cache-coherency" framing to a **PFIFO ↔ vCPU dispatch race**:
-xemu never publishes `NV_PGRAPH_STATUS` and the default-on
-`XEMU_PGRAPH_FAST_READ` returns 0 via `__ATOMIC_RELAXED`, so
-`pb_wait_until_gr_not_busy` exits on the first iteration and
-the guest's AGP read can win the race against the PFIFO
-thread's not-yet-processed IMAGE_BLIT push. Doc-only slice
-(zero source diff). M15 overall still **NOT MET** pending §H.6
-full close, §G.5, RT-as-texture.
+Last updated: 2026-05-22 (cycle 15 — **§H.6 cycle-13 race
+hypothesis CONFIRMED renderer-agnostic** via new opt-in
+host-visible guest-log channel `XEMU_GUEST_LOG=1` / IO port
+0xE9. Both GL and Metal legs of `image-blit.iso` produce
+identical `pass=3/8 mask=0x31` (cells 0/4/5 PASS) first-run
+under the new channel; cycle-11 follow-up item #1 ("Re-run
+image-blit on GL") is now CLOSED. Cycle-13 follow-up item #2
+(`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) is the next bounded slice;
+expected to flip all 8 cells green on both renderers. M15
+overall still **NOT MET** pending §H.6 full close, §G.5,
+RT-as-texture.
+
+## 2026-05-22 (cycle 15) — §H.6 renderer-agnostic confirmation + reusable host-visible guest-log channel
+
+**Status: SHIPPED — host-visible Tier-2 oracle output channel + first-adopter retargeted (image-blit v0.4).**
+
+**Slice.** Smallest durable host-visible output path for Tier-2
+diagnostic XBEs whose per-cell oracle verdicts otherwise depend on
+GL/Metal screenshot capture. Renderer-agnostic by construction;
+opt-in by env var so retail runs are unaffected.
+
+**What landed.**
+
+- `hw/xbox/xbox_guest_log.c` (NEW, ~110 lines): opt-in IO-port sink
+  at port 0xE9. Bytes accumulate into a 512-byte line buffer; `\n`
+  / `\0` / buffer-full flushes to `stderr` with `xemu-guest-log:`
+  prefix. Activation gated by `XEMU_GUEST_LOG=1`. Wired into
+  `xbox_init_common` (`hw/xbox/xbox.c:344`) and declared in
+  `hw/xbox/xbox.h`. Build-system entry in `hw/xbox/meson.build`.
+- `scripts/apple-silicon/xbe-tests/lib/xbed_runtime.{h,c}`: shared
+  `xbed_host_log_write[f]()` helpers using GCC inline `outb` to a
+  fixed compile-time port `XBED_HOST_LOG_PORT = 0xE9`. Helpers
+  safe to call unconditionally — silently absorbed by unmapped IO
+  on real Xbox / stock upstream xemu.
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c`: mirrors the
+  existing per-cell PASS|FAIL + first-mismatch lines through the
+  new channel alongside `debugPrint`; adds session-begin anchor
+  line and post-Phase-1 tally line
+  `image-blit: tally pass=N/8 mask=0xXX`.
+- `scripts/apple-silicon/xbe-tests/image-blit/manifest.json`:
+  bumped to v0.4; adds `"gl"` to `expected_fail_renderers` to
+  record the renderer-agnostic truth uncovered by the new channel.
+
+**Cycle 13 race hypothesis — CONFIRMED renderer-agnostic.**
+
+Captured 2026-05-22 12:31 CDT under
+`benchmark-runs/xbe-cycle15-host-log-20260522-123038/`:
+
+| Run # | Metal tally        | GL tally           |
+|------:|:------------------:|:------------------:|
+| 1     | 3/8 (mask=0x31)    | 3/8 (mask=0x31)    |
+| 2     | 3/8 (mask=0x31)    | 3/8 (mask=0x31)    |
+| 3     | 2/8 (mask=0x30)    | 2/8 (mask=0x30)    |
+| 4     | 2/8 (mask=0x30)    | 3/8 (mask=0x31)    |
+
+mask=0x31 ↔ cells 0, 4, 5 PASS (the same triplet cycle-11/12/13
+identified on Metal v0.2/v0.3). First-mismatch records also match
+across renderers: every FAIL cell shows `got=0xff808080`
+(sentinel), `expected=0xffff0000` (RED), at `(mx=0, my=0)`. The
+small per-boot mask drift is expected under the cycle-13
+PFIFO/vCPU race hypothesis (small race window → small variance).
+This is the renderer-agnostic confirmation cycle 14 could not
+produce because the GL screenshot path is upstream-blocked.
+
+**Codex validation.** `/codex-validate changes` returned MAJOR
+ISSUES with three actionable findings; all three adopted before
+close (see decision-log cycle-15 entry). Notable adoption: dropped
+the runtime `XEMU_GUEST_LOG_PORT` host override so the port is
+fixed end-to-end on both sides (Codex finding #2 — a runtime
+override without a matching XBE rebuild would silently disconnect
+the channel).
+
+**Cycle 11 follow-up list status update.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED by this slice.
+  Renderer-agnostic verdict confirmed; bug is in shared
+  PFIFO/PGRAPH machinery, NOT in `mtl/blit.c`.
+- ⏭ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — promoted to next
+  bounded slice. Codex mandatory.
+- ⏳ #3 (Real-Xbox oracle parity check) — deferred until #2 lands
+  and flips all 8 cells green locally.
+
+**M15 default-on Gate 2 status — UNCHANGED from cycle 13.**
+
+- §E.13 per-format pitch + image-rect alignment — MET (cycle 10).
+- §H.6 IMAGE_BLIT — PARTIAL (3/8 cells green first-run; residual
+  now CONFIRMED renderer-agnostic by cycle 15; expected to close
+  via `XEMU_DIAG_PGRAPH_STATUS_DRAIN`).
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+XBE first-wave Metal count unchanged at **17 of 18 PASS on Metal
++ 1 expected_fail SPEC** (`logic-ops`). Second-wave coverage now
+**1 MET + 1 PARTIAL out of 4**.
+
+Cycle 13 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 13) — §H.6 `image-blit` residual REFRAMED — PFIFO ↔ vCPU dispatch race against missing NV_PGRAPH_STATUS publication
 

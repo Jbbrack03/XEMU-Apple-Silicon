@@ -12,6 +12,7 @@ specific_ss.add(files(
 	'smbus_storage.c',
 	'smbus_xbox_smc.c',
 	'xbox.c',
+	'xbox_guest_log.c',
 	'xbox_pci.c',
 	'xid.c',
 	'xblc.c',

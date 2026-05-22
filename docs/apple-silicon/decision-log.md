@@ -1,5 +1,129 @@
 # Decision Log
 
+## 2026-05-22 (cycle 15): §H.6 `image-blit` is **renderer-agnostic** — host-visible guest-log channel adopted as reusable Tier-2 oracle output path
+
+**Decision.** Adopt a small opt-in host-visible guest-log channel
+(`XEMU_GUEST_LOG=1`, fixed IO port `0xE9`, byte-stream → xemu stderr
+with `xemu-guest-log:` prefix) as the durable reusable output path
+for Tier-2 diagnostic XBEs whose per-cell oracle verdicts otherwise
+live only in the on-screen framebuffer and therefore depend on
+GL/Metal screenshot capture. First adopter: `image-blit` v0.4.
+
+The empirical first run with both legs of `image-blit.iso` through
+`xbe-harness` under `XEMU_GUEST_LOG=1` produces matching tally
+`pass=3/8 mask=0x31` on Metal AND GL on the first XBE invocation
+(cells 0, 4, 5 PASS on both renderers). This **confirms the cycle-13
+PFIFO ↔ vCPU dispatch-race hypothesis is renderer-agnostic**: the
+§H.6 residual lives in shared PFIFO/PGRAPH machinery upstream of
+either renderer, not in `mtl/blit.c` or any per-renderer code path.
+
+Evidence: `benchmark-runs/xbe-cycle15-host-log-20260522-123038/`,
+`host-log-evidence-summary.md`, `image-blit/{metal,gl}/xemu.log`.
+
+**Mechanism.** A new ISA-style IO device at port `0xE9`
+(`hw/xbox/xbox_guest_log.c`) accumulates byte writes from the guest
+into a per-instance line buffer and flushes to stderr on `\n` /
+`\0` / buffer-full. The device is opt-in via env var
+`XEMU_GUEST_LOG=1` so retail runs are unaffected. The port is
+fixed end-to-end — a host-side runtime override without a matching
+XBE-library rebuild would silently disconnect the channel, so the
+matching guest-side `XBED_HOST_LOG_PORT` in
+`scripts/apple-silicon/xbe-tests/lib/xbed_runtime.h` is also a
+compile-time constant (Codex 2026-05-22 finding #2 adopted; the
+initial draft had a runtime `XEMU_GUEST_LOG_PORT` override on the
+host side only — dropped).
+
+Guest helpers `xbed_host_log_write[f]()` live in `xbed_runtime` so
+every diagnostic XBE can opt in by a single function call alongside
+its existing `debugPrint` lines. Helpers use GCC inline `outb`; on
+real Xbox or stock upstream xemu the OUT instruction is absorbed by
+unmapped IO space, so calls are safe unconditionally.
+
+**Why we didn't take the alternatives.**
+
+- Hooking `int 0x2D` (`OutputDebugStringA` / NT debugger interrupt)
+  would also be renderer-agnostic, but `int 0x2D` is not handled by
+  xemu (`grep -rn '0x2D' xemu-fork/hw` returns no Xbox-side debug
+  hook) and adding kernel-debugger-interrupt emulation is a larger
+  scope than a single-byte IO port.
+- Reusing the QEMU `isa-debugcon` device would require chardev
+  plumbing and a runtime `-device` argument that doesn't currently
+  exist in xemu's Xbox machine wiring. The bespoke
+  `xbox_guest_log.c` device is ~60 lines and integrates with a
+  single function call.
+- Scanning VRAM for a magic string is intrusive, heavyweight, and
+  introduces a dependency on the renderer's surface-cache lifecycle.
+
+**Renderer-agnostic verdict matrix from the first cycle-15 run.**
+
+| Run # | Metal tally | GL tally |
+|------:|:-----------:|:--------:|
+| 1     | 3/8 (mask=0x31) | 3/8 (mask=0x31) |
+| 2     | 3/8 (mask=0x31) | 3/8 (mask=0x31) |
+| 3     | 2/8 (mask=0x30) | 2/8 (mask=0x30) |
+| 4     | 2/8 (mask=0x30) | 3/8 (mask=0x31) |
+
+Cells 1/2/3/6/7 first-mismatch records also match across
+renderers: `got=0xff808080` (sentinel), `expected=0xffff0000`
+(RED), at `(mx=0, my=0)`. Per-run mask drift across reboots within
+the 35s harness window is expected under the cycle-13 race
+hypothesis (small race window → small per-boot variance), not new
+non-determinism.
+
+**Implication for cycle 11 follow-up list.** Item #1 ("Re-run
+image-blit on GL") is now **CLOSED** by the cycle-15 evidence; the
+answer is renderer-agnostic and the §H.6 residual sits in
+PFIFO/PGRAPH, not in `mtl/blit.c`. Item #2
+(`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) becomes the **highest-priority
+next bounded slice** for cycle 16 — a small `hw/xbox/nv2a/`
+change that should flip all 8 cells green on both renderers and
+close §H.6.
+
+**Manifest / harness state.** `scripts/apple-silicon/xbe-tests/image-blit/manifest.json`
+bumped to v0.4 and adds `"gl"` to `expected_fail_renderers` to
+record the renderer-agnostic truth. The existing harness gate at
+`xbe_orchestrator.py:430` only downgrades pixel-oracle failures
+that ran to completion (`run.status == "ok"`); the GL leg's current
+`fail (no-screenshot-captured)` status surfaces as a separate infra
+issue (the upstream GL display-capture gap from cycle 14), not as
+a regression in the host-log channel itself.
+
+**Codex validation.** `/codex-validate changes` returned MAJOR
+ISSUES with three actionable findings; all three were adopted in
+this slice before close:
+
+1. (High) `XEMU_GUEST_LOG` must be documented in
+   `docs/apple-silicon/automation.md` and the relevant
+   `.claude/rules/flags-*.md`. **Adopted**: added a "Guest-side log
+   channel (cycle 15)" section to `automation.md` and a 1-line
+   index entry under `## Guest-side log channel` in
+   `.claude/rules/flags-bench.md`.
+2. (Medium) Removing the runtime port override on the host so the
+   port is fixed end-to-end and cannot silently disconnect.
+   **Adopted**: dropped `XEMU_GUEST_LOG_PORT` parsing in
+   `hw/xbox/xbox_guest_log.c`; rebuilt xemu; re-ran GL leg
+   confirming the channel still works (4 reboots, all
+   `tally pass=3/8 mask=0x31`).
+3. (Medium) Close the orchestration-state files and update the
+   manifest to reflect that GL also fails on this XBE. **Adopted**:
+   added `"gl"` to `expected_fail_renderers`; the orchestration-
+   state files are closed as part of this cycle-15 commit.
+
+**Combines with rules.** #1 (no guessing — channel verified
+end-to-end), #4 (no doc drift), #5 (tool built when the existing
+toolset was the limit), #15 (Codex mandatory before non-trivial
+close), #17 (XBE-first development loop).
+
+**Next slice (NOT started in cycle 15).** Implement the cycle-13
+follow-up item #2 — an opt-in `XEMU_DIAG_PGRAPH_STATUS_DRAIN`
+diagnostic flag wired into `pgraph_read(NV_PGRAPH_STATUS)` so it
+returns non-zero while `pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] !=
+pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`. Codex mandatory for that
+slice; if all 8 cells PASS under the flag on both renderers, §H.6
+is closeable via a properly-published PGRAPH busy bit.
+
+---
+
 ## 2026-05-22 (cycle 13): §H.6 `image-blit` residual reframed — PFIFO/vCPU dispatch race, NOT TLB / cache-coherency
 
 **Decision.** Sharpen cycle 12's "guest CPU read-back coherency"

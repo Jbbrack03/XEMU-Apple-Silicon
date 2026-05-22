@@ -232,3 +232,53 @@ void xbed_draw_arrays(unsigned mode, int start, int count)
     p = pb_push1(p, NV097_SET_BEGIN_END, NV097_SET_BEGIN_END_OP_END);
     pb_end(p);
 }
+
+/* ---------------------------------------------------------------------
+ * Host-visible log channel (cycle 15, 2026-05-22).
+ *
+ * Writes string bytes one at a time to IO port XBED_HOST_LOG_PORT
+ * (default 0xE9). The host xemu side (`hw/xbox/xbox_guest_log.c`)
+ * accumulates bytes into a line buffer and flushes to stderr on '\n'
+ * with an `xemu-guest-log:` prefix when XEMU_GUEST_LOG=1 is set.
+ *
+ * On real Xbox hardware (or stock upstream xemu without the device
+ * wired in) the OUT instruction is silently absorbed by unmapped IO
+ * space, so this helper is safe to call unconditionally. */
+
+static inline void xbed_outb_e9(unsigned char val)
+{
+    __asm__ __volatile__("outb %0, %1"
+                         :
+                         : "a"(val), "Nd"((unsigned short)XBED_HOST_LOG_PORT));
+}
+
+void xbed_host_log_write(const char *line)
+{
+    if (line == NULL) {
+        return;
+    }
+    while (*line) {
+        xbed_outb_e9((unsigned char)*line++);
+    }
+    xbed_outb_e9((unsigned char)'\n');
+}
+
+#include <stdarg.h>
+
+void xbed_host_log_writef(const char *fmt, ...)
+{
+    char buf[256];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    /* Strip any trailing newline the caller passed; xbed_host_log_write
+     * always appends exactly one '\n'. */
+    if (n > 0 && buf[n - 1] == '\n') {
+        buf[n - 1] = '\0';
+    }
+    xbed_host_log_write(buf);
+}

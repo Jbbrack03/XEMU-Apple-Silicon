@@ -82,4 +82,31 @@ void          xbed_draw_arrays(unsigned mode, int start, int count);
 int           xbed_back_buffer_width(void);
 int           xbed_back_buffer_height(void);
 
+/* Host-visible log channel (cycle 15, 2026-05-22). When xemu is
+ * launched with XEMU_GUEST_LOG=1, the host installs an IO-port sink
+ * on port 0xE9 (see `hw/xbox/xbox_guest_log.c`) that forwards bytes
+ * written by the guest to xemu stderr with an `xemu-guest-log:`
+ * prefix. Each call to xbed_host_log_write() emits one line (a
+ * trailing '\n' is appended automatically). Each call to
+ * xbed_host_log_writef() formats and emits one line.
+ *
+ * Renderer-agnostic; does NOT depend on screenshot capture, so Tier-2
+ * XBEs can surface per-cell oracle verdicts even when the GL or Metal
+ * display-capture path is broken. On real Xbox hardware (or stock
+ * upstream xemu without the device wired in) the OUT instruction is a
+ * silent no-op, so calls are safe regardless of host.
+ *
+ * Implementation: GCC inline `outb` to a fixed compile-time port
+ * (0xE9). The port is intentionally NOT runtime-configurable on
+ * either side — a host-side override without a matching rebuild
+ * would silently disconnect the channel. If you ever need to move
+ * the port, change BOTH this define AND XBOX_GUEST_LOG_IOPORT in
+ * `hw/xbox/xbox_guest_log.c`, then rebuild xemu AND the XBE
+ * library. */
+#define XBED_HOST_LOG_PORT 0xE9
+
+void          xbed_host_log_write(const char *line);
+void          xbed_host_log_writef(const char *fmt, ...)
+    __attribute__((format(printf, 1, 2)));
+
 #endif /* XBED_RUNTIME_H */
