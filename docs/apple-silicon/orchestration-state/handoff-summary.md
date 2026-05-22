@@ -1,7 +1,8 @@
 # Handoff Summary
 
-- Cycle 17 closed at commit `9024a548f7` (status-drain diagnostic, image-blit 3/8 → 8/8 mask=0xff on Metal AND GL renderer-agnostically; cycle-13 dispatch-race hypothesis confirmed).
-- Cycle 18 was the packaging slice that closes the carry-forward orchestration-state diff Hermes left behind when opening this session. Scope was doc-only (quartet refresh + cycle-17 closure-hash record), matching the cycle-16 precedent (`3b5257a498`).
-- **Next bounded slice (cycle 19):** real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` (cycle-11 follow-up item #3). This gates the default-on / long-term-fix decision (properly published busy bit vs. default PFIFO barrier vs. shipping the diagnostic as-is). Start in a fresh session; do not start it as a continuation of this packaging session.
-- Pre-reqs already in place for cycle 19: `XEMU_DIAG_PGRAPH_STATUS_DRAIN` flag landed (`hw/xbox/nv2a/pgraph/pgraph.c`, `nv2a_regs.h`); host-visible guest-log channel (`XEMU_GUEST_LOG`, cycle 15) usable for tally readback; `XBE_HARNESS_TIMEOUT_SECONDS` override available for the long-latency GL leg; reference local evidence in `benchmark-runs/cycle17-status-drain-{metal-PASS-gl-timeout,gl-long-timeout}-20260522/`.
-- Worktree state at handoff: clean after this packaging commit. No carry-forward dirty diff for the next session.
+- Cycle 17 closed the local renderer-agnostic milestone; cycle 18 packaged the state in a separate doc-only checkpoint.
+- Cycle 19 was BLOCKED earlier today on Claude billing; that blocker is CLEARED — the worker ran through Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell, not the exhausted ANTHROPIC_API_KEY shell fallback.
+- Cycle 19 then attempted the real-Xbox parity check for image-blit.iso. Two independent runs (timestamps 20260522T203718Z and 20260522T204139Z) chainloaded the XBE successfully and the Xbox rebooted cleanly back to FTP, but neither run produced `D:\image-blit-capture.bin` or `D:\image-blit-done.txt`. Cycle 17's xemu-side `pass=8/8 mask=0xff` cannot be cross-witnessed against real Xbox via image-blit in its current form.
+- `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision is DEFERRED. The flag continues to ship opt-in, default OFF — cycle 17's local finding is not invalidated.
+- Next bounded slice (cycle 20+): either rework image-blit with early FTP-collectable progress markers (Path A) or build a smaller PFIFO-race-only diag XBE that captures via the proven `xbed_capture` PCRTC path (Path B). Scope choice is the next Hermes pass's call.
+- All evidence and canonical-doc updates are on disk; the next session can resume cold from files per the orchestration-workflow.md §7 model.

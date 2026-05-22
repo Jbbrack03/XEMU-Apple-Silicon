@@ -1,26 +1,33 @@
 # Claude Status
 
-- Objective: cycle-18 bounded cleanup/packaging slice for the completed cycle-17 status-drain milestone.
-- Status: **CLOSED — cycle-17 closure hash `9024a548f7` recorded into the durable control plane; quartet aligned with reality; explicit next-session handoff captured.**
-- Session: hermes_xemu_live_20260522_1410
-- Started: 2026-05-22 14:10 CDT.
-- Closed: 2026-05-22 (this slice).
+- Objective: cycle-19 bounded real-Xbox parity check for image-blit.iso with the status-drain diagnostic enabled on the xemu leg.
+- Status: **CLOSED — parity check attempted across two bounded runs; real-Xbox witness path BLOCKED; default-on decision DEFERRED.**
+- Active session: cycle-19 (Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell). Bounded scope complete.
 
-## Worker receipt
+## Outcome (one-paragraph)
 
-- **Docs read:** orchestration-workflow.md; current-cycle.md; claude-status.md; validation-status.md; handoff-summary.md; handoff.md (cycle-17 section + recent state); decision-log.md (cycle-17 entry); prior packaging-commit precedents (cycle-16 `3b5257a498`, cycle-14 `3aea4aee54`, cycle-12 `4f3b95a93a`).
-- **Bounded slice objective:** package the carry-forward cycle-17 closure state cleanly. Scope = doc-only quartet update plus one `docs/state:` commit.
-- **Outcome:** met. Dirty diff confirmed to be cycle-18 opening state authored by Hermes (not cycle-17 leftover); cycle-17 implementation + canonical docs were already shipped in commit `9024a548f7`. Quartet advanced to CLOSED with the cycle-17 hash recorded.
+Two independent `xbe_orchestrator.py run --xbe image-blit --renderer real-xbox` attempts each chainloaded the XBE successfully, the Xbox rebooted cleanly back to FTP, and the oracle agent re-launched — but neither attempt produced `D:\image-blit-capture.bin` or `D:\image-blit-done.txt`. Only the uploaded `default.xbe` was in `/E/Apps/image-blit/` after each run. Cycle 17's `pass=8/8 mask=0xff` therefore cannot be witnessed against real Xbox using `image-blit.iso` in its current form. The `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision is deferred to a future cycle that either reworks the XBE to be real-Xbox-witnessable (Path A) or builds a smaller PFIFO-race-only diag XBE (Path B).
 
-## Closure summary
+## Evidence preserved
 
-- Code shipped: none. Pure doc-only packaging slice.
-- Docs synced: `current-cycle.md`, `claude-status.md`, `validation-status.md`, `handoff-summary.md` — all four quartet files moved from "cycle-18 STARTED, awaiting receipt" → "cycle-18 CLOSED with closure record + next-session handoff".
-- Codex validation: skipped by precedent. Doc-only quartet edit, aggregate diff below the rule #15 trigger; matches the cycle-16 packaging-slice precedent (commit `3b5257a498` body: "Codex re-validation was not triggered for cycle 16").
-- Canonical docs (`handoff.md`, `decision-log.md`, `automation.md`, `flags-*.md`) already carry the cycle-17 entries from `9024a548f7`; no further sync needed in this slice.
-- Next bounded slice (cycle 19): cycle-11 follow-up item #3 — real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`. Start in a fresh session.
+- `benchmark-runs/cycle19-real-xbox-parity-image-blit-20260522T203718Z/` — attempt 1 (chainload→FTP-back 22.4 s; only `default.xbe` collected).
+- `benchmark-runs/cycle19-real-xbox-parity-image-blit-retry-20260522T204139Z/` — attempt 2 (chainload→FTP-back 22.3 s; same result).
 
-## Supervisor note
+Each run dir includes `report.md`, `summary.json`, `image-blit/real-xbox/real-xbox.log`, and `orch/{pre,post}.png` + `orch/verdict.json` + `orch/artifacts/default.xbe`.
 
-- Prior worker session was closed after cycle 17 reached a validated milestone and the canonical docs were synced.
-- This packaging session existed specifically because the quartet still carried the supervisor's cycle-18 OPEN edit; it is now cleanly closed and the worktree is ready for the next investigation slice.
+## Canonical docs synced
+
+- `docs/apple-silicon/handoff.md` — cycle-19 entry at the top; cycle-17 entry preserved below.
+- `docs/apple-silicon/decision-log.md` — cycle-19 entry above the cycle-17 entry; cycle-17 NOT superseded.
+- `docs/apple-silicon/orchestration-state/*` — all four files updated this cycle (this one, current-cycle.md, validation-status.md, handoff-summary.md).
+
+## Codex validation
+
+- N/A this cycle. Rule #15 trigger (>30-line uncommitted diff on renderer / TCG / NV2A / build / apple-silicon scripts) does not fire — cycle 19 is doc-only + evidence preservation. No xemu-fork code changed.
+
+## Next bounded slice (cycle 20+)
+
+- Path A: instrument `image-blit/main.c` with early always-on FTP-collectable progress markers to identify which stage fails on real Xbox.
+- Path B: build a smaller PFIFO-race-only Tier-1 diag XBE that captures via the proven `xbed_capture` PCRTC path.
+
+Scope choice belongs to the next Hermes pass.

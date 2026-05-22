@@ -1,14 +1,195 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 17 — **`XEMU_DIAG_PGRAPH_STATUS_DRAIN`
-LANDED**; §H.6 IMAGE_BLIT race window closed renderer-agnostically.
-Under the flag, image-blit.iso flips from cycle-15's `pass=3/8
-mask=0x31` to `pass=8/8 mask=0xff` on Metal (4 boots) and GL
-(15 boots). Cycle-11 follow-up item #2 — CLOSED. Cycle-11
-follow-up item #3 (real-Xbox parity check on the diag flag) is
-the next bounded slice; gates the default-on / long-term-fix
-decision. M15 overall still **NOT MET** pending §H.6 default-on
-shape, §G.5, RT-as-texture.
+Last updated: 2026-05-22 (cycle 19 — **real-Xbox parity check
+ATTEMPTED; image-blit.iso does not produce real-Xbox-witnessable
+output in its current form**. Two independent chainload attempts
+returned only the uploaded `default.xbe` from `/E/Apps/image-blit/`
+— no `D:\image-blit-capture.bin` and no `D:\image-blit-done.txt`,
+even though the Xbox rebooted cleanly back to FTP after ~22 s of
+runtime. Cycle-17's xemu-with-flag `pass=8/8 mask=0xff` therefore
+CANNOT be directly compared against a real-Xbox tally. The
+`XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix
+decision is **DEFERRED** pending a real-Xbox-witnessable
+diagnostic. Cycle-11 follow-up item #3 — **ATTEMPTED, BLOCKED on
+witness mechanism, not on the diagnostic itself.** M15 overall
+still **NOT MET** pending §H.6 default-on shape, §G.5,
+RT-as-texture.
+
+## 2026-05-22 (cycle 19) — real-Xbox image-blit parity check attempted; witness path BLOCKED
+
+**Status: ATTEMPTED — capture reproducibly FAILED on real Xbox
+across two bounded attempts; long-term-fix decision deferred.**
+
+**Slice.** Cycle-11 follow-up item #3 promoted by cycle-17 closure:
+take the cycle-17 `XEMU_DIAG_PGRAPH_STATUS_DRAIN` result
+(`pass=8/8 mask=0xff` on Metal AND GL under the flag) and witness
+the same XBE on real Xbox via the existing oracle pipeline. The
+parity outcome would inform the long-term-fix shape — match implies
+"diagnostic correctly models real-hardware NV_PGRAPH_STATUS"
+(justifies default-on path); divergence implies "diagnostic is a
+xemu-side overshoot" (different fix needed).
+
+**Pre-conditions verified.**
+
+- `oracle-smoke.sh` 12/12 PASS at 2026-05-22 15:36 CDT (agent up,
+  EEPROM sha256=871ed8a9…, controller buffer kernel-pool allocated
+  with `anchor_ok=1`, screenshot RPC working).
+- Working tree clean on `apple-silicon-performance` except the
+  cycle-19 doc updates; HEAD = `b2e4af913f` (cycle-18 packaging).
+
+**What was run.**
+
+```
+python3 scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
+  --xbe image-blit --renderer real-xbox --out <bench-dir>
+```
+
+Twice, ~3 minutes apart. Each run:
+1. Reboots Xbox to release FTP, uploads `bin/default.xbe` (155 648 B)
+   to `/E/Apps/image-blit/`.
+2. Re-launches the oracle agent via `SITE EXEC`.
+3. Captures `pre.png` (agent splash visible).
+4. Chainloads `E:\Apps\image-blit\default.xbe` via the agent's
+   `runxbe` RPC.
+5. Waits for the Xbox to come back to FTP after the chainloaded XBE
+   reboots.
+6. FTP-pulls everything under `/E/Apps/image-blit/`.
+7. Re-launches the agent, captures `post.png`.
+
+**Result — reproducible across two attempts.**
+
+| Attempt | Run dir | Chainload→FTP-back gap | Files in `/E/Apps/image-blit/` after run |
+|--------:|---|---:|---|
+| 1 | `benchmark-runs/cycle19-real-xbox-parity-image-blit-20260522T203718Z/` | 22.4 s | `default.xbe` (the upload) only |
+| 2 | `benchmark-runs/cycle19-real-xbox-parity-image-blit-retry-20260522T204139Z/` | 22.3 s | `default.xbe` (the upload) only |
+
+Neither attempt produced `D:\image-blit-capture.bin` or
+`D:\image-blit-done.txt`. The orchestrator's `verdict.json`
+reports `status: ok` for the chainload-and-collect cycle itself —
+the Xbox successfully rebooted, FTP came back inside the 120-retry
+window, and the post-run agent splash matches the pre-run splash.
+The harness's pixel oracle correctly flips the cell to `fail` with
+`notes: no-xoss-blob-pulled` (the XOSS decoder has nothing to
+decode).
+
+`pre.png` and `post.png` for both attempts show only the
+oracle-agent boot splash — the agent re-launched cleanly after
+the XBE's reboot, so the screenshot capture sees the agent's
+fresh init, not whatever the XBE rendered. Without composite
+capture (MS2109) we cannot determine from these screenshots alone
+whether the XBE crashed during init / class-object instantiation /
+IMAGE_BLIT submission / `pb_agp_access()` VRAM readback /
+`xbed_capture_front_to_xoss()`'s `fopen("D:\\…","wb")`, or whether
+it completed and the D:\ fopens silently failed because real
+Xbox's chainload-launched-from-`E:\Apps\image-blit\` does not
+remap D:\ the way `XLaunchXBE` does for ISO-mounted launches.
+
+**Why the parity check is decision-relevant, and why it cannot
+land today.** The cycle-17 conclusion — "publishing a meaningful
+`NV_PGRAPH_STATUS` busy bit gated on PFIFO drain eligibility flips
+image-blit from `3/8 mask=0x31` to `8/8 mask=0xff` on both Metal
+and GL with zero changes to renderer code" — is a xemu-side
+finding. To justify a default-on flip, we need real-Xbox evidence
+that hardware ALSO reports `8/8` under the same workload, i.e.
+that the diagnostic faithfully models real-NV2A behavior rather
+than over-correcting. Without that, defaulting the flag on risks
+"fixed on xemu but diverges from real hardware" — exactly the
+failure mode rule #17 (XBE-first development loop is binding for
+the Metal renderer; the retail-game oracle is the final acceptance
+gate) was adopted to prevent.
+
+**Decision.** The `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on /
+long-term-fix shape decision is **DEFERRED**. The flag continues
+to ship opt-in, default OFF; nothing about cycle-17's local
+finding is invalidated.
+
+**Hypotheses for the witness-path failure (NOT decided today —
+listed only to bound the next cycle).**
+
+1. **D:\ remap mismatch.** `XLaunchXBE` on real Xbox, when chained
+   from the oracle agent (`SITE EXEC` launch from FTP), may not
+   remap D:\ to point at the chainloaded XBE's directory the way
+   `-dvd_path image-blit.iso` does on xemu. If true, both
+   `xbed_capture_front_to_xoss(D:\\…)` and the done-marker fopen
+   silently fail, but the orderly reboot still happens. Other
+   real-Xbox Tier-1 XBEs (`mirror`, `color-channel`, `depth-floor`)
+   captured byte-exact references via this same harness on
+   2026-05-07, which is some evidence against a generic D:\ failure
+   — but image-blit is a Tier-2 XBE with additional D:\ usage
+   patterns that may differ.
+2. **NV2A class-object instantiation mismatch.** image-blit
+   pre-binds channel 3 (NV_09F IMAGE_BLIT) and channel 4 (NV_062
+   CONTEXT_SURFACES_2D) via pbkit handles 3/4 to avoid the
+   `set_draw_buffer()` reprogramming of channels 9/11 (see
+   manifest.json). Real NV2A may enforce stricter instantiation
+   rules that xemu doesn't, triggering an NV2A exception that the
+   pbkit pre-bind doesn't recover from.
+3. **`pb_agp_access()` divergence.** image-blit reads dst VRAM
+   via the cache-coherent linear AGP remap. Real NV2A's AGP
+   aperture behavior may not match xemu's emulated linear path.
+4. **Some other early-init failure.** Memory alignment, PFIFO
+   programming order, or a pbkit init step that's safe on xemu
+   but not on real Xbox.
+
+**Next bounded slice (cycle 20+).** Restore the witness path. Two
+candidate paths, both legitimate per `diagnostic-xbe-plan.md` v2
+and rule #5 (build tools when the toolset is the limit):
+
+- **A. Make image-blit real-Xbox-witnessable.** Add an
+  always-on, FTP-collectable diagnostic file the XBE writes
+  EARLY (e.g. before pbkit init), and stage subsequent progress
+  markers through additional fopens. Verify which stage fails on
+  real Xbox by which marker files exist after the chainload+reboot
+  cycle. This is a cheap, ladder-style targeted-test slice per
+  rule #1.
+- **B. Build a smaller PFIFO-race-only XBE.** A new Tier-1 diag
+  that exercises ONLY the `pb_wait_until_gr_not_busy()` semantics
+  against a workload that races against NV_PGRAPH_STATUS — no
+  IMAGE_BLIT, no pb_agp_access, no per-cell dashboard encoding.
+  Capture via the existing PCRTC-based xbed_capture path that's
+  already proven on real Xbox. Pass/fail signal is just a binary
+  "tally drained before timeout / didn't."
+
+**A** is the cheapest, **B** is the most robust. The cycle-20
+scope choice belongs to the next Hermes pass.
+
+**Codex validation.** Cycle 19 is doc-only + evidence-preservation
+(no xemu-fork code changes; aggregate uncommitted diff is the
+four orchestration-state files + this handoff entry + the
+decision-log cycle-19 entry). Rule #15's `/codex-validate changes`
+trigger (>30-line uncommitted diff on renderer / TCG / NV2A /
+build / apple-silicon scripts) does not fire on doc-only work.
+
+**Files produced.**
+
+- `benchmark-runs/cycle19-real-xbox-parity-image-blit-20260522T203718Z/`
+  (attempt 1; report.md + summary.json + image-blit/real-xbox/
+  real-xbox.log + orch/{pre,post}.png + orch/verdict.json +
+  orch/artifacts/default.xbe).
+- `benchmark-runs/cycle19-real-xbox-parity-image-blit-retry-20260522T204139Z/`
+  (attempt 2; same shape).
+
+**Cycle 11 follow-up list — updated.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED cycle 15.
+- ✅ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — CLOSED cycle 17.
+- 🟡 #3 (Real-Xbox parity check) — **ATTEMPTED cycle 19, BLOCKED
+  on the XBE's real-Xbox witness mechanism, NOT on the diagnostic
+  itself.** Promoted to cycle 20 with two candidate paths
+  (witness-on-image-blit vs smaller-PFIFO-race-XBE).
+
+**M15 default-on Gate 2 status — UNCHANGED from cycle 17.**
+
+- §E.13 per-format pitch + image-rect alignment — MET (cycle 10).
+- §H.6 IMAGE_BLIT — **MET under the flag locally (cycle 17);
+  default-off pending the real-Xbox witness path (cycle 19's
+  finding).**
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+Cycle 17 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 17) — `XEMU_DIAG_PGRAPH_STATUS_DRAIN` lands; §H.6 race window closed renderer-agnostically
 

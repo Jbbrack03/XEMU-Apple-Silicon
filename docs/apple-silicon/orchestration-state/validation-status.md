@@ -1,22 +1,32 @@
 # Validation Status
 
-- Active slice: cycle 18 — cleanup/packaging for the completed cycle-17 status-drain milestone (**CLOSED 2026-05-22**).
-- Validation state: **CLOSED — every required gate green.**
+- Active slice: cycle 19 — real-Xbox parity check for image-blit.iso under the status-drain diagnostic.
+- Validation state: **CLOSED — parity attempt reproducibly produced no real-Xbox witness; default-on decision deferred. All gates below satisfied for the assigned bounded scope.**
 
-## Required gates for this slice — all met
+## Gate status
 
-- [x] Fresh worker receipt posted after canonical-doc read and reflected in `current-cycle.md` plus `claude-status.md`.
-- [x] Dirty diff reviewed and confirmed to be cycle-18 opening state authored by Hermes (not cycle-17 leftover). Cycle 17 implementation + canonical doc sync is fully committed at `9024a548f7`.
-- [x] One clean packaging outcome produced: a `docs/state:` checkpoint commit advancing the quartet from "cycle-18 STARTED, awaiting receipt" to "cycle-18 CLOSED" and recording the cycle-17 closure hash, following the cycle-16 precedent (`3b5257a498`).
-- [x] Durable orchestration-state files (`current-cycle.md`, `claude-status.md`, `validation-status.md`, `handoff-summary.md`) kept aligned with the actual slice state through closure.
-- [x] Explicit handoff recorded in `handoff-summary.md` for the next session: real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` (cycle-11 follow-up item #3).
+- [x] Fresh worker receipt posted after canonical-doc read and reflected in current-cycle.md plus claude-status.md (15:35 CDT).
+- [x] Real-Xbox oracle / harness path exercised for the bounded parity check (twice; rule #1 reproducibility confirmation).
+- [x] Durable evidence captured: `benchmark-runs/cycle19-real-xbox-parity-image-blit-{20260522T203718Z,retry-20260522T204139Z}/` (each with report.md, summary.json, real-xbox.log, pre/post.png, verdict.json, artifacts/default.xbe).
+- [x] Decision impact recorded clearly: `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix shape DEFERRED pending a real-Xbox-witnessable diag XBE (handoff.md + decision-log.md cycle-19 entries).
+- [x] Canonical docs + orchestration-state files synced to the actual outcome.
+- [x] Codex validation considered — N/A this cycle. Rule #15 trigger (>30-line uncommitted diff on renderer / TCG / NV2A / build / apple-silicon scripts) does not fire on doc-only + evidence-preservation work.
 
-## Codex re-validation
+## Witness outcome summary
 
-- Skipped by precedent. This slice's diff is doc-only (four orchestration-state files), well below the rule #15 trigger and matching the cycle-16 packaging-slice precedent ("Codex re-validation was not triggered for cycle 16"). The cycle-17 implementation itself already received a Codex `changes` pass with both MINOR ISSUES adopted before commit `9024a548f7`.
+| Attempt | Run dir | Chainload→FTP-back | Files retrieved from `/E/Apps/image-blit/` |
+|---|---|---:|---|
+| 1 | `cycle19-real-xbox-parity-image-blit-20260522T203718Z/` | 22.4 s | `default.xbe` (upload echo) only |
+| 2 | `cycle19-real-xbox-parity-image-blit-retry-20260522T204139Z/` | 22.3 s | `default.xbe` (upload echo) only |
 
-## Carry-forward context
+Both attempts produced `verdict.json status: ok` for the chainload-and-collect cycle itself, but no `D:\image-blit-capture.bin` and no `D:\image-blit-done.txt`. The pixel oracle correctly marked the cell as `fail: no-xoss-blob-pulled`.
 
-- Cycle 17 already achieved the substantive graphics milestone: the status-drain diagnostic flips `image-blit` from `pass=3/8 mask=0x31` to `pass=8/8 mask=0xff` on both Metal (4 boots) and GL (15 boots) renderer-agnostically; the cycle-13 PFIFO ↔ vCPU dispatch-race hypothesis is empirically confirmed.
-- Cycle 18 (this slice) was packaging-only and adds no new evidence. The next fresh worker can start the real-Xbox parity step from a clean checkpoint.
-- Cycle-11 follow-up item #3 (real-Xbox oracle parity check) gates the default-on / long-term-fix decision and is the next bounded slice.
+## What still stands from cycle 17
+
+- xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged.
+- §H.6 IMAGE_BLIT MET under the flag locally — unchanged.
+- Flag ships opt-in, default OFF — unchanged.
+
+## What changed
+
+- The path from cycle 17's local MET to a default-on flip now explicitly requires a new bounded slice that establishes a real-Xbox witness (Path A or Path B in the handoff/decision-log entries).
