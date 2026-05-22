@@ -1,5 +1,171 @@
 # Decision Log
 
+## 2026-05-22 (Hermes cycle 6): §4.13 `texture-shader-stages` v0.1 shipped as SPEC ORACLE; last unstarted first-wave XBE; expected_fail Metal pending task #18
+
+**Decision.** Ship the smallest high-value vertical slice of the
+§4.13 catalog entry — 2 of 19 modes (`PASS_THROUGH` 0x04 +
+`PROGRAM_NONE` 0x00) at stage 0 only — as the v0.1 SPEC ORACLE
+into the first-wave rotation, rather than holding the slice until
+the full 19-mode test matrix is ready. The 2-mode subset is
+specifically chosen as the only pair whose expected output is
+byte-exactly derivable without modeling the full
+sampler/filter/wrap state machine (PASSTHRU outputs the
+interpolated TEXCOORD0; PROGRAM_NONE outputs (0,0,0,1)); both
+modes are single-stage with no inter-stage dependencies; together
+they exercise the SHADER_STAGE_PROGRAM 5-bit-per-stage register
+dispatch path. The 17 remaining modes (PROJECT2D, PROJECT3D,
+CUBEMAP, CLIPPLANE, BUMPENVMAP*, BRDF, DOT_*, DPNDNT_*,
+DOTPRODUCT, DOT_RFLCT_SPEC_CONST) are deferred to v0.2+ behind
+the dedicated multi-stage-chaining infrastructure that needs to
+be built first.
+
+**Code change set.** All under
+`scripts/apple-silicon/xbe-tests/texture-shader-stages/`:
+
+1. `main.c` (~440 LOC including header): 4x2 grid (8 cells),
+   POSITION + TEXCOORD0 + DIFFUSE per-vertex stream. Per-cell
+   SHADER_STAGE_PROGRAM override at draw time
+   (`program_stage_program_for_cell`). Shared combiner setup
+   (`program_combiners_shared`): COLOR ICW stage 0 A_SOURCE=T0,
+   B_SOURCE=ZERO with UNSIGNED_INVERT (so B=1), C=D=0; OCW
+   AB_DST=R0, OP=NOSHIFT; alpha stage 0 zeroed; final-combiner
+   D=R0, G=DIFFUSE.a — the same combiner topology as
+   `combiner-basic` v0.1, just with `A_SOURCE=T0` instead of
+   `A_SOURCE=DIFFUSE`. Dummy 4x4 magenta texture bound to stage 0
+   so the renderer does not override stage_program=NONE due to a
+   disabled stage (`hw/xbox/nv2a/pgraph/glsl/psh.c:142-148`).
+2. `expected.py`: math-derived oracle. Row 0 cells = RED / GREEN /
+   BLUE / WHITE per TEXCOORD0 input; row 1 cells = BLACK x 4 per
+   PROGRAM_NONE.
+3. `manifest.json`: declares `expected_fail_renderers:
+   ["xemu/metal"]` with detailed `expected_fail_notes` documenting
+   the empirical Metal FAIL signature (boots OK, clears OK,
+   draws produce no visible output), the 3 candidate root causes
+   for task #18 investigation (one ruled out by Codex during this
+   review), the GL exclusion rationale (harness screencap path
+   limitation), and the next-session-actionable v0.2 bisect
+   experiment. Pins `metal_canonical_overrides:
+   {"XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"}` so captures land on
+   the 640x480 NV2A surface (unaffected by the `surface_scale=2`
+   xemu.toml mutation that catches `pipeline-smoke`).
+4. `Makefile`: standard nxdk wiring (mirrors
+   `texture-format-sweep/Makefile` pattern).
+
+**Validation evidence (durable, all under `benchmark-runs/`):**
+
+- `20260522T064552Z-task18-texture-shader-stages-metal/`: initial
+  run with default `drawable` screenshot source — FAIL pure-
+  BLACK output, captured frame 0044 selected by harness frame-
+  scoring (boot logo).
+- `20260522T065933Z-task18-ts-shader-dump/`: same XBE with
+  `XEMU_METAL_DUMP_TARGET_SHADER=all` → 1024 .glsl files dumped;
+  2 unique pipelines for the 0x032a4000 front buffer, both
+  PROJECT2D-mode (from dashboard + xbed_load_textured_shaders Cg
+  setup); zero PSH variants with `vec4 t0 = pT0;`.
+- `20260522T070256Z-task18-texture-shader-stages-metal-v0.1-baseline/`:
+  canonical baseline with `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`
+  pinned via the manifest's `metal_canonical_overrides`. Harness
+  correctly reports `expected_fail` (recognizing the manifest's
+  declaration). `signal_match_pct=19.3` confirms no per-cell
+  color content reaches the front buffer.
+- Same-session sanity check `/tmp/combiner-basic-sanity/`:
+  `combiner-basic` v0.1 PASSes on the same harness setup → the
+  harness is sound; the FAIL is specific to §4.13's renderer
+  interaction.
+
+**Codex review state (cycle 6).** COMPLETED via `/codex-validate
+changes`. Verdict: **MINOR ISSUES** (2 findings, both adopted).
+
+- **MEDIUM (adopted).** The original v0.1 manifest listed
+  "Metal pipeline cache key omits SHADER_STAGE_PROGRAM" as
+  candidate root cause (1). Codex verified by reading
+  `hw/xbox/nv2a/pgraph/mtl/shaderstate.h:59-67`, then
+  `hw/xbox/nv2a/pgraph/glsl/shaders.h:27-31`, then
+  `hw/xbox/nv2a/pgraph/glsl/psh.h:37-40`, that the cache key
+  DOES include `PshState.shader_stage_program`. Manifest's
+  `expected_fail_notes` rewritten: revised candidate (1) now
+  points at pipeline-rebuild dirty-state propagation around
+  `NV_PGRAPH_SHADERPROG` writes (not key omission).
+- **LOW (adopted).** `main.c`'s header text said "No
+  `compare_overrides` needed" while the manifest set
+  `max_changed_pct=3.0 / min_signal_match_pct=97.0`.
+  `expected.py`'s docstring made a similar "byte-exact"
+  claim. Both updated to clarify: cell interiors are byte-
+  exact; the budget exists only to absorb inter-cell
+  rasterizer-edge pixels (4 vertical seams + 1 horizontal
+  mid-line) + harness frame-selection slack; the per-channel
+  threshold remains the harness default (16) and is not
+  relaxed by this XBE.
+- **OPEN question Codex raised (deflected via explicit
+  documentation).** GL not listed in `expected_fail_renderers`
+  even though the harness GL screencap path is known-unreliable.
+  Manifest now documents the GL exclusion explicitly in
+  `expected_fail_notes`: the harness reports
+  `no-screenshot-captured` for the GL leg rather than a
+  meaningful diff result; treat any GL run as smoke until the
+  GL renderer-native screenshot path is implemented (separate
+  harness-improvement slice).
+- **OUT OF SCOPE Codex noted.** No obvious authoring bug in
+  `main.c` explains the all-BLACK Metal result — the combiner
+  / source encodings and PASSTHRU/NONE derivation are
+  internally consistent against `psh.c`. This strengthens
+  the case that the FAIL is renderer-side, not test-side, and
+  validates filing it as task #18 (renderer investigation)
+  rather than reworking the XBE.
+
+**Task #18 filed (next-session blocker for §4.13 rotation flip
+to PASS).** Three candidate root causes after Codex cycle 6
+review:
+
+1. (Revised per Codex) `NV_PGRAPH_SHADERPROG` may not trigger
+   pipeline-rebuild dirty-state on Metal despite being in the
+   cache key.
+2. XBE-side combiner setup may cause silent failure (e.g. wrong
+   ICW_A_SOURCE encoding for T0 — though combiner-basic uses
+   the same encoding successfully, just with DIFFUSE source).
+3. State-machine interaction between
+   `xbed_load_textured_shaders` Cg-emitted setup and per-cell
+   SHADER_STAGE_PROGRAM override.
+
+**Next concrete step for task #18 investigation (next-session-
+actionable, documented in manifest's expected_fail_notes):**
+add a 3rd cell variant in v0.2 that uses
+`ICW_A_SOURCE=DIFFUSE` (slot 3) with per-cell DIFFUSE =
+(R,G,B,1) — if that variant renders correctly, candidate (2)
+and (3) are ruled out and the regression localizes to the
+SHADER_STAGE_PROGRAM register write → Metal pipeline-rebuild
+dirty-state chain (revised candidate 1).
+
+**Methodology continuity.** This slice honors workspace
+`CLAUDE.md` rule #17 (XBE-first methodology binding for the
+Metal renderer): the §4.13 XBE was authored as a feature-
+isolating SPEC ORACLE first; the discovered renderer-side FAIL
+is filed as a separate investigation task (#18) rather than
+re-tuning retail-title metrics. The slice mirrors the v0.2
+`swizzle-mipmap` precedent (cycle 3 morning of 2026-05-21):
+ship the XBE as expected_fail SPEC oracle when it catches a
+real renderer regression, document the empirical signature,
+file a dedicated renderer-fix task for a separate slice.
+
+**Doc / instrumentation deltas landed this slice.**
+
+- 5 new files under
+  `scripts/apple-silicon/xbe-tests/texture-shader-stages/`.
+- `docs/apple-silicon/handoff.md` — cycle 6 banner appended;
+  cycle 5 narrative preserved.
+- `docs/apple-silicon/decision-log.md` — cycle 6 entry
+  appended (this entry).
+- `docs/apple-silicon/orchestration-state/{claude-status,
+  current-cycle, validation-status, handoff-summary}.md` —
+  refreshed to slice-complete state.
+- Codex marker at
+  `/Users/jbbrack03/XEMU_MacOS/.claude/state/codex-validate-last-run`.
+
+**Previous cycle 5 (task #16 closure) decision preserved below.**
+
+---
+
+
 ## 2026-05-22 (Hermes cycle 5): task #16 CLOSED — Metal non-cubemap-2D `s.border` 2x-upload + xbed_texture `BORDER_SOURCE_COLOR` default shipped; swizzle-mipmap PASS byte-exact on Metal
 
 **Decision.** Implement the two-bug fix scope identified by

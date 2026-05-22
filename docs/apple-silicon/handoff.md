@@ -1,14 +1,177 @@
 # Handoff
 
-Last updated: 2026-05-22 (Hermes-supervised cycle 5 — task #16 closure
+Last updated: 2026-05-22 (Hermes-supervised cycle 6 — §4.13
+`texture-shader-stages` v0.1 slice). **Last unstarted first-wave
+XBE shipped as SPEC ORACLE.** §4.13 v0.1 covers 2 of 19 NV2A
+SHADER_STAGE_PROGRAM modes at stage 0 (`PASS_THROUGH` 0x04 +
+`PROGRAM_NONE` 0x00) on a 4x2 grid. The slice ships as
+`expected_fail` on xemu/metal: the XBE boots, clears to BLACK,
+reaches the draw loop, but the 8 per-cell draws produce no
+visible output — the captured frame stays at the pure-BLACK
+clear color across all 3 render-and-reboot cycles observed. This
+is a real renderer-side finding (filed as **task #18** for next-
+session investigation; Codex 2026-05-22 ruled out the original
+"cache key omits SHADER_STAGE_PROGRAM" hypothesis by reading
+shaderstate.h:59-67 → shaders.h:27-31 → psh.h:37-40; revised
+hypothesis is pipeline-rebuild dirty-state propagation around
+`NV_PGRAPH_SHADERPROG` writes). First-wave XBE rotation now
+stands at **16 of 18 PASS on Metal + 2 expected_fail** (logic-ops
+neither-renderer SPEC; texture-shader-stages tracks task #18) +
+1 expected_fail GL-only (swizzle-mipmap task #17). 0 unstarted
+of the §4 first-wave priority list. Cycle 6 banner appended;
+cycle 5 preserved below for continuity.
+
+## 2026-05-22 (Hermes cycle 6) — §4.13 `texture-shader-stages` v0.1 (last unstarted first-wave XBE; ships as expected_fail Metal pending task #18)
+
+**Status: BOUNDED PARTIAL closed cleanly.** v0.1 lands the
+infrastructure + a math-derived spec oracle for the
+SHADER_STAGE_PROGRAM 5-bit-per-stage register dispatch path. The
+XBE is design-verified (Codex MINOR ISSUES adopted) but FAILs on
+Metal with a documented signature; the FAIL is queued as task #18
+for the next session. Per workspace rule #17 (XBE-first
+methodology), this is the correct shape: ship the feature-
+isolating XBE as a SPEC ORACLE first; investigate the renderer-
+side root cause in a separate dedicated slice.
+
+**Slice scope (v0.1):** 4x2 grid, 8 cells, 2 of 19 modes.
+
+- Row 0 (4 cells): SHADER_STAGE_PROGRAM stage0 = PASS_THROUGH
+  (0x04); per-cell `TEXCOORD0 = (R,G,B,1)` → t0 = pT0 → R0 →
+  fragColor. Expected: RED / GREEN / BLUE / WHITE.
+- Row 1 (4 cells): SHADER_STAGE_PROGRAM stage0 = PROGRAM_NONE
+  (0x00); identical per-cell TEXCOORD0 input → t0 = (0,0,0,1)
+  regardless of input → BLACK x 4. Identical input across both
+  rows isolates per-row delta to the SHADER_STAGE_PROGRAM
+  dispatch path itself.
+- Shared combiner override (mirrors combiner-basic v0.1
+  topology): COLOR ICW stage 0 A_SOURCE=T0, B_SOURCE=ZERO
+  (UNSIGNED_INVERT → B=1), C=D=0; OCW AB_DST=R0; alpha
+  zeroed; final-combiner D=R0, G=DIFFUSE.a.
+- Stage 0 bound to a 4x4 magenta dummy texture (so renderer
+  does NOT force stage_program=NONE due to a disabled stage per
+  `glsl/psh.c:142-148`); texture content is never sampled by
+  either mode, but a leak would render row 0 MAGENTA.
+
+**Files added (5 new):**
+
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/main.c`
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/expected.py`
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/manifest.json`
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/Makefile`
+- build artifacts (`bin/default.xbe`, `texture-shader-stages.iso`,
+  `main.{exe,obj,c.d}`)
+
+**Validation evidence (durable, under `benchmark-runs/`):**
+
+| Run dir | Purpose | Result |
+|---|---|---|
+| `20260522T064552Z-task18-texture-shader-stages-metal/` | initial Metal run (drawable source) | FAIL pure-BLACK |
+| `20260522T065933Z-task18-ts-shader-dump/` | XEMU_METAL_DUMP_TARGET_SHADER=all | 1024 .glsl; no PASSTHRU PSH variant emitted for the front buffer |
+| `20260522T070256Z-task18-texture-shader-stages-metal-v0.1-baseline/` | nv2a source pinned via metal_canonical_overrides; canonical baseline | `expected_fail` recognized by harness; `signal_match_pct=19.3` confirms no per-cell color content |
+
+Combiner-basic sanity check on the same harness setup PASSed in
+the same session (`/tmp/combiner-basic-sanity/`), so the harness
+itself is sound — the FAIL is specific to this XBE's renderer
+interaction.
+
+**Codex review state (cycle 6):** COMPLETED. Verdict: **MINOR
+ISSUES** (2 findings, both adopted).
+
+- MEDIUM (adopted): cycle 6 v0.1 manifest's candidate root
+  cause (1) said the Metal pipeline cache key may omit
+  SHADER_STAGE_PROGRAM. Codex verified via
+  `hw/xbox/nv2a/pgraph/glsl/psh.h:37-40` →
+  `hw/xbox/nv2a/pgraph/glsl/shaders.h:27-31` →
+  `hw/xbox/nv2a/pgraph/mtl/shaderstate.h:59-67` that the key
+  DOES include `shader_stage_program`. Manifest rewritten:
+  revised hypothesis (1) now points at pipeline-rebuild dirty-
+  state propagation around `NV_PGRAPH_SHADERPROG` writes
+  instead.
+- LOW (adopted): main.c header text "No `compare_overrides`
+  needed" + `expected.py` "byte-exact" claim were inconsistent
+  with the manifest's `max_changed_pct=3.0 / min_signal=97.0`
+  budget. Both header texts updated to clarify that the budget
+  absorbs only inter-cell rasterizer edges + harness frame-
+  selection slack; per-channel threshold remains harness default
+  (16); cell interiors are byte-exact.
+- OPEN question Codex raised: GL not in `expected_fail_renderers`
+  even though the harness GL screencap path is unreliable. The
+  manifest now documents the GL exclusion explicitly in
+  `expected_fail_notes` (the harness will report
+  `no-screenshot-captured` for the GL leg rather than a
+  meaningful diff; treat any GL run as smoke until GL renderer-
+  native screenshot lands).
+- OUT OF SCOPE Codex noted: no obvious authoring bug in main.c
+  explains the all-BLACK Metal result. The combiner / source
+  encodings and PASSTHRU/NONE derivation are internally
+  consistent — strengthening the case that the FAIL is renderer-
+  side.
+
+**M15 default-on prerequisite status (per `metal-renderer-plan.md`
+§M15 + 2026-05-20 evening XBE-first methodology pivot):** the
+first-wave XBE PASS count is **16 of 18** with this slice (was 16
+of 17 before §4.13 entered the rotation; §4.13 enters as a
+documented expected_fail SPEC oracle for task #18, mirroring
+`swizzle-mipmap` v0.2's role for tasks #16/#17 before they
+closed). All §4 priority XBEs now have at least a v0.1; only
+v0.2+ expansions and the second wave remain queued.
+
+**Net next-highest-value actions (not binding):**
+
+1. **Investigate task #18 (§4.13 Metal silent-fail root cause).**
+   Three remaining candidate root causes (Codex ruled out the
+   original "cache key omits SHADER_STAGE_PROGRAM" hypothesis):
+   (1) `NV_PGRAPH_SHADERPROG` may not trigger pipeline dirty-
+   state / rebuild on Metal despite being in the key; (2) my
+   XBE's combiner setup may cause a silent failure (e.g. wrong
+   ICW_A_SOURCE encoding for T0, even though combiner-basic
+   uses the same encoding); (3) state-machine interaction
+   between xbed_load_textured_shaders Cg setup and per-cell
+   override. Next concrete step: author the v0.2 DIFFUSE-source
+   experiment cell (described in expected_fail_notes) to bisect
+   between (1) renderer-side vs (2)/(3) XBE-side.
+2. **Investigate task #17 (GL LOD-clamp regression)** — separate
+   slice. Cycle 3 evidence: GL renders swizzle-mipmap cell 0
+   correctly but cells 1..6 BLACK when MIN_LOD_CLAMP =
+   MAX_LOD_CLAMP > 0. Likely lives in `gl/texture.c` per-mip
+   upload when `s.levels < 7`.
+3. **v0.2 expansion of `texture-shader-stages` after task #18
+   closure.** Add the remaining 17 modes (PROJECT2D, PROJECT3D,
+   CUBEMAP, CLIPPLANE, BUMPENVMAP*, BRDF, DOT_*, DPNDNT_*,
+   DOTPRODUCT, DOT_RFLCT_SPEC_CONST) with multi-stage chaining
+   infrastructure.
+4. **Investigate the pipeline-smoke `surface_scale=2` leak**
+   — harness / xemu.toml interaction; pre-existing, documented
+   under cycle 5.
+
+**Doc / instrumentation deltas landed this slice:**
+
+- 5 new files under
+  `scripts/apple-silicon/xbe-tests/texture-shader-stages/`.
+- `docs/apple-silicon/handoff.md` — cycle 6 banner appended.
+- `docs/apple-silicon/decision-log.md` — cycle 6 entry appended.
+- `docs/apple-silicon/orchestration-state/*.md` — 3
+  orchestration-state files refreshed to slice-complete state.
+- Codex marker at
+  `/Users/jbbrack03/XEMU_MacOS/.claude/state/codex-validate-last-run`.
+
+**Previous cycle 5 closure banner preserved below for continuity.**
+
+---
+
+
+
+## 2026-05-22 (Hermes cycle 5) — Task #16 closure: Metal bordered-texture fix + xbed_texture library BORDER_SOURCE_COLOR default
+
+(Cycle-5 closure narrative preserved verbatim below.)
+**Original 2026-05-22 cycle 5 header text:** Last updated: 2026-05-22 (Hermes-supervised cycle 5 — task #16 closure
 slice). **Task #16 CLOSED.** `swizzle-mipmap` v0.2 now PASSes byte-exact
 on Metal (changed_pixels_pct=0.0000, signal_match_pct=100.0000) via
-the two-part fix Cycle 4 identified end-to-end. XBE rotation now stands
+the two-part fix Cycle 4 identified end-to-end. XBE rotation now stood
 at 16 of 17 first-wave XBEs PASS on Metal + 1 expected_fail (`logic-ops`,
 NV2A feature in neither renderer) + 1 expected_fail GL-only
-(`swizzle-mipmap` v0.2 still tracks task #17 GL LOD-clamp regression).
-1 unstarted (`texture-shader-stages`). Cycle 5 banner appended; cycles
-2 + 3 + 4 preserved below for continuity.
+(`swizzle-mipmap` v0.2 still tracked task #17 GL LOD-clamp regression).
+1 unstarted (`texture-shader-stages` — closed by cycle 6, this banner).
 
 ## 2026-05-22 (Hermes cycle 5) — Task #16 closure: Metal bordered-texture fix + xbed_texture library BORDER_SOURCE_COLOR default
 

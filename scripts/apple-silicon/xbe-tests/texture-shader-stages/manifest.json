@@ -1,0 +1,45 @@
+{
+  "id": "texture-shader-stages",
+  "title": "NV2A SHADER_STAGE_PROGRAM dispatch oracle (v0.1 — PASS_THROUGH + PROGRAM_NONE; ships as expected_fail Metal pending task #18 investigation)",
+  "purpose": "4x2 grid (8 cells) exercising 2 of the 19 NV2A texture-shader-stage modes at stage 0. Row 0 (4 cells): SHADER_STAGE_PROGRAM stage0 = PASS_THROUGH (0x04), TEXCOORD0 set to (R,G,B,1) per cell -> t0 = pT0 -> R0 -> fragColor; cells render RED/GREEN/BLUE/WHITE. Row 1 (4 cells): SHADER_STAGE_PROGRAM stage0 = PROGRAM_NONE (0x00), TEXCOORD0 mirrors row 0 -> t0 = (0,0,0,1) regardless of input -> all 4 cells render BLACK. Identical TEXCOORD0 input across both rows isolates the per-row delta to the mode dispatch itself. Stage 0 is bound to a 4x4 magenta dummy texture for both rows so the renderer does not override SHADER_STAGE_PROGRAM to NONE due to a disabled stage (psh.c:142-148). The texture is never sampled by either mode (PASS_THROUGH uses pT0; NONE uses constant); any accidental sample reaching fragColor would paint row 0 MAGENTA instead of the target colors. v0.1 catches: (a) SHADER_STAGE_PROGRAM 5-bit-per-stage field mis-decoded; (b) PASS_THROUGH collapsed to NONE (row 0 BLACK); (c) NONE collapsed to PASS_THROUGH (row 1 colored); (d) TEXCOORD0 attribute interpolation broken (row 0 uniform color); (e) dummy texture sample leaking into the combiner (row 0 MAGENTA). v0.2 will expand to the remaining 17 modes; multi-stage chaining (BUMPENVMAP*, DOT_*, DPNDNT_*, DOTPRODUCT) requires inter-stage infrastructure deferred to v0.3+.",
+  "catalog_ref": "§D.8",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\texture-shader-stages-capture.bin",
+      "ftp_path": "/E/Apps/texture-shader-stages/texture-shader-stages-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\texture-shader-stages-done.txt",
+      "ftp_path": "/E/Apps/texture-shader-stages/texture-shader-stages-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "metal_canonical_overrides": {
+    "XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["xemu/metal"],
+  "expected_fail_notes": "Metal v0.1 ships as expected_fail pending task #18 root-cause investigation. Empirical signature (benchmark-runs/20260522T064552Z-task18-texture-shader-stages-metal/ and the 2026-05-22 baseline run with nv2a screenshot source pinned): the XBE successfully boots, clears the 640x480 front buffer to BLACK via xbed_clear_color_argb(0xFF000000), and reaches xbed_render_loop_then_capture (confirmed by 3 distinct pure-BLACK frames at host capture indices 0124-0126, 0190-0192, 0256-0258, each ~5s apart, matching the n_frames=300 render-and-capture-and-reboot cycle), but the 8 per-cell draws issued via xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, ...) produce NO visible output -- the captured frame stays at the pure-BLACK clear color throughout the XBE render window. The shader dump via XEMU_METAL_DUMP_TARGET_SHADER=all (benchmark-runs/20260522T065933Z-task18-ts-shader-dump/) shows only PROJECT2D-mode PSH variants for the 0x032a4000 front-buffer (2 unique pipelines, both from the dashboard / xbed_load_textured_shaders Cg-emitted state); no PSH variant containing the expected `vec4 t0 = pT0;` (PASS_THROUGH) signature is observed. Three candidate root causes (not yet narrowed) for the next session to investigate (Codex 2026-05-22 confirmed the pipeline cache key DOES include SHADER_STAGE_PROGRAM via PshState.shader_stage_program -> ShaderState -> mtl_pipeline_key per hw/xbox/nv2a/pgraph/glsl/psh.h:37-40, hw/xbox/nv2a/pgraph/glsl/shaders.h:27-31, hw/xbox/nv2a/pgraph/mtl/shaderstate.h:59-67, so the original 'cache key omits it' hypothesis is ruled out): (1) SHADER_STAGE_PROGRAM may not be invalidating/rebuilding the translated Metal pipeline despite being in the key -- dirty-state propagation around NV_PGRAPH_SHADERPROG write may be the gap (revised per Codex finding); (2) my XBE's combiner setup is incorrect in a way that causes the draws to fail silently (e.g. wrong ICW_A_SOURCE encoding for T0); (3) some other state-machine interaction between the textured-shaders Cg setup and my per-cell override. GL renderer leg is NOT in the rotation today: the harness's GL-side capture path uses sidecar window screencapture (xbe-harness/README.md), which cannot reliably land a deterministic frame in the XBE's 5-second render window; the GL leg is excluded from `expected_fail_renderers` because the harness will report no-screenshot-captured rather than a comparable diff result -- treat any GL run output as smoke until the GL capture path lands at the renderer-native level. Next-session-actionable: add a 3rd cell variant in v0.2 that uses ICW_A_SOURCE=DIFFUSE (slot 3) with per-cell DIFFUSE = (R,G,B,1) -- if that variant renders correctly, root cause (2) or (3) is ruled out and the regression localizes to the SHADER_STAGE_PROGRAM register write -> Metal pipeline-rebuild dirty-state chain (revised hypothesis 1). See decision-log 2026-05-22 cycle 6 + handoff.md."
+}

@@ -1,24 +1,26 @@
 # Validation Status
 
-- Current slice: Task #16 closure — Metal non-cubemap-2D `s.border` 2x-upload + xbed_texture library `BORDER_SOURCE_COLOR` default (Hermes cycle 5, 2026-05-22).
-- Build/tests: incremental `ninja -C build qemu-system-i386` succeeded (single-file recompile of `texture_pg.c`). Full `./build.sh -a arm64 --skip-shader-validation` succeeded — Apple Silicon binary built, signed (`codesign --verify --deep --strict` returns "valid on disk"), runs `--version` (`QEMU emulator version 10.2.0 (v0.8.134-189-gd4eec1ce5c-dirty)`). M5 shader-validation post-build gate intentionally skipped for the hot-iteration loop. 4 XBE binaries rebuilt via nxdk (`make clean && make` in each of swizzle-mipmap, texture-format-sweep, texture-filter-wrap, texture-dma-ab) — all clean.
-- Code coverage: functional fixes (no env-gated/diag); aggregate ~58 LOC across 3 source files. The renderer fix is gated on the precise `!s.cubemap && !f.linear && s.border` predicate so it's a no-op for ALL existing texture binds except non-cubemap-2D bordered ones (a path previously broken — the new path is the first correct execution); the XBE library fix is a 1-line addition that no-ops for LU_IMAGE_ users (linear path skips bordered UV transform regardless of `s.border`) and corrects `s.border` for the one SZ_ user.
-- XBE rotation: **16/17 first-wave PASS on Metal** after this slice (was 15/17). Remaining: 1 expected_fail (`logic-ops`, NV2A feature in neither renderer; SPEC oracle), 1 expected_fail GL-only (`swizzle-mipmap` v0.2 — task #17 GL LOD-clamp regression), 1 unstarted (`texture-shader-stages` §4.13).
-- Validation evidence:
-  - `benchmark-runs/20260522T054316Z-task16-swizzle-mipmap-validation/` — swizzle-mipmap canonical Metal: **PASS byte-exact** (`changed_pixels=0`, `mean_abs_error=0.0000`, `rms_error=0.0000`, `max_abs_error=0`, `signal_match_pct=100.0000` at gate ≥95.0%).
-  - `benchmark-runs/20260522T054422Z-task16-xbed-texture-regress/` — 3 LU_IMAGE_ xbed_texture XBEs (texture-format-sweep, texture-filter-wrap, texture-dma-ab) all PASS on Metal. Confirms library fix is a no-op for linear callers.
-  - `benchmark-runs/20260522T055631Z-task16-wider-regress/` — 7 non-texture XBEs (depth-floor, stencil-ops, native-quad-tri-depth, cmp-vertex-format, flat-quad-propagation, crtc-publish ×2 variants) all PASS on Metal. msaa-aa-factor reports `not-built` — pre-existing build state, unrelated. Confirms renderer fix doesn't regress non-bordered code paths.
-  - `benchmark-runs/20260522T054657Z-task16-renderer-regress-smoke/` — pipeline-smoke + mirror + color-channel + combiner-basic + blend-matrix: 4/5 PASS. pipeline-smoke FAILs with the captured candidate at `1280x960` (drawable @ `surface_scale=2`) vs the 640x480 math-derived reference. Independent re-run at `benchmark-runs/20260522T055508Z-task16-pipeline-smoke-recheck/` confirms same deterministic failure mode.
-  - **pipeline-smoke FAIL attribution (not regressed by this slice):** xemu mutates the harness's `surface_scale=1` toml on first launch — the per-cell `xemu.toml` written by `scripts/apple-silicon/xbe-harness/xbe_renderers.py:78-79` shows `surface_scale = 1` in source, but xemu's post-run-rewrite drops the entire `[display.quality]` block and re-applies the Apple Silicon first-launch default = 2 on the next read. pipeline-smoke is Tier-4 (CPU-paints framebuffer with a single white pixel at (320, 50)) and has no `metal_canonical_overrides` for `XEMU_METAL_SCREENSHOT_SOURCE=nv2a` so it captures the upscaled drawable, which then doesn't survive the harness's downsample to 640x480 for comparison. swizzle-mipmap is immune because its manifest declares `XEMU_METAL_SCREENSHOT_SOURCE=nv2a`. The fix for this is a separate harness/config-mutation slice (queued).
-- Codex validation: COMPLETED via `/codex-validate changes` on the final diff. Verdict: MINOR ISSUES. Detail in `decision-log.md` cycle 5 entry and `handoff-summary.md`.
-  - **Adopted (LOW):** `lib/vs.inl` + `lib/xbed_tex_vs.inl` had workstation-absolute path comments from the rebuild path. Reverted via `git checkout --` on those two files (shader bytecode identical, pure cosmetic noise).
-  - **Deferred (OPEN):** expose `BORDER_SOURCE` as an explicit field on `XbedTextureStage0` for a future dedicated bordered-texture XBE. Tracked as a follow-up; the hardcoded COLOR default in this slice matches the nxdk samples/mesh reference and unblocks the four current users today.
-  - **Out of scope per Codex:** pipeline-smoke attribution wasn't independently verified by Codex; I verified independently via deterministic re-run.
-  - Marker `~/.claude/state/codex-validate-last-run` written post-finding-adoption (after the LOW finding's revert). Fingerprint matches the final pre-commit dirty state.
-- Oracle / visual gate: not invoked — Tier-1 math-derived oracle is the canonical reference for swizzle-mipmap (manifest `oracle_priority: ["real-xbox", "math-derived"]`; real-xbox capture not currently available; math-derived produces the exact reference pattern). Byte-exact agreement with the math oracle is the strongest possible signal.
-- Doc-sync (rule #4): all canonical docs synced to cycle-5 closure state pre-commit.
-  - `handoff.md` — cycle-5 banner appended with full closure narrative; cycles 2 + 3 + 4 preserved below for continuity.
-  - `decision-log.md` — cycle-5 entry appended; cites every code location touched + evidence dir.
-  - `scripts/apple-silicon/xbe-tests/swizzle-mipmap/manifest.json` — `expected_fail_renderers` flipped; notes rewritten.
-  - `orchestration-state/{current-cycle,claude-status,handoff-summary,validation-status}.md` — refreshed and reconciled to closure state.
-- Exit option: **A** (renderer fix + library fix + manifest flip + 4 XBE binary rebuilds + doc-sync + Codex-validated; commit pending).
+- Current slice: §4.13 `texture-shader-stages` v0.1 — last unstarted first-wave XBE, Hermes cycle 6 (launched 2026-05-22 01:35:34 CDT).
+- Validation state: GATES MET FOR BOUNDED-PARTIAL EXIT.
+- Repo baseline before slice: clean tree on commit `261b6a6a56` (task #16 closure).
+- Slice scope: ship the v0.1 SPEC ORACLE covering 2 of 19 NV2A SHADER_STAGE_PROGRAM modes at stage 0 (`PASS_THROUGH` 0x04 + `PROGRAM_NONE` 0x00) — the smallest high-value vertical slice that exercises the 5-bit-per-stage register dispatch path without requiring multi-stage chaining infrastructure.
+
+## Gate status
+
+- **Build:** PASS. `make` against the nxdk toolchain produces `bin/default.xbe` (151,552 bytes) and `texture-shader-stages.iso` cleanly; SHA matches between bin/ and iso content.
+- **Harness discovery:** PASS. `python3 xbe_orchestrator.py list` now reports 20 XBEs (was 19), including `texture-shader-stages tier=1 BUILT`.
+- **Expected-oracle generation:** PASS. `python3 expected.py /tmp/texture-shader-stages-expected.png` produces a 640x480 RGBA PNG with the 4x2 colored / black layout.
+- **Metal end-to-end run:** **FAIL on Metal (expected per manifest declaration).** The XBE boots and clears OK but draws produce no visible output. Harness correctly reports `expected_fail` status given the manifest's `expected_fail_renderers: ["xemu/metal"]`. See evidence under `benchmark-runs/20260522T070256Z-task18-texture-shader-stages-metal-v0.1-baseline/` (canonical baseline with `nv2a` screenshot source pinned via `metal_canonical_overrides`).
+- **Cross-XBE sanity:** PASS. `combiner-basic` PASSes on the same harness setup in the same session (`/tmp/combiner-basic-sanity/`), so the harness is sound — the §4.13 FAIL is renderer-interaction-specific.
+- **Codex validation:** PASS. Verdict **MINOR ISSUES** (2 findings, both adopted; 1 open question deflected via explicit documentation; 1 out-of-scope note that strengthens the slice's case). Marker `/Users/jbbrack03/XEMU_MacOS/.claude/state/codex-validate-last-run` will be written on commit-clean fingerprint.
+- **Visual / oracle validation:** N/A for renderer-correctness CLAIM (the slice does not claim Metal renderer correctness for §D.8; it ships as an expected_fail SPEC ORACLE that documents the FAIL as task #18 for a separate renderer-fix slice).
+- **Doc sync:** COMPLETE. `handoff.md` cycle 6 banner appended; `decision-log.md` cycle 6 entry appended; orchestration-state files refreshed.
+
+## Known open items
+
+- **Task #18 (next session):** Investigate why per-cell SHADER_STAGE_PROGRAM writes do not produce visible output on Metal despite the cache key correctly including `shader_stage_program` (Codex 2026-05-22 verified the key composition via shaderstate.h → shaders.h → psh.h). Three candidate root causes documented in the manifest's `expected_fail_notes`; next concrete code step is the v0.2 DIFFUSE-source bisect cell.
+- **GL leg exclusion** from `expected_fail_renderers`: documented explicitly in `expected_fail_notes` — the harness GL screencap path is known-unreliable; the GL leg is not encoded as expected_fail because the harness reports `no-screenshot-captured` rather than a meaningful diff. A separate harness-improvement slice would add renderer-native GL screenshots.
+
+## Cycle exit verdict
+
+**Bounded partial closed cleanly per the cycle's documented fallback exit criterion B.** The slice lands the bounded vertical implementation (5 new files: `main.c` + `expected.py` + `manifest.json` + `Makefile` + build artifacts) with durable evidence (3 distinct benchmark-runs directories), exact blockers documented (3 candidate root causes for task #18), updated canonical docs (handoff + decision-log + 3 orchestration-state files), and the next concrete code step (v0.2 DIFFUSE-source bisect cell). Ready to commit locally; do NOT push to origin.

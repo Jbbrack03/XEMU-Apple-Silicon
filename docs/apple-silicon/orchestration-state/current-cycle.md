@@ -1,13 +1,22 @@
 # Current Cycle
 
-- Started: 2026-05-22 (local; bounded session immediately following Hermes cycle 4 close).
-- Owner: Claude Code (Hermes-supervised cycle 5 of task #16, closure slice).
-- Session goal: Task #16 closure — land the two-bug fix scope identified in Cycle 4 (Metal renderer non-cubemap-2D `s.border` 2x-upload + xbed_texture library `BORDER_SOURCE_COLOR` default), rebuild affected XBE binaries, rebuild xemu, validate swizzle-mipmap on Metal with durable evidence, run Codex on the final diff, update canonical docs + manifest, commit locally (do NOT push).
-- Required reading before substantive work: `docs/apple-silicon/handoff.md` (latest task #16 cycle 4 banner), `docs/apple-silicon/orchestration-workflow.md`, `docs/apple-silicon/decision-log.md` (latest task #16 entry), `docs/apple-silicon/orchestration-state/handoff-summary.md`, `docs/apple-silicon/automation.md` (Metal diag toggles), `../.claude/rules/flags-renderer.md`.
-- Exit criteria:
-  A) Preferred: Task #16 moves from `expected_fail` to validated fixed on Metal with durable artifact-backed evidence, doc-synced, Codex-validated, committed locally. (**MET**.)
-  B) Fallback: clean tree + sharper diagnosis + staged evidence + updated canonical docs + next exact experiment.
-- Result: **Exit Option A achieved.** `swizzle-mipmap` PASSes byte-exact on Metal (`changed_pixels_pct=0.0000`, `signal_match_pct=100.0000`) at `benchmark-runs/20260522T054316Z-task16-swizzle-mipmap-validation/`. Zero regressions across 11 other XBEs exercised (texture-format-sweep, texture-filter-wrap, texture-dma-ab, depth-floor, stencil-ops, native-quad-tri-depth, cmp-vertex-format, flat-quad-propagation, crtc-publish ×2, mirror, color-channel, combiner-basic, blend-matrix). One deterministic pre-existing FAIL (pipeline-smoke) confirmed unrelated to this slice (Tier-4 CPU-painted, no PGRAPH, no textures; root cause: xemu mutates `surface_scale=2` from the harness's `surface_scale=1` toml). Manifest updated to flip `expected_fail_renderers` from `["xemu/gl", "xemu/metal"]` to `["xemu/gl"]`.
-- Out of scope: §4.13 `texture-shader-stages` authoring, task #17 GL LOD-clamp investigation, `swizzle-bordered` follow-up XBE, pipeline-smoke `surface_scale=2` leak investigation, pushing to origin, broad harness sweeps unrelated to Task #16.
-- Validation status: build clean (`./build.sh -a arm64 --skip-shader-validation` succeeds; binary signs and `--version` runs); XBE rebuilds succeed via nxdk (`make clean && make` in each of swizzle-mipmap, texture-format-sweep, texture-filter-wrap, texture-dma-ab); swizzle-mipmap PASS byte-exact + regression smoke clean; `/codex-validate changes` returned MINOR ISSUES with one LOW finding (build-path noise in .inl files — adopted by reverting `git checkout --` on `lib/vs.inl` and `lib/xbed_tex_vs.inl`; shader bytecode identical) and one open question (deferred follow-up: `BORDER_SOURCE` field on `XbedTextureStage0` for future bordered XBE). Codex marker written at `~/.claude/state/codex-validate-last-run` post-revert. Commit pending closure; do NOT push.
-- Notes for supervision: handoff banner, decision-log entry, manifest, and all four orchestration-state files updated to closure state. Validation evidence directories are durable; the only large artifact in the tree is the four rebuilt XBE ISOs (~720 KB each, already pre-committed as binary artifacts in the prior swizzle-mipmap v0.2 slice).
+- Started: 2026-05-22 01:35:34 CDT
+- Closed:  2026-05-22 02:15 CDT (approximate; tied to commit timestamp)
+- Owner: Claude Code (Hermes-supervised cycle 6 — fresh bounded session after task #16 closure commit `261b6a6a56`).
+- Session goal: Start the highest-value next slice from the canonical docs: **Section 4.13 `texture-shader-stages`**. Read the canonical docs first, then author a bounded initial implementation slice inside the workspace only.
+- Required reading consumed: `docs/apple-silicon/handoff.md`, `docs/apple-silicon/decision-log.md`, `docs/apple-silicon/orchestration-workflow.md`, `docs/apple-silicon/orchestration-state/handoff-summary.md`, `docs/apple-silicon/diagnostic-xbe-plan.md` §4.13, `docs/apple-silicon/nv2a-feature-surface-research.md` §D.8, plus the existing XBE helper/test files for texture combiners and stage setup (`combiner-basic/`, `texture-format-sweep/`, `swizzle-mipmap/`, `lib/xbed_runtime.{c,h}`, `lib/xbed_texture.{c,h}`, `lib/xbed_capture.{c,h}`).
+- Scope guardrails (all honored):
+  - Worked only inside `/Users/jbbrack03/XEMU_MacOS/xemu-fork`.
+  - Picked one bounded vertical slice (2 of 19 modes) rather than the full 19-mode matrix.
+  - Updated compact orchestration-state artifacts as the slice progressed.
+  - Codex validation completed (MINOR ISSUES, both adopted).
+  - No renderer-correctness CLAIM made (slice ships as SPEC ORACLE marking task #18 for a separate renderer-fix slice).
+- Exit criteria taken: **Option B (bounded partial with durable evidence).**
+  - Sharply-bounded partial: 5 new files under `scripts/apple-silicon/xbe-tests/texture-shader-stages/` + 4 doc updates. Scope is "2 of 19 modes" with explicit deferral of the remaining 17.
+  - Durable evidence: 3 benchmark-runs directories under `benchmark-runs/`; build artifacts checked in; expected PNG generates byte-stable.
+  - Exact blockers: 3 candidate root causes for the Metal silent-fail documented in `manifest.json::expected_fail_notes` (one ruled out by Codex during this cycle).
+  - Updated canonical docs + orchestration state: handoff.md cycle 6 banner appended; decision-log.md cycle 6 entry appended; 4 orchestration-state files refreshed; Codex finding LOW for compare_overrides text adopted across main.c + expected.py.
+  - Next concrete code step for the following fresh session: add a v0.2 cell variant using `ICW_A_SOURCE=DIFFUSE` (slot 3) with per-cell `DIFFUSE = (R,G,B,1)` to bisect XBE-side vs renderer-side root cause.
+- Initial expectation taken: mapped the §4.13 mode matrix against `psh_regs.h::PS_TEXTUREMODES`, surveyed existing helper infrastructure (`xbed_runtime`, `xbed_capture`, `xbed_texture`, `xbed_tex_vs.cg`, `xbed_tex_ps.cg`), and selected the smallest 2-mode vertical slice that exercises the SHADER_STAGE_PROGRAM dispatch path without inter-stage dependencies or multi-stage chaining infrastructure.
+- Prior slice status: task #16 committed cleanly at `261b6a6a56`; no resumption attempted.
+- Tree state pre-commit: 5 new files + 4 modified doc files. Codex marker pending post-commit clean fingerprint write.
