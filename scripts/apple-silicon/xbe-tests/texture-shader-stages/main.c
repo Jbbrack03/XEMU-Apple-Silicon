@@ -1,6 +1,6 @@
 /*
  * texture-shader-stages — NV2A SHADER_STAGE_PROGRAM (D.8) dispatch Tier-1
- * diag XBE.  v0.1.
+ * diag XBE.  v0.2.
  *
  * NV2A feature exercised: §D.8 (texture stage program — Xbox-specific
  *                          shader stages, 19-mode 5-bit-per-stage field).
@@ -11,19 +11,25 @@
  * Self-validation tier:    1 (host-side capture; math-derived oracle).
  * Oracle priority:         real-xbox (canonical) + math-derived (audit).
  *
- * --- v0.1 scope --------------------------------------------------------
+ * --- v0.2 scope --------------------------------------------------------
  *
  * Per `diagnostic-xbe-plan.md` v2 §4.13: "Iterate each valid (stage,
  * mode) pair from the 19-mode enum; per-mode signature pattern."
- * v0.1 narrows to the **smallest high-value vertical slice** that
- * exercises the SHADER_STAGE_PROGRAM 5-bit-field dispatch path while
- * keeping the inter-stage / multi-texture infrastructure out of scope:
+ * v0.2 expands v0.1's 4x2 grid to a 4x3 grid by adding a third row
+ * that bypasses the t0 path entirely. The new row is a bisect cell
+ * that distinguishes a renderer-side SHADER_STAGE_PROGRAM dispatch
+ * bug from an XBE-side combiner / state-machine bug (per the v0.1
+ * manifest's `expected_fail_notes` next-session experiment):
  *
  *   - Stage 0 only.
- *   - Two modes: `PASS_THROUGH` (0x04) and `PROGRAM_NONE` (0x00).
- *   - The other 17 modes deferred to v0.2+ (see "Does NOT catch" below).
+ *   - Three modes/sources tested:
+ *     row 0: SHADER_STAGE_PROGRAM=PASS_THROUGH (0x04), combiner A=T0.
+ *     row 1: SHADER_STAGE_PROGRAM=PROGRAM_NONE  (0x00), combiner A=T0.
+ *     row 2: SHADER_STAGE_PROGRAM=PROGRAM_NONE  (0x00), combiner A=V0.
+ *   - The other 17 modes deferred to v0.3+ (see "Does NOT catch" below).
  *
- * Why these two: per `hw/xbox/nv2a/pgraph/glsl/psh.c:1170-1227`,
+ * Why these two SHADER_STAGE_PROGRAM modes: per
+ * `hw/xbox/nv2a/pgraph/glsl/psh.c:1170-1227`,
  *
  *     case PS_TEXTUREMODES_NONE:
  *         t0 = vec4(0.0, 0.0, 0.0, 1.0);
@@ -36,7 +42,22 @@
  * expected output is byte-exactly predictable without modeling the
  * full sampler / filter / wrap state machine.
  *
- * Catches that v0.1 detects:
+ * Why the v0.2 row-2 V0/DIFFUSE-source bisect: per the v0.1 manifest's
+ * `expected_fail_notes`, row 2 keeps SHADER_STAGE_PROGRAM at NONE
+ * (same as row 1) but rewires the combiner stage-0 A_SOURCE to V0
+ * (PS_REGISTER_V0 = 0x04, the interpolated vertex DIFFUSE attribute
+ * at slot 3). The per-cell DIFFUSE attribute encodes (R,G,B,1).
+ * Combiner stage 0 routes A=V0 -> R0 -> fragColor, bypassing t0
+ * entirely. If row 2 renders the expected per-cell colors while
+ * row 0 renders black, the failure localizes to the renderer's
+ * PASS_THROUGH path (the t0 / pT0 chain or the
+ * SHADER_STAGE_PROGRAM PASS_THROUGH dispatch); the XBE-side
+ * combiner / vertex-attrib / state-machine plumbing is proven
+ * sound by the working row 2 cells. If row 2 also renders black,
+ * the failure is broader (combiner program never reaches the
+ * fragment stage; or every per-cell draw is silently dropped).
+ *
+ * Catches that v0.2 detects:
  *   - SHADER_STAGE_PROGRAM 5-bit field mis-decoded at stage 0 — any
  *     wrong mode produces output that visibly differs from BOTH the
  *     PASS_THROUGH expectation (texcoord-as-color) AND the NONE
@@ -44,7 +65,7 @@
  *     stage 0 as PROJECT2D would sample the dummy magenta texture and
  *     paint MAGENTA everywhere.
  *   - PASS_THROUGH collapsed to NONE: row 0 renders BLACK instead of
- *     the per-cell color from TEXCOORD0.
+ *     R/G/B/W from TEXCOORD0.
  *   - NONE collapsed to PASS_THROUGH: row 1 renders the per-cell
  *     TEXCOORD0 color instead of BLACK.
  *   - TEXCOORD0 not propagating from VS to PS: row 0 renders a
@@ -55,33 +76,61 @@
  *     incorrectly: if stage 0 is treated as disabled, the renderer
  *     forces stage_program=NONE, which makes the PASS_THROUGH row
  *     render as BLACK and falsely-matches the NONE row.
+ *   - v0.2-specific: bisect between renderer-side PASS_THROUGH-path
+ *     bug and XBE-side combiner / state-machine bug. Row 2 bypasses
+ *     the t0 / pT0 chain entirely (A_SOURCE=V0 / DIFFUSE), so it
+ *     proves the combiner / vertex-attrib / state-machine plumbing
+ *     is sound when row 2 renders correctly. If row 0 stays BLACK
+ *     while row 2 renders R/G/B/W, the regression is localized to
+ *     the t0 or PASS_THROUGH dispatch path in the renderer.
  *
  * --- Geometry layout --------------------------------------------------
  *
- * 640x480 framebuffer. 4 cols × 2 rows = 8 cells; cell_w=160, cell_h=240.
+ * 640x480 framebuffer. 4 cols × 3 rows = 12 cells; cell_w=160, cell_h=160.
  *
  *   col 0      col 1     col 2     col 3
  *      |         |         |         |
  *   y=0   +---------+---------+---------+---------+
- *         |  RED    |  GREEN  |  BLUE   |  WHITE  |  Row 0 = PASS_THROUGH
- *   y=240 +---------+---------+---------+---------+
- *         |  BLACK  |  BLACK  |  BLACK  |  BLACK  |  Row 1 = NONE
+ *         |  RED    |  GREEN  |  BLUE   |  WHITE  |  Row 0 = PASS_THROUGH, A=T0
+ *   y=160 +---------+---------+---------+---------+
+ *         |  BLACK  |  BLACK  |  BLACK  |  BLACK  |  Row 1 = NONE,         A=T0
+ *   y=320 +---------+---------+---------+---------+
+ *         |  RED    |  GREEN  |  BLUE   |  WHITE  |  Row 2 = NONE,         A=V0 (bisect)
  *   y=480 +---------+---------+---------+---------+
  *
- * Row 0 (PASS_THROUGH): TEXCOORD0 attribute set to the cell's target
- *                       (R, G, B, 1.0) on all 4 vertices of the cell's
- *                       quad. PASS_THROUGH copies pT0 -> t0 unchanged,
- *                       and the combiner routes t0 -> R0 -> fragColor.
+ * Row 0 (PASS_THROUGH, A=T0): TEXCOORD0 attribute set to the cell's
+ *                       target (R, G, B, 1.0) on all 4 vertices of
+ *                       the cell's quad. PASS_THROUGH copies
+ *                       pT0 -> t0 unchanged, and the combiner routes
+ *                       t0 -> R0 -> fragColor. DIFFUSE held white.
  *
- * Row 1 (PROGRAM_NONE): TEXCOORD0 attribute set to the same per-cell
- *                       colors as row 0 — the input is irrelevant for
- *                       PROGRAM_NONE since the renderer hard-codes
- *                       t0 = vec4(0, 0, 0, 1). All 4 cells render
- *                       solid BLACK. Identical TEXCOORD0 input across
- *                       both rows guarantees that any per-column color
- *                       difference between rows is caused by the
- *                       SHADER_STAGE_PROGRAM mode dispatch, not by
- *                       attribute interpolation.
+ * Row 1 (PROGRAM_NONE, A=T0): TEXCOORD0 attribute set to the same
+ *                       per-cell colors as row 0 — the input is
+ *                       irrelevant for PROGRAM_NONE since the
+ *                       renderer hard-codes t0 = vec4(0, 0, 0, 1).
+ *                       All 4 cells render solid BLACK. Identical
+ *                       TEXCOORD0 input across rows 0 and 1
+ *                       guarantees that any per-column color
+ *                       difference between those rows is caused by
+ *                       the SHADER_STAGE_PROGRAM mode dispatch,
+ *                       not by attribute interpolation. DIFFUSE
+ *                       held white.
+ *
+ * Row 2 (PROGRAM_NONE, A=V0 — bisect): TEXCOORD0 ignored (held the
+ *                       same per-cell colors for vertex-attrib
+ *                       symmetry; combiner now reads DIFFUSE
+ *                       instead). DIFFUSE attribute set to the
+ *                       cell's target (R, G, B, 1.0). Combiner
+ *                       stage-0 A_SOURCE rewired to V0 (DIFFUSE);
+ *                       routes v0 -> R0 -> fragColor. Expected
+ *                       output mirrors row 0. The combiner program
+ *                       and DIFFUSE attribute path bypass the
+ *                       SHADER_STAGE_PROGRAM PASS_THROUGH dispatch
+ *                       entirely; this isolates "renderer-side
+ *                       PASS_THROUGH bug" from "XBE-side combiner /
+ *                       state-machine / vertex-attrib bug" (per the
+ *                       v0.1 manifest's `expected_fail_notes`
+ *                       next-session experiment).
  *
  * --- Math derivation per cell ----------------------------------------
  *
@@ -112,23 +161,29 @@
  *   fragColor (post-framebuffer-clamp [0,1] and quantize to 8 bit per
  *   channel):
  *
- *     Row 0 (PASS_THROUGH, t0 = pT0):
+ *     Row 0 (PASS_THROUGH, A=T0; t0 = pT0):
  *       cell 0: pT0=(1,0,0,1) -> (255,   0,   0, 255)  RED
  *       cell 1: pT0=(0,1,0,1) -> (  0, 255,   0, 255)  GREEN
  *       cell 2: pT0=(0,0,1,1) -> (  0,   0, 255, 255)  BLUE
  *       cell 3: pT0=(1,1,1,1) -> (255, 255, 255, 255)  WHITE
  *
- *     Row 1 (PROGRAM_NONE, t0 = (0,0,0,1)):
+ *     Row 1 (PROGRAM_NONE, A=T0; t0 = (0,0,0,1)):
  *       cells 4..7: (0, 0, 0, 255)  BLACK
+ *
+ *     Row 2 (PROGRAM_NONE, A=V0; combiner reads DIFFUSE):
+ *       cell  8: v0=(1,0,0,1) -> (255,   0,   0, 255)  RED
+ *       cell  9: v0=(0,1,0,1) -> (  0, 255,   0, 255)  GREEN
+ *       cell 10: v0=(0,0,1,1) -> (  0,   0, 255, 255)  BLUE
+ *       cell 11: v0=(1,1,1,1) -> (255, 255, 255, 255)  WHITE
  *
  * All target colors are saturated 0/255 cube corners; the
  * float -> framebuffer round-to-nearest-byte path produces the
  * byte-exact 8-bit values above for each cell interior. The manifest
- * applies `compare_overrides.max_changed_pct = 3.0` /
- * `min_signal_match_pct = 97.0` only to absorb (a) sub-pixel rasterizer
- * differences along the 4 inter-cell vertical edges and the 1 horizontal
- * mid-line edge, and (b) the harness's `frame_quality_score` having to
- * pick the best post-XBE-load frame from the screenshot sequence; the
+ * applies `compare_overrides.max_changed_pct = 5.0` /
+ * `min_signal_match_pct = 95.0` only to absorb (a) sub-pixel rasterizer
+ * differences along the 4 inter-cell vertical edges and the 2 horizontal
+ * row-boundary lines, and (b) the harness's `frame_quality_score` having
+ * to pick the best post-XBE-load frame from the screenshot sequence; the
  * per-channel threshold remains the harness default (16) and is not
  * relaxed by this XBE.
  *
@@ -152,7 +207,7 @@
  * `border_logical_size[i][0] == 0.0f` so the PASS_THROUGH assert
  * (psh.c:1225) does not trip.
  *
- * --- Does NOT catch (deferred to v0.2+) ------------------------------
+ * --- Does NOT catch (deferred to v0.3+) ------------------------------
  *
  *   - The other 17 of 19 modes (PROJECT2D, PROJECT3D, CUBEMAP,
  *     CLIPPLANE, BUMPENVMAP*, BRDF, DOT_ST, DOT_ZW, DOT_RFLCT_*,
@@ -161,14 +216,14 @@
  *   - Multi-stage chaining (stage 1 reading t0 from stage 0; stage 2
  *     reading t0+t1; etc.). Required for BUMPENVMAP*, DOT_*, DPNDNT_*,
  *     DOTPRODUCT modes.
- *   - SET_SHADER_OTHER_STAGE_INPUT field meaning per stage; v0.1 sets
+ *   - SET_SHADER_OTHER_STAGE_INPUT field meaning per stage; v0.2 sets
  *     this register but does not exercise its semantics.
  *   - PROGRAM_NONE on a stage with DISABLED stage 0 binding (which
  *     would degenerate to the same `NONE` output — by design indistin-
  *     guishable; tracked as "this case is by construction equal to the
  *     ENABLED+NONE case" rather than a separate test).
  *   - Validating that stage_program at stages 1..3 is also honored
- *     (v0.1 holds stages 1..3 at PROGRAM_NONE for all cells; per
+ *     (v0.2 holds stages 1..3 at PROGRAM_NONE for all cells; per
  *     psh.c:142-148 the renderer also clears their bits because those
  *     stages are explicitly disabled via xbed_texture_disable_*).
  *
@@ -195,10 +250,10 @@
 #define WIN_H 480
 
 #define GRID_COLS 4
-#define GRID_ROWS 2
+#define GRID_ROWS 3
 #define GRID_CELLS (GRID_COLS * GRID_ROWS)
 #define CELL_W (WIN_W / GRID_COLS)   /* 160 */
-#define CELL_H (WIN_H / GRID_ROWS)   /* 240 */
+#define CELL_H (WIN_H / GRID_ROWS)   /* 160 */
 
 /* Dummy texture is 4x4 magenta (LU_IMAGE_A8R8G8B8). Not sampled by
  * PASSTHRU or NONE, but the binding must exist so the renderer doesn't
@@ -213,29 +268,46 @@
 #define MODE_PROGRAM_NONE  0x00
 #define MODE_PASS_THROUGH  0x04
 
+/* Combiner ICW A_SOURCE register codes — see `psh_regs.h::PS_REGISTER_*`.
+ * Only the two sources used by v0.2 cells are named here; full table
+ * lives in `psh_regs.h`. */
+#define ICW_A_SOURCE_V0    0x4  /* PS_REGISTER_V0 (DIFFUSE) */
+#define ICW_A_SOURCE_T0    0x8  /* PS_REGISTER_T0 */
+
 typedef struct {
     uint8_t  stage0_mode;     /* SHADER_STAGE_PROGRAM mode for stage 0 */
     float    tex0[4];         /* per-cell TEXCOORD0 RGBA */
+    float    diffuse[4];      /* per-cell DIFFUSE RGBA (vertex slot 3) */
 } ShaderStageCell;
 
 static const ShaderStageCell k_cells[GRID_CELLS] = {
-    /* Row 0 — PASS_THROUGH; TEXCOORD0 is the cell's target color. */
-    { MODE_PASS_THROUGH, { 1.0f, 0.0f, 0.0f, 1.0f } },  /* 0 RED   */
-    { MODE_PASS_THROUGH, { 0.0f, 1.0f, 0.0f, 1.0f } },  /* 1 GREEN */
-    { MODE_PASS_THROUGH, { 0.0f, 0.0f, 1.0f, 1.0f } },  /* 2 BLUE  */
-    { MODE_PASS_THROUGH, { 1.0f, 1.0f, 1.0f, 1.0f } },  /* 3 WHITE */
-    /* Row 1 — PROGRAM_NONE; TEXCOORD0 mirrors row 0 so any per-row
-     * delta is attributable solely to the mode dispatch. */
-    { MODE_PROGRAM_NONE, { 1.0f, 0.0f, 0.0f, 1.0f } },  /* 4 BLACK */
-    { MODE_PROGRAM_NONE, { 0.0f, 1.0f, 0.0f, 1.0f } },  /* 5 BLACK */
-    { MODE_PROGRAM_NONE, { 0.0f, 0.0f, 1.0f, 1.0f } },  /* 6 BLACK */
-    { MODE_PROGRAM_NONE, { 1.0f, 1.0f, 1.0f, 1.0f } },  /* 7 BLACK */
+    /* Row 0 — PASS_THROUGH + combiner A=T0. TEXCOORD0 is the cell's
+     *          target color; DIFFUSE held white (combiner ignores it). */
+    { MODE_PASS_THROUGH, { 1.0f, 0.0f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 0  RED   */
+    { MODE_PASS_THROUGH, { 0.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 1  GREEN */
+    { MODE_PASS_THROUGH, { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 2  BLUE  */
+    { MODE_PASS_THROUGH, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 3  WHITE */
+    /* Row 1 — PROGRAM_NONE + combiner A=T0. TEXCOORD0 mirrors row 0
+     *          so any per-row delta is attributable solely to the
+     *          SHADER_STAGE_PROGRAM mode dispatch; DIFFUSE held white. */
+    { MODE_PROGRAM_NONE, { 1.0f, 0.0f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 4  BLACK */
+    { MODE_PROGRAM_NONE, { 0.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 5  BLACK */
+    { MODE_PROGRAM_NONE, { 0.0f, 0.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 6  BLACK */
+    { MODE_PROGRAM_NONE, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 7  BLACK */
+    /* Row 2 (v0.2 bisect) — PROGRAM_NONE + combiner A=V0. TEXCOORD0
+     *          held identical to row 1 to keep the vertex-attrib path
+     *          symmetric across rows; DIFFUSE drives the per-cell color
+     *          via the rewired combiner A_SOURCE. */
+    { MODE_PROGRAM_NONE, { 1.0f, 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } }, /* 8  RED   */
+    { MODE_PROGRAM_NONE, { 0.0f, 1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f } }, /* 9  GREEN */
+    { MODE_PROGRAM_NONE, { 0.0f, 0.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 1.0f, 1.0f } }, /* 10 BLUE  */
+    { MODE_PROGRAM_NONE, { 1.0f, 1.0f, 1.0f, 1.0f }, { 1.0f, 1.0f, 1.0f, 1.0f } }, /* 11 WHITE */
 };
 
 typedef struct {
     float pos[3];
     float tex[4];   /* TEXCOORD0 */
-    float col[4];   /* DIFFUSE (always white) */
+    float col[4];   /* DIFFUSE (white in rows 0/1; per-cell colors in row 2) */
 } __attribute__((packed)) TsVertex;
 
 #define VERTS_PER_QUAD 6
@@ -250,7 +322,7 @@ static void      *s_tex_vram;     /* shared dummy texture for all cells */
     (((VALUE) << (__builtin_ffs(FIELD) - 1)) & (FIELD))
 
 static inline void mk_vert(TsVertex *v, int x_w, int y_w,
-                           const float tex0[4])
+                           const float tex0[4], const float diffuse[4])
 {
     v->pos[0]   = (float)x_w / (float)(WIN_W / 2) - 1.0f;
     v->pos[1]   = 1.0f - (float)y_w / (float)(WIN_H / 2);
@@ -259,23 +331,25 @@ static inline void mk_vert(TsVertex *v, int x_w, int y_w,
     v->tex[1]   = tex0[1];
     v->tex[2]   = tex0[2];
     v->tex[3]   = tex0[3];
-    /* DIFFUSE is always white. Final-combiner G_SOURCE = DIFFUSE with
-     * G_ALPHA = 1 supplies fragColor.a = 1.0. */
-    v->col[0]   = 1.0f;
-    v->col[1]   = 1.0f;
-    v->col[2]   = 1.0f;
-    v->col[3]   = 1.0f;
+    /* DIFFUSE drives row 2's combiner A_SOURCE=V0 path; for rows 0/1
+     * it's held white and the final-combiner G_SOURCE = DIFFUSE.a path
+     * still supplies fragColor.a = 1.0 (the .a channel is 1.0 in every
+     * row). */
+    v->col[0]   = diffuse[0];
+    v->col[1]   = diffuse[1];
+    v->col[2]   = diffuse[2];
+    v->col[3]   = diffuse[3];
 }
 
 static void emit_quad(TsVertex *out, int x0, int y0, int x1, int y1,
-                      const float tex0[4])
+                      const float tex0[4], const float diffuse[4])
 {
-    mk_vert(&out[0], x0, y0, tex0);
-    mk_vert(&out[1], x1, y0, tex0);
-    mk_vert(&out[2], x1, y1, tex0);
-    mk_vert(&out[3], x0, y0, tex0);
-    mk_vert(&out[4], x1, y1, tex0);
-    mk_vert(&out[5], x0, y1, tex0);
+    mk_vert(&out[0], x0, y0, tex0, diffuse);
+    mk_vert(&out[1], x1, y0, tex0, diffuse);
+    mk_vert(&out[2], x1, y1, tex0, diffuse);
+    mk_vert(&out[3], x0, y0, tex0, diffuse);
+    mk_vert(&out[4], x1, y1, tex0, diffuse);
+    mk_vert(&out[5], x0, y1, tex0, diffuse);
 }
 
 static void build_geometry(void)
@@ -288,7 +362,7 @@ static void build_geometry(void)
             const int x1  = x0 + CELL_W;
             const int y1  = y0 + CELL_H;
             emit_quad(&s_verts[idx * VERTS_PER_QUAD], x0, y0, x1, y1,
-                      k_cells[idx].tex0);
+                      k_cells[idx].tex0, k_cells[idx].diffuse);
         }
     }
 }
@@ -339,15 +413,16 @@ static void bind_attribs(void)
         sizeof(TsVertex), &s_alloc_verts[0].col[0]);
 }
 
-/* Push the shared combiner program (identical across all cells).
- * Stage 0: t0 -> R0 (color); alpha stage 0 zeroed.
+/* Push the shared combiner program for the given ICW stage-0 A_SOURCE
+ * (T0 or V0). Stage 0: A * 1 -> R0 (color); alpha stage 0 zeroed.
  * Final combiner: D = R0, G = DIFFUSE.a -> fragColor = (R0.rgb, 1.0). */
-static void program_combiners_shared(void)
+static void program_combiners_with_a_source(uint32_t a_source)
 {
-    /* COLOR ICW stage 0. A_SOURCE = T0 (0x8), A_MAP = UNSIGNED_IDENTITY
+    /* COLOR ICW stage 0. A_SOURCE = configurable (T0 for rows 0/1,
+     * V0 = DIFFUSE for row 2's bisect), A_MAP = UNSIGNED_IDENTITY
      * (0); B_SOURCE = ZERO (0x0), B_MAP = UNSIGNED_INVERT (0x1) -> B = 1. */
     const uint32_t icw_color =
-          TS_MASK(NV097_SET_COMBINER_COLOR_ICW_A_SOURCE, 0x8)
+          TS_MASK(NV097_SET_COMBINER_COLOR_ICW_A_SOURCE, a_source)
         | TS_MASK(NV097_SET_COMBINER_COLOR_ICW_A_ALPHA,  0)
         | TS_MASK(NV097_SET_COMBINER_COLOR_ICW_A_MAP,    0)
         | TS_MASK(NV097_SET_COMBINER_COLOR_ICW_B_SOURCE, 0x0)
@@ -483,6 +558,9 @@ static void bind_dummy_stage0(void)
     xbed_texture_bind_stage0(&params);
 }
 
+#define ROW01_CELL_COUNT (2 * GRID_COLS)  /* rows 0 + 1 = 8 cells   */
+#define ROW2_CELL_COUNT  GRID_COLS         /* row 2          = 4 cells */
+
 static void render_one(uint32_t frame_idx, void *ctx)
 {
     (void)frame_idx;
@@ -493,17 +571,26 @@ static void render_one(uint32_t frame_idx, void *ctx)
     enforce_common_state();
     bind_attribs();
 
-    /* Shared combiner program — identical across all 8 cells. Push
-     * once per frame; only SHADER_STAGE_PROGRAM varies per cell. */
-    program_combiners_shared();
-
-    /* Stage 0 texture binding — also identical across all cells (the
+    /* Stage 0 texture binding — identical across all 12 cells (the
      * texture is never sampled by PASS_THROUGH or NONE, but the bind
      * must be active so the renderer doesn't override stage_program
      * to NONE due to a disabled stage). Push once per frame. */
     bind_dummy_stage0();
 
-    for (int idx = 0; idx < GRID_CELLS; idx++) {
+    /* Rows 0 + 1 — combiner A_SOURCE = T0. Push once for the 8 cells
+     * of rows 0 (PASS_THROUGH) and 1 (PROGRAM_NONE). */
+    program_combiners_with_a_source(ICW_A_SOURCE_T0);
+    for (int idx = 0; idx < ROW01_CELL_COUNT; idx++) {
+        program_stage_program_for_cell(idx);
+        xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES,
+                         idx * VERTS_PER_QUAD, VERTS_PER_QUAD);
+    }
+
+    /* Row 2 — combiner A_SOURCE = V0 (DIFFUSE) bisect cells. Push the
+     * combiner once for the 4 row-2 cells; SHADER_STAGE_PROGRAM stays
+     * at PROGRAM_NONE (already set by the row-1 tail). */
+    program_combiners_with_a_source(ICW_A_SOURCE_V0);
+    for (int idx = ROW01_CELL_COUNT; idx < GRID_CELLS; idx++) {
         program_stage_program_for_cell(idx);
         xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES,
                          idx * VERTS_PER_QUAD, VERTS_PER_QUAD);
@@ -515,7 +602,7 @@ static void render_one(uint32_t frame_idx, void *ctx)
 int main(void)
 {
     if (xbed_init(WIN_W, WIN_H) != XBED_OK) return 1;
-    debugPrint("texture-shader-stages v0.1\n");
+    debugPrint("texture-shader-stages v0.2\n");
 
     xbed_set_default_render_state();
     xbed_load_textured_shaders();

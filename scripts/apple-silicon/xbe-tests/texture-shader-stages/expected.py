@@ -1,23 +1,30 @@
 """
 texture-shader-stages — math-derived expected oracle.
 
-640x480 RGBA front buffer. 4-col x 2-row grid of 160x240 cells.
+640x480 RGBA front buffer. 4-col x 3-row grid of 160x160 cells.
 
-v0.1 exercises 2 of 19 NV2A SHADER_STAGE_PROGRAM modes at stage 0:
+v0.2 exercises 2 of 19 NV2A SHADER_STAGE_PROGRAM modes at stage 0,
+combined with a 3rd-row bisect that bypasses the t0 path entirely:
 
-  Row 0 (y 0..239):    PASS_THROUGH (0x04) -- t0 = pT0 (TEXCOORD0)
+  Row 0 (y   0..159):  PASS_THROUGH (0x04), combiner A=T0
                         cells: RED, GREEN, BLUE, WHITE
-  Row 1 (y 240..479):  PROGRAM_NONE (0x00) -- t0 = vec4(0,0,0,1)
-                        cells: BLACK x 4 (TEXCOORD0 input ignored)
+                        path:  t0 = pT0 -> R0 -> fragColor
+  Row 1 (y 160..319):  PROGRAM_NONE (0x00), combiner A=T0
+                        cells: BLACK x 4
+                        path:  t0 = vec4(0,0,0,1) -> R0 -> BLACK
+  Row 2 (y 320..479):  PROGRAM_NONE (0x00), combiner A=V0 (DIFFUSE)
+                        cells: RED, GREEN, BLUE, WHITE
+                        path:  bypass t0; v0 (DIFFUSE) -> R0 -> fragColor
 
-Shared combiner: t0 -> R0 -> fragColor.rgb (FINAL D = R0); final-combiner
-G = DIFFUSE.a (always 1.0) -> fragColor.a = 255. All 8 cells encode
+Shared combiner topology: A -> R0 -> fragColor.rgb (FINAL D = R0); final-
+combiner G = DIFFUSE.a (always 1.0) -> fragColor.a = 255. All cells encode
 saturated 0/255 cube-corner channels; the float -> 8-bit framebuffer
 quantize step is byte-exact in cell interiors. The manifest applies a
-small `compare_overrides` budget (max_changed_pct=3.0 / signal>=97.0%)
+small `compare_overrides` budget (max_changed_pct=5.0 / signal>=95.0%)
 only to absorb sub-pixel rasterizer edges along the 4 inter-cell
-vertical seams + the 1 horizontal mid-line + harness frame-selection
-slack; the per-channel threshold remains the harness default (16).
+vertical seams + the 2 horizontal row-boundary lines + harness frame-
+selection slack; the per-channel threshold remains the harness default
+(16).
 
 Catches:
   - SHADER_STAGE_PROGRAM 5-bit field dispatch broken: any wrong mode
@@ -31,8 +38,15 @@ Catches:
   - Dummy texture sample leaking into fragColor: row 0 renders MAGENTA
     (the dummy texture content) instead of the per-cell PASS_THROUGH
     color.
+  - v0.2-specific: bisect renderer-side PASS_THROUGH bug from XBE-side
+    combiner/state-machine bug. Row 2 routes DIFFUSE (slot 3) through
+    the combiner stage A=V0, bypassing the t0/pT0 chain entirely. If
+    row 2 renders correctly while row 0 stays BLACK, the failure is
+    localized to the renderer's PASS_THROUGH dispatch or t0
+    interpolation; the XBE's combiner / state-machine plumbing is
+    proven sound.
 
-Does NOT catch (deferred to v0.2+): the other 17 of 19 modes
+Does NOT catch (deferred to v0.3+): the other 17 of 19 modes
 (PROJECT2D, PROJECT3D, CUBEMAP, CLIPPLANE, BUMPENVMAP*, BRDF, DOT_*,
 DPNDNT_*, DOTPRODUCT, DOT_RFLCT_SPEC_CONST). Multi-stage chaining
 (stage 1+ reading t0 from stage 0). The
@@ -44,19 +58,24 @@ from __future__ import annotations
 WIDTH = 640
 HEIGHT = 480
 CELL_W = WIDTH // 4    # 160
-CELL_H = HEIGHT // 2   # 240
+CELL_H = HEIGHT // 3   # 160
 
-# Row 0: PASS_THROUGH cells -> the per-cell TEXCOORD0 (R, G, B, 1).
-# Row 1: PROGRAM_NONE cells -> (0, 0, 0, 1) regardless of TEXCOORD0.
+# Row 0: PASS_THROUGH, A=T0 -> per-cell TEXCOORD0 (R, G, B, 1).
+# Row 1: PROGRAM_NONE, A=T0 -> (0, 0, 0, 1) regardless of TEXCOORD0.
+# Row 2: PROGRAM_NONE, A=V0 -> per-cell DIFFUSE (R, G, B, 1).
 CELL_RGBA = (
-    (0xFF, 0x00, 0x00, 0xFF),  # 0 RED      PASS_THROUGH
-    (0x00, 0xFF, 0x00, 0xFF),  # 1 GREEN    PASS_THROUGH
-    (0x00, 0x00, 0xFF, 0xFF),  # 2 BLUE     PASS_THROUGH
-    (0xFF, 0xFF, 0xFF, 0xFF),  # 3 WHITE    PASS_THROUGH
-    (0x00, 0x00, 0x00, 0xFF),  # 4 BLACK    PROGRAM_NONE
-    (0x00, 0x00, 0x00, 0xFF),  # 5 BLACK    PROGRAM_NONE
-    (0x00, 0x00, 0x00, 0xFF),  # 6 BLACK    PROGRAM_NONE
-    (0x00, 0x00, 0x00, 0xFF),  # 7 BLACK    PROGRAM_NONE
+    (0xFF, 0x00, 0x00, 0xFF),  #  0 RED      PASS_THROUGH, A=T0
+    (0x00, 0xFF, 0x00, 0xFF),  #  1 GREEN    PASS_THROUGH, A=T0
+    (0x00, 0x00, 0xFF, 0xFF),  #  2 BLUE     PASS_THROUGH, A=T0
+    (0xFF, 0xFF, 0xFF, 0xFF),  #  3 WHITE    PASS_THROUGH, A=T0
+    (0x00, 0x00, 0x00, 0xFF),  #  4 BLACK    PROGRAM_NONE, A=T0
+    (0x00, 0x00, 0x00, 0xFF),  #  5 BLACK    PROGRAM_NONE, A=T0
+    (0x00, 0x00, 0x00, 0xFF),  #  6 BLACK    PROGRAM_NONE, A=T0
+    (0x00, 0x00, 0x00, 0xFF),  #  7 BLACK    PROGRAM_NONE, A=T0
+    (0xFF, 0x00, 0x00, 0xFF),  #  8 RED      PROGRAM_NONE, A=V0 (DIFFUSE)
+    (0x00, 0xFF, 0x00, 0xFF),  #  9 GREEN    PROGRAM_NONE, A=V0 (DIFFUSE)
+    (0x00, 0x00, 0xFF, 0xFF),  # 10 BLUE     PROGRAM_NONE, A=V0 (DIFFUSE)
+    (0xFF, 0xFF, 0xFF, 0xFF),  # 11 WHITE    PROGRAM_NONE, A=V0 (DIFFUSE)
 )
 
 

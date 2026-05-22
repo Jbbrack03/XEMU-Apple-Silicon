@@ -1,25 +1,263 @@
 # Handoff
 
-Last updated: 2026-05-22 (Hermes-supervised cycle 6 — §4.13
-`texture-shader-stages` v0.1 slice). **Last unstarted first-wave
-XBE shipped as SPEC ORACLE.** §4.13 v0.1 covers 2 of 19 NV2A
-SHADER_STAGE_PROGRAM modes at stage 0 (`PASS_THROUGH` 0x04 +
-`PROGRAM_NONE` 0x00) on a 4x2 grid. The slice ships as
-`expected_fail` on xemu/metal: the XBE boots, clears to BLACK,
-reaches the draw loop, but the 8 per-cell draws produce no
-visible output — the captured frame stays at the pure-BLACK
-clear color across all 3 render-and-reboot cycles observed. This
-is a real renderer-side finding (filed as **task #18** for next-
-session investigation; Codex 2026-05-22 ruled out the original
-"cache key omits SHADER_STAGE_PROGRAM" hypothesis by reading
-shaderstate.h:59-67 → shaders.h:27-31 → psh.h:37-40; revised
-hypothesis is pipeline-rebuild dirty-state propagation around
-`NV_PGRAPH_SHADERPROG` writes). First-wave XBE rotation now
-stands at **16 of 18 PASS on Metal + 2 expected_fail** (logic-ops
-neither-renderer SPEC; texture-shader-stages tracks task #18) +
-1 expected_fail GL-only (swizzle-mipmap task #17). 0 unstarted
-of the §4 first-wave priority list. Cycle 6 banner appended;
-cycle 5 preserved below for continuity.
+Last updated: 2026-05-22 (Hermes-supervised cycle 7 — §4.13
+`texture-shader-stages` v0.2 DIFFUSE-source bisect). **v0.2
+bisect rules out only the PASS_THROUGH-SPECIFIC explanation of
+v0.1 hypothesis 1; the broader "any SHADER_STAGE_PROGRAM
+override under xbed_load_textured_shaders() is not honored"
+case remains live, alongside a newly-identified third
+candidate (combiner-rewrite not honored under textured-shader
+state) per Codex 2026-05-22.** §4.13 v0.2 expands the 4x2 grid
+to a 4x3 grid by adding row 2 —
+`SHADER_STAGE_PROGRAM=PROGRAM_NONE` (same as row 1) + combiner
+ICW `A_SOURCE=V0` (DIFFUSE) with per-cell DIFFUSE = (R,G,B,1),
+bypassing the `t0`/`pT0` chain entirely. **Row 2 also produces
+pure (0,0,0,0) on Metal.** All 8 XBE-active capture frames
+across 3 render-and-reboot cycles are pure BLACK with zero
+non-zero pixels (per-row stats archived at
+`benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/key-evidence/per-row-stats.md`).
+Because row 2 keeps `SHADER_STAGE_PROGRAM` constant across all 4
+cells, a `NV_PGRAPH_SHADERPROG` dirty-state propagation issue
+**alone** is ruled out, but the broader "override path itself
+not honored under textured-shader state" interpretation
+survives. The surviving candidate root causes for task #18
+(refined per Codex finding 2): (a, formerly v0.1 candidate 3)
+state-machine interaction between `xbed_load_textured_shaders`
+Cg-emitted setup and the XBE's per-cell overrides on Metal;
+(b, NEW per Codex 2026-05-22) the row-2 combiner rewrite
+(`A_SOURCE=V0`) may not be honored either — if the combiner
+update is silently dropped under textured-shader state, row 2's
+BLACK output is equally explained by row 1's residual
+`A_SOURCE=T0` config still being in effect at draw time. The
+dashboard renders correctly and `combiner-basic` (uses
+`xbed_load_default_shaders`, no texturing) PASSes in the same
+harness session.
+v0.2 also identified a SEPARATE bug while reading the source —
+`psh.c:142-148` + `pgraph.h:330` (`pgraph_is_texture_stage_active`)
+shows that the fork-local gate added in commit `046160d04d`
+("Fix Metal boot and texture stability canaries", 2026-05-04)
+degrades PASS_THROUGH (mode 4) to NONE in
+`state->shader_stage_program` because `pgraph_is_texture_stage_active`
+returns false for mode 4. This explains the v0.1 shader-dump
+finding (no `vec4 t0 = pT0;` signature) for row 0 but does not
+explain row 2's all-BLACK output, so it is queued as a
+SEPARATE fix slice rather than task #18 itself. First-wave XBE
+rotation unchanged: **16 of 18 PASS on Metal + 2 expected_fail**
+(logic-ops neither-renderer SPEC; texture-shader-stages still
+tracks task #18) + 1 expected_fail GL-only (swizzle-mipmap task
+#17). 0 unstarted of the §4 first-wave priority list. Cycle 7
+banner appended; cycle 6 preserved below for continuity.
+
+## 2026-05-22 (Hermes cycle 7) — §4.13 `texture-shader-stages` v0.2 DIFFUSE-source bisect (task #18 investigation bounded partial)
+
+**Status: BOUNDED PARTIAL closed cleanly per cycle exit option B.**
+v0.2 lands the DIFFUSE-source bisect row described in v0.1's
+`expected_fail_notes` as the next-session-actionable next step;
+the bisect ran on Metal and **invalidates v0.1's revised
+hypothesis 1** (NV_PGRAPH_SHADERPROG dirty-state propagation).
+The fix attempt is **NOT** landed in this session because the
+hypothesis it would have addressed is now ruled out.
+
+**Slice scope (v0.2):** 4x3 grid (12 cells), 3 rows; rows 0+1
+unchanged from v0.1; row 2 is the new bisect:
+
+- Row 0 (4 cells, y=0..159): SHADER_STAGE_PROGRAM stage0 =
+  PASS_THROUGH (0x04); combiner ICW A_SOURCE = T0; per-cell
+  TEXCOORD0 = (R,G,B,1) → t0 = pT0 → R0 → fragColor. Expected
+  R/G/B/W.
+- Row 1 (4 cells, y=160..319): SHADER_STAGE_PROGRAM stage0 =
+  PROGRAM_NONE (0x00); combiner ICW A_SOURCE = T0; TEXCOORD0
+  mirrors row 0 → t0 = (0,0,0,1) → R0=0 → fragColor=BLACK.
+- Row 2 (4 cells, y=320..479, NEW bisect): SHADER_STAGE_PROGRAM
+  stage0 = PROGRAM_NONE (0x00); combiner ICW A_SOURCE = V0
+  (PS_REGISTER_V0 = 0x4, DIFFUSE); per-cell DIFFUSE =
+  (R,G,B,1) → v0 → R0 → fragColor. Bypasses the t0/pT0 chain.
+  Expected R/G/B/W identical to row 0 if the combiner+vertex
+  attribute path is sound and only the t0/PASS_THROUGH chain is
+  broken.
+
+**v0.2 bisect result (Metal):**
+
+Row 0 BLACK + row 1 BLACK + **row 2 BLACK**. Per-row stats in
+`benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/key-evidence/per-row-stats.md`.
+Frames 0116-0118, 0183-0184, 0248-0250 are unique-color = 1 with
+RGB max = 0 per channel (zero non-zero pixels anywhere). The XBE
+clears to BLACK successfully (8 captured BLACK frames across 3
+render-and-reboot cycles matching the n_frames=300 cycle), but
+none of the 12 per-cell draws produce any visible output.
+
+**Files touched (4 modified, 1 baseline created):**
+
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/main.c`
+  — v0.2 expansion (4x3 grid, per-row combiner switch,
+  per-cell DIFFUSE attribute).
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/expected.py`
+  — 12-cell layout with row 2 R/G/B/W from DIFFUSE.
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/manifest.json`
+  — v0.2 title + updated `expected_fail_notes` with the bisect
+  verdict.
+- `scripts/apple-silicon/xbe-tests/texture-shader-stages/{bin/default.xbe,
+  texture-shader-stages.iso, main.exe, main.obj}`
+  — rebuilt artifacts.
+- `benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/`
+  — durable evidence: full screenshot sequence (256 PNGs) +
+  `key-evidence/` directory with the dashboard frame + 3 distinct
+  XBE-active BLACK frames + per-row-stats.md narrative.
+
+**v0.1 candidate root causes — post-v0.2 status (refined per
+Codex 2026-05-22):**
+
+1. **NV_PGRAPH_SHADERPROG dirty-state propagation
+   (PASS_THROUGH-specific reading):** RULED OUT by v0.2 for the
+   PASS_THROUGH-specific interpretation only. Row 2 keeps
+   SHADER_STAGE_PROGRAM at PROGRAM_NONE for all 4 cells (no
+   change across cells), so a SHADER_STAGE_PROGRAM-mode-specific
+   dirty-state bug cannot explain row 2's failure. The BROADER
+   reading — "any SHADER_STAGE_PROGRAM override under
+   xbed_load_textured_shaders() is not being honored" —
+   remains live and needs the v0.3 control-row bisect or a
+   per-draw pipeline-key dump to confirm or rule out.
+2. **XBE-side combiner setup wrong:** PARTIALLY RULED OUT. Row 2
+   uses a different combiner ICW_A_SOURCE (V0 vs T0) and also
+   fails; the combiner config encodings mirror combiner-basic
+   (which PASSes on Metal), so this is unlikely.
+3. **State-machine interaction with xbed_load_textured_shaders:**
+   **SURVIVING CANDIDATE.** The dashboard renders correctly and
+   `combiner-basic` (uses `xbed_load_default_shaders`, no
+   texturing) PASSes in the same harness session. Likely
+   interaction points: (a) Cg's pre-set
+   `SHADER_STAGE_PROGRAM=2D_PROJECTIVE` for stage 0 in
+   `xbed_tex_ps.inl` overridden per-cell but Metal's
+   texture-state cache / dirty-bit chain may not invalidate the
+   right things; (b) textured VS has 3 input attributes
+   (POSITION+DIFFUSE+TEXCOORD0) vs default VS's 2 — vertex
+   descriptor / `uniform_attrs` recomputation may not be picking
+   up TEXCOORD0 (slot 9) correctly; (c) `bind_dummy_stage0`'s
+   tex bind interacts with per-cell SHADER_STAGE_PROGRAM
+   override in a way that silently drops the draw on Metal.
+4. **(NEW per Codex 2026-05-22) Combiner-rewrite ignored under
+   textured-shader state:** SURVIVING CANDIDATE. The only
+   intentional row1→row2 delta is the second
+   `program_combiners_with_a_source()` call switching
+   `ICW_A_SOURCE` from `T0` to `V0`. If that combiner update is
+   silently dropped under textured-shader state, row 2's BLACK
+   output is equally explained by row 1's residual
+   `A_SOURCE=T0` config still being in effect at draw time
+   (which combined with `t0=(0,0,0,1)` from NONE yields
+   `R0 = T0 * 1 = 0` → BLACK). This is distinct from
+   candidate (3): even if SHADER_STAGE_PROGRAM overrides ARE
+   honored, the combiner override may not be.
+
+**SEPARATE bug identified while authoring v0.2 (not task #18
+itself but real and worth a future fix slice):**
+`hw/xbox/nv2a/pgraph/glsl/psh.c:142-148` (shared GL+Metal code,
+added by commit `046160d04d`) combined with
+`hw/xbox/nv2a/pgraph/pgraph.h:330`
+(`pgraph_is_texture_stage_active`) degrades PASS_THROUGH (mode
+0x04) to NONE in `state->shader_stage_program`. The helper
+returns false for mode 0 (NONE) and mode 4 (PASS_THROUGH), and
+the gate `if (!enabled) state->shader_stage_program &= ~(0x1f
+<< (i * 5));` clears the per-stage mode bits for PASS_THROUGH
+even though PASS_THROUGH does not sample any texture and does
+not require an active texture binding. tex_modes[0] becomes 0
+in the shader generator and the emitted PSH contains `vec4 t0 =
+vec4(0.0, 0.0, 0.0, 1.0);` instead of `vec4 t0 = pT0;`. This
+matches v0.1's shader-dump finding (no PASSTHRU signature
+observed) for row 0. **The minimal proposed fix** would exempt
+NONE and PASS_THROUGH from the zeroing gate (they do not need
+texture sampling infrastructure; PASS_THROUGH just routes pT0).
+This is in shared GL+Metal code so the fix would apply to both
+renderers. The fix is NOT landed in this cycle because: (a) the
+v0.2 evidence shows row 2 also fails, so this PASS_THROUGH bug
+alone is insufficient to explain task #18 — fixing it would not
+make texture-shader-stages PASS on Metal; (b) commit
+`046160d04d` was specifically added to fix "Metal boot and
+texture stability canaries", so naïvely reverting/relaxing the
+gate risks regressing Metal boot animation. The future fix
+slice should bisect Metal boot stability with and without the
+NONE/PASS_THROUGH exemption before landing.
+
+**Validation evidence (durable, all under `benchmark-runs/`):**
+
+| Run dir | Purpose | Result |
+|---|---|---|
+| `20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/` | v0.2 Metal canonical baseline (nv2a source pinned via metal_canonical_overrides) | `expected_fail` per manifest; row 2 also pure BLACK; 8 XBE-active BLACK frames across 3 cycles |
+
+Harness sanity from same session: combiner-basic PASS (in v0.1
+cycle's `/tmp/combiner-basic-sanity/`); no new harness sanity
+needed since v0.2 reuses the same harness machinery.
+
+**Codex review state (cycle 7):** COMPLETED. Verdict: **MINOR
+ISSUES** (3 findings, all adopted in cycle 7).
+
+- MEDIUM (adopted): Codex pointed out the docs overstated what
+  v0.2 ruled out. Row 2 is authored correctly and shows the
+  failure is not PASS_THROUGH-only, but it does not eliminate
+  the broader "any SHADER_STAGE_PROGRAM override under
+  xbed_load_textured_shaders() is not being honored" case.
+  Softened the verdict accordingly: now says
+  "PASS_THROUGH-only explanation ruled out" rather than
+  "hypothesis 1 ruled out".
+- MEDIUM (adopted): Codex flagged a third live interpretation
+  missing from the verdict — row 2 black is also consistent
+  with the row-2 COMBINER REWRITE never taking effect under
+  textured-shader state. Added candidate (4) to the surviving
+  list above.
+- LOW (adopted): Codex noted the orchestration docs were
+  initially inconsistent about review state (one said
+  completed, others said pending). Synced all 6 docs to
+  "COMPLETED, MINOR ISSUES" before commit.
+- OUT OF SCOPE (Codex confirmed): row-2 XBE wiring is correct
+  for the stated bisect; PASS_THROUGH-degraded-to-NONE
+  analysis is correct; queueing the psh.c fix as a separate
+  slice is reasonable.
+
+**Next-session-actionable bisect (v0.3 proposed, not committed
+— Codex finding 2 informs the design):**
+
+1. Add a v0.3 control row that uses `xbed_load_default_shaders`
+   (no texturing) but still issues per-cell SHADER_STAGE_PROGRAM
+   writes. If that row renders correctly, the bug is isolated to
+   the textured-shader state machine — candidate (3a)/(3b)/(3c).
+   If it also fails, the bug is in the SHADER_STAGE_PROGRAM
+   override path itself, independent of textured shaders.
+2. **NEW (per Codex finding 2):** Instrument the row1→row2
+   combiner `A_SOURCE` switch directly (not just the stage-
+   program writes) — e.g., add a sentinel combiner config
+   that would produce a deterministic non-black output IF the
+   combiner update is honored, and capture whether the
+   pipeline cache hits a new MSL after the switch.
+3. Alternatively / additionally: dump the Metal pipeline cache
+   key per draw via `XEMU_METAL_DIAG_ATTRIB_DUMP` (already wired
+   for task #16 investigation) to see whether the XBE's
+   per-cell pipelines are even being built, and if not, why the
+   cache key isn't changing.
+4. Separately (not task #18 itself): land a `psh.c` PASS_THROUGH
+   gate fix slice that exempts mode 0 and mode 4 from the
+   zeroing gate, with a Metal boot animation regression test
+   before flipping.
+
+**M15 default-on prerequisite status:** unchanged from cycle 6
+— `texture-shader-stages` remains an expected_fail SPEC oracle
+tracking task #18. First-wave PASS count stays **16 of 18**.
+
+**Doc / instrumentation deltas landed this slice:**
+
+- 4 modified files under
+  `scripts/apple-silicon/xbe-tests/texture-shader-stages/` +
+  rebuilt artifacts.
+- `benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/`
+  — full evidence directory.
+- `docs/apple-silicon/handoff.md` — cycle 7 banner appended.
+- `docs/apple-silicon/decision-log.md` — cycle 7 entry to be
+  appended.
+- `docs/apple-silicon/orchestration-state/*.md` — refreshed.
+
+**Previous cycle 6 closure banner preserved below for continuity.**
+
+---
+
+
 
 ## 2026-05-22 (Hermes cycle 6) — §4.13 `texture-shader-stages` v0.1 (last unstarted first-wave XBE; ships as expected_fail Metal pending task #18)
 
