@@ -20,7 +20,7 @@
 6. [x] Conservative interpretation recorded in `handoff.md` + `decision-log.md` cycle-21 entries. Cycle-19 hypothesis #1 demoted from "leading" to "insufficient as sole explanation." Hypotheses #2/#3/#4 weight goes UP but no direct discrimination. New cycle-21 hypothesis recorded (FATX-driver / NT-mount state under `runxbe` chainload may differ from FTP-server-time state).
 7. [x] Codex validation completed: mode `changes`, verdict MINOR ISSUES. Two findings (both about doc-sync completeness), both adopted in full in this same closure pass. Validation marker written at `.claude/state/codex-validate-last-run`.
 8. [x] Canonical docs synced: handoff.md (cycle-21 entry on top; cycle-20 preserved below), decision-log.md (cycle-21 entry above cycle-20; cycle-17/19/20 NOT superseded), all four orchestration-state files updated for cycle 21 closure.
-9. [ ] Slice committed — pending final commit step (this entry is written PRE-commit so the commit can include this file's "CLOSED" status; commit hash will be appended to handoff-summary.md after the commit lands).
+9. [x] Slice committed as `df8eb65efc` (the cycle-21 closure commit). Tree clean at session end (apart from the untracked Hermes-side `.hermes_cycle21_path_a2_prompt.txt` scratch file, which is intentionally not staged).
 
 ## Out-of-scope (kept bounded per the assignment)
 
