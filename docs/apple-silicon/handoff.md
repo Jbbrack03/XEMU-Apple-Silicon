@@ -1,34 +1,99 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 21 Path A.2 — **image-blit
-progress markers re-routed from `D:\image-blit-marker-NN-STAGE.txt`
-(proven blocked across three cycle-19+cycle-20 real-Xbox runs) to
-`E:\Apps\image-blit\image-blit-marker-NN-STAGE.txt` (the
-xbe-harness's existing `--ftp-collect /E/Apps/image-blit` target).
-The helper gained an idempotent `nxIsDriveMounted('E')` +
-`nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")` shim plus
-`CreateDirectoryA` on `E:\Apps\` and `E:\Apps\image-blit\` — the
-same well-trodden pattern shipped in `oracle-agent/controller.c`,
-`oracle-agent/tier2.c`, `lib/xbed_input_synth.c`, and
-`controller-readback/main.c`. Local xemu-Metal validation
-(`XEMU_GUEST_LOG=1`, 4 boots) shipped 52 marker lines (13 ×4) all
-reporting `e_mount=1` AND zero `fopen-failed` lines — vs cycle 20's
-52 markers with 52 fopen-failed; the v0.4 tally drift (3/8 mask=0x31
-on boots 1-2, 2/8 mask=0x30 on boots 3-4) is byte-identical to
-cycle 20, so no regression was introduced. The real-Xbox witness
-run produced a clear NEGATIVE answer: chainload→FTP-back gap 22.4 s
-(the FOURTH independent reproduction of that exact gap across
-cycle-19+cycle-20+cycle-21), `verdict.json status: ok`,
-`/E/Apps/image-blit/` retrieved EXACTLY ONE file (`default.xbe`,
-the upload echo), ZERO `image-blit-marker-*` files present. The
-cycle-21 hypothesis "D:\ was the sole witness-path blocker" is
-INVALIDATED — re-routing to a known-writeable, known-FTP-collectable
-partition does NOT make markers observable. The failure is upstream
-of any in-XBE fopen.** `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on /
-long-term-fix decision remains DEFERRED. Cycle-17's xemu-side
-`8/8 mask=0xff` finding is NOT invalidated; the flag continues to
-ship opt-in, default OFF. M15 overall still **NOT MET** pending
-§H.6 default-on shape, §G.5, RT-as-texture.
+Last updated: 2026-05-22 (cycle 22 Path A.3 — **provenance audit of `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}` closed; all five reference capture sets were produced through the SAME agent-side `XLaunchXBE`-based chainload mechanism the cycle-21 image-blit witness uses (`scripts/apple-silicon/xbe-tests/oracle-agent/commands.c:344-380`, kernel-call primitive unchanged between capture-time and cycle-21 modulo cosmetic path-parsing + SMC cleanup edits). Five capture sets produced byte-exact D:\\<id>-capture.bin files via this path — three of them (mirror/color-channel/depth-floor, all Tier-1 NV2A pbkit XBEs) under UnleashX/SITE-EXEC dashboard, which is the EXACT dashboard cycle-21 used. Cycle-19 hypothesis #1 ("D:\\ remap mismatch / runxbe-SITE-EXEC chainload blocks witness-path file writes") is therefore **fully INVALIDATED** (cycle-21 had it merely demoted to "insufficient as sole explanation"). Cycle-21 hypothesis #3 (FATX-driver / NT-mount state diverges between FTP-server-time and chainloaded-XBE-time) is also INVALIDATED for D:\\ writes from chainloaded diag XBEs. The image-blit failure across cycle 19+20+21 is conclusively re-classified as **image-blit-specific**, not a launch-path defect. Leading hypothesis is now: image-blit crashes BEFORE its main() body's first instruction (`image_blit_marker(0, "program_entered")`) completes — i.e. in CRT init, static-init, DllCharacteristics, or pre-main XBE thunking. Right next bounded slice: Path A.4 (non-fopen kernel-pool controller-buffer witness from cycle-21's proposed follow-up list). Doc/evidence-only audit; no code, no XBE rebuild, no real-Xbox runs. Codex validation skipped under rule #15's "doc-only changes" carve-out (full justification in cycle-22 decision-log entry).** `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision remains DEFERRED. Cycle-17's xemu-side `8/8 mask=0xff` finding is NOT invalidated; the flag continues to ship opt-in, default OFF. M15 overall still **NOT MET** pending §H.6 default-on shape, §G.5, RT-as-texture.
+
+## 2026-05-22 (cycle 22 Path A.3) — `xbox-real-references/` provenance audit CLOSED; cycle-19 launch-path-blocker hypothesis fully INVALIDATED; image-blit failure re-classified as image-blit-specific
+
+**Status: CLOSED (doc/evidence-only audit; no code, no XBE rebuild, no real-Xbox runs). Bounded slice CLOSED — provenance question answered with HIGH confidence across all five reference sets; cycle-21 interpretation materially sharpened.**
+
+**Slice.** Cycle 21 left three candidate next slices (A.3 provenance audit, A.4 non-fopen kernel-pool buffer witness, B smaller PFIFO-race-only Tier-1 XBE). Cycle 22 took A.3 — the cheapest single follow-up per rule #1 — because it required only inspecting existing artifacts + tooling history: no new code, no XBE rebuild, no real-Xbox run. Binary question: did the existing reference captures use the same `runxbe` SITE-EXEC chainload path image-blit currently uses, or a meaningfully different launch path?
+
+**Method.** Five steps, all file-backed:
+1. Inventory every file under `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}/`. Result: 6 PNG files, **zero** embedded README/metadata/provenance docs. Audit must rely on git history + harness/agent source lineage.
+2. `git log --diff-filter=A` (no `--follow`) on each capture file to find the introducing commit.
+3. Read the orchestrator (`scripts/apple-silicon/oracle-orchestrator.py`) and xbe-harness (`scripts/apple-silicon/xbe-harness/xbe_renderers.py`) source at each introducing commit, and at HEAD, and diff them to verify the chainload mechanism didn't change.
+4. Read the oracle-agent (`scripts/apple-silicon/xbe-tests/oracle-agent/commands.c`) `cmd_runxbe` handler at the earliest introducing commit and at HEAD to verify the kernel-call primitive (`XLaunchXBE(path)`) is unchanged.
+5. Cross-reference with the dashboard-transition timeline (`e74715cd71` "Composite-capture leg + UnleashX dashboard switch + iND-BiOS findings" at 2026-05-06 19:21 CDT) to determine which dashboard each capture was taken under.
+
+**Provenance evidence (per-set verdicts).**
+
+| Reference set | Capture file | Intro commit | Capture date (commit time / file mtime) | Dashboard at capture | Launch path | Verdict |
+|---|---|---|---|---|---|---|
+| pipeline-smoke | `pipeline-smoke/real-xbox.png` (2 320 B) | `aae0138565` | 2026-05-06 15:32 CDT / file mtime 15:19 (pre-19:21 UnleashX switch) | **XBMC4Gamers** | orchestrator `run_diag` → `client.runxbe()` RPC → agent `cmd_runxbe` → `XLaunchXBE("E:\\Apps\\pipeline-smoke\\default.xbe")`. AGENT FTP-launched via `SITE RunXBE`. | **runxbe path (HIGH)** — same `XLaunchXBE` chainload as cycle-21; only the AGENT-launch verb differs (SITE RunXBE vs. SITE EXEC), and that difference is upstream of the diag XBE's process environment. |
+| color-channel | `color-channel/real-xbox.png` (2 319 B) | `823733f2e6` | 2026-05-06 21:48 CDT (file mtime; post-switch) | **UnleashX** | same chainload; AGENT FTP-launched via `SITE EXEC` (orchestrator now SITE HELP-auto-detects). | **runxbe path (HIGH)** — identical dashboard + same chainload as cycle-21. |
+| depth-floor | `depth-floor/real-xbox.png` (2 313 B) | `823733f2e6` | 2026-05-06 21:48 CDT (post-switch) | **UnleashX** | same. | **runxbe path (HIGH)** — identical dashboard + same chainload as cycle-21. |
+| mirror | `mirror/real-xbox.png` (2 330 B) | `823733f2e6` | 2026-05-06 21:48 CDT (post-switch) | **UnleashX** | same. | **runxbe path (HIGH)** — identical dashboard + same chainload as cycle-21. |
+| mirror | `mirror/composite.png` (2 191 B) | `58bf218838` | 2026-05-07 09:55 CDT | **UnleashX** | `scripts/apple-silicon/capture-composite-reference.sh` runs the same `oracle-orchestrator.py run-diag` chainload, then PICKS the best-matching frame from a parallel MS2109 HDMI-capture recording. The XBE-side chainload is identical to the other sets. | **runxbe path (HIGH)** — XBE chainload identical; the only "different" thing is the host-side capture leg (HDMI grab vs. FTP-pull of XOSS blob), which doesn't affect the diag XBE's execution environment. |
+| controller-roundtrip | `controller-roundtrip/real-xbox-zero.png` (2 319 B) | `58bf218838` | 2026-05-07 09:53 CDT | **UnleashX** | same chainload; set additionally requires a pre-run `controller.set` zero-state write via the agent (`_pre_run_setup_real_xbox` in `xbe_renderers.py:343-385`) but the diag-XBE launch itself is `XLaunchXBE(path)` exactly as in every other set. | **runxbe path (HIGH)** — identical dashboard + same chainload as cycle-21. |
+
+**Source-lineage diff summary (capture-time → HEAD).**
+
+- `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_runxbe` — 2 commits between `c2274310fc` (first introduction) and HEAD: (i) `81e36900ef` 2026-05-10 reworked path argument parsing from `op_parse_kv_str` to manual `strstr("path=") + trim`, fixing whitespace/CR handling; (ii) `959d24acb8` 2026-05-12 added one line of SMC fan-curve cleanup (`oracle_smc_cleanup_if_manual()`). Neither edit touches the `XLaunchXBE(path)` call or the kernel-side chainload primitive. **The chainload primitive is invariant across all reference captures and cycle-21.**
+- `scripts/apple-silicon/oracle-orchestrator.py::run_diag` — diff between `823733f2e6` (color-channel/depth-floor/mirror intro commit) and HEAD is 49 lines, **all comment-only** (rephrases "SITE RunXBE" → "SITE EXEC / SITE RunXBE (auto-detected)" in docstrings; rephrases "XBMC4Gamers' FTP server" → "dashboard FTP"; updates the documented agent path from `/E/XBMC4Gamers/Apps/oracle-agent/...` to `/E/Apps/oracle-agent/...`). The `client.runxbe(xbe_path)` chainload call inside `run_diag` is unchanged.
+- `scripts/apple-silicon/xbe-harness/xbe_renderers.py::run_real_xbox` — diff between `823733f2e6` and HEAD adds (a) QMP-socket-in-/tmp for the xemu-side path-length safety (doesn't touch real-Xbox flow), (b) `XBE_HARNESS_TIMEOUT_SECONDS` env knob, (c) `_ensure_agent_via_orch` + `_pre_run_setup_real_xbox` helpers (cycle-17 additions for controller-roundtrip), (d) QMP socket cleanup. The actual real-Xbox upload + chainload path (`oracle-orchestrator.py run-diag --xbe E:\\Apps\\<id>\\default.xbe --ftp-collect /E/Apps/<id>`) is unchanged.
+
+**What this proves and what it doesn't.**
+
+PROVES (file-backed):
+1. The current `XLaunchXBE`-based chainload mechanism IS capable of running a diag XBE on real Xbox to the point where it writes a multi-KB `D:\<id>-capture.bin` + `D:\<id>-done.txt` to FATX, reboots back to dashboard, and has those files FTP-retrievable. Provable five times across pipeline-smoke + mirror + color-channel + depth-floor + controller-roundtrip.
+2. Cycle-19 hypothesis #1 (the `runxbe` SITE-EXEC chainload path itself blocks witness-path file writes) is **FALSIFIED** by the mere existence of five working reference captures produced via that exact path. Cycle 21 had this hypothesis "demoted to insufficient as sole explanation"; cycle 22 promotes it to **fully invalidated**.
+3. Cycle-21 hypothesis #3 (FATX-driver / NT-mount state diverges between FTP-server-time and chainloaded-XBE-time) is **FALSIFIED for D:\\** by mirror/color-channel/depth-floor having all written D:\\ captures successfully via the same chainload under UnleashX. The most natural reading is also falsified for E:\\ (same FATX driver, same NT mount semantics), though no existing reference capture writes to E:\\ from a chainloaded XBE — that's a residual narrow uncertainty.
+
+DOES NOT PROVE:
+- That ANY chainloaded diag XBE will succeed on this path. Tier-2+ diag XBEs (image-blit at Tier-2; anything Tier-3) exercise more NV2A state and may hit failures unrelated to the launch path.
+- That the byte-exact SHA match recorded at capture time still holds today (the SHA was matched at the moment of commit; the references are static PNGs since).
+- That pipeline-smoke (Tier-4, CPU-painted, no NV2A) is a comparator for image-blit (Tier-2, NV_IMAGE_BLIT 0x9F + NV062 + pb_agp_access). The Tier-1 references (mirror/color-channel/depth-floor) are the relevant comparator — they use pbkit + NV2A and succeed.
+
+**Re-interpretation of cycle-21's NEGATIVE witness result against A.3 evidence.**
+
+Five reproductions of the chainload→FTP-back gap (22.4 s, 22.3 s, 22.4 s, 22.4 s, 22.4 s across cycle 19+20+21) with zero retrieved markers from image-blit, set against five successful reference captures via the same launch path, narrows the leading explanation to **image-blit-specific failure**. The strongest candidates after A.3:
+
+1. **image-blit crashes BEFORE its main() body executes the first `image_blit_marker(0, "program_entered")` call.** Marker-00 sits as the literal first line of `main()` per cycle-20's placement — before xbed_init, before pbkit, before any NV2A. If marker-00's fopen never runs, the crash is in CRT init, static-init, DllCharacteristics, or pre-main XBE thunking. **LEADING candidate**: predictive power matches every cycle 19/20/21 observation including the consistent 22.4 s chainload→FTP-back gap (XBE early-exit reboot pattern).
+2. **image-blit reaches main() but `nxMountDrive('E', …)` semantics in the chainloaded-XBE runtime environment fail in a way nxIsDriveMounted does not detect AND the D:\\ default-mount also fails.** Less likely after A.3 because mirror/color-channel/depth-floor's D:\\ writes worked from the same chainload — but their XBEs may differ in CRT/static-init behavior or DllCharacteristics.
+3. **image-blit's specific NV2A usage (NV_IMAGE_BLIT 0x9F + NV062 + 8-cell sweep + pb_agp_access readback) triggers a crash inside `xbed_init` / pbkit-init on real hardware that doesn't on xemu.** Possible but doesn't explain marker-00 (pre-init) not landing.
+4. **image-blit binary size (159 744 B vs. mirror's 147 456 B vs. pipeline-smoke's 110 592 B) crosses some FATX/loader threshold.** Speculative; no evidence to support.
+
+The leading candidate (#1) is what cycle-21's proposed Path A.4 (non-fopen kernel-pool controller-buffer witness) is specifically designed to discriminate. A.3 makes A.4 the right next bounded slice.
+
+**Hypothesis status after cycle 22.**
+
+1. **Cycle-19 hypothesis #1 (D:\\ remap mismatch under `runxbe` chainload):** **FULLY INVALIDATED.** Cycle-21 demoted; cycle-22 falsifies via comparator evidence.
+2. **Cycle-21 hypothesis #2 (NV2A class-object instantiation mismatch / `pb_agp_access` divergence / generic early-init failure):** **STILL OPEN** but partially narrowed — if marker-00 (pre-NV2A) doesn't fire, the NV2A-instantiation framing alone can't explain it. Generic CRT/static-init early-crash is the more parsimonious explanation. The narrower NV2A-specific framing is reserved for "image-blit reaches xbed_init's NV2A calls but crashes there"; A.4 discriminates.
+3. **Cycle-21 hypothesis #3 (FATX-driver / NT-mount state diverges between FTP-server-time and chainloaded-XBE-time):** **INVALIDATED for D:\\** by reference captures. Residual narrow uncertainty for E:\\ — no existing reference capture writes from a chainloaded XBE to E:\\; the speculation is weakened but not strictly falsified.
+4. **Cycle-22 new framing (image-blit crashes before main()'s first instruction completes):** **LEADING.** Best fit to every cycle 19/20/21 observation when read against A.3 comparator evidence.
+
+**Codex validation.** **Skipped under rule #15's "doc-only changes" carve-out.** No code, no XBE rebuild, no real-Xbox runs. Aggregate diff is markdown-only across `docs/apple-silicon/handoff.md`, `docs/apple-silicon/decision-log.md`, and `docs/apple-silicon/orchestration-state/*`. Rule #15 explicitly: "Trivial work skips automatically (≤30-line uncommitted diff, doc-only changes, single-line fixes)." Full justification at the end of the cycle-22 decision-log entry. Validation marker NOT written; this paragraph is the per-slice justification record per `orchestration-state/validation-status.md`.
+
+**Files produced (evidence preserved on disk).**
+
+- `docs/apple-silicon/handoff.md` — this entry.
+- `docs/apple-silicon/decision-log.md` — cycle-22 entry above cycle-21; cycle-17/19/20/21 NOT superseded.
+- `docs/apple-silicon/orchestration-state/{current-cycle.md, claude-status.md, validation-status.md, handoff-summary.md}` — all four files updated for cycle 22.
+- No new files under `docs/apple-silicon/xbox-real-references/` — the audit deliberately did not generate new captures.
+
+**Cycle 11 follow-up list — updated.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED cycle 15.
+- ✅ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — CLOSED cycle 17.
+- 🟡 #3 (Real-Xbox parity check) — **REFRAMED AGAIN cycle 22.** Cycle 21 demonstrated re-routing to E:\\ doesn't unblock the witness; cycle 22 demonstrated the launch path itself is not the blocker (five reference captures work via the same path). Remaining bounded slices:
+  - **A.4 (now top-priority).** Add a non-fopen witness to image-blit: write a few bytes into the oracle-agent's persistent kernel-pool controller buffer (`oracle_ctrl_buffer` at the agent-published phys address) BEFORE attempting any marker fopen. Next agent boot reads the buffer via `controller.buffer-info` / `controller.get`. Bypasses every partition-mount + FATX-driver-state concern. **Discriminates the cycle-22 leading hypothesis (#1) from the cycle-21 #2 framing.**
+  - **B.** Smaller PFIFO-race-only Tier-1 diag XBE that captures via PCRTC. Still on the table per cycle 19's recommendation list. Heavier than A.4; better suited if A.4 lands inconclusively.
+  - **C (new, cycle 22).** If A.4's witness fires (i.e. image-blit DOES reach first-instruction execution), shift focus to xbed_init / pbkit-init / first NV2A call on real Xbox via per-section instrumentation. If A.4's witness does NOT fire, the crash is in CRT/static-init/XBE thunking — out of in-XBE-source reach; would need either a smaller image-blit variant or XBE-file-level analysis (DllCharacteristics, kernel imports, section layout).
+
+**Out-of-scope (cycle-22 kept bounded).**
+
+- Did NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on.
+- Did NOT start Path A.4 (oracle-agent kernel-pool buffer witness) — that's now top-priority for the next bounded slice; Hermes chooses.
+- Did NOT start Path B (smaller PFIFO-race-only Tier-1 diag XBE).
+- Did NOT modify any code (XBE OR host).
+- Did NOT rebuild any binaries.
+- Did NOT run any real-Xbox attempts.
+- Did NOT verify Hermes-side `.hermes_cycle22_path_a3_prompt.txt` scratch file (it's untracked and out of scope).
+- Did NOT touch retail-title metrics, §G.5, RT-as-texture, or any second-wave XBE work.
+
+Cycle 21 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 21 Path A.2) — image-blit markers re-routed to `E:\Apps\image-blit\`; real-Xbox witness still BLOCKED (4th reproduction of the 22.4 s zero-output pattern); D:\-only hypothesis INVALIDATED
 
