@@ -1,7 +1,196 @@
 # Handoff
 
-Last updated: 2026-05-21 (mid-day, Hermes-supervised cycle 1
-closure) — **15 of 17 first-wave XBEs PASS on Metal + 2 expected_fail
+Last updated: 2026-05-21 (evening, Hermes-supervised cycle 2 — task
+#16 deeper diagnosis slice). **No new XBE PASS this cycle.** Task #16
+banner appended; mid-day banner preserved below for continuity.
+
+## 2026-05-21 (evening, Hermes cycle 2) — Task #16 deeper diagnosis (durable, no fix landed)
+
+**Status: still expected_fail on Metal.** The handoff's earlier task
+#16 narrative ("many compiled pipelines declare ONLY `float4 v0
+[[attribute(0)]]`, no `v9 [[attribute(9)]]`, slot 9 read from
+`inlineValue[8]`") is **partially superseded by this evening's
+diagnosis**: with the current source tree (after the morning's
+LOD-clamp fix + commit `498bdfd57e` adding
+`XEMU_METAL_DIAG_ATTRIB_DUMP`), the bug is NOT a wholesale "slot 9
+collapsed to a uniform" — slot 9 IS routed through the vertex
+descriptor in every dumped pipeline that matched the XBE's
+draw-target. The newly-isolated symptom is finer-grained and lives
+**downstream of `pgraph_mtl_set_attr_masks` / `pipeline_key_build`**.
+A bounded fix did NOT fit this slice; tree left clean (diag-only code
+changes documented below). Next-highest-value action is to confirm
+which render target the XBE actually draws to and whether the
+captured front-buffer screenshot path samples a stale `0x032a4000`
+binding produced by a non-XBE pipeline.
+
+**What was proven this slice (decisive evidence; not speculation).
+Durable evidence copied into
+`docs/apple-silicon/task-16-evidence-2026-05-21/` so the supersession
+narrative is replayable across hosts; the original `/tmp/task16-*`
+captures are ephemeral.**
+
+1. **The CPU-side per-vertex slot-9 stream is correct at collect
+   time.** `XEMU_METAL_DIAG_ATTRIB_DUMP=1` fires the
+   `metal_attrib_stream slot=9 ... count=4 stride=44 src=0` log line
+   16× per run for the swizzle-mipmap XBE's draws (7 cells × ~2
+   frames). Stride=44 matches `sizeof(TexVertex) = pos[3]+tex[4]+
+   col[4]` floats packed. Evidence:
+   `docs/apple-silicon/task-16-evidence-2026-05-21/logs/
+   collect-stream-and-vsh-diag.log`,
+   `benchmark-runs/xbe-harness-20260521-110722/swizzle-mipmap/metal/
+   xemu.log` (earlier preserved capture).
+
+2. **`pgraph_mtl_set_attr_masks` computes the CORRECT
+   `uniform_attrs=0xFDF6` for the XBE's full-bind state**
+   (bits 0/3/9 clear → POSITION/DIFFUSE/TEX0 streaming;
+   bits 1/2/4-8/10-15 set → uniform). The new
+   `metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0
+   [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44` diag line confirms
+   each XBE draw observes the expected per-slot count/stride state
+   inside the same dispatch as the collect-stream diag. Evidence:
+   `docs/apple-silicon/task-16-evidence-2026-05-21/logs/
+   set-attr-masks-stride44.log`.
+
+3. **Pipelines whose `attrs[3]` AND `attrs[9]` are both populated DO
+   exist** — `XEMU_METAL_DUMP_TARGET_SHADER=stride44` (a heuristic
+   noise filter — NOT proof of XBE provenance; see automation.md
+   caveats) captures 3 such pipelines targeting back-buffer-class
+   VRAM addresses (`0x03aa8000`, `0x03bd4000`, `0x03d00000`). Their
+   GLSL correctly emits `layout(location = 0) in vec4 v0;`,
+   `layout(location = 3) in vec4 v3;`, and
+   `layout(location = 9) in vec4 v9;`. These are strong candidates
+   for the XBE's own pipelines (matching the bit-3/bit-9 invariant
+   of `uniform_attrs=0xFDF6`) but the filter alone does not prove
+   draw provenance. Evidence:
+   `docs/apple-silicon/task-16-evidence-2026-05-21/glsl-dumps/
+   xemu-metal-target-0x03aa8000.glsl` (plus two siblings).
+
+4. **At least one pipeline compiled for the front buffer
+   (`0x032a4000`) has slot 3 marked uniform while slot 9 is still
+   streaming** (`uniform_attrs = 0xFDFE`, GLSL emits
+   `vec4 v3 = inlineValue[2]` while keeping
+   `layout(location = 9) in vec4 v9`). This corresponds to a state
+   where bit 3 of `uniform_attrs` is set but bit 9 is clear — which
+   the XBE's `bind_attribs()` ordering (clear → bind 0 → bind 9 →
+   bind 3) cannot legitimately produce mid-bind, since slot 3 is
+   bound LAST. Two plausible mechanisms remain to investigate when
+   work resumes: (a) a non-XBE draw (BIOS / dashboard / pbkit
+   publish path) hits the same VRAM target with this attribute
+   layout; or (b) the XBE's draws actually go to a different target
+   and front-buffer composition uses a different (stale) pipeline.
+   Evidence (note: the `0x032a4000` dump was captured during a
+   `stride44`-filtered run earlier in this slice but was overwritten
+   by the final 3-dump run; the original 6-dump set was not staged
+   into the repo. A replay capture is the first step when resuming).
+
+5. **The visual symptom in the captured screenshots is a smooth
+   2-D corner-tinted gradient covering the entire 640×480 surface,
+   NOT the expected 8-cell × 4-quadrant mosaic.** Reference (math-
+   derived oracle) shows 8 cells with sharp per-mip tint and per-
+   quadrant RGBY pattern. Captured output shows top-right red,
+   bottom-left green, bottom-right yellow, top-left black — i.e. one
+   large quad spanning the full surface with linearly-interpolated
+   UV-sampled colors. This is **inconsistent with the previously
+   stated "Q0 collapse"** symptom and indicates the actual rendered
+   geometry on the displayed surface is one big screen-aligned quad,
+   not 7×6 small per-cell triangles. Evidence:
+   `docs/apple-silicon/task-16-evidence-2026-05-21/screenshots/
+   symptom-corner-gradient-f0138.png` versus
+   `docs/apple-silicon/task-16-evidence-2026-05-21/reference/
+   math-derived-expected.png`.
+
+**Implicated files / lines (read these next):**
+
+- `hw/xbox/nv2a/pgraph/mtl/state.c:189-280`
+  (`pgraph_mtl_build_pipeline_key`) — reads `pg->uniform_attrs` via
+  `pgraph_glsl_get_shader_state(pg)`. Confirmed reads correct value
+  immediately after `set_attr_masks`.
+- `hw/xbox/nv2a/pgraph/mtl/vertex.c:287-359`
+  (`pgraph_mtl_collect_all_vertex_streams`) — collects per-vertex
+  streams. Diag confirms stride=44, count=4 for slot 9 at the XBE's
+  draws.
+- `hw/xbox/nv2a/pgraph/mtl/vertex.c:435-478`
+  (`pgraph_mtl_set_attr_masks`) — diag confirms `uniform_attrs =
+  0xFDF6` for the XBE's draws.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c:1843-1985`
+  (`pgraph_mtl_flush_draw_inner`) — branches over inline_elements /
+  draw_arrays / inline_array / inline_buffer; the swizzle-mipmap
+  XBE goes through `draw_arrays` (line 1936) at `min_element=0..144`
+  with `count=24` per cell (matches 7 cells × 4 quads × 6 verts).
+  **Open question**: does the draw_arrays branch in the Metal
+  renderer correctly honor `start_index` per-subrange? The CPU
+  collect routine passes `start, count` to
+  `collect_all_vertex_streams` but the bound buffer-offset for slot
+  N is unconditionally `attr_offs[i]` (which `state.c::
+  pipeline_key_build` hardcodes to 0) — so all 7 cells may be
+  reading the SAME first-24 vertices, with the position stream
+  re-mapped per call. This is consistent with the observed
+  "one-big-gradient-quad" output if the position stream is being
+  reused across cells.
+- `hw/xbox/nv2a/pgraph/mtl/draw.mm:1107-1114`
+  (`pgraph_mtl_draw_translated`) — binds each non-NULL stream at
+  `MTL_ATTR_BUFFER_INDEX_BASE + i` with `attr_offs[i]`. If
+  `attr_offs` is always 0 and the streams[] buffer holds only the
+  current subrange's decoded verts, that's actually correct (the
+  decoder already offsets by `start`). But verify against the cell-
+  to-cell sequence to be sure.
+
+**What was ruled out:**
+
+- "slot 9 dropped wholesale from the vertex descriptor" — false in
+  current tree; all observed pipelines for the XBE-bind-state have
+  `layout(location = 9) in vec4 v9` in the compiled GLSL.
+- "`set_attr_masks` computes wrong `uniform_attrs`" — false; diag
+  confirms `0xFDF6` for stride=44 draws.
+- "shader cache aliasing across pipeline keys" — false; cache
+  compare is full-struct memcmp; different `uniform_attrs` values
+  produce different keys and were observed to produce distinct
+  cached entries.
+- "`pgraph_mtl_texture_bind_from_pg` modifies `pg->uniform_attrs`
+  between `set_attr_masks` and `pipeline_key_build`" — false;
+  inspected source, only `pg->texture_dirty[stage]` is touched.
+
+**Net next-highest-value action when work resumes:**
+
+(a) Confirm which VRAM target the XBE's `xbed_draw_arrays(TRIANGLES,
+    cell*24, 24)` actually renders to (instrument
+    `mtl_dispatch_decoded_draw` to log `draw_target_vram_addr` for
+    stride==44 draws). If it's a back buffer with a correct full-
+    bind pipeline (`0x03aa8000` class), the front-buffer
+    `0x032a4000` content shown in the screenshot is a copy/blit
+    that's using a stale/wrong pipeline. (b) Examine the per-cell
+    position stream values — the corner-gradient visual implies
+    that 6 of 7 cells contribute zero pixels and 1 cell (or one
+    aggregated quad) covers the whole screen. (c) Re-test under
+    `XEMU_METAL_FRONT_FB_FALLBACK=0` to remove the post-flip
+    publish leg as a confound.
+
+**Doc / instrumentation deltas landed this slice (kept as opt-in
+diagnostics, no behavior change with env unset):**
+
+- `hw/xbox/nv2a/pgraph/mtl/vertex.c::pgraph_mtl_set_attr_masks`:
+  added env-gated diag dump (`XEMU_METAL_DIAG_ATTRIB_DUMP`, slot 9
+  stride==44 filter, 32-line cap) of the recomputed
+  `uniform_attrs` plus per-slot count/stride for slots 0-4 and 9.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c::mtl_dump_target_shader_once`:
+  added `stride44` mode (filter: `attrs[3].format != 0 AND
+  attrs[9].format != 0`, 1024-dump cap) so a run can dump only
+  XBE-full-bind pipelines without `all`'s noise drowning the
+  diagnostic.
+- `automation.md` "Diagnostic Toggles": updated `XEMU_METAL_DIAG_
+  ATTRIB_DUMP` entry to describe the third stream, and added
+  `XEMU_METAL_DUMP_TARGET_SHADER` entry covering `all` / `stride44`
+  / `0xADDR` modes.
+- `.claude/rules/flags-renderer.md`: updated both flag entries to
+  match.
+
+**Previous mid-day banner preserved below for diagnostic continuity.**
+
+---
+
+## 2026-05-21 (mid-day, Hermes-supervised cycle 1 closure)
+
+**15 of 17 first-wave XBEs PASS on Metal + 2 expected_fail
 (logic-ops + swizzle-mipmap). 1 unstarted (§4.13). §4.15
 `msaa-aa-factor` v0.1 SHIPPED this slice (Hermes-supervised
 single-cycle); Codex MAJOR findings adopted as narrowed-v0.1 +

@@ -1,5 +1,103 @@
 # Decision Log
 
+## 2026-05-21 (evening, Hermes cycle 2): task #16 deeper diagnosis — supersede earlier "v9 selectively dropped from vertex descriptor" narrative; defer fix
+
+**Decision.** Update the task #16 narrative in `handoff.md` with the
+results of a Hermes-supervised diagnostic-only slice. The prior
+narrative ("many compiled pipelines declare ONLY `float4 v0
+[[attribute(0)]]`; no `v9 [[attribute(9)]]`; slot 9 read from
+`inlineValue[8]` with `uniform_attrs=0xFFE0`") is partially superseded:
+in the current source tree (after the morning's LOD-clamp fix and the
+2026-05-21 `XEMU_METAL_DIAG_ATTRIB_DUMP` instrumentation commit
+`498bdfd57e`), all pipelines compiled for the XBE's full-bind state
+have `layout(location = 9) in vec4 v9` and `layout(location = 3) in
+vec4 v3` correctly. The captured visual symptom is a corner-tinted
+gradient covering the full surface, not the previously documented
+"intra-mip Q0 collapse." The renderer-side `pgraph_mtl_set_attr_masks`
+and `pipeline_key_build` paths both observe the correct
+`uniform_attrs=0xFDF6` for stride==44 draws. The bug lives downstream
+of those, somewhere in (a) which render target the XBE's `draw_arrays`
+calls actually hit, or (b) the per-subrange position-stream binding,
+or (c) the front-buffer publish path that the captured screenshot
+reflects.
+
+**Scope.** No fix landed; tree left clean (only env-gated diagnostic
+toggles added: `XEMU_METAL_DIAG_ATTRIB_DUMP` extended with a third
+`metal_set_attr_masks` log line, and `XEMU_METAL_DUMP_TARGET_SHADER`
+gains a `stride44` mode). Documented in `automation.md` "Diagnostic
+Toggles" and `.claude/rules/flags-renderer.md`.
+
+**Evidence (durable; staged into the repo under
+`docs/apple-silicon/task-16-evidence-2026-05-21/` so the supersession
+narrative is replayable across hosts).**
+
+- `docs/apple-silicon/task-16-evidence-2026-05-21/logs/collect-stream-
+  and-vsh-diag.log` — `metal_attrib_stream slot=9 count=4 stride=44
+  src=0` confirms CPU collect path sees slot 9 as streaming at flush
+  time.
+- `docs/apple-silicon/task-16-evidence-2026-05-21/logs/set-attr-masks-
+  stride44.log` — `metal_set_attr_masks uniform_attrs=0xfdf6
+  [9]c=4,s=44` confirms `set_attr_masks` recomputes the correct
+  mask.
+- `docs/apple-silicon/task-16-evidence-2026-05-21/glsl-dumps/xemu-metal-
+  target-0x03aa8000.glsl` (and 0x03bd4000, 0x03d00000) — three
+  pipelines for back-buffer-class targets have v0, v3, v9 all
+  streaming. These satisfy the `stride44` heuristic filter
+  (attrs[3] AND attrs[9] populated) and match the
+  `uniform_attrs=0xFDF6` invariant of the XBE's full-bind state,
+  but the filter alone does not prove draw provenance — combine
+  with the `metal_set_attr_masks` log entries to attribute them to
+  the XBE.
+- Front-buffer pipeline (`0x032a4000`) with `vec4 v3 =
+  inlineValue[2]` while keeping `layout(location = 9) in vec4 v9`
+  — observed during this slice but the dump was overwritten by a
+  later `stride44`-filtered run before staging. A replay capture
+  is the first concrete step when work resumes.
+- `docs/apple-silicon/task-16-evidence-2026-05-21/screenshots/symptom-
+  corner-gradient-f0138.png` versus
+  `docs/apple-silicon/task-16-evidence-2026-05-21/reference/math-
+  derived-expected.png` — captured "bug" frame exhibits a smooth
+  two-corner-axis gradient over the full surface, NOT the
+  8-cell × 4-quadrant pattern the math-derived oracle expects.
+
+**Why this is a SUPERSEDES, not a fresh diagnosis on a fresh bug.**
+The prior handoff narrative made testable predictions ("v9 = inline
+Value[8]", "uniform_attrs=0xFFE0") that this slice's instrumentation
+contradicts: the new diag tools confirm `uniform_attrs=0xFDF6` and v9
+streaming for the XBE's draws. The XBE-output regression therefore
+must have a different mechanism than the prior narrative claimed. The
+prior LOD-clamp work (`mtl/texture_pg.c::build_sampler_desc_from_pg`
++ `mtl/texture.mm::build_sampler`) may also have partially closed
+that earlier mechanism; this is consistent with seeing the per-cell
+mip tint working (per the prior handoff) but the intra-mip pattern
+still wrong via a different code path.
+
+**How to apply.** Anyone resuming task #16 must START from this
+evening's diagnosis: read the new banner in `handoff.md`, replay the
+diagnostic-toggle pair above against a fresh swizzle-mipmap run, and
+look at the four implicated files+lines in that banner. Do NOT re-
+investigate the prior "v9 wholesale dropped" narrative — that path is
+ruled out by `/tmp/task16-glsl-dumps/`. The next concrete experiment
+is instrumenting `mtl_dispatch_decoded_draw` to log
+`draw_target_vram_addr` for stride==44 draws, then comparing against
+the pipeline-target dump files to decide whether the XBE is rendering
+to back buffer vs. front buffer.
+
+**Combines with** rules #1 (no guessing), #5 (build tools when the
+toolset is the limit — both new diag modes shipped in this slice),
+#11 (closed Apple Silicon flags exempt from re-validation; this is
+not one of them), #17 (XBE-first development loop is binding; the
+swizzle-mipmap XBE remains the regression gate when this work
+resumes), #15 (Codex validation before declaring done — this slice
+does NOT declare done; the diagnostic deltas remain uncommitted as of
+this entry pending Codex pass).
+
+**Status.** Task #16 still open; swizzle-mipmap still ships
+`expected_fail` on Metal; the XBE harness still flags this as a
+regression target without gating the rotation.
+
+---
+
 ## 2026-05-21 (mid-day, late): formalize Hermes/Claude/Codex orchestration workflow in `orchestration-workflow.md`
 
 **Decision.** Promote the Hermes supervision model already in use this

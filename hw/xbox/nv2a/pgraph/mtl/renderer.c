@@ -87,7 +87,8 @@ static void mtl_dump_target_shader_once(uint32_t color_target,
     }
 
     bool dump_all = g_ascii_strcasecmp(env, "all") == 0;
-    if (!dump_all) {
+    bool dump_stride44 = g_ascii_strcasecmp(env, "stride44") == 0;
+    if (!dump_all && !dump_stride44) {
         char *endp = NULL;
         unsigned long target = strtoul(env, &endp, 0);
         if (endp == env || *endp != '\0' || (uint32_t)target != color_target) {
@@ -95,10 +96,28 @@ static void mtl_dump_target_shader_once(uint32_t color_target,
         }
     }
 
+    /* Task #16 diagnostic: stride44 mode is a HEURISTIC dump filter.
+     * It only keeps pipeline keys whose slot-3 (DIFFUSE) AND slot-9
+     * (TEX0) vertex attribute descriptors are both populated (format
+     * != 0). pipeline_key_build leaves attrs[i] zero for uniform
+     * slots, so both being populated means bits 3 and 9 of
+     * pg->uniform_attrs were clear when the pipeline was compiled.
+     * That is necessary but NOT sufficient to identify "the swizzle-
+     * mipmap XBE's full-bind state": it does not verify stride==44,
+     * slot 0 presence, draw provenance, or uniform_attrs==0xFDF6.
+     * Use it as a noise filter for triage, not as proof. Codex
+     * 2026-05-21 evening: "stride44 is described as isolating the
+     * XBE's full-bind state, but the code only filters on attrs[3]
+     * and attrs[9]." */
+    if (dump_stride44 &&
+        (key->attrs[3].format == 0 || key->attrs[9].format == 0)) {
+        return;
+    }
+
     uint32_t dump_index = 0;
-    if (dump_all) {
+    if (dump_all || dump_stride44) {
         dump_index = atomic_fetch_add(&s_dumped, 1);
-        if (dump_index >= 64) {
+        if (dump_index >= 1024) {
             return;
         }
     } else {

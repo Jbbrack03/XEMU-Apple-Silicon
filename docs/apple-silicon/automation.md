@@ -2921,21 +2921,48 @@ behavior. See
 
 ## Diagnostic Toggles
 
-`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits two diagnostic
-streams to stderr (logged into `xemu.log` when the benchmark harness is in
-use): (1) for every Metal vertex-attribute stream collected in
-`pgraph_mtl_collect_all_vertex_streams` for slot 9 (TEX0) with stride=44
-(the xbed-library textured-vertex layout), dumps the per-vertex decoded
-Float4 for up to 30 elements with `metal_attrib_stream slot=...` /
-`slot=N k=K v=(...)` markers. (2) for every `decode_face_levels` of an
-SZ_A8R8G8B8 swizzled texture with 7 mip levels (the swizzle-mipmap XBE's
-shape) and per-mip W,H >= 2, dumps the 4-quadrant-center bytes of the
-post-unswizzle buffer for up to 28 calls with
-`metal_unswizzle_dump w=... Q0=... Q1=... Q2=... Q3=...` markers. Used
-to verify the CPU-side data ARRIVING at the Metal renderer is what the
-XBE writes — narrows the §4.8 swizzle-mipmap intra-mip-sampling bug
-investigation. Output is large (up to ~3000 lines) but env-gated. Do not
-ship enabled.
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits three
+diagnostic streams to stderr (logged into `xemu.log` when the benchmark
+harness is in use): (1) for every Metal vertex-attribute stream
+collected in `pgraph_mtl_collect_all_vertex_streams` for slot 9 (TEX0)
+with stride=44 (the xbed-library textured-vertex layout), dumps the
+per-vertex decoded Float4 for up to 30 elements with
+`metal_attrib_stream slot=...` / `slot=N k=K v=(...)` markers. (2) for
+every `decode_face_levels` of an SZ_A8R8G8B8 swizzled texture with 7 mip
+levels (the swizzle-mipmap XBE's shape) and per-mip W,H >= 2, dumps the
+4-quadrant-center bytes of the post-unswizzle buffer for up to 28 calls
+with `metal_unswizzle_dump w=... Q0=... Q1=... Q2=... Q3=...` markers.
+(3) 2026-05-21 evening (Hermes cycle 2, task #16): for every call to
+`pgraph_mtl_set_attr_masks` where slot 9 currently has stride==44,
+dumps the recomputed `uniform_attrs` mask plus per-slot count/stride
+for slots 0..4 and 9, capped at 32 lines, with `metal_set_attr_masks
+uniform_attrs=0x...` markers. Used to verify whether `set_attr_masks`
+observes the same per-slot `VertexAttribute` state the upstream
+collect-stream pass just saw inside the same dispatch — confirmed
+during the 2026-05-21 evening cycle that both passes agree on
+`uniform_attrs=0xFDF6` for the XBE's full-bind state, so the bug lives
+downstream of `set_attr_masks` (see handoff "task #16 deeper diagnosis
+2026-05-21 evening"). Output is large (up to ~3000 lines) but
+env-gated. Do not ship enabled.
+
+`XEMU_METAL_DUMP_TARGET_SHADER` dumps the generated GLSL VSH/PSH
+source for pipelines as `pipeline_key_build` runs (translated MSL is
+NOT written; the dump is pre-translation). Accepts: `0`/empty (off),
+`all` (dump every pipeline-key build, up to 1024 dumps, filenames
+include monotonic index + primitive mode), `stride44` (NEW 2026-05-21
+evening, task #16: HEURISTIC noise filter that keeps only pipelines
+whose `attrs[3]` AND `attrs[9]` vertex-attribute descriptors are
+both populated; this is necessary but NOT sufficient to identify the
+swizzle-mipmap XBE's full-bind state, since the filter does not check
+stride==44, slot 0 presence, or uniform_attrs==0xFDF6 — treat
+matching dumps as triage candidates, not proof; same 1024 cap as
+`all`, target-only filename, latest dump per target wins), or
+`0xADDR` (single-target one-shot dump). The optional companion env
+`XEMU_METAL_DUMP_TARGET_SHADER_DIR=path` selects the output
+directory (default `/tmp`). Used during task #16 investigation to
+narrow the dump set; pair with `XEMU_METAL_DIAG_ATTRIB_DUMP` and the
+per-draw `metal_set_attr_masks` log line to confirm a given dump
+corresponds to the XBE's draws.
 
 `XEMU_DIAG_SIMPLIFY_TRI_GEOM_DEPTH=1` keeps triangle-family geometry shaders in
 use, but bypasses their depth-plane and slope calculation. This is intentionally

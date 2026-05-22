@@ -1,0 +1,24 @@
+# Claude Status
+
+- Objective: Close or decisively narrow Task #16 (Metal swizzle-mipmap intra-mip UV collapse). Exit option B (durable diagnosis) chosen — bounded fix not safely landable in this slice.
+- Current hypothesis (REVISED from prior handoff): prior narrative "slot 9 wholesale dropped from vertex descriptor, read as inlineValue[8], uniform_attrs=0xFFE0" is contradicted by the new instrumentation. Actual observed state: pg->uniform_attrs=0xFDF6 (correct) for stride==44 draws via `metal_set_attr_masks` log; pipelines passing the `stride44` heuristic dump filter (attrs[3]+attrs[9] populated) have v0, v3, v9 all streaming. Bug lives downstream of pgraph_mtl_set_attr_masks / pipeline_key_build — either in (a) which render target the per-cell draw_arrays hit, (b) per-subrange position-stream binding, or (c) front-buffer publish path the screenshot reflects.
+- Files changed:
+  - `hw/xbox/nv2a/pgraph/mtl/vertex.c` — env-gated diag dump of recomputed uniform_attrs after set_attr_masks (stride==44 filter, 32-line cap)
+  - `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `XEMU_METAL_DUMP_TARGET_SHADER=stride44` mode (heuristic noise filter; attrs[3]+attrs[9] populated; 1024-dump cap; per Codex feedback this is necessary but not sufficient to identify XBE-bind-state pipelines)
+  - `docs/apple-silicon/automation.md` — Diagnostic Toggles updated for the new diag stream + new dump mode (reworded per Codex: GLSL VSH/PSH source not "GLSL/MSL pair"; stride44 reworded as heuristic)
+  - `docs/apple-silicon/handoff.md` — task #16 evening banner with durable diagnosis (Codex MAJOR findings adopted: stride44 reworded as heuristic; durable artifacts staged into `docs/apple-silicon/task-16-evidence-2026-05-21/`)
+  - `docs/apple-silicon/decision-log.md` — supersedes-prior-narrative entry with adopted Codex findings
+  - `.claude/rules/flags-renderer.md` — XEMU_METAL_DIAG_ATTRIB_DUMP + XEMU_METAL_DUMP_TARGET_SHADER index entries refreshed (Codex: removed "GLSL/MSL pair" claim)
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/` — durable artifact dir staged with logs/, glsl-dumps/, screenshots/, reference/
+- Commands/tests run:
+  - 5 swizzle-mipmap repros under `XEMU_METAL_DIAG_ATTRIB_DUMP=1` with various dump configurations
+  - 4 rebuilds (`./build.sh -a arm64 --skip-shader-validation`)
+  - 1 `/codex-validate changes` pass: returned MAJOR ISSUES (3 findings), all 3 adopted in-slice
+- Evidence produced (durable):
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/logs/collect-stream-and-vsh-diag.log`
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/logs/set-attr-masks-stride44.log`
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/glsl-dumps/xemu-metal-target-0x{03aa8000,03bd4000,03d00000}.glsl` — three back-buffer-class pipelines with v0+v3+v9 all streaming
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/screenshots/symptom-corner-gradient-f0138.png` + `reference/math-derived-expected.png`
+- Blockers / uncertainties: front-buffer pipeline dump (`0x032a4000` with v3 uniform, v9 streaming) was overwritten before staging — would need a replay capture when work resumes. The `stride44` filter is heuristic (necessary, not sufficient).
+- Next proposed action: commit the diag tools + doc updates as a single commit.
+- Confidence / risk notes: HIGH confidence the prior task-#16 narrative is wrong about mechanism. MEDIUM confidence the new diagnosis correctly fingers the next investigation track. LOW confidence on what the actual bounded fix will look like — deferred to a future slice.

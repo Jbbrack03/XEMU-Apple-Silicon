@@ -475,6 +475,45 @@ void pgraph_mtl_set_attr_masks(PGRAPHState *pg,
     pg->uniform_attrs    = uniform_mask;
     pg->compressed_attrs = 0;
     pg->swizzle_attrs    = 0;
+
+    /* 2026-05-21 task #16 diagnostic (companion to the collect-stream
+     * dump above): when XEMU_METAL_DIAG_ATTRIB_DUMP is set, fire when
+     * slot 9 has stride==44 (the swizzle-mipmap TexVertex layout)
+     * regardless of count, and report the recomputed uniform_attrs
+     * mask plus the count/stride pair for each "interesting" slot.
+     * Lets us see whether set_attr_masks observes the same per-slot
+     * VertexAttribute state that pgraph_mtl_collect_all_vertex_streams
+     * just saw inside the same dispatch. */
+    {
+        const char *diag_env = getenv("XEMU_METAL_DIAG_ATTRIB_DUMP");
+        VertexAttribute *a9 = &pg->vertex_attributes[9];
+        /* Filter to slot 9 stride==44 — same signature collect uses
+         * for the swizzle-mipmap TexVertex layout — so the cap doesn't
+         * get exhausted by unrelated BIOS draws before the XBE renders. */
+        if (diag_env && a9->stride == 44) {
+            static unsigned int diag_count = 0;
+            if (diag_count < 32) {
+                fprintf(stderr,
+                        "xemu-perf: metal_set_attr_masks "
+                        "uniform_attrs=0x%04x "
+                        "[0]c=%u,s=%u [1]c=%u,s=%u [2]c=%u,s=%u "
+                        "[3]c=%u,s=%u [4]c=%u,s=%u [9]c=%u,s=%u\n",
+                        (unsigned)pg->uniform_attrs,
+                        pg->vertex_attributes[0].count,
+                        pg->vertex_attributes[0].stride,
+                        pg->vertex_attributes[1].count,
+                        pg->vertex_attributes[1].stride,
+                        pg->vertex_attributes[2].count,
+                        pg->vertex_attributes[2].stride,
+                        pg->vertex_attributes[3].count,
+                        pg->vertex_attributes[3].stride,
+                        pg->vertex_attributes[4].count,
+                        pg->vertex_attributes[4].stride,
+                        a9->count, a9->stride);
+                diag_count++;
+            }
+        }
+    }
 }
 
 void pgraph_mtl_set_attr_masks_inline_buffer(PGRAPHState *pg,
