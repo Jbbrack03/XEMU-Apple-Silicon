@@ -6,7 +6,7 @@
   - `hw/xbox/nv2a/pgraph/mtl/blit.c` diff = 0 lines in the final closure tree.
   - Codex `changes`-mode validation completed (rule #15 satisfied).
   - All three Codex findings adopted in-tree (state-file drift fixed pre-commit; BR encoding doc claim corrected in main.c + README + decision-log + handoff; top-level README/manifest overview updated for the v0.3 2×2 FAIL layout).
-  - Slice commit hash recorded in the follow-up state-sync commit.
+  - Slice commit hash: `e8fba9e925` (recorded in this follow-up state-sync commit).
 
 ## Carry-forward technical conclusion
 
