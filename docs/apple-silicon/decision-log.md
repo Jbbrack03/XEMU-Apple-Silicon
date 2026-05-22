@@ -1,5 +1,209 @@
 # Decision Log
 
+## 2026-05-22 (cycle 20 Path A): image-blit progress-marker instrumentation lands; `D:\` write-back from `runxbe` chainload confirmed blocked on real Xbox; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision REMAINS DEFERRED
+
+**Decision.** Adopt the marker-instrumentation slice as the
+cycle-20 closure for Path A. The 13 staged markers shipped in
+`scripts/apple-silicon/xbe-tests/image-blit/main.c`; they cleanly
+isolate `D:\` write-back from XBE execution staging on xemu; and
+their universal absence in three independent real-Xbox runs (the
+two cycle-19 attempts plus the post-Codex cycle-20 attempt that
+deliberately reduced every basename to ≤39 chars) is sufficient
+to elevate cycle-19 hypothesis #1 ("`D:\` remap mismatch under
+`runxbe` SITE-EXEC chainload") to the leading hypothesis without
+yet treating it as universal. The remaining cycle-19 hypotheses
+(class-object instantiation mismatch, `pb_agp_access` divergence,
+generic early-init failure) are NOT discriminated by cycle-20
+evidence because they all produce the same end-state observation
+once `D:\` write-back is blocked.
+
+`XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix
+decision remains DEFERRED. Cycle-17's xemu-side
+`8/8 mask=0xff` finding is NOT invalidated. The flag continues
+to ship opt-in, default OFF.
+
+**Why this slice, framed against rule #1 and #5.** Cycle 19
+left two candidate slices (Path A: instrument image-blit;
+Path B: build a smaller PFIFO-race XBE). Path A is the
+cheaper instrumentation extension: ~100 lines of XBE-side C,
+no xemu host source change, reuses the existing
+`xbed_host_log_writef` channel and the existing oracle FTP-
+collect machinery. Path B is the more robust replacement but
+requires a new XBE skeleton + a fresh capture-via-PCRTC integration
++ a fresh oracle reference. Per rule #1 (cheapest targeted test
+first) and rule #5 (build tools when the existing toolset is the
+limit), Path A is the right cycle-20 move; Path B remains on
+the table for a future cycle and is unchanged.
+
+**Pre-conditions verified.**
+
+- `oracle-smoke.sh` 12/12 PASS at 2026-05-22 17:12 CDT (agent
+  up, EEPROM sha256=871ed8a9…, controller kernel-pool
+  `anchor_ok=1`, screenshot RPC working).
+- Working tree clean at session start; HEAD = `bd9ba8cadb`
+  (cycle-19 closure).
+- Worker receipt posted at 2026-05-22 17:04 CDT to
+  `orchestration-state/claude-status.md` +
+  `current-cycle.md` before any deeper work, per
+  `orchestration-workflow.md` §13.
+
+**What was instrumented.**
+
+A single best-effort helper at file scope in
+`scripts/apple-silicon/xbe-tests/image-blit/main.c`:
+
+```c
+static void image_blit_marker(unsigned idx, const char *stage);
+```
+
+It snprintfs `D:\image-blit-marker-NN-<stage>.txt` (basename
+budget ≤39 chars after Codex-driven label shortening, well
+under FATX's 42-char limit), mirrors the marker line through
+the existing `xbed_host_log_writef` channel (so xemu logs see
+the stage progression even when `D:\` fopen fails), then opens
+the file `wb` and writes a single line of metadata. A NULL
+`FILE *` is silently absorbed after surfacing an explicit
+`image-blit: marker NN STAGE fopen-failed` line through the
+host-log channel — no new exit paths added, so a failing
+marker can never strand the test.
+
+The 13 staged checkpoints are placed at:
+
+| Marker | Where | What it isolates |
+|---:|---|---|
+| 00 program_entered | First line of `main()` | Pre-`xbed_init` D:\ write-ability |
+| 01 xbed_init_ok | After `xbed_init` returns OK | `XVideoSetMode`/`pb_init` success |
+| 02 verts_alloc_ok | After `MmAllocateContiguousMemoryEx` for dashboard verts | Contiguous-VRAM alloc |
+| 03 src_alloc_ok | After src VRAM alloc | Source-surface alloc |
+| 04 src_filled | After `fill_source_buffer()` | CPU-side source paint |
+| 05 dst_alloc_ok | After all 8 dst VRAM allocs | All destination-surface allocs |
+| 06 before_blits | Pre blit-loop | About-to-fire-first-blit |
+| 07 after_cell0 | After `run_one_blit_cell(0)` | First IMAGE_BLIT fire + first `pb_agp_access` oracle readback |
+| 08 after_all_blits | After 8-cell blit loop | All 8 oracle compares done |
+| 09 state_set | After `xbed_set_default_render_state` | Default 3D state set |
+| 10 shaders_loaded | After `xbed_load_default_shaders` | Passthrough VS/PS uploaded |
+| 11 geometry_built | After `build_dashboard_geometry` | Dashboard verts populated |
+| 12 pre_capture | Pre `xbed_render_loop_then_capture` | About-to-render-and-reboot |
+
+**Local xemu validation.** All 13 markers fire in order on
+`xemu-Metal` with `XEMU_GUEST_LOG=1` (host-log channel
+captures the full ladder), AND every `fopen("D:\\…","wb")`
+returns NULL because the XBE is mounted from `image-blit.iso`
+as a CD-ROM — `D:\` is therefore read-only on xemu. The
+existing harness has been masking this because xemu's
+renderer-side screenshot hook writes to a HOST filesystem path
+(`XEMU_METAL_SCREENSHOT_PATH`), not through `D:\`. The v0.4
+`pass=3/8 mask=0x31` tally is unchanged (no instrumentation-
+induced regression). Evidence:
+
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-20260522T220904Z/`
+  — first local run, default env (no host-log channel). Same
+  expected_fail verdict as v0.4 baseline.
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-guestlog-20260522T221035Z/`
+  — same XBE with `XEMU_GUEST_LOG=1`. Confirms all 13 markers
+  fire AND that every `fopen` fails on the ISO mount path.
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-postcodex-20260522T221959Z/`
+  — post-Codex re-validate with shortened labels. Same outcome.
+
+**Real-Xbox runs (three total — counting cycle-19's two as the
+baseline).**
+
+| Run | Date/run dir | Chainload→FTP-back | Marker files retrieved |
+|---|---|---:|---|
+| cycle-19 #1 | `cycle19-real-xbox-parity-image-blit-20260522T203718Z/` | 22.4 s | 0 (no markers — baseline image-blit v0.4) |
+| cycle-19 #2 | `cycle19-real-xbox-parity-image-blit-retry-20260522T204139Z/` | 22.3 s | 0 (same) |
+| cycle-20 #1 | `cycle20-real-xbox-image-blit-markers-20260522T221224Z/` | 22.4 s | 0 (instrumented, pre-Codex labels) |
+| cycle-20 #2 | `cycle20-real-xbox-image-blit-markers-postcodex-20260522T222048Z/` | 22.4 s | 0 (instrumented, post-Codex labels) |
+
+**What we can conclude (high-confidence).**
+
+1. The cycle-20 instrumentation works: 13 markers fire in
+   order on xemu's host-log channel; the helper is bounded and
+   does not introduce new failure modes; the v0.4 verdict is
+   unchanged with the instrumentation in place.
+2. `D:\` write-back from a `runxbe` SITE-EXEC chainload on
+   this console is BLOCKED for image-blit, irrespective of:
+   - XBE stage (marker-00 fires before any subsystem init and
+     also produced zero files);
+   - basename length (cycle-20 #1 had at-limit / over-limit
+     names; cycle-20 #2 was Codex-shortened to ≤39 chars —
+     same outcome);
+   - cycle (three independent runs, identical 22.4 s gap and
+     identical "only `default.xbe` retrieved").
+3. Cycle-19 hypothesis #1 (D:\ remap mismatch under `runxbe`
+   chainload) is the leading hypothesis. Hypotheses #2/#3/#4
+   are not discriminated by this evidence because they share
+   the same end-state observation once #1 is true.
+
+**What we explicitly do NOT conclude (per rule #1 and #3).**
+
+1. We do NOT claim hypothesis #1 is universally true for all
+   `runxbe`-launched XBEs on this console. The
+   `xbox-real-references/` directory contains successful
+   captures for pipeline-smoke / mirror / color-channel /
+   depth-floor — those may have used `runxbe` OR a different
+   launch path; this needs cross-checking (Path A.3) before
+   the leading hypothesis is treated as universal.
+2. We do NOT claim the XBE crashes at any specific stage. The
+   evidence is consistent with "XBE runs to completion, every
+   D:\ fopen fails" OR "XBE crashes very early before any
+   marker fopen happens"; both produce the same FTP-collect
+   output.
+3. We do NOT promote any code change beyond the bounded
+   instrumentation slice. No xemu-fork host source changed,
+   no XEMU_* flag landed, no default flip happened.
+
+**Codex validation.** Mode: `changes`. Verdict: **MINOR
+ISSUES**. One medium-severity finding (FATX 42-char basename
+overflow on labels `default_state_set` / `before_capture_loop`
+which were 42 / 44 chars respectively) — adopted in full:
+both labels shortened, comment block re-grounded against the
+limit with an explicit ≤14-char label budget, binary
+rebuilt, validation re-run on real Xbox with the corrected
+binary (third reproducibility confirmation included this
+already-corrected build). Validation marker written at
+`.claude/state/codex-validate-last-run` per rule #15.
+
+**Cycle-19 hypotheses — status after cycle 20.**
+
+1. **D:\ remap mismatch under `runxbe` chainload** —
+   **PROMOTED to leading hypothesis** based on cycle-20
+   evidence: 13-marker ladder produces zero files independent
+   of XBE stage and independent of basename length.
+   Pending cross-check against existing
+   `xbox-real-references/` captures to determine universality.
+2. **NV2A class-object instantiation mismatch** — unchanged,
+   not discriminated by cycle-20 evidence.
+3. **`pb_agp_access()` divergence** — unchanged, not
+   discriminated by cycle-20 evidence.
+4. **Some other early-init failure** — unchanged, not
+   discriminated by cycle-20 evidence.
+
+**Next bounded slices (NOT started this cycle).**
+
+- **A.2.** Re-route the next image-blit instrumentation pass
+  to a known-writeable partition (e.g.
+  `E:\Apps\image-blit\marker-NN.txt` absolute paths, or
+  `T:\…` title-data partition). If markers land there, we
+  learn the XBE's actual execution stage AND get a discriminating
+  signal on hypotheses #2/#3/#4. Cheapest single follow-up
+  per rule #1.
+- **A.3.** Cross-check whether the existing
+  `xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor}`
+  captures came from `runxbe` chainload or from a different
+  launch path. If `runxbe`, the leading hypothesis is image-
+  blit-specific (not universal). If a different path, the
+  oracle pipeline may need a non-`runxbe` chainload mode for
+  Tier-2 XBEs that depend on `D:\` writes.
+- **B.** Smaller PFIFO-race-only Tier-1 diag XBE that
+  captures via PCRTC. Still on the table per cycle-19's
+  recommendation list; still belongs to a future Hermes pass.
+
+The cycle-20 scope was bounded to Path A. None of A.2 / A.3 /
+B were started in this session, per the assignment.
+
+---
+
 ## 2026-05-22 (cycle 19): real-Xbox parity check for `image-blit.iso` ATTEMPTED — witness path BLOCKED; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision DEFERRED
 
 **Decision.** Defer the `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on

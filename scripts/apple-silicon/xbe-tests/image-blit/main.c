@@ -155,6 +155,77 @@
 
 #include "nv2a_regs_image_blit.h"
 
+/* Cycle 20 Path A (2026-05-22): always-on, FTP-collectable progress
+ * markers. Every staged checkpoint writes a tiny text file to
+ * `D:\image-blit-marker-NN-STAGE.txt`. The harness's `--ftp-collect
+ * /E/Apps/image-blit` pulls everything under that directory after the
+ * chainloaded XBE reboots; the highest-numbered marker file present
+ * after a real-Xbox run is the furthest stage the XBE actually reached.
+ *
+ * Why this matters: cycle 19 attempted a real-Xbox parity check by
+ * chainloading the existing v0.4 image-blit XBE via the oracle agent's
+ * `runxbe` RPC. Two independent attempts produced clean reboots back to
+ * FTP but NO `D:\image-blit-capture.bin` and NO `D:\image-blit-done.txt`.
+ * The single binary witness "either everything ran or nothing did" was
+ * the entire problem — we could not tell whether the XBE crashed at
+ * `xbed_init`, mid-blit, during oracle compare, in shader load, or
+ * whether it ran to completion and the final `fopen("D:\\…","wb")` for
+ * the capture/done files failed silently because `D:\` didn't map the
+ * way `XLaunchXBE` (from an ISO mount on xemu) maps it.
+ *
+ * Path A markers turn that into a stage-decodable signal: each marker
+ * is independently small (a few hundred bytes max), is written via the
+ * same `fopen / fprintf / fclose` path as the cycle-19 done-marker (so
+ * if D:\ fopen genuinely doesn't work on real Xbox we'll see ZERO
+ * markers, which is itself a definitive answer), and is also mirrored
+ * through the existing `xbed_host_log_writef` channel so xemu logs see
+ * the progression too. A failed marker write is silently ignored — we
+ * want maximum forward progress, not extra exit paths.
+ *
+ * Markers MUST be numerically ordered. Adding a new one between two
+ * existing markers requires renumbering everything after it. The
+ * mapping (number -> stage) is the authoritative documentation; the
+ * stage label string in the filename is for human readability. */
+static void image_blit_marker(unsigned idx, const char *stage)
+{
+    /* Filename budget: FATX caps basenames at 42 characters. The
+     * fixed prefix `image-blit-marker-` (18) + `NN-` (3) + `.txt` (4)
+     * costs 25 chars, leaving 17 for the stage label. ALL labels
+     * below are kept ≤ 14 chars so every marker basename stays at
+     * 39 chars or under, well clear of the limit. (Codex 2026-05-22
+     * cycle 20 review flagged the original `default_state_set` /
+     * `before_capture_loop` labels for being at-limit / over-limit;
+     * they were shortened to `state_set` / `pre_capture`.) The
+     * `%02u` keeps lexical and numeric ordering identical so a
+     * sorted FTP listing reflects the stage-execution order. */
+    char path[64];
+    int n = snprintf(path, sizeof(path),
+                     "D:\\image-blit-marker-%02u-%s.txt", idx, stage);
+    if (n <= 0 || n >= (int)sizeof(path)) {
+        /* Bad format / overflow: skip the FS write but still surface
+         * through the host-log channel so xemu sees the stage tag. */
+        xbed_host_log_writef("image-blit: marker %02u %s (path-overflow)",
+                             idx, stage);
+        return;
+    }
+    /* Mirror through the host-log channel FIRST so the marker shows up
+     * in xemu logs even if the file open fails. Inert on real Xbox /
+     * stock xemu without XEMU_GUEST_LOG. */
+    xbed_host_log_writef("image-blit: marker %02u %s", idx, stage);
+    /* Then write the FTP-collectable file. Best-effort: ignore errors
+     * silently so a single failing write can't strand the test. */
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "image-blit marker %02u stage=%s\n", idx, stage);
+        fclose(f);
+    } else {
+        /* fopen failed: also surface this through the host-log channel
+         * so the failure mode is at least observable under xemu. */
+        xbed_host_log_writef("image-blit: marker %02u %s fopen-failed",
+                             idx, stage);
+    }
+}
+
 #define WIN_W 640
 #define WIN_H 480
 
@@ -612,7 +683,16 @@ static void render_dashboard_frame(uint32_t frame_idx, void *ctx)
 
 int main(void)
 {
+    /* Cycle 20 Path A: marker 00 fires BEFORE anything else — no
+     * pbkit, no XVideoSetMode, no VRAM alloc. If real Xbox produces
+     * this file but no later markers, the failure is in xbed_init or
+     * pbkit init. If real Xbox produces NO markers at all, either
+     * D:\ doesn't fopen on this chainload path or the XBE crashes
+     * before main() body runs. */
+    image_blit_marker(0, "program_entered");
+
     if (xbed_init(WIN_W, WIN_H) != XBED_OK) return 1;
+    image_blit_marker(1, "xbed_init_ok");
     debugPrint("image-blit v0.4 (cycle 15 host-visible oracle channel)\n");
     /* Cycle 15: anchor line so harness/grep can confirm the
      * host-visible log channel reached at least once during this run.
@@ -644,6 +724,7 @@ int main(void)
         HalReturnToFirmware(HalRebootRoutine);
         return 1;
     }
+    image_blit_marker(2, "verts_alloc_ok");
 
     /* Allocate VRAM for source + 8 dst surfaces. PAGE_WRITECOMBINE
      * matches what every other diag XBE uses for CPU-paint VRAM. */
@@ -656,7 +737,9 @@ int main(void)
         HalReturnToFirmware(HalRebootRoutine);
         return 1;
     }
+    image_blit_marker(3, "src_alloc_ok");
     fill_source_buffer();
+    image_blit_marker(4, "src_filled");
 
     for (int idx = 0; idx < GRID_CELLS; idx++) {
         s_dst_vram[idx] = MmAllocateContiguousMemoryEx(
@@ -670,14 +753,26 @@ int main(void)
         }
         fill_dest_sentinel(s_dst_vram[idx]);
     }
+    image_blit_marker(5, "dst_alloc_ok");
 
     /* Phase 1: execute all 8 IMAGE_BLITs + verify CPU-side. We do
      * this BEFORE loading the 3D shaders so the IMAGE_BLIT pushes
      * (which touch subchannels 3 and 4) cannot interact with any
      * partially-initialized 3D pipeline state on subchannel 0. */
+    image_blit_marker(6, "before_blits");
     for (int idx = 0; idx < GRID_CELLS; idx++) {
         run_one_blit_cell(idx);
+        if (idx == 0) {
+            /* Marker 7 fires AFTER the first blit + oracle compare
+             * specifically — this is the cycle-19 hypothesis-3 surface
+             * (`pb_agp_access` divergence between xemu's emulated AGP
+             * aperture and real-NV2A behavior). If marker 6 lands but
+             * 7 does not, real-Xbox died inside the first blit fire
+             * or the first oracle read-back. */
+            image_blit_marker(7, "after_cell0");
+        }
     }
+    image_blit_marker(8, "after_all_blits");
 
     /* Cycle 15: emit a single-line tally through the host channel so
      * the harness can read the verdict total even if the per-cell
@@ -702,12 +797,26 @@ int main(void)
      * -> window coords; DIFFUSE -> COLOR). Matches the triangle
      * sample / texture-pitch-alignment patterns. */
     xbed_set_default_render_state();
+    image_blit_marker(9, "state_set");
     xbed_load_default_shaders();
+    image_blit_marker(10, "shaders_loaded");
 
     /* Build the dashboard geometry once with per-cell verdict
      * colors, then render it for n_frames so the host capture has
      * plenty of opportunities to land on a fully-rendered frame. */
     build_dashboard_geometry();
+    image_blit_marker(11, "geometry_built");
+
+    /* Marker 12 is the last checkpoint BEFORE the render loop and
+     * the final `xbed_capture_front_to_xoss(D:\\image-blit-capture.bin)
+     * + fopen(D:\\image-blit-done.txt)` tail. If marker 12 lands on
+     * real Xbox but neither `image-blit-capture.bin` nor
+     * `image-blit-done.txt` does, the failure is specifically in the
+     * render-loop / PCRTC-publish / final capture+done fopen, NOT in
+     * any of the earlier init/blit stages. Label kept short
+     * (`pre_capture`) to stay clear of the FATX 42-char basename
+     * limit — see image_blit_marker() comment. */
+    image_blit_marker(12, "pre_capture");
 
     xbed_render_loop_then_capture(
         render_dashboard_frame, NULL, /*n_frames=*/300,

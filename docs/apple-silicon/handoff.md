@@ -1,19 +1,215 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 19 — **real-Xbox parity check
-ATTEMPTED; image-blit.iso does not produce real-Xbox-witnessable
-output in its current form**. Two independent chainload attempts
-returned only the uploaded `default.xbe` from `/E/Apps/image-blit/`
-— no `D:\image-blit-capture.bin` and no `D:\image-blit-done.txt`,
-even though the Xbox rebooted cleanly back to FTP after ~22 s of
-runtime. Cycle-17's xemu-with-flag `pass=8/8 mask=0xff` therefore
-CANNOT be directly compared against a real-Xbox tally. The
-`XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix
-decision is **DEFERRED** pending a real-Xbox-witnessable
-diagnostic. Cycle-11 follow-up item #3 — **ATTEMPTED, BLOCKED on
-witness mechanism, not on the diagnostic itself.** M15 overall
-still **NOT MET** pending §H.6 default-on shape, §G.5,
-RT-as-texture.
+Last updated: 2026-05-22 (cycle 20 Path A — **image-blit
+instrumented with 13 staged progress markers writing
+`D:\image-blit-marker-NN-STAGE.txt` files. Local xemu validation
+shows all 13 markers fire via the existing `xemu-guest-log:` host
+channel but every `fopen("D:\\…","wb")` returns NULL on the
+ISO-mount path (CD-ROM, read-only) — the host-side screenshot path
+masks this for the existing xemu pipeline. Real-Xbox runs (twice,
+once with `default_state_set` / `before_capture_loop` labels at /
+over the FATX 42-char basename limit, once with Codex-shortened
+`state_set` / `pre_capture` labels) produced ZERO marker files in
+FTP-collect; only the uploaded `default.xbe` echo. Chainload→FTP-
+back gap stable at 22.4 s across all three cycle-19+cycle-20
+attempts. Conclusion: under the `runxbe` SITE-EXEC chainload
+path on this console, the chainloaded XBE cannot write any `D:\`
+file the FTP-collect step retrieves — independent of basename
+length and independent of how far into the XBE the writes are
+attempted. Cycle-19 hypothesis #1 (D:\ remap mismatch under
+`runxbe` chainload) is materially elevated; the other three
+hypotheses cannot be discriminated from this evidence alone
+because they share the same observation. Path A's specific
+question — "which stage fails on real Xbox" — is NOT directly
+answered; what IS answered is that the D:\ witness mechanism
+itself is the blocker, not stage-specific failures the markers
+were designed to bracket.** `XEMU_DIAG_PGRAPH_STATUS_DRAIN`
+default-on / long-term-fix decision remains DEFERRED. Cycle-17's
+xemu-side `8/8 mask=0xff` finding is NOT invalidated; the flag
+continues to ship opt-in, default OFF. M15 overall still
+**NOT MET** pending §H.6 default-on shape, §G.5, RT-as-texture.
+
+## 2026-05-22 (cycle 20 Path A) — image-blit progress-marker instrumentation; D:\ witness path confirmed BLOCKED on real Xbox under `runxbe` chainload
+
+**Status: SHIPPED (XBE-only instrumentation slice; xemu source untouched). Bounded slice CLOSED — markers landed, local validation green, real-Xbox witness re-confirmed BLOCKED.**
+
+**Slice.** Cycle-19 closure left two candidate next slices: Path A
+(make `image-blit.iso` real-Xbox-witnessable enough to identify
+which stage fails) and Path B (build a smaller PFIFO-race-only
+Tier-1 diag XBE that captures via the proven `xbed_capture`
+PCRTC path). Cycle-20 took Path A: add early, always-on,
+FTP-collectable progress markers to
+`scripts/apple-silicon/xbe-tests/image-blit/main.c` so the
+existing oracle pipeline's FTP-collect step can distinguish
+"crashed at xbed_init", "crashed mid-blit", "crashed during
+oracle compare", "crashed during shader load", "completed but
+D:\ fopens silently fail", etc.
+
+**Diff (uncommitted in xemu-fork/ at session close).** Only
+`scripts/apple-silicon/xbe-tests/image-blit/main.c` — adds a
+single helper `image_blit_marker(unsigned idx, const char *stage)`
+that writes a tiny text file to
+`D:\image-blit-marker-NN-STAGE.txt` and ALSO mirrors the marker
+line through the existing `xbed_host_log_writef` channel
+(inert on real Xbox / stock xemu without `XEMU_GUEST_LOG=1`).
+Markers fire at 13 staged points: 00 program_entered (literal
+first line of `main()`, before `xbed_init`), 01 xbed_init_ok,
+02 verts_alloc_ok, 03 src_alloc_ok, 04 src_filled, 05
+dst_alloc_ok, 06 before_blits, 07 after_cell0 (specifically
+isolates the first IMAGE_BLIT fire + first `pb_agp_access`
+oracle readback), 08 after_all_blits, 09 state_set, 10
+shaders_loaded, 11 geometry_built, 12 pre_capture (last
+checkpoint BEFORE `xbed_render_loop_then_capture`). Markers
+09 and 12 were shortened from `default_state_set` /
+`before_capture_loop` to `state_set` / `pre_capture` after
+Codex flagged the originals against the FATX 42-char basename
+limit (marker-12 was 44 chars, marker-09 exactly at 42). Helper
+is best-effort: failed `fopen` returns silently after surfacing
+an `image-blit: marker NN STAGE fopen-failed` line through the
+host-log channel; no exit paths added. Bounded reviewable diff
+~101 net lines added.
+
+**Local validation (xemu-Metal, `XEMU_GUEST_LOG=1`).** All 13
+markers fire in order via the `xemu-guest-log:` host channel.
+EVERY `fopen("D:\\image-blit-marker-NN-STAGE.txt","wb")` returns
+NULL on the ISO-mount path — `image-blit.iso` is a CD-ROM mount
+which is read-only, so `D:\` (mapped to the chainloaded XBE's
+parent directory) is also read-only. This was previously masked
+because xemu's renderer-side screenshot hook
+(`XEMU_METAL_SCREENSHOT_PATH`) writes screenshots to a HOST
+filesystem path, NOT through `D:\` — the harness has been
+producing PNGs all along despite the XBE's own `D:\` writes
+silently failing. The v0.4 3/8 `mask=0x31` tally is unchanged
+(same expected_fail verdict as v0.4 baseline; no
+instrumentation-induced regression). First local run:
+`benchmark-runs/cycle20-image-blit-markers-local-metal-guestlog-20260522T221035Z/`.
+Post-Codex re-validate (with shortened labels):
+`benchmark-runs/cycle20-image-blit-markers-local-metal-postcodex-20260522T221959Z/`.
+
+**Real-Xbox runs (two, with the post-Codex shortened-label
+binary AND the pre-Codex over-limit-label binary).** Both
+produced IDENTICAL outcomes: chainload→FTP-back gap 22.4 s
+(matches cycle-19 attempts of 22.4 s + 22.3 s; third
+reproducibility confirmation), only `default.xbe` retrieved
+from `/E/Apps/image-blit/`, ZERO marker files present. Pixel
+oracle correctly classifies as `fail: no-xoss-blob-pulled`.
+
+| Attempt | Run dir | Chainload→FTP-back | Marker files retrieved |
+|---:|---|---:|---|
+| 1 (pre-Codex labels) | `cycle20-real-xbox-image-blit-markers-20260522T221224Z/` | 22.4 s | 0 |
+| 2 (post-Codex labels) | `cycle20-real-xbox-image-blit-markers-postcodex-20260522T222048Z/` | 22.4 s | 0 |
+
+**Why marker-00 producing zero files is decision-relevant.**
+Marker-00 fires as the literal first line of `main()`, before
+`xbed_init()`, before `XVideoSetMode`, before pbkit, before any
+NV2A interaction. The marker writes a 40-character basename
+(`image-blit-marker-00-program_entered.txt`), well under the
+FATX 42-char limit. If `fopen("D:\\…","wb")` worked at all on
+the `runxbe` chainload path, marker-00 would be the highest-
+likelihood-success file in the entire ladder. Its absence
+combined with the absence of marker 01..12 makes the
+discriminating signal strong: **`D:\` fopen for write is
+blocked on the `runxbe` SITE-EXEC chainload path on this
+console, regardless of XBE-side stage.** This is consistent
+with cycle-19 hypothesis #1 (D:\ remap mismatch under `runxbe`
+chainload).
+
+**Conservative reading — what this DOES NOT prove.**
+
+1. We have NOT proven the XBE crashes at any specific stage. We
+   have only proven that no `D:\…` file written by the XBE
+   reaches FTP. The XBE may run to completion with every fopen
+   failing, OR it may crash at any point along the way; the
+   surface evidence is identical in either case.
+2. We have NOT proven that the existing pipeline-smoke / mirror /
+   color-channel / depth-floor real-Xbox references (in
+   `docs/apple-silicon/xbox-real-references/`) were captured via
+   the same `runxbe` SITE-EXEC chainload path. If those were
+   captured by a different launch path (e.g. via `XLaunchXBE`
+   from an ISO mount through a different shell), the D:\
+   behavior may genuinely differ; that needs cross-checking
+   before the leading hypothesis is treated as a single
+   universal fact.
+3. Path A as originally framed ("identify which stage fails on
+   real Xbox") is NOT directly delivered — markers couldn't get
+   off-board on real Xbox. What IS delivered is sharper framing:
+   the witness-mechanism blocker is `D:\` write-back under
+   `runxbe`, not stage-specific XBE failure modes.
+
+**Codex validation.** Mode: `changes`. Verdict: **MINOR ISSUES**
+(strengths cited; one medium-severity finding flagged the FATX
+42-char basename overflow for marker 12 + at-limit marker 09).
+Findings adopted in full: both labels shortened, comment block
+re-grounded against the FATX limit with an explicit ≤14-char
+label budget, binary rebuilt, validation re-run on real Xbox
+with the corrected binary. Out-of-scope finding (orchestration
+`claude-status.md` mentioned a 9-marker ladder when the code
+ships 13) is addressed in this same doc-sync pass. Validation
+marker written at `.claude/state/codex-validate-last-run` per
+rule #15. Codex stream + last-message files removed at close
+per skill §6.
+
+**Files produced.**
+
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c` —
+  instrumentation diff (uncommitted at session close).
+- `scripts/apple-silicon/xbe-tests/image-blit/bin/default.xbe`
+  + `image-blit.iso` — rebuilt (post-Codex labels). Both are
+  uncommitted by-products of the build; will be staged as part
+  of the cycle-20 commit.
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-20260522T220904Z/`
+  — first local xemu run (no `XEMU_GUEST_LOG`); confirms pixel
+  oracle behavior unchanged.
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-guestlog-20260522T221035Z/`
+  — local xemu run with host-log channel on; confirms 13
+  markers fire and `fopen` fails on ISO mount.
+- `benchmark-runs/cycle20-real-xbox-image-blit-markers-20260522T221224Z/`
+  — first real-Xbox run (pre-Codex labels); zero markers
+  retrieved.
+- `benchmark-runs/cycle20-image-blit-markers-local-metal-postcodex-20260522T221959Z/`
+  — local xemu re-validate after Codex-driven label shortening;
+  same v0.4 tally.
+- `benchmark-runs/cycle20-real-xbox-image-blit-markers-postcodex-20260522T222048Z/`
+  — second real-Xbox run (post-Codex labels); zero markers
+  retrieved (third reproducibility confirmation overall).
+
+**Cycle 11 follow-up list — updated.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED cycle 15.
+- ✅ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — CLOSED cycle 17.
+- 🟡 #3 (Real-Xbox parity check) — **REFRAMED cycle 20.** No
+  longer "which stage fails"; the bounded answer is "D:\
+  write-back is blocked on the `runxbe` chainload path." Next
+  bounded slices (NOT promoted in this session per the cycle-20
+  scope rule):
+  - **A.2.** Route the next image-blit instrumentation pass to
+    a known-writeable partition (e.g. `T:\` title-data or
+    direct paths under `E:\Apps\image-blit\`) and re-run. If
+    markers land there, we'll learn the XBE's execution stage.
+  - **A.3.** Cross-check the existing
+    `xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor}`
+    captures: confirm whether they were captured via `runxbe`
+    chainload (in which case `D:\` writes work for THOSE XBEs
+    and image-blit fails for a different reason) or via a
+    different launch path (in which case the leading hypothesis
+    is universal).
+  - **B.** Smaller PFIFO-race-only Tier-1 diag XBE that
+    captures via PCRTC. Still on the table per cycle 19's
+    recommendation list.
+
+**Out-of-scope (cycle-20 kept bounded).**
+
+- Did NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on.
+- Did NOT start Path B.
+- Did NOT modify xemu-fork host source.
+- Did NOT touch retail-title metrics or §G.5 / RT-as-texture
+  work.
+- Did NOT investigate alternative write-back partitions in this
+  cycle — that is Path A.2 and belongs to the next Hermes pass.
+
+Cycle 19 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 19) — real-Xbox image-blit parity check attempted; witness path BLOCKED
 
