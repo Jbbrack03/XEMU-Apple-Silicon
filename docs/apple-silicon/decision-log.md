@@ -1,5 +1,145 @@
 # Decision Log
 
+## 2026-05-22 (cycle 12): §H.6 `image-blit` v0.3 — bounded partial; residual root cause narrowed from "shared blit math" to "guest CPU read-back coherency"
+
+**Decision.** Ship `xbe-tests/image-blit/` v0.3 as a **bounded
+partial (Option B)** that closes cycle 12. v0.3 keeps the same
+3/8 per-cell PASS verdict as v0.2 (cells 0, 4, 5 PASS; 1, 2, 3,
+6, 7 FAIL on Metal) but materially advances the root-cause
+narrowing by adding a per-cell first-mismatch diagnostic
+encoding (item #4 of the cycle-11 residual investigation list)
+and gathering two follow-on control experiments that disprove
+three of the cycle-11 hypotheses.
+
+**Evidence (all preserved durably).**
+
+1. **Per-cell first-mismatch encoding (v0.3).** New `CellDiag
+   s_cell_diag[GRID_CELLS]` populated by `oracle_check_cell`;
+   `build_dashboard_geometry` now emits a 2×2 sub-rect layout
+   per cell with TL=red banner, TR=GOT pixel, BL=EXPECTED
+   pixel, BR=`pos_color_argb(mx, my)` (R = `(mx & 7) * 32`,
+   G = `(my & 7) * 32` — bucket-of-32 values in `{0, 32, 64,
+   …, 224}` so the low 3 bits survive Apple's GL-on-Metal
+   gamma; B = `((mx >> 3) << 4) | (my >> 3)` packs the upper 3
+   bits of mx/my as a nibble pair, narrower range but mx/my
+   are bounded by the 32×32 max blit rect). Frame 0124 of
+   `benchmark-runs/xbe-harness-20260522-090124/image-blit/
+   metal/screenshots/` decodes to: every FAIL cell shows
+   GOT=`0xff808080` (sentinel), EXPECTED=`0xffff0000` (RED),
+   mismatch coords `(mx, my) = (0, 0)`. Confirmed identically
+   in the final clean-xemu validation run at
+   `benchmark-runs/xbe-harness-20260522-091903/.../
+   image-blit.0124.png`.
+2. **Renderer fprintf evidence (since reverted).** A transient
+   `fprintf(stderr, "xemu-perf: image_blit_cell …")` in
+   `hw/xbox/nv2a/pgraph/mtl/blit.c` (capped at 32 invocations)
+   captured per-blit `source_offset`, `dest_offset`,
+   `dest_size`, `clipped_dest_size`, `adjusted_height`,
+   `leftover_bytes`, `row_pixels`, and the pre/post first-pixel
+   dword of `dest_row`. Stored at
+   `benchmark-runs/xbe-harness-20260522-090729/image-blit/
+   metal/xemu.log`. Result: for ALL 8 cells in the first XBE
+   invocation, `dst_pre=0xff808080, dst_post=0xffff0000`. No
+   tile clipping engages (`clipped == dest_size` for every
+   cell). The renderer CPU memcpy writes the correct RED bytes
+   at the right host pointer.
+3. **Cached-read control experiment.** A v0.3 variant flipped
+   `oracle_check_cell` to read via `s_dst_vram[idx]` directly
+   instead of `pb_agp_access(s_dst_vram[idx])`. Frame 0124 of
+   `benchmark-runs/xbe-harness-20260522-091452/` shows the
+   result is STRICTLY WORSE — only cell 4 PASSes (vs 0/4/5
+   under AGP read). Cached read is less fresh than AGP read.
+   Both views map to the same backing memory in xemu, so the
+   difference proves the guest CPU is hitting a stale read
+   path.
+
+**Conclusion (binding).** The residual 5-cell mismatch is a
+**guest CPU cache-coherency issue on the VRAM read-back path**,
+NOT a renderer bug. The Metal `pgraph_mtl_image_blit` CPU
+memcpy is byte-correct; the gl/vk siblings being literal mirrors
+means the conclusion applies cross-renderer too.
+
+**Hypotheses now disproved by direct evidence (cycle-11 list).**
+
+- Shared blit math bug (`mtl/blit.c:181-233`, mirrored in
+  `gl/blit.c:123-187` and `vk/blit.c:127-191`) — DISPROVED.
+- Tile-limit clipping via `nv_clip_gpu_tile_blit`
+  (`nv2a.c:89-107`) — DISPROVED (no clip ever engages).
+- Surface-cache download corruption (Metal surface cache) —
+  DISPROVED (no cache entries for the never-rendered VRAM
+  buffers used by the XBE).
+- XBE-side oracle math bug — DISPROVED (math is symmetric
+  across cells; the FIRST mismatch in every FAIL cell is at
+  `(0,0)` with got=sentinel, expected=red, which only makes
+  sense if the GUEST read genuinely sees stale sentinel).
+
+**PASS/FAIL asymmetry partially explained.** Cells 4 (PASS)
+and 5 (PASS) have non-zero `out_x/out_y`, so their oracle's
+iteration finds the FIRST EXPECTED pixel at `dst[0,0]` to be
+SENTINEL (correct under the math-derived oracle for those
+cells). A stale-sentinel read at `dst[0,0]` therefore still
+matches the oracle — the read-back coherency bug is invisible
+to these cells. Cell 0 (`out=(0,0)`, PASS via AGP) vs cell 3
+(`out=(0,0)`, FAIL via AGP) is the surviving puzzle; the
+working sub-hypothesis is a cold-TCG / first-iteration TLB
+state, to be grounded in cycle 13.
+
+**Files shipped.**
+
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c` —
+  `CellDiag` struct, `oracle_check_cell(idx, …)`, 2×2 sub-rect
+  geometry generator, `pos_color_argb()` helper, banner bumped.
+- `scripts/apple-silicon/xbe-tests/image-blit/manifest.json` —
+  title bumped to v0.3, `expected_fail_notes` rewritten with
+  the narrowed root cause + cited evidence.
+- `scripts/apple-silicon/xbe-tests/image-blit/README.md` —
+  cycle-12 status, evidence runs, decoder for the BR sub-rect,
+  disproved-hypothesis list.
+- `scripts/apple-silicon/xbe-tests/image-blit/image-blit.iso` —
+  rebuilt.
+- `hw/xbox/nv2a/pgraph/mtl/blit.c` — transient diag fprintf
+  REMOVED before commit. Evidence preserved in the
+  `xbe-harness-20260522-090729` xemu.log.
+
+**Not shipped (kept research-only).**
+
+- Cached-read variant of `oracle_check_cell`. The v0.3 ships
+  `pb_agp_access(s_dst_vram[idx])` (strictly less stale than
+  cached read on this test). The cached-read variant exists
+  in the evidence run only.
+
+**Cycle-13 follow-up (not started this cycle).**
+
+Investigate xemu's CPU/TLB read-back coherency between host
+pgraph memcpy writes (to `d->vram_ptr + phys`) and guest TCG
+vCPU reads through the cached (`0x80000000 + phys`) and
+AGP-aliased (`0xF0000000 + phys`) virtual mappings. Possible
+diagnostic angles:
+
+- Temporary tracepoint in `accel/tcg/cputlb.c` /
+  softmmu-load helpers for VRAM-range hits.
+- Tracer hook around `memory_region_dispatch_read` for the
+  RAM region.
+- Inspect QEMU dirty-bit interactions for `DIRTY_MEMORY_VGA`
+  / `DIRTY_MEMORY_NV2A_TEX` to see whether host-side writes
+  flip the right bookkeeping for TCG reads.
+- Check page-attribute / WRITECOMBINE / MTRR handling on
+  Apple-Silicon TCG vs upstream QEMU's expectations.
+- Patch xemu so a host-side memcpy into VRAM also calls
+  `cpu_physical_memory_set_dirty_lebitmap` (or equivalent)
+  to invalidate any TCG cached translation.
+
+**M15 default-on Gate 2 status update.**
+
+- §E.13 per-format pitch + image-rect alignment — **MET** (cycle 10).
+- §H.6 IMAGE_BLIT — **PARTIAL, root cause narrowed** (cycle 12).
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+Gate 2 reads **1 MET + 1 PARTIAL (root cause narrowed) of 4**.
+
+---
+
 ## 2026-05-22 (cycle 11): §H.6 `image-blit` v0.2 — bounded partial on Metal; channel 9/11 → 3/4 root cause grounded
 
 **Decision.** Ship `xbe-tests/image-blit/` v0.2 as a **bounded

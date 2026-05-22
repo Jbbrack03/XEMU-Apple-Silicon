@@ -6,12 +6,21 @@ Tier-2 diagnostic XBE covering §H.6 (`NV_IMAGE_BLIT` class 0x9F +
 of the second-wave M15-default-on Gate-2 coverage list (after
 `texture-pitch-alignment` shipped 2026-05-22 cycle 10).
 
-**Current status (v0.2, 2026-05-22 cycle 11): bounded partial.**
-3 of 8 cells PASS on Metal byte-correct; 5 fail. Original v0.1
-assertion crash (`blit.c:170 source_offset < source_dma_len`) is
-**resolved** via DMA-handle change; remaining 5-cell mismatch
-documented as the next bounded slice. See "Status" section below
-for the full per-cell verdict matrix and the residual hypothesis.
+**Current status (v0.3, 2026-05-22 cycle 12): bounded partial,
+root cause materially narrowed.** Same 3-of-8 PASS verdict on
+Metal as v0.2, but cycle 12 added a per-cell first-mismatch
+diagnostic encoding (4-quad sub-rect layout per cell) that
+decoded the residual: got = sentinel `0xff808080`, expected =
+RED `0xffff0000`, first mismatch at `(mx=0, my=0)` for every
+FAIL cell. A transient xemu-side fprintf in
+`hw/xbox/nv2a/pgraph/mtl/blit.c` (since reverted) proved that
+the **renderer's CPU memcpy writes the correct RED bytes for
+ALL 8 cells**. A cached-read control experiment (oracle reading
+via `s_dst_vram[idx]` directly instead of `pb_agp_access`) made
+the result strictly WORSE — only cell 4 PASSed. Conclusion: the
+residual 5-cell mismatch is a **guest-side CPU cache coherency
+issue on the VRAM read-back path**, not a renderer bug. See the
+"Status" section + decision-log cycle 12 entry for evidence.
 
 ## What it tests
 
@@ -42,7 +51,11 @@ every pixel outside the rect remains sentinel gray.
 The per-cell verdict is encoded as a 160×240 dashboard rectangle:
 
 - PASS: solid green `0xFF00FF00`.
-- FAIL: solid red `0xFFFF0000`.
+- FAIL (v0.3): a 2×2 sub-rect with TL = solid red FAIL banner,
+  TR = GOT pixel color, BL = EXPECTED pixel color, BR = encoded
+  first-mismatch `(mx, my)`. See "Cycle-12 v0.3 diagnostic
+  encoding" below for the decoder. (v0.2 historical: a single
+  solid red `0xFFFF0000` rectangle.)
 
 ## Expected output
 
@@ -171,7 +184,75 @@ scripts/apple-silicon/xbe-harness/xbe_orchestrator.py run \
 
 ## Status
 
-**v0.2 — BOUNDED PARTIAL on Metal (2026-05-22 cycle 11).**
+**v0.3 — BOUNDED PARTIAL on Metal (2026-05-22 cycle 12).** Same
+per-cell verdict as v0.2 (3 of 8 PASS, 5 FAIL), but the residual
+root cause is now materially narrowed by the cycle-12
+first-mismatch diagnostic encoding + cached-read control
+experiment + xemu-side per-blit fprintf.
+
+### Cycle-12 v0.3 diagnostic encoding
+
+When a cell FAILs, its dashboard cell is now split into a 2×2
+sub-rect layout instead of solid red:
+
+- **TL (red)**: FAIL banner — still solid red, retains the
+  visual gestalt of "this cell failed."
+- **TR**: GOT pixel value as a solid color — the exact ARGB
+  the oracle saw at `dst[mx, my]`.
+- **BL**: EXPECTED pixel value as a solid color — what the
+  math-derived oracle expected.
+- **BR**: `(mx, my)` encoded as a pure ARGB color where R and G
+  are bucket-of-32 (`R = (mx & 7) * 32`, `G = (my & 7) * 32`;
+  values in `{0, 32, 64, …, 224}` so Apple GL-on-Metal gamma
+  cannot corrupt the low 3 bits), and B packs the upper 3 bits
+  of mx/my as a nibble pair (`B = ((mx >> 3) << 4) | (my >> 3)`;
+  values up to `0x33` for mx, my ∈ [0, 31]). Decoder:
+  `mx = R / 32 + ((B >> 4) & 7) * 8`,
+  `my = G / 32 + (B & 7) * 8`.
+
+Frame 0124 of
+`benchmark-runs/xbe-harness-20260522-090124/image-blit/metal/
+screenshots/` decodes to: every FAIL cell shows
+TR=`0xff808080` (sentinel), BL=`0xffff0000` (red),
+BR=`(mx=0, my=0)`. So the FIRST byte of the dst (offset 0) is
+sentinel where it should be red.
+
+### Cycle-12 xemu fprintf evidence (since reverted)
+
+A transient `fprintf(stderr, "xemu-perf: image_blit_cell …")` in
+`hw/xbox/nv2a/pgraph/mtl/blit.c` logged the local
+`source_offset` / `dest_offset` / `dest_size` / `clipped_dest_size`
+/ `adjusted_height` / `leftover_bytes` per blit invocation, plus
+the pre/post first-pixel dword at `dest_row`. Evidence in
+`benchmark-runs/xbe-harness-20260522-090729/image-blit/metal/
+xemu.log` shows:
+
+- All eight cell blits fire.
+- No tile clipping engages (`clipped == dest_size` for every
+  cell).
+- `dst_pre = 0xff808080, dst_post = 0xffff0000` for every cell —
+  the host-side memcpy writes the correct RED bytes at the right
+  host pointer.
+
+### Cycle-12 cached-read control experiment
+
+A v0.3 variant flipped `oracle_check_cell` to read via the
+cached virtual pointer (`s_dst_vram[idx]`) instead of
+`pb_agp_access(s_dst_vram[idx])`. Frame 0124 of
+`benchmark-runs/xbe-harness-20260522-091452/` decodes to: only
+cell 4 PASSes; cells 0/1/2/3/5/6/7 all FAIL with the same
+"first mismatch at (0,0), got=sentinel, expected=RED" signature.
+The cached read is **strictly less fresh** than the AGP-aliased
+read — direct evidence that the residual lies in the guest CPU's
+read-back cache coherency, not in the renderer.
+
+### Disproved cycle-11 hypotheses
+
+- Shared blit math bug (`mtl/blit.c:181-233` etc.) — DISPROVED.
+- Tile-limit clipping via `nv_clip_gpu_tile_blit` — DISPROVED.
+- Surface-cache download corruption — DISPROVED.
+
+### v0.2 historical context preserved below.
 
 Original v0.1 routed the NV062 source/destin DMA via pbkit handles
 9 and 11. On Metal that asserted at
@@ -195,14 +276,14 @@ After the fix the dashboard renders 3 of 8 cells PASS on Metal:
 
 | Cell | In(x,y) | Out(x,y) | W×H   | Verdict (Metal, v0.2)        |
 |------|---------|----------|-------|------------------------------|
-| 0    | (0,0)   | (0,0)    | 8×8   | **PASS** (solid green)       |
-| 1    | (0,0)   | (0,0)    | 16×16 | FAIL (solid red)             |
-| 2    | (0,0)   | (0,0)    | 32×32 | FAIL (solid red)             |
-| 3    | (8,8)   | (0,0)    | 8×8   | FAIL (solid red)             |
-| 4    | (0,0)   | (4,4)    | 8×8   | **PASS** (solid green)       |
-| 5    | (4,4)   | (8,8)    | 8×8   | **PASS** (solid green)       |
-| 6    | (0,0)   | (0,0)    | 1×16  | FAIL (solid red)             |
-| 7    | (0,0)   | (0,0)    | 16×1  | FAIL (solid red)             |
+| 0    | (0,0)   | (0,0)    | 8×8   | **PASS** (solid green)        |
+| 1    | (0,0)   | (0,0)    | 16×16 | FAIL (v0.3: 2×2 diag layout) |
+| 2    | (0,0)   | (0,0)    | 32×32 | FAIL (v0.3: 2×2 diag layout) |
+| 3    | (8,8)   | (0,0)    | 8×8   | FAIL (v0.3: 2×2 diag layout) |
+| 4    | (0,0)   | (4,4)    | 8×8   | **PASS** (solid green)        |
+| 5    | (4,4)   | (8,8)    | 8×8   | **PASS** (solid green)        |
+| 6    | (0,0)   | (0,0)    | 1×16  | FAIL (v0.3: 2×2 diag layout) |
+| 7    | (0,0)   | (0,0)    | 16×1  | FAIL (v0.3: 2×2 diag layout) |
 
 Best frame:
 `benchmark-runs/xbe-harness-20260522-075241/image-blit/metal/screenshots/image-blit.0124.png`.

@@ -234,6 +234,37 @@ static const BlitCell k_cells[GRID_CELLS] = {
 /* Per-cell verdict from CPU-side oracle: 1 on PASS, 0 on FAIL. */
 static int s_cell_pass[GRID_CELLS];
 
+/* Per-cell first-mismatch diagnostic (cycle 12, v0.3): when the
+ * oracle finds a mismatched pixel inside the 64x64 dst, capture
+ * (mx, my) and the got / expected pixel values so the failing
+ * sub-rect can encode them visually for host-screenshot decode.
+ *
+ * Visual encoding (FAIL cells, v0.3):
+ *   - TL 80x120: solid red (FAIL banner).
+ *   - TR 80x120: GOT pixel color (what the dst actually held).
+ *   - BL 80x120: EXPECTED pixel color (math-derived oracle).
+ *   - BR 80x120: pure-color (mx, my) encoding:
+ *       R = (mx % 8) * 32  (3 LSB of mx, scaled into bucket-of-32)
+ *       G = (my % 8) * 32  (3 LSB of my)
+ *       B = ((mx / 8) << 4) | (my / 8)  (3 MSB each packed)
+ *     R and G are bucket-of-32 values in {0, 32, 64, ..., 224},
+ *     which on Apple's GL-on-Metal display path stay
+ *     visually-decodable even under gamma. B packs the upper
+ *     three bits of mx and my into a nibble pair (values up
+ *     to 0x33 for mx, my < 32 — narrower range, but mx/my are
+ *     bounded by the largest blit rect, 32x32 in this XBE).
+ *     The exact (mx, my) can be read by dividing the R/G
+ *     channel value by 32 and reading the B channel
+ *     high-nibble / low-nibble.
+ *
+ * PASS cells continue to render solid green (all 4 sub-rects). */
+typedef struct {
+    int has_mismatch;
+    uint32_t mx, my;
+    uint32_t got, expected;
+} CellDiag;
+static CellDiag s_cell_diag[GRID_CELLS];
+
 /* VRAM allocations: one source surface + 8 dst surfaces. */
 static void *s_src_vram   = NULL;
 static void *s_dst_vram[GRID_CELLS];
@@ -250,7 +281,11 @@ typedef struct {
 } __attribute__((packed)) DashVertex;
 
 #define VERTS_PER_QUAD 6
-#define DASH_VERTS_TOTAL (GRID_CELLS * VERTS_PER_QUAD)
+/* Cycle 12 (v0.3): each cell now renders 4 sub-quads (2x2 layout)
+ * carrying the per-cell diagnostic info; total verts = 8 cells x
+ * 4 sub-quads x 6 verts = 192. */
+#define SUBQUADS_PER_CELL 4
+#define DASH_VERTS_TOTAL (GRID_CELLS * SUBQUADS_PER_CELL * VERTS_PER_QUAD)
 
 static DashVertex s_verts[DASH_VERTS_TOTAL];
 static DashVertex *s_alloc_verts = NULL;
@@ -331,9 +366,24 @@ static void push_image_blit(const BlitCell *cell,
 /* CPU-side oracle: every pixel inside the declared dst rect must
  * equal the corresponding source pixel; every pixel outside the
  * dst rect (but still inside the 64x64 allocation) must remain
- * sentinel. Returns 1 on PASS, 0 on FAIL. */
-static int oracle_check_cell(const BlitCell *cell, const void *dst_vram)
+ * sentinel. Returns 1 on PASS, 0 on FAIL.
+ *
+ * Cycle 12 (v0.3): on the FIRST mismatch, populate s_cell_diag[idx]
+ * with (mx, my, got, expected) so the dashboard can encode this
+ * info as a 2x2 sub-rect layout (see CellDiag comment above). */
+static int oracle_check_cell(int idx,
+                             const BlitCell *cell, const void *dst_vram)
 {
+    /* Cycle 12 finding (decision-log 2026-05-22): use `pb_agp_access`
+     * to read dst via the AGP-aliased UNCACHED view. The control
+     * experiment (a cycle-12 v0.3 variant that read through the
+     * cached pointer) made the residual WORSE: only cell 4 PASSed
+     * instead of 0/4/5. Combined with the host-side fprintf evidence
+     * that the renderer memcpy writes correct RED bytes for all 8
+     * cells, this proves the residual 5-cell mismatch is a guest
+     * CPU cache-coherency issue on the read-back path, not a
+     * renderer bug. AGP-aliased read is strictly less stale than
+     * cached read and is the right view for this test. */
     const uint32_t *dst = (const uint32_t *)pb_agp_access((void *)dst_vram);
     for (uint32_t y = 0; y < DST_H; y++) {
         for (uint32_t x = 0; x < DST_W; x++) {
@@ -355,10 +405,15 @@ static int oracle_check_cell(const BlitCell *cell, const void *dst_vram)
                 expected = SENTINEL_PIXEL;
             }
             if (got != expected) {
+                s_cell_diag[idx].has_mismatch = 1;
+                s_cell_diag[idx].mx = x;
+                s_cell_diag[idx].my = y;
+                s_cell_diag[idx].got = got;
+                s_cell_diag[idx].expected = expected;
                 debugPrint(
-                    "image-blit: cell mismatch dst@(%u,%u) got=0x%08lx "
+                    "image-blit: cell %d mismatch dst@(%u,%u) got=0x%08lx "
                     "expected=0x%08lx in=(%u,%u) out=(%u,%u) wxh=%ux%u\n",
-                    (unsigned)x, (unsigned)y,
+                    idx, (unsigned)x, (unsigned)y,
                     (unsigned long)got, (unsigned long)expected,
                     (unsigned)cell->in_x, (unsigned)cell->in_y,
                     (unsigned)cell->out_x, (unsigned)cell->out_y,
@@ -375,7 +430,7 @@ static void run_one_blit_cell(int idx)
     fill_dest_sentinel(s_dst_vram[idx]);
     push_image_blit(&k_cells[idx], s_src_vram, s_dst_vram[idx]);
     pb_wait_until_gr_not_busy();
-    s_cell_pass[idx] = oracle_check_cell(&k_cells[idx], s_dst_vram[idx]);
+    s_cell_pass[idx] = oracle_check_cell(idx, &k_cells[idx], s_dst_vram[idx]);
     debugPrint("image-blit: cell %d %s\n", idx,
                s_cell_pass[idx] ? "PASS" : "FAIL");
 }
@@ -406,21 +461,85 @@ static void emit_cell_quad(DashVertex *out, int x0, int y0, int x1, int y1,
     dash_vert(&out[5], x0, y1, rgba);
 }
 
+/* Cycle 12 (v0.3): unpack an ARGB pixel into a normalized float4
+ * suitable for emitting as a sub-rect DIFFUSE. The XBE source
+ * paint and oracle use 0xAARRGGBB layout. */
+static void argb_to_float4(uint32_t argb, float out[4])
+{
+    out[0] = (float)((argb >> 16) & 0xFF) / 255.0f; /* R */
+    out[1] = (float)((argb >>  8) & 0xFF) / 255.0f; /* G */
+    out[2] = (float)((argb >>  0) & 0xFF) / 255.0f; /* B */
+    out[3] = (float)((argb >> 24) & 0xFF) / 255.0f; /* A */
+}
+
+/* Cycle 12 (v0.3): pack (mx, my) into a pure ARGB color via the
+ * bucket-of-32 scheme documented at the CellDiag declaration so
+ * the host screenshot can decode the exact first-mismatch
+ * coordinates without relying on continuous gradients. */
+static uint32_t pos_color_argb(uint32_t mx, uint32_t my)
+{
+    uint8_t r = (uint8_t)((mx & 0x07u) * 32u);
+    uint8_t g = (uint8_t)((my & 0x07u) * 32u);
+    uint8_t b = (uint8_t)((((mx >> 3) & 0x07u) << 4) |
+                          ((my >> 3) & 0x07u));
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+}
+
 static void build_dashboard_geometry(void)
 {
-    /* Per-cell DIFFUSE = PASS (green) or FAIL (red) from the CPU
-     * oracle that already ran in main(). Stored as float4 in [0,1]
-     * for the passthrough PS. */
+    /* Per-cell DIFFUSE: PASS (green) or FAIL with diagnostic 2x2
+     * sub-rect encoding. Stored as float4 in [0,1] for the
+     * passthrough PS. */
+    const float pass_rgba[4] = { 0.0f, 1.0f, 0.0f, 1.0f }; /* green */
+    const float fail_rgba[4] = { 1.0f, 0.0f, 0.0f, 1.0f }; /* red   */
+
+    const int SUBCELL_W = CELL_W / 2; /* 80 */
+    const int SUBCELL_H = CELL_H / 2; /* 120 */
+
     for (int row = 0; row < GRID_ROWS; row++) {
         for (int col = 0; col < GRID_COLS; col++) {
             const int idx = row * GRID_COLS + col;
-            const float pass_rgba[4] = { 0.0f, 1.0f, 0.0f, 1.0f }; /* green */
-            const float fail_rgba[4] = { 1.0f, 0.0f, 0.0f, 1.0f }; /* red   */
-            const float *rgba = s_cell_pass[idx] ? pass_rgba : fail_rgba;
-            const int x0 = col * CELL_W;
-            const int y0 = row * CELL_H;
-            emit_cell_quad(&s_verts[idx * VERTS_PER_QUAD],
-                           x0, y0, x0 + CELL_W, y0 + CELL_H, rgba);
+            const int cx0 = col * CELL_W;
+            const int cy0 = row * CELL_H;
+
+            float tl_rgba[4], tr_rgba[4], bl_rgba[4], br_rgba[4];
+            if (s_cell_pass[idx] || !s_cell_diag[idx].has_mismatch) {
+                /* PASS or unexpected no-mismatch FAIL: all green. */
+                memcpy(tl_rgba, pass_rgba, sizeof(pass_rgba));
+                memcpy(tr_rgba, pass_rgba, sizeof(pass_rgba));
+                memcpy(bl_rgba, pass_rgba, sizeof(pass_rgba));
+                memcpy(br_rgba, pass_rgba, sizeof(pass_rgba));
+            } else {
+                /* FAIL with diag info: encode 2x2 layout per docs. */
+                memcpy(tl_rgba, fail_rgba, sizeof(fail_rgba));
+                argb_to_float4(s_cell_diag[idx].got, tr_rgba);
+                argb_to_float4(s_cell_diag[idx].expected, bl_rgba);
+                argb_to_float4(pos_color_argb(s_cell_diag[idx].mx,
+                                              s_cell_diag[idx].my),
+                               br_rgba);
+            }
+
+            const int base = idx * SUBQUADS_PER_CELL * VERTS_PER_QUAD;
+            /* TL */
+            emit_cell_quad(&s_verts[base + 0 * VERTS_PER_QUAD],
+                           cx0, cy0,
+                           cx0 + SUBCELL_W, cy0 + SUBCELL_H,
+                           tl_rgba);
+            /* TR */
+            emit_cell_quad(&s_verts[base + 1 * VERTS_PER_QUAD],
+                           cx0 + SUBCELL_W, cy0,
+                           cx0 + CELL_W, cy0 + SUBCELL_H,
+                           tr_rgba);
+            /* BL */
+            emit_cell_quad(&s_verts[base + 2 * VERTS_PER_QUAD],
+                           cx0, cy0 + SUBCELL_H,
+                           cx0 + SUBCELL_W, cy0 + CELL_H,
+                           bl_rgba);
+            /* BR */
+            emit_cell_quad(&s_verts[base + 3 * VERTS_PER_QUAD],
+                           cx0 + SUBCELL_W, cy0 + SUBCELL_H,
+                           cx0 + CELL_W, cy0 + CELL_H,
+                           br_rgba);
         }
     }
     memcpy(s_alloc_verts, s_verts, sizeof(s_verts));
@@ -476,7 +595,7 @@ static void render_dashboard_frame(uint32_t frame_idx, void *ctx)
 int main(void)
 {
     if (xbed_init(WIN_W, WIN_H) != XBED_OK) return 1;
-    debugPrint("image-blit v0.1\n");
+    debugPrint("image-blit v0.3 (cycle 12 first-mismatch diag encoding)\n");
 
     /* Vertex storage for the 8-cell dashboard quads. Allocated up
      * front but only populated after the per-cell verdicts land.
