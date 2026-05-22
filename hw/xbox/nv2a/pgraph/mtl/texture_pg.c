@@ -55,6 +55,7 @@
 #include "surface.h"
 #include "texture.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -1200,6 +1201,75 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
 
     PgraphMtlSamplerDesc sd;
     build_sampler_desc_from_pg(pg, stage, levels, &s, &sd);
+
+    /* 2026-05-21 evening (Hermes cycle 4, task #16) — per-bind sampler
+     * attribution diagnostic. Records the FINAL `PgraphMtlSamplerDesc`
+     * that `pgraph_mtl_texture_bind_slot_*` will hand to `get_sampler`,
+     * the resolved texture base + bound color RT, the upcoming
+     * `XEMU_METAL_DUMP_DRAW_RT` PNG index (when that dump is also
+     * active), and the input bind-path predicates (`has_surf` =
+     * `has_compatible_surface`, `self_sample`, `linear`, `tex_dirty`).
+     * Note: the diag fires BEFORE the actual surface / surface-copy /
+     * cached / full bind path is selected later in this function — the
+     * four predicates above are the inputs that selection uses, NOT a
+     * label for the chosen path. Gated under `XEMU_METAL_DIAG_ATTRIB_DUMP`
+     * set AND `pg->vertex_attributes[9].stride == 44` AND
+     * `s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8`
+     * (matches the swizzle-mipmap XBE's texture format; intentionally
+     * does NOT gate on `s.levels == 7` because per-cell MAX_LOD_CLAMP
+     * rewrites cause `pgraph_get_texture_shape` to clamp `s.levels`
+     * down to `max_mipmap_level + 1`, so the same XBE-bound texture is
+     * reported as `s.levels = 1..7` across the 7 per-cell binds).
+     * Capped at 32 lines so the four diag streams from this family
+     * (set_attr_masks / attrib_stream / dispatch_draw_target /
+     * tex_bind_attrib) share the same per-cell sample budget. Zero
+     * impact when the env is unset (single getenv + branch). */
+    {
+        const char *diag_env = getenv("XEMU_METAL_DIAG_ATTRIB_DUMP");
+        if (diag_env != NULL && diag_env[0] != '\0' && diag_env[0] != '0' &&
+            pg->vertex_attributes[9].stride == 44 &&
+            s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8) {
+            static _Atomic unsigned int s_sampler_attrib_lines = 0;
+            unsigned int line_idx =
+                atomic_fetch_add(&s_sampler_attrib_lines, 1);
+            if (line_idx < 32) {
+                uint64_t next_dump_idx = pgraph_mtl_draw_dump_rt_peek_index();
+                bool dump_active = pgraph_mtl_draw_dump_rt_active();
+                fprintf(stderr,
+                        "xemu-perf: metal_tex_bind_attrib stage=%d "
+                        "tex_addr=0x%llx color_target=0x%08x "
+                        "nv2a_fmt=0x%02x mtl_fmt=%u "
+                        "w=%u h=%u levels=%u s_levels=%u "
+                        "shape_min_lvl=%u shape_max_lvl=%u "
+                        "min_lod=%.3f max_lod=%.3f lod_bias=%.3f "
+                        "min_f=%u mag_f=%u mip_f=%u "
+                        "addr_u=%u addr_v=%u "
+                        "has_surf=%d self_sample=%d linear=%d "
+                        "tex_dirty=%d "
+                        "next_dump_idx=%llu dump_active=%d\n",
+                        stage,
+                        (unsigned long long)offset,
+                        (unsigned)color_target,
+                        (unsigned)s.color_format,
+                        (unsigned)mtl_fmt,
+                        s.width, s.height, levels, s.levels,
+                        (unsigned)s.min_mipmap_level,
+                        (unsigned)s.max_mipmap_level,
+                        sd.min_lod, sd.max_lod, sd.lod_bias,
+                        (unsigned)sd.min_filter,
+                        (unsigned)sd.mag_filter,
+                        (unsigned)sd.mip_filter,
+                        (unsigned)sd.addr_u,
+                        (unsigned)sd.addr_v,
+                        has_compatible_surface ? 1 : 0,
+                        self_sample ? 1 : 0,
+                        f.linear ? 1 : 0,
+                        pg->texture_dirty[stage] ? 1 : 0,
+                        (unsigned long long)next_dump_idx,
+                        dump_active ? 1 : 0);
+            }
+        }
+    }
 
     bool texture_possibly_dirty = false;
     if (!has_compatible_surface || self_sample) {

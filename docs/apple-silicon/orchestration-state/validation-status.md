@@ -1,11 +1,22 @@
 # Validation Status
 
-- Current slice: Task #16 — Metal swizzle-mipmap diagnostic slice (Hermes cycle 2, 2026-05-21 evening)
-- Build/tests: `./build.sh -a arm64 --skip-shader-validation` succeeded 4× during the slice. M5 shader-validation post-build gate intentionally skipped for the hot-iteration loop.
-- Code coverage: diag additions only (no behavior change when env unset). New `set_attr_masks` diag is gated on `XEMU_METAL_DIAG_ATTRIB_DUMP`. New `XEMU_METAL_DUMP_TARGET_SHADER=stride44` heuristic noise-filter mode added; default mode unchanged.
-- Codex validation: COMPLETED. Verdict: MAJOR ISSUES (3 findings). All 3 adopted in-slice:
-  - HIGH (stride44 overstates what it proves): reworded as heuristic noise filter in renderer.c comment, automation.md, .claude/rules/flags-renderer.md, handoff.md, decision-log.md.
-  - MEDIUM (/tmp artifacts cited as "durable"): copied logs / glsl-dumps / screenshots / reference into `docs/apple-silicon/task-16-evidence-2026-05-21/`; updated references in handoff.md and decision-log.md.
-  - LOW ("GLSL/MSL pair" wording): changed to "GLSL VSH/PSH source" in automation.md and .claude/rules/flags-renderer.md.
-- Oracle / visual gate: not required for this slice — diagnostic-only, no renderer-correctness claim. The swizzle-mipmap XBE remains `expected_fail` on Metal; harness rotation is unaffected.
-- Doc-sync: handoff.md (banner appended), decision-log.md (supersedes-prior entry), automation.md (Diagnostic Toggles), .claude/rules/flags-renderer.md (index entries), and the new docs/apple-silicon/task-16-evidence-2026-05-21/ artifact dir all in sync.
+- Current slice: Task #16 — Metal sampler-attribution + bordered-texture root-cause slice (Hermes cycle 4, 2026-05-21 evening).
+- Build/tests: incremental `ninja -C build qemu-system-i386` succeeded this cycle after touching `mtl/texture_pg.c`, `mtl/draw.h`, `mtl/draw.mm`; all three files recompiled cleanly (Objective-C++ for `draw.mm`, C for `texture_pg.c`; only pre-existing missing-prototype warnings on unrelated counter accessors in `renderer.c`). Earlier `./build.sh -a arm64 --skip-shader-validation` runs during cycles 2 + 3 remain valid for the broader Metal renderer; M5 shader-validation post-build gate intentionally skipped for the hot-iteration loop. No runtime tests; the slice is diagnostic-only (no renderer-correctness claim made or attempted).
+- Code coverage: diagnostic additions only, all env-gated under `XEMU_METAL_DIAG_ATTRIB_DUMP` (already-shipped flag).
+  - `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg` — new `metal_tex_bind_attrib` log stream (~52 LOC, 32-line cap, gated on env + `pg->vertex_attributes[9].stride == 44` + `s.color_format == SZ_A8R8G8B8`; one extra `#include <stdatomic.h>` for the `_Atomic` line counter). Zero impact when env unset (single getenv + branch). Diag-comment trimmed post-Codex to make explicit that `has_surf/self_sample/linear/tex_dirty` are bind-path *inputs*, not labels for the chosen path.
+  - `hw/xbox/nv2a/pgraph/mtl/draw.h` / `draw.mm` — new helper `pgraph_mtl_draw_dump_rt_peek_index()` (~14 LOC implementation + 10 LOC declaration + doc comment). Pure read-only atomic load; returns 0 when `XEMU_METAL_DUMP_DRAW_RT` unset; safe to call outside the renderer thread.
+  - Aggregate diff: ~108 LOC, all env-gated.
+- Codex validation: COMPLETED. Verdict: MAJOR ISSUES (3 findings). All adopted in-slice:
+  - MEDIUM (orchestration-state docs disagreed on exit/validation/commit state — `current-cycle.md` claimed Exit A + Codex ran + slice committed; `handoff-summary.md`/`claude-status.md` said Exit B + validation pending; `validation-status.md` mixed): reconciled all four orchestration-state files to one consistent state (Exit Option A, Codex completed, commit pending then DONE).
+  - LOW (`automation.md` L2924 said "four diagnostic streams" while the same section now enumerates five): changed to "five".
+  - LOW (`texture_pg.c` diag comment overclaimed "the chosen bind path (surface / surface-copy / cached / full)" while the emitted fields are predicate inputs only and the path selection happens later in the function): comment trimmed to describe the four fields as inputs to the selection, not a chosen-path label.
+  Marker `~/.claude/state/codex-validate-last-run` written post-fixes (after the three adoptions landed; fingerprint matches the final pre-commit dirty state).
+- Oracle / visual gate: not required for this slice — diagnostic-only, no renderer-correctness claim. The swizzle-mipmap XBE remains `expected_fail` on Metal (manifest unchanged). Harness rotation is unaffected; closed Apple Silicon flags (rule #11) untouched.
+- Doc-sync (rule #4): all canonical docs synced to the cycle-4 state pre-commit.
+  - `handoff.md` — cycle-4 banner appended with full root-cause analysis (7 decisive findings + 2 named bugs + supersession of cycle-3 narrative); cycle 2 + 3 banners preserved below for continuity.
+  - `decision-log.md` — cycle-4 entry appended; cites every file/line referenced.
+  - `automation.md` "Diagnostic Toggles" — stream-5 description added; "four" → "five" stream-count fixed.
+  - `../.claude/rules/flags-renderer.md` — `XEMU_METAL_DIAG_ATTRIB_DUMP` summary updated to mention the cycle-4 `metal_tex_bind_attrib` line + the new `pgraph_mtl_draw_dump_rt_peek_index()` helper.
+  - `docs/apple-silicon/task-16-evidence-2026-05-21/cycle4-sampler-rt/` — README + 4 log files + 1 screenshot, ~600 KB durable evidence; raw harness dirs (~3.5 GB of PNG/log churn) intentionally not preserved.
+  - `orchestration-state/{handoff-summary,current-cycle,claude-status,validation-status}.md` — refreshed and reconciled to cycle 4 closure state.
+- Exit option: **A** (durable diagnostic slice with code change = the diag tooling that produced the evidence, doc-synced, Codex-validated, commit pending). The renderer FIX itself is deliberately deferred to the next slice; it's a multi-file change touching `decode_face_levels`, `pgraph_mtl_texture_bind_from_pg`, and the texture cache key, plus an nxdk rebuild for the XBE-library bit fix — out of scope for "one bounded slice only".

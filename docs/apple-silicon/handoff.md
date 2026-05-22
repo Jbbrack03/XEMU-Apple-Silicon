@@ -1,10 +1,274 @@
 # Handoff
 
-Last updated: 2026-05-21 (evening, Hermes-supervised cycle 3 — task
-#16 render-target attribution slice). **No new XBE PASS this cycle.**
-Task #16 still expected_fail; investigation now narrowed to the
-texture sampler / fragment-shader UV-to-texel path. Cycle 3 banner
-appended; cycle 2 + mid-day banners preserved below for continuity.
+Last updated: 2026-05-21 (evening, Hermes-supervised cycle 4 — task
+#16 sampler-attribution + bordered-texture diagnosis slice). **No new
+XBE PASS this cycle.** Task #16 still expected_fail on Metal; root
+cause now localized end-to-end. Cycle 4 banner appended; cycles 2 + 3
++ mid-day banners preserved below for continuity.
+
+## 2026-05-21 (evening, Hermes cycle 4) — Task #16 sampler attribution + bordered-texture diagnosis (durable, no fix landed)
+
+**Status: still expected_fail on Metal.** This cycle closes the
+cycle-3 open question ("is the sampler per-cell correct?") and traces
+the intra-mip Q0 collapse symptom to its end-to-end root cause. The
+bug is now fully explained: a Metal-renderer missing-feature
+(`pgraph_mtl_texture_bind_from_pg` / `decode_face_levels` do not honor
+`s.border` to upload textures at 2x size with a 4-texel border, the way
+`gl/texture.c:451-456` does) interacting with an XBE library bug
+(`scripts/apple-silicon/xbe-tests/lib/xbed_texture.c::xbed_texture_bind_stage0`
+forgets to set `BORDER_SOURCE_COLOR` in the composed format word,
+defaulting it to BORDER_SOURCE_TEXTURE). Cycle 3's "sampler /
+fragment-shader UV-to-texel path" framing is partially superseded:
+sampler is correct, fragment-shader UV transform is correct (under
+the GL bordered-texture convention), but the Metal texture upload does
+not honor the convention. No bounded fix landed this cycle; the renderer
+fix touches `decode_face_levels` + `pgraph_mtl_texture_bind_from_pg` +
+the texture cache key (multi-file, needs its own validation slice). The
+XBE-library fix is a one-liner but requires a nxdk rebuild and is
+deferred to the same next slice for cohesion. Tree left clean (one
+env-gated diag added + one tiny new helper in mtl/draw.{h,mm}; zero
+behavior change with env unset).
+
+**Tooling delta this cycle (env-gated, zero impact when env unset).**
+`hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg`
+gains one env-gated `metal_tex_bind_attrib` diag line per bind when
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` AND
+`pg->vertex_attributes[9].stride == 44` AND
+`s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8`. Cap
+32 lines; matches the existing diag-stream cap family. The line shape:
+
+```
+xemu-perf: metal_tex_bind_attrib stage=N tex_addr=0xAAAA color_target=0xCCCC \
+  nv2a_fmt=0xFF mtl_fmt=M w=W h=H levels=L s_levels=S \
+  shape_min_lvl=MN shape_max_lvl=MX \
+  min_lod=X.XXX max_lod=Y.YYY lod_bias=B.BBB \
+  min_f=N mag_f=N mip_f=N addr_u=U addr_v=V \
+  has_surf=B self_sample=B linear=B tex_dirty=B \
+  next_dump_idx=IDX dump_active=B
+```
+
+The `next_dump_idx` field is the upcoming `XEMU_METAL_DUMP_DRAW_RT`
+PNG filename, plumbed via a new tiny helper
+`pgraph_mtl_draw_dump_rt_peek_index()` in `mtl/draw.{h,mm}` (returns 0
+when DUMP is inactive; atomic-load otherwise). Lets the caller match
+a stride==44 bind to the eventual post-flush_draw PNG when DUMP is
+active. The gate intentionally omits `s.levels == 7` because per-cell
+`MAX_LOD_CLAMP` writes cause `pgraph_get_texture_shape` to clamp
+`s.levels` down to `max_mipmap_level + 1` (so the same XBE-bound
+texture is reported as `s.levels = 1..7` across the 7 per-cell binds).
+
+Documented in `automation.md` "Diagnostic Toggles" and
+`.claude/rules/flags-renderer.md`.
+
+**Decisive findings this cycle (durable evidence under
+`docs/apple-silicon/task-16-evidence-2026-05-21/cycle4-sampler-rt/`).**
+
+1. **Per-cell sampler state IS correct on Metal.** The 32 captured
+   stride==44 binds show exact per-cell discrimination matching the
+   XBE's `set_lod_clamp(mip, mip)` writes:
+   - cell 0: `levels=1, shape_min/max=0/0, min_lod/max_lod=0/0, mip_f=0`
+   - cell 1: `levels=2, shape_min/max=1/1, min_lod/max_lod=1/1, mip_f=1`
+   - ...
+   - cell 6: `levels=7, shape_min/max=6/6, min_lod/max_lod=6/6, mip_f=1`
+
+   Evidence: `cycle4-sampler-rt/logs/sampler-attrib-per-cell.log`.
+   The Metal sampler descriptor cache produces a distinct
+   `MTLSamplerState` per cell because the `PgraphMtlSamplerDesc`
+   memcmp key differs. The cycle-3 LOD-clamp morning fix is plumbed
+   end-to-end through `build_sampler_desc_from_pg`.
+
+2. **The bug is NOT in the sampler.** Each cell's sampler clamps
+   correctly to its target mip. The intra-mip Q0 collapse must come
+   from upstream of the sampler (the texture upload / fragment-shader
+   UV transform).
+
+3. **`pgraph_get_texture_shape` clamps `s.levels` per cell.** The
+   widened-gate run histogram
+   (`cycle4-sampler-rt/logs/sampler-attrib-widened-gate-histogram.log`)
+   shows ~9-10 binds each across `s_levels=1..7` over 64 captured
+   lines. This is `texture.c:304`'s
+   `levels = MIN(levels, max_mipmap_level + 1)` clamp. Per cell, a
+   distinct MTLTexture is allocated (cache key includes `levels`).
+   Cell 0's MTLTexture has 1 mip level = 64x64; cell 6's has 7 mips
+   = 64x64...1x1. Each MTLTexture's mip data is the correct
+   unswizzled per-mip swizzle-mipmap data (cycle-2 unswizzle dump
+   already proved CPU-side decode is correct).
+
+4. **The fragment shader uses the bordered-texture UV transform.**
+   Cycle 3's preserved GLSL dump
+   (`../cycle3-replay/glsl-dumps/xemu-metal-target-0x03aa8000.glsl`)
+   emits the
+   `apply_border_adjustment` block from `psh.c:794-810`:
+
+   ```glsl
+   vec3 t0LogicalSize = vec3(64.000000, 64.000000, 1.000000);
+   pT0.xyz = (pT0.xyz * t0LogicalSize + vec3(4, 4, 4))
+               * vec3(0.007812, 0.007812, 0.062500);
+   vec4 t0 = textureProj(texSamp0, (pT0.xyw));
+   ```
+
+   `0.007812 = 1/128`, `0.062500 = 1/16`. Per xemu's convention
+   (`psh.c:180-185` comment): when `BORDER_SOURCE != COLOR` the
+   actual texture in memory is **2x the reported logical size with a
+   4-texel border**. The GLSL transforms input UVs (e.g. 0.75) to land
+   on the correct texel of the **128-wide physical** texture:
+   `(0.75 * 64 + 4) / 128 = 52/128`, hitting texel 52 of the 128-wide
+   bordered texture = correctly the Q1 region of the inner logical
+   64x64.
+
+5. **The GL renderer uploads the 2x bordered texture.**
+   `gl/texture.c:451-456`:
+   ```c
+   if (!f.linear && s.border) {
+       adjusted_width  = MAX(16, adjusted_width  * 2);
+       adjusted_height = MAX(16, adjusted_height * 2);
+       adjusted_pitch  = adjusted_width * (s.pitch / s.width);
+       adjusted_depth  = MAX(16, s.depth * 2);
+   }
+   ```
+   GL allocates a 128x128 GL texture and uploads the doubled swizzled
+   VRAM contents. The GLSL `(uv*64+4)/128` transform produces correct
+   sample coordinates against this 128x128 texture — cell 0 renders
+   the 4-quadrant pattern correctly on GL.
+
+6. **The Metal renderer does NOT double for borders.**
+   `mtl/texture_pg.c::decode_face_levels` (lines 856-958) decodes
+   `s.width × s.height` with no `s.border` adjustment;
+   `pgraph_mtl_texture_bind_slot_full` (`texture.mm:907-912`)
+   allocates the MTLTexture at `l0->width × l0->height`. Result for
+   the swizzle-mipmap XBE: the 64x64-uploaded texture is sampled with
+   the bordered-UV transform that expects 128x128, so all four sub-quad
+   UVs (0.25/0.75 × 0.25/0.75) land in the left half of the 64x64
+   texture's normalized [0..1] range, specifically in Q0:
+   - Q0 (TL) UV=(0.25, 0.25) → texel (10, 10) → Q0 → RED ✓
+   - Q1 (TR) UV=(0.75, 0.25) → texel (26, 10) → still Q0 → RED ✗
+   - Q2 (BL) UV=(0.25, 0.75) → texel (10, 26) → still Q0 → RED ✗
+   - Q3 (BR) UV=(0.75, 0.75) → texel (26, 26) → still Q0 → RED ✗
+
+   This is the intra-mip "Q0 collapse" symptom exactly as observed in
+   the cycle 3 + cycle 4 screenshots. Evidence:
+   `cycle4-sampler-rt/screenshots/cycle4-best-frame-0257-q0-collapse.png`.
+
+7. **The XBE's texture format word never sets `BORDER_SOURCE_COLOR`.**
+   `xbed_texture.c::xbed_texture_bind_stage0` (lines 87-93) composes
+   the format from `fmt = 0` and OR-ins `XBED_FMT_CONTEXT_DMA_MASK`,
+   `XBED_FMT_DIMENSIONALITY`, color/mipmap/base-size — but never the
+   `XBED_FMT_BORDER_SOURCE_BIT` it defines at line 27. So bit 3 is
+   left at 0 = `NV_PGRAPH_TEXFMT0_BORDER_SOURCE_TEXTURE` (NOT COLOR).
+   The nxdk `samples/mesh` reference at
+   `/Users/jbbrack03/XEMU_MacOS/nxdk/samples/mesh/main.c:145` pushes
+   `0x0001122a` whose bit 3 IS set:
+   `0x2a = 0b00101010` → bit 3 = 1 = `BORDER_SOURCE_COLOR`. xbed
+   library was authored to mirror that sample but missed this bit.
+
+**Root cause: two interacting bugs.**
+
+- **Bug 1 (Metal renderer, real-game impact):**
+  `pgraph_mtl_texture_bind_from_pg` + `decode_face_levels` do not
+  honor `s.border`. When `s.border == true` (BORDER_SOURCE != COLOR)
+  the renderer should double the texture upload dimensions and apply
+  the 4-texel border, mirroring `gl/texture.c:451-456`. Currently it
+  uploads only the reported size, so the GLSL bordered-UV transform
+  produces wrong sample coordinates. Real-Xbox games using bordered
+  textures will misrender on Metal.
+- **Bug 2 (XBE library, accidental tickle):**
+  `xbed_texture_bind_stage0` forgets to set `BORDER_SOURCE_COLOR`,
+  so all four library users bind their textures as "TEXTURE has its
+  own border" — accidentally triggering bug #1 in the Metal renderer.
+  Only the SZ_*-format users hit it; LU_IMAGE_-format users
+  (`texture-format-sweep`, `texture-dma-ab`, `texture-filter-wrap`)
+  are unaffected because `psh.c:179`'s `if (!f.linear && !cubemap)`
+  guard skips the bordered UV transform for linear textures.
+
+**Cycle 3 narrative resolution.** Cycle 3 narrowed the surface to
+"Metal texture sampler / fragment-shader UV-to-texel path". Cycle 4
+proves the sampler is correct (#1, #2 above) and the
+**fragment-shader UV transform is also correct** under the GL
+convention. The bug is in the **texture upload** path
+(`decode_face_levels` / `bind_slot_full` not honoring `s.border`).
+Cycle 3's instinct was off by one layer; cycle 4's per-bind sampler
+attribution diag closed that gap by proving the sampler is per-cell
+correct, forcing the search back upstream to the texture upload.
+
+**Code locations validated correct this cycle (cumulative; do NOT
+re-investigate unless code changes):**
+
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::build_sampler_desc_from_pg`
+  — per-cell sampler descriptor (incl. LOD clamps + filter mode) is
+  derived correctly from pg state.
+- `hw/xbox/nv2a/pgraph/mtl/texture.mm::get_sampler` /
+  `sampler_desc_equal` — sampler-cache memcmp produces distinct
+  MTLSamplerStates per cell.
+- `hw/xbox/nv2a/pgraph/glsl/psh.c::apply_border_adjustment` — the
+  `(uv*size+4)/(size*2)` bordered UV transform is correct under the
+  documented convention (GL renderer's bordered upload satisfies it).
+- All cycle 2 + cycle 3 code locations remain validated correct.
+
+**Implicated files / lines for the next slice (FIX surface):**
+
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::decode_face_levels`
+  (lines 718-959) — needs `s.border` adjust:
+  `if (!f.linear && s.border) { width *= 2; height *= 2; pitch *= 2; ... }`
+  for the swizzled / compressed paths (mirror
+  `gl/texture.c:451-456`).
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg`
+  (lines 1025-1320) — the cache lookup + `bind_slot_full` call must
+  pass the doubled dimensions when `s.border`. Cache key currently
+  uses (vram_addr, length, w, h, fmt, cube, levels); if doubled w/h
+  is passed it'll naturally evict the old non-bordered entries.
+- `scripts/apple-silicon/xbe-tests/lib/xbed_texture.c::xbed_texture_bind_stage0`
+  (lines 87-93) — add `fmt |= XBED_FMT_BORDER_SOURCE_BIT;`. Rebuild
+  the four library users (`swizzle-mipmap`, `texture-format-sweep`,
+  `texture-dma-ab`, `texture-filter-wrap`) via nxdk. The three
+  LU_IMAGE_ users won't change behavior (they're linear); only
+  `swizzle-mipmap` will flip its bordered-path behavior.
+
+**Net next-highest-value actions when work resumes (suggested
+ordering; not binding):**
+
+1. **Decide fix scope.** Either (a) ship the Metal renderer
+   `s.border` 2x-upload fix and keep the XBE library tickling it as
+   a regression gate; or (b) ship the XBE-library fix alone (one
+   line, makes swizzle-mipmap pass on Metal but doesn't catch the
+   real-game Metal bug); or (c) ship both (preferred; principled).
+2. **Author a dedicated diag XBE for bordered textures** if option
+   (c) — `swizzle-bordered` or similar — that intentionally sets
+   `BORDER_SOURCE = TEXTURE` and provides 128x128 swizzled data so the
+   bordered-UV transform produces correct per-quadrant samples. This
+   guards against the Metal renderer's bordered-texture path
+   regressing in the future once the library helper is fixed.
+3. **Investigate Task #17 separately.** Cycle 3 evidence says GL
+   renders cell 0 correctly but cells 1..6 BLACK when MIN_LOD_CLAMP ==
+   MAX_LOD_CLAMP > 0. That is unrelated to the bordered-texture bug
+   (GL handles borders correctly). The GL bug likely lives in
+   `gl/texture.c` per-mip upload when `s.levels < 7` due to the same
+   `pgraph_get_texture_shape::levels = MIN(levels, max + 1)` clamp.
+4. **Audit other `psh.c` UV-emission sites** for consistency with the
+   bordered-texture convention (textureProj variants, convolution
+   filter, etc.) so the Metal renderer fix satisfies them all.
+
+**Doc / instrumentation deltas landed this slice:**
+
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg`:
+  added env-gated `metal_tex_bind_attrib` diag line (~50 LOC,
+  32-line cap, zero impact when env unset).
+- `hw/xbox/nv2a/pgraph/mtl/draw.{h,mm}`: added
+  `pgraph_mtl_draw_dump_rt_peek_index()` helper (~8 LOC; returns the
+  upcoming `XEMU_METAL_DUMP_DRAW_RT` PNG filename index when DUMP is
+  active, 0 otherwise).
+- `automation.md` "Diagnostic Toggles": added stream-5 description
+  to `XEMU_METAL_DIAG_ATTRIB_DUMP`.
+- `.claude/rules/flags-renderer.md`: updated
+  `XEMU_METAL_DIAG_ATTRIB_DUMP` summary to mention the new line.
+- `docs/apple-silicon/task-16-evidence-2026-05-21/cycle4-sampler-rt/`:
+  new evidence directory with README + 4 log files + 1 screenshot.
+  Total ~600KB durable evidence; raw harness dirs (~3.5GB of
+  PNG/log churn) cleaned up.
+
+**Previous cycle 3 evening banner preserved below for continuity.**
+
+---
+
 
 ## 2026-05-21 (evening, Hermes cycle 3) — Task #16 render-target attribution (durable, no fix landed)
 

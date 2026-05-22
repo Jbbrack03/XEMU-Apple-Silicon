@@ -2921,7 +2921,7 @@ behavior. See
 
 ## Diagnostic Toggles
 
-`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits four
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits five
 diagnostic streams to stderr (logged into `xemu.log` when the benchmark
 harness is in use): (1) for every Metal vertex-attribute stream
 collected in `pgraph_mtl_collect_all_vertex_streams` for slot 9 (TEX0)
@@ -2953,8 +2953,52 @@ its concrete color/depth VRAM target — answers the cycle-2 open
 question "which render target does the XBE actually draw to". Verified
 cycle 3: every XBE stride==44 dispatch renders to back-buffer-class
 targets (`0x03aa8000`/`0x03bd4000`/`0x03d00000` cycling) with depth
-target `0x0397c000`; NEVER `0x032a4000` (front buffer). Output is
-large (up to ~3000 lines including all four streams) but env-gated.
+target `0x0397c000`; NEVER `0x032a4000` (front buffer). (5) 2026-05-21
+evening (Hermes cycle 4, task #16): for every
+`pgraph_mtl_texture_bind_from_pg` call where slot 9 has stride==44
+AND `s.color_format == NV097_SET_TEXTURE_FORMAT_COLOR_SZ_A8R8G8B8`,
+dumps `metal_tex_bind_attrib stage=N tex_addr=0xAAAA
+color_target=0xCCCC nv2a_fmt=0xFF mtl_fmt=M w=W h=H levels=L
+s_levels=S shape_min_lvl=MN shape_max_lvl=MX min_lod=X.XXX
+max_lod=Y.YYY lod_bias=B.BBB min_f=N mag_f=N mip_f=N addr_u=U addr_v=V
+has_surf=B self_sample=B linear=B tex_dirty=B next_dump_idx=IDX
+dump_active=B`, capped at 32 lines (matched to stream 4's cap so per-
+dispatch attribution interleaves with the dispatch-target line). The
+gate intentionally omits `s.levels == 7` because per-cell
+`MAX_LOD_CLAMP` writes cause `pgraph_get_texture_shape` to clamp
+`s.levels` down to `max_mipmap_level + 1`, so the same XBE-bound
+texture is reported as `s.levels = 1..7` across the 7 per-cell binds.
+`next_dump_idx` cross-references the upcoming `XEMU_METAL_DUMP_DRAW_RT`
+PNG filename via `pgraph_mtl_draw_dump_rt_peek_index()`. Used to
+attribute the per-cell sampler descriptor (LOD clamps, filter modes,
+texture base, bound color RT) to the upcoming draw — answers the
+cycle-3 open question "is the sampler per-cell correct?". Verified
+cycle 4: 32-bind capture shows clean cell 0..6 ramp
+(`shape_min_lvl=0,1,2,3,4,5,6` paired with `s_levels=1..7`, all binds
+on the same `tex_addr=0x3976000` with the three back-buffer color
+targets cycling per frame), proving the Metal sampler descriptor
+discriminates correctly per cell. Combined with cycle 2/3 evidence
+(per-vertex slot-9 UVs at the 4 quadrant centers `(0.25,0.25)`,
+`(0.75,0.25)`, `(0.25,0.75)`, `(0.75,0.75)`; CPU-side unswizzle
+buffer containing 4 distinct quadrant colors at every mip; GLSL PSH
+emitting `pT0.xyz = (pT0.xyz * vec3(64,64,1) + vec3(4,4,4)) *
+vec3(0.007812, 0.007812, 0.062500)` then `textureProj(texSamp0,
+pT0.xyw)`), the intra-mip Q0 collapse is now localized to a
+non-cubemap-2D `s.border` allocation gap in the Metal swizzled
+decode path: `mtl_get_cubemap_face_size`
+(`hw/xbox/nv2a/pgraph/mtl/texture_pg.c` ~L598) doubles `w`/`h`
+unconditionally for `!f.linear && s.border`, but
+`decode_face_levels` (same file, ~L737) only doubles for
+`s.cubemap && s.border && !f.linear` — the non-cubemap 2D path
+allocates the MTLTexture at the un-doubled 64x64 while the GLSL
+coord-scale `1/128` assumes the GL/Vulkan 128x128 bordered layout
+(see `gl/texture.c` ~L451 and `vk/texture.c` ~L111, both of which
+double unconditionally). Net effect: all 4 quadrant-center UVs map
+into the Q0 region `[0..31]` of the 64-wide MTLTexture, producing
+the observed Q0 collapse. Fix surface is `decode_face_levels`'s
+swizzled non-cubemap-2D branch (not landed in this slice; cycle 4 is
+diagnostic-only). See handoff "task #16 cycle 4" banner. Output is
+large (up to ~3500 lines including all five streams) but env-gated.
 Do not ship enabled.
 
 `XEMU_METAL_DUMP_TARGET_SHADER` dumps the generated GLSL VSH/PSH

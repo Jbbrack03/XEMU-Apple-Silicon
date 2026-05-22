@@ -1,0 +1,152 @@
+xemu-perf: metal_color_bind vram_addr=0x3628000 guest=1280x480 scaled=1280x480 pitch=5120 format=8
+xemu-perf: metal_color_bind vram_addr=0x32a4000 guest=640x480 scaled=640x480 pitch=2560 format=8
+xemu-perf: metal_color_bind vram_addr=0x2854000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x2894000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x28d4000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x2914000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x2954000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x2994000 guest=256x256 scaled=256x256 pitch=1024 format=8
+xemu-perf: metal_color_bind vram_addr=0x0 guest=512x512 scaled=512x512 pitch=1024 format=3
+xemu-perf: metal_color_bind vram_addr=0x2e06000 guest=1024x512 scaled=1024x512 pitch=4096 format=8
+xemu-perf: metal_color_bind vram_addr=0x2c06000 guest=1024x512 scaled=1024x512 pitch=4096 format=8
+xemu-perf: metal_color_bind vram_addr=0x2454000 guest=1024x1024 scaled=1024x1024 pitch=4096 format=8
+xemu-perf: metal_color_bind vram_addr=0x3bd4000 guest=640x480 scaled=640x480 pitch=2560 format=8
+xemu-perf: metal_attrib_stream slot=9 min=0 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=1 s_levels=1 shape_min_lvl=0 shape_max_lvl=0 min_lod=0.000 max_lod=0.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=0 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90502 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=24 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=2 s_levels=2 shape_min_lvl=1 shape_max_lvl=1 min_lod=1.000 max_lod=1.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90503 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=48 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=3 s_levels=3 shape_min_lvl=2 shape_max_lvl=2 min_lod=2.000 max_lod=2.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90504 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=72 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=4 s_levels=4 shape_min_lvl=3 shape_max_lvl=3 min_lod=3.000 max_lod=3.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90505 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=96 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=5 s_levels=5 shape_min_lvl=4 shape_max_lvl=4 min_lod=4.000 max_lod=4.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90506 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=120 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=6 s_levels=6 shape_min_lvl=5 shape_max_lvl=5 min_lod=5.000 max_lod=5.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90507 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=144 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=7 s_levels=7 shape_min_lvl=6 shape_max_lvl=6 min_lod=6.000 max_lod=6.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90508 dump_active=1
+xemu-perf: metal_unswizzle_dump w=64 h=64 Q0=(B00 G00 Rff Aff) Q1=(B00 Gff R00 Aff) Q2=(Bff G00 R00 Aff) Q3=(B00 Gff Rff Aff)
+xemu-perf: metal_unswizzle_dump w=32 h=32 Q0=(B00 G00 Rdf Aff) Q1=(B00 Gdf R00 Aff) Q2=(Bdf G00 R00 Aff) Q3=(B00 Gdf Rdf Aff)
+xemu-perf: metal_unswizzle_dump w=16 h=16 Q0=(B00 G00 Rbf Aff) Q1=(B00 Gbf R00 Aff) Q2=(Bbf G00 R00 Aff) Q3=(B00 Gbf Rbf Aff)
+xemu-perf: metal_unswizzle_dump w=8 h=8 Q0=(B00 G00 R9f Aff) Q1=(B00 G9f R00 Aff) Q2=(B9f G00 R00 Aff) Q3=(B00 G9f R9f Aff)
+xemu-perf: metal_unswizzle_dump w=4 h=4 Q0=(B00 G00 R7f Aff) Q1=(B00 G7f R00 Aff) Q2=(B7f G00 R00 Aff) Q3=(B00 G7f R7f Aff)
+xemu-perf: metal_unswizzle_dump w=2 h=2 Q0=(B00 G00 R5f Aff) Q1=(B00 G5f R00 Aff) Q2=(B5f G00 R00 Aff) Q3=(B00 G5f R5f Aff)
+xemu-perf: metal_color_bind vram_addr=0x3d00000 guest=640x480 scaled=640x480 pitch=2560 format=8
+xemu-perf: metal_attrib_stream slot=9 min=0 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=1 s_levels=1 shape_min_lvl=0 shape_max_lvl=0 min_lod=0.000 max_lod=0.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=0 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90509 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=24 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=2 s_levels=2 shape_min_lvl=1 shape_max_lvl=1 min_lod=1.000 max_lod=1.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90510 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=48 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=3 s_levels=3 shape_min_lvl=2 shape_max_lvl=2 min_lod=2.000 max_lod=2.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90511 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=72 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=4 s_levels=4 shape_min_lvl=3 shape_max_lvl=3 min_lod=3.000 max_lod=3.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90512 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=96 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=5 s_levels=5 shape_min_lvl=4 shape_max_lvl=4 min_lod=4.000 max_lod=4.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90513 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=120 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=6 s_levels=6 shape_min_lvl=5 shape_max_lvl=5 min_lod=5.000 max_lod=5.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90514 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=144 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=7 s_levels=7 shape_min_lvl=6 shape_max_lvl=6 min_lod=6.000 max_lod=6.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90515 dump_active=1
+xemu-perf: metal_color_bind vram_addr=0x3aa8000 guest=640x480 scaled=640x480 pitch=2560 format=8
+xemu-perf: metal_attrib_stream slot=9 min=0 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=1 s_levels=1 shape_min_lvl=0 shape_max_lvl=0 min_lod=0.000 max_lod=0.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=0 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90516 dump_active=1
+xemu-perf: metal_attrib_stream slot=9 min=24 num=24 count=4 stride=44 src=0
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=2 s_levels=2 shape_min_lvl=1 shape_max_lvl=1 min_lod=1.000 max_lod=1.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90517 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=3 s_levels=3 shape_min_lvl=2 shape_max_lvl=2 min_lod=2.000 max_lod=2.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90518 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=4 s_levels=4 shape_min_lvl=3 shape_max_lvl=3 min_lod=3.000 max_lod=3.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90519 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=5 s_levels=5 shape_min_lvl=4 shape_max_lvl=4 min_lod=4.000 max_lod=4.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90520 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=6 s_levels=6 shape_min_lvl=5 shape_max_lvl=5 min_lod=5.000 max_lod=5.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90521 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03aa8000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03aa8000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=7 s_levels=7 shape_min_lvl=6 shape_max_lvl=6 min_lod=6.000 max_lod=6.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90522 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=1 s_levels=1 shape_min_lvl=0 shape_max_lvl=0 min_lod=0.000 max_lod=0.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=0 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90523 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=2 s_levels=2 shape_min_lvl=1 shape_max_lvl=1 min_lod=1.000 max_lod=1.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90524 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=3 s_levels=3 shape_min_lvl=2 shape_max_lvl=2 min_lod=2.000 max_lod=2.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90525 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=4 s_levels=4 shape_min_lvl=3 shape_max_lvl=3 min_lod=3.000 max_lod=3.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90526 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=5 s_levels=5 shape_min_lvl=4 shape_max_lvl=4 min_lod=4.000 max_lod=4.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90527 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=6 s_levels=6 shape_min_lvl=5 shape_max_lvl=5 min_lod=5.000 max_lod=5.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90528 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03bd4000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03bd4000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=7 s_levels=7 shape_min_lvl=6 shape_max_lvl=6 min_lod=6.000 max_lod=6.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90529 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=1 s_levels=1 shape_min_lvl=0 shape_max_lvl=0 min_lod=0.000 max_lod=0.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=0 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90530 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=2 s_levels=2 shape_min_lvl=1 shape_max_lvl=1 min_lod=1.000 max_lod=1.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90531 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=3 s_levels=3 shape_min_lvl=2 shape_max_lvl=2 min_lod=2.000 max_lod=2.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90532 dump_active=1
+xemu-perf: metal_set_attr_masks uniform_attrs=0xfdf6 [0]c=3,s=44 [1]c=0,s=0 [2]c=0,s=0 [3]c=4,s=44 [4]c=0,s=0 [9]c=4,s=44
+xemu-perf: metal_dispatch_draw_target color_addr=0x03d00000 depth_addr=0x0397c000 uniform_attrs=0xfdf6 vcount=24 icount=0 prim=5 color_fmt=0x50 depth_fmt=0x104 v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+xemu-perf: metal_tex_bind_attrib stage=0 tex_addr=0x3976000 color_target=0x03d00000 nv2a_fmt=0x06 mtl_fmt=80 w=64 h=64 levels=4 s_levels=4 shape_min_lvl=3 shape_max_lvl=3 min_lod=3.000 max_lod=3.000 lod_bias=0.000 min_f=0 mag_f=0 mip_f=1 addr_u=0 addr_v=0 has_surf=0 self_sample=0 linear=0 tex_dirty=1 next_dump_idx=90533 dump_active=1
+xemu-perf: metal_color_bind vram_addr=0x3ba1000 guest=1024x1024 scaled=1024x1024 pitch=4096 format=8
+xemu-perf: metal_unswizzle_dump w=64 h=64 Q0=(B00 G00 Rff Aff) Q1=(B00 Gff R00 Aff) Q2=(Bff G00 R00 Aff) Q3=(B00 Gff Rff Aff)
+xemu-perf: metal_unswizzle_dump w=32 h=32 Q0=(B00 G00 Rdf Aff) Q1=(B00 Gdf R00 Aff) Q2=(Bdf G00 R00 Aff) Q3=(B00 Gdf Rdf Aff)
+xemu-perf: metal_unswizzle_dump w=16 h=16 Q0=(B00 G00 Rbf Aff) Q1=(B00 Gbf R00 Aff) Q2=(Bbf G00 R00 Aff) Q3=(B00 Gbf Rbf Aff)
+xemu-perf: metal_unswizzle_dump w=8 h=8 Q0=(B00 G00 R9f Aff) Q1=(B00 G9f R00 Aff) Q2=(B9f G00 R00 Aff) Q3=(B00 G9f R9f Aff)
+xemu-perf: metal_unswizzle_dump w=4 h=4 Q0=(B00 G00 R7f Aff) Q1=(B00 G7f R00 Aff) Q2=(B7f G00 R00 Aff) Q3=(B00 G7f R7f Aff)
+xemu-perf: metal_unswizzle_dump w=2 h=2 Q0=(B00 G00 R5f Aff) Q1=(B00 G5f R00 Aff) Q2=(B5f G00 R00 Aff) Q3=(B00 G5f R5f Aff)
+xemu-perf: metal_unswizzle_dump w=64 h=64 Q0=(B00 G00 Rff Aff) Q1=(B00 Gff R00 Aff) Q2=(Bff G00 R00 Aff) Q3=(B00 Gff Rff Aff)
+xemu-perf: metal_unswizzle_dump w=32 h=32 Q0=(B00 G00 Rdf Aff) Q1=(B00 Gdf R00 Aff) Q2=(Bdf G00 R00 Aff) Q3=(B00 Gdf Rdf Aff)
+xemu-perf: metal_unswizzle_dump w=16 h=16 Q0=(B00 G00 Rbf Aff) Q1=(B00 Gbf R00 Aff) Q2=(Bbf G00 R00 Aff) Q3=(B00 Gbf Rbf Aff)
+xemu-perf: metal_unswizzle_dump w=8 h=8 Q0=(B00 G00 R9f Aff) Q1=(B00 G9f R00 Aff) Q2=(B9f G00 R00 Aff) Q3=(B00 G9f R9f Aff)
+xemu-perf: metal_unswizzle_dump w=4 h=4 Q0=(B00 G00 R7f Aff) Q1=(B00 G7f R00 Aff) Q2=(B7f G00 R00 Aff) Q3=(B00 G7f R7f Aff)
+xemu-perf: metal_unswizzle_dump w=2 h=2 Q0=(B00 G00 R5f Aff) Q1=(B00 G5f R00 Aff) Q2=(B5f G00 R00 Aff) Q3=(B00 G5f R5f Aff)
+xemu-perf: metal_unswizzle_dump w=64 h=64 Q0=(B00 G00 Rff Aff) Q1=(B00 Gff R00 Aff) Q2=(Bff G00 R00 Aff) Q3=(B00 Gff Rff Aff)
+xemu-perf: metal_unswizzle_dump w=32 h=32 Q0=(B00 G00 Rdf Aff) Q1=(B00 Gdf R00 Aff) Q2=(Bdf G00 R00 Aff) Q3=(B00 Gdf Rdf Aff)
+xemu-perf: metal_unswizzle_dump w=16 h=16 Q0=(B00 G00 Rbf Aff) Q1=(B00 Gbf R00 Aff) Q2=(Bbf G00 R00 Aff) Q3=(B00 Gbf Rbf Aff)
+xemu-perf: metal_unswizzle_dump w=8 h=8 Q0=(B00 G00 R9f Aff) Q1=(B00 G9f R00 Aff) Q2=(B9f G00 R00 Aff) Q3=(B00 G9f R9f Aff)
+xemu-perf: metal_unswizzle_dump w=4 h=4 Q0=(B00 G00 R7f Aff) Q1=(B00 G7f R00 Aff) Q2=(B7f G00 R00 Aff) Q3=(B00 G7f R7f Aff)
+xemu-perf: metal_unswizzle_dump w=2 h=2 Q0=(B00 G00 R5f Aff) Q1=(B00 G5f R00 Aff) Q2=(B5f G00 R00 Aff) Q3=(B00 G5f R5f Aff)

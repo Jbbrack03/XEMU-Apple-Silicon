@@ -1421,3 +1421,17 @@ extern "C" bool pgraph_mtl_draw_dump_rt_active(void)
 {
     return s_dump_enabled;
 }
+
+/* 2026-05-21 (task #16, cycle 4) — return the value that the next
+ * `atomic_fetch_add(&s_dump_draw_index, 1)` inside
+ * `pgraph_mtl_draw_dump_rt_after_flush_draw` would observe before
+ * incrementing, i.e. the index that the next flush_draw's PNG will be
+ * named with. Returns 0 when the dump is not enabled. Safe to call
+ * outside the renderer thread (read-only atomic load). */
+extern "C" uint64_t pgraph_mtl_draw_dump_rt_peek_index(void)
+{
+    if (!s_dump_enabled) {
+        return 0;
+    }
+    return atomic_load(&s_dump_draw_index);
+}

@@ -268,6 +268,16 @@ uint64_t pgraph_mtl_draw_rt_dumps_count(void);
  * the present pipeline reading uninitialized magenta). */
 bool pgraph_mtl_draw_dump_rt_active(void);
 
+/* 2026-05-21 (task #16, cycle 4) — peek the index that the NEXT
+ * `pgraph_mtl_draw_dump_rt_after_flush_draw` call will assign to its
+ * PNG filename. Returns 0 when XEMU_METAL_DUMP_DRAW_RT is not active
+ * (the caller should also check `pgraph_mtl_draw_dump_rt_active()` to
+ * disambiguate "not active" from "next index happens to be 0"). Used
+ * by sampler-attribution diagnostics in texture_pg.c to cross-reference
+ * a stride==44 bind to its eventual draw-RT PNG filename.
+ */
+uint64_t pgraph_mtl_draw_dump_rt_peek_index(void);
+
 #ifdef __cplusplus
 }
 #endif
