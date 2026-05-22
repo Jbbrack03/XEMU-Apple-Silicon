@@ -1,5 +1,161 @@
 # Decision Log
 
+## 2026-05-22 (cycle 13): §H.6 `image-blit` residual reframed — PFIFO/vCPU dispatch race, NOT TLB / cache-coherency
+
+**Decision.** Sharpen cycle 12's "guest CPU read-back coherency"
+framing for the §H.6 `image-blit` residual: the 5/8 FAIL pattern
+is best explained by an async dispatch race between the PFIFO
+puller thread (which executes `pgraph_mtl_image_blit` and the
+CPU-side memcpy) and the vCPU thread (which polls
+`NV_PGRAPH_STATUS` after `pb_end()` and then reads VRAM via the
+AGP-aliased pointer). The cycle-12 narrative remains valid in
+direction (the residual IS guest-side, NOT in `mtl/blit.c`) but
+its mechanism — TLB or page-attribute discrepancy between
+cached/AGP mappings — is one rung too deep. The real gap is at
+the dispatch-synchronization layer.
+
+This entry SHARPENS, not supersedes, the cycle-12 entry above.
+Cycle 12's per-cell first-mismatch encoding, disproved-hypothesis
+list, and v0.3 XBE artifacts all remain authoritative.
+
+**Evidence (code-path audit; doc-only slice, zero source diff).**
+
+1. **PFIFO is the writer thread.** `hw/xbox/nv2a/nv2a.c:248`
+   creates `nv2a.pfifo_thread`.
+   `hw/xbox/nv2a/pfifo.c:226-272` (`pfifo_run_puller`) acquires
+   `d->pgraph.lock` and calls `pgraph_method` from that thread.
+   `hw/xbox/nv2a/pgraph/mtl/renderer.c:2525` registers
+   `pgraph_mtl_image_blit`; the CPU memcpy at
+   `hw/xbox/nv2a/pgraph/mtl/blit.c:215-221` runs on the PFIFO
+   thread.
+
+2. **`NV_PGRAPH_STATUS` is never published.** `grep -rn
+   '0x400700\|PGRAPH_STATUS' hw/xbox/nv2a/` returns ZERO hits.
+   `pg->regs_[0x400700]` is therefore zero-initialized and stays
+   `0` for the life of the emulator.
+
+3. **pbkit's busy poll exits on the first iteration.**
+   `nxdk/lib/pbkit/outer.h:461-462` defines
+   `NV_PGRAPH_STATUS = 0x00400700`, `NV_PGRAPH_STATUS_NOT_BUSY
+   = 0`. `nxdk/lib/pbkit/pbkit.c:486-494`
+   (`pb_wait_until_gr_not_busy`) is
+   `while(VIDEOREG(NV_PGRAPH_STATUS) != NV_PGRAPH_STATUS_NOT_BUSY)
+   { ... }` — equivalent to `while(0) {}`.
+
+4. **Default-on fast read provides no acquire barrier.**
+   `hw/xbox/nv2a/pgraph/pgraph.c:115-150` (`pgraph_read`) with
+   `XEMU_PGRAPH_FAST_READ=1` (default-on per
+   `renderer-state.md`) returns `qatomic_read(&pg->regs_[addr])`.
+   `include/qemu/atomic.h:77-84` defines `qatomic_read` as
+   `__atomic_load_n(..., __ATOMIC_RELAXED)`. No
+   synchronizes-with relationship to any prior PFIFO-thread
+   store. The slow path acquires `pg->lock`, but still returns
+   `0` (no busy bit was ever written) and only synchronizes
+   against an *in-flight* `pgraph_method` — a strictly weaker
+   guarantee than "PFIFO has drained DMA_PUT through the
+   IMAGE_BLIT push."
+
+5. **PFIFO kick is pure async signal.**
+   `hw/xbox/nv2a/pfifo.c:85-110` (`pfifo_write`) on DMA_PUT
+   calls `pfifo_kick(d)`. `pfifo.c:112-116`:
+   `qemu_cond_broadcast(&d->pfifo.fifo_cond)`, then returns.
+   The vCPU's MMIO write returns immediately; PFIFO thread
+   wakes up later, scheduler-dependent. `fifo_idle_cond`
+   (`pfifo.c:533`) broadcasts on full PFIFO idle, but nothing
+   on the vCPU side waits on it. No mechanism is in place for
+   the vCPU to wait until the puller has caught up.
+
+6. **Race conclusion.** Step-by-step trace of the §H.6 oracle
+   path per cell:
+   1. vCPU pushes IMAGE_BLIT (cell N) via `pb_end()` (MMIO
+      write to DMA_PUT, async kick, vCPU returns immediately).
+   2. vCPU enters `pb_wait_until_gr_not_busy()`. Fast-read of
+      `NV_PGRAPH_STATUS` returns `0` on the first iteration.
+      No barrier, no PFIFO drain.
+   3. vCPU executes `pb_agp_access(dst) → dst | 0xF0000000`
+      and reads `dst_vram[0]`. The softmmu fast path is a pure
+      host-pointer dereference with no QEMU-side barrier.
+   4. **Race:** if PFIFO has processed cell N's IMAGE_BLIT
+      between steps 1 and 3, the read sees RED. If not, it
+      sees the sentinel `0xff808080` the guest just wrote via
+      its own WRITECOMBINE kernel mapping.
+
+   The cycle-12 v0.3 fprintf evidence (renderer-thread
+   `dst_pre=sentinel, dst_post=red` for all 8 cells) is fully
+   consistent with this — those logs fire eventually, just not
+   necessarily before each per-cell oracle check. The 3/8 PASS
+   vs 5/8 FAIL split, the cached-vs-AGP asymmetry, and the
+   "cell 0 PASS / cell 3 FAIL both at out=(0,0)" surviving
+   puzzle are all natural consequences of a thread race rather
+   than deterministic per-cell semantics.
+
+7. **Renderer-agnostic prediction.** The dispatch race lives in
+   PFIFO/PGRAPH machinery shared by the GL, Vulkan and Metal
+   backends, NOT in `mtl/blit.c`. The hypothesis predicts the
+   same XBE will exhibit a similar PASS/FAIL split under
+   `XEMU_RENDERER=GL`. That is also the cheapest, sharpest
+   single confirmation experiment.
+
+**Implications beyond §H.6.**
+
+This race almost certainly affects every retail title that uses
+`pb_wait_until_gr_not_busy` as a software fence between an
+IMAGE_BLIT (or other PGRAPH-resident operation) and a CPU read
+of VRAM — full-screen software copies, screenshot paths, FMV
+landings, certain dashboard/menu transitions. The §H.6 XBE is
+the first xemu artifact to make the bug visible because the
+oracle is byte-exact rather than human-eye-tolerant. This is
+*not* a §H.6-only issue; it is a class issue that the diagnostic
+XBE library now has the leverage to expose.
+
+**Cycle-14 next-slice plan (bounded; not started in this slice).**
+
+In priority order:
+
+1. Run `image-blit.iso` under `XEMU_RENDERER=GL` through
+   `scripts/apple-silicon/xbe-harness`. Confirms / disproves
+   the renderer-agnostic race hypothesis.
+2. If confirmed, add a small diagnostic env flag
+   `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` to
+   `pgraph_read(NV_PGRAPH_STATUS)` that returns non-zero while
+   `pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] !=
+   pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`, forcing the pbkit
+   busy poll to spin until PFIFO has actually drained the
+   pushbuffer. Re-run the XBE — all 8 cells PASS would close
+   the §H.6 residual and clear the path to a default-on
+   barrier or a properly-published busy bit. Codex validation
+   MANDATORY at that point (non-trivial code change in
+   `hw/xbox/nv2a/`).
+3. Real-Xbox oracle parity check on the same XBE if the local
+   fix flips all 8 cells green — guards against a "fixed on
+   xemu but diverges from real hardware" trap.
+
+**Not changed by this slice.** Per-cell PASS/FAIL verdict
+unchanged (3/8 PASS Metal). M15 Gate-2 second-wave coverage
+status unchanged (1 MET + 1 PARTIAL out of 4). Zero source diff
+under `xemu-fork/hw/` or `xemu-fork/scripts/apple-silicon/`;
+docs-only slice, Codex validation hook does NOT trigger.
+
+**Authoritative citations recap.**
+
+- `hw/xbox/nv2a/nv2a.c:248`
+- `hw/xbox/nv2a/pfifo.c:85-116` (`pfifo_write` / `pfifo_kick`)
+- `hw/xbox/nv2a/pfifo.c:226-272` (`pfifo_run_puller`)
+- `hw/xbox/nv2a/pgraph/pgraph.c:115-150` (`pgraph_read`)
+- `hw/xbox/nv2a/pgraph/pgraph.c:745+` (`pgraph_method`
+  dispatch)
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c:2525`
+- `hw/xbox/nv2a/pgraph/mtl/blit.c:215-221`
+- `include/qemu/atomic.h:77-84` (`qatomic_read` relaxed
+  semantics)
+- `nxdk/lib/pbkit/outer.h:461-462`
+  (`NV_PGRAPH_STATUS_NOT_BUSY = 0`)
+- `nxdk/lib/pbkit/pbkit.c:486-494`
+  (`pb_wait_until_gr_not_busy`)
+- `nxdk/lib/pbkit/pbkit_dma.c:55-58` (`pb_agp_access`)
+
+---
+
 ## 2026-05-22 (cycle 12): §H.6 `image-blit` v0.3 — bounded partial; residual root cause narrowed from "shared blit math" to "guest CPU read-back coherency"
 
 **Decision.** Ship `xbe-tests/image-blit/` v0.3 as a **bounded

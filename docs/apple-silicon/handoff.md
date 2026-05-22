@@ -1,12 +1,107 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 12 — §H.6 image-blit v0.3
-**BOUNDED PARTIAL on Metal, root cause materially narrowed**;
-per-cell first-mismatch diagnostic encoding shipped; residual
-proven to be a guest CPU cache-coherency issue on the VRAM
-read-back path, NOT a renderer bug; three cycle-11 hypotheses
-disproved by direct evidence; M15 overall still **NOT MET**
-pending §H.6 full close, §G.5, RT-as-texture).
+Last updated: 2026-05-22 (cycle 13 — §H.6 image-blit residual
+**REFRAMED via code-path audit** from cycle 12's "guest CPU
+cache-coherency" framing to a **PFIFO ↔ vCPU dispatch race**:
+xemu never publishes `NV_PGRAPH_STATUS` and the default-on
+`XEMU_PGRAPH_FAST_READ` returns 0 via `__ATOMIC_RELAXED`, so
+`pb_wait_until_gr_not_busy` exits on the first iteration and
+the guest's AGP read can win the race against the PFIFO
+thread's not-yet-processed IMAGE_BLIT push. Doc-only slice
+(zero source diff). M15 overall still **NOT MET** pending §H.6
+full close, §G.5, RT-as-texture.
+
+## 2026-05-22 (cycle 13) — §H.6 `image-blit` residual REFRAMED — PFIFO ↔ vCPU dispatch race against missing NV_PGRAPH_STATUS publication
+
+**Status: AUDIT-ONLY (doc-only slice; zero `xemu-fork/hw/` or
+`xemu-fork/scripts/apple-silicon/` diff).**
+
+**Slice goal.** Take ONE bounded diagnostic step toward the
+cycle-12 "guest CPU / TCG VRAM read-back coherency" hypothesis
+for §H.6 `image-blit`. Outcome: hypothesis sharpened with
+file/line evidence; mechanism reframed from "TLB / page-
+attribute coherency" to "missing PGRAPH busy publication +
+relaxed-atomic fast read + async PFIFO kick → vCPU reads
+VRAM before PFIFO has processed the IMAGE_BLIT push."
+
+**Concrete evidence chain.** (Full citations in
+`decision-log.md` 2026-05-22 cycle-13 entry.)
+
+- PFIFO thread runs `pgraph_mtl_image_blit`
+  (`hw/xbox/nv2a/nv2a.c:248`,
+  `hw/xbox/nv2a/pfifo.c:226-272`,
+  `hw/xbox/nv2a/pgraph/mtl/renderer.c:2525`,
+  `hw/xbox/nv2a/pgraph/mtl/blit.c:215-221`).
+- xemu never writes `NV_PGRAPH_STATUS` (0x400700). Repo-wide
+  `grep -rn '0x400700\|PGRAPH_STATUS' hw/xbox/nv2a/` returns
+  zero hits. `pg->regs_[0x400700]` is permanently `0 =
+  NV_PGRAPH_STATUS_NOT_BUSY`
+  (`nxdk/lib/pbkit/outer.h:461-462`).
+- Default-on fast path returns it with no acquire
+  (`hw/xbox/nv2a/pgraph/pgraph.c:115-150`,
+  `include/qemu/atomic.h:77-84`).
+- `pb_wait_until_gr_not_busy` exits on the first iteration
+  (`nxdk/lib/pbkit/pbkit.c:486-494`).
+- PFIFO kick is pure async signal
+  (`hw/xbox/nv2a/pfifo.c:85-116`).
+
+**Why the 3/8 PASS / 5/8 FAIL pattern is consistent.** The
+race window between vCPU's IMAGE_BLIT push and vCPU's read is
+small but non-zero. Early cells sometimes win the race; later
+cells lose more often. The cached-vs-AGP asymmetry (cycle-12)
+is naturally explained by the racing PFIFO memcpy interacting
+with the different mappings' read serialization differently.
+Cycle-12's "renderer memcpy is byte-correct" fprintf
+evidence is preserved — those logs fire on the PFIFO thread
+and run *eventually*, just not necessarily *before* the per-
+cell oracle.
+
+**Renderer-agnostic prediction.** The gap is in PFIFO/PGRAPH
+machinery shared by GL, Vulkan and Metal. The same XBE should
+exhibit a similar PASS/FAIL split under `XEMU_RENDERER=GL`.
+The cycle-11 follow-up item #1 ("Re-run image-blit on GL")
+is now the sharpest single confirmation experiment.
+
+**Cycle-14 entry plan (NOT started this slice).**
+
+1. GL leg of `image-blit.iso` through
+   `scripts/apple-silicon/xbe-harness`. Race hypothesis
+   predicts GL fails the same cells. Confirms/disproves
+   renderer-agnostically.
+2. If confirmed: add `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`
+   diagnostic env flag wired into
+   `pgraph_read(NV_PGRAPH_STATUS)` to return non-zero while
+   `pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] !=
+   pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`. Forces
+   `pb_wait_until_gr_not_busy` to spin until PFIFO has
+   drained the pushbuffer. If all 8 cells PASS, the §H.6
+   residual closes and the path to a default-on barrier or
+   a properly published busy bit is clear. Codex MANDATORY
+   for that slice (non-trivial `hw/xbox/nv2a/` change).
+3. Real-Xbox oracle parity check on the SAME XBE after the
+   local fix flips all 8 cells green.
+
+**Broader implication.** Every retail title that uses
+`pb_wait_until_gr_not_busy` as a software fence between an
+IMAGE_BLIT (or other PGRAPH-resident op) and a CPU read of
+VRAM almost certainly hits the same race silently. The §H.6
+XBE made it visible because the oracle is byte-exact.
+
+**M15 default-on Gate 2 status — UNCHANGED from cycle 12.**
+
+- §E.13 per-format pitch + image-rect alignment — MET (cycle 10).
+- §H.6 IMAGE_BLIT — PARTIAL (3/8 cells green; residual reframed
+  but not closed).
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE — still unstarted.
+
+XBE first-wave Metal count unchanged at **17 of 18 PASS on Metal
++ 1 expected_fail SPEC** (`logic-ops`). Second-wave coverage
+still **1 MET + 1 PARTIAL out of 4**.
+
+Cycle 12 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 12) — §H.6 `image-blit` v0.3 BOUNDED PARTIAL — root cause materially narrowed
 

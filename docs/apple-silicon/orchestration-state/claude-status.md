@@ -1,17 +1,31 @@
 # Claude Status
 
-- Objective: cycle-12 §H.6 `image-blit` v0.3 commit/cleanup continuation.
-- Status: **CLOSED.** Cycle-12 v0.3 bounded partial committed; renderer source clean; Codex MAJOR-ISSUES findings adopted; state artifacts durably closed.
-- Outcome:
-  - `hw/xbox/nv2a/pgraph/mtl/blit.c` diff = 0 lines in the final closure tree.
-  - Codex `changes`-mode validation completed (rule #15 satisfied).
-  - All three Codex findings adopted in-tree (state-file drift fixed pre-commit; BR encoding doc claim corrected in main.c + README + decision-log + handoff; top-level README/manifest overview updated for the v0.3 2×2 FAIL layout).
-  - Slice commit hash: `e8fba9e925` (recorded in this follow-up state-sync commit).
+- Objective: cycle-13 §H.6 `image-blit` residual code-path audit + state-sync closure (doc-only slice).
+- Status: **CLOSED.** Doc-only audit committed; all load-bearing citations spot-verified; state artifacts durably closed.
+- Session: `hermes_xemu_live_20260522_110134`
+
+## Outcome
+
+- Diff is doc-only: `docs/apple-silicon/{handoff.md, decision-log.md, orchestration-state/*}`. Zero `xemu-fork/hw/` content. Zero `xemu-fork/scripts/apple-silicon/` content.
+- All load-bearing audit citations spot-verified against the live tree:
+  - `grep -rn '0x400700\|PGRAPH_STATUS' hw/xbox/nv2a/` returns ZERO hits (PGRAPH_STATUS is never published).
+  - `hw/xbox/nv2a/nv2a.c:247-248` — `qemu_thread_create("nv2a.pfifo_thread", pfifo_thread, ...)`.
+  - `hw/xbox/nv2a/pfifo.c` — `pfifo_write` (lines ~84-110) calls `pfifo_kick(d)`; `pfifo_kick` (lines ~112-115) is `qemu_cond_broadcast(&d->pfifo.fifo_cond)`; `pfifo_run_puller` (lines ~226-272) acquires `d->pgraph.lock` and dispatches `pgraph_method` from the PFIFO thread.
+  - `hw/xbox/nv2a/pgraph/pgraph.c:115-150` — `pgraph_read` fast path returns `qatomic_read(&pg->regs_[addr])` with no acquire barrier; `pgraph_method` defined at lines ~744+.
+  - `hw/xbox/nv2a/pgraph/mtl/blit.c:215-220` — `perform_blit_cpu(...)` CPU memcpy runs on PFIFO thread.
+  - `hw/xbox/nv2a/pgraph/mtl/renderer.c:2525` — `.image_blit = pgraph_mtl_image_blit` registration.
+  - `include/qemu/atomic.h:77-84` — `qatomic_read` is `__atomic_load_n(..., __ATOMIC_RELAXED)`.
+  - `nxdk/lib/pbkit/outer.h:461-462` — `NV_PGRAPH_STATUS = 0x00400700`, `NV_PGRAPH_STATUS_NOT_BUSY = 0`.
+  - `nxdk/lib/pbkit/pbkit.c:486-494` — `pb_wait_until_gr_not_busy` busy-poll body.
+  - `nxdk/lib/pbkit/pbkit_dma.c:55-58` — `pb_agp_access` returns `fb | AGP_MEMORY_REMAP`.
+  - `XEMU_PGRAPH_FAST_READ` default-on confirmed via `.claude/rules/{flags-renderer.md, renderer-state.md}` and `docs/apple-silicon/automation.md`.
+- Codex validation NOT required: doc-only slice (rule #15 trivial-doc exemption — zero source change).
+- Slice commit hash: `<closure-hash-tbd>` (recorded in the follow-up state-sync commit).
 
 ## Carry-forward technical conclusion
 
-The cycle-12 technical conclusion remains: `image-blit` v0.3 materially narrowed the §H.6 residual to a guest CPU VRAM read-back coherency issue. The Metal renderer's CPU memcpy is byte-correct for all 8 cells (proven by transient `mtl/blit.c` fprintf, now reverted). The cycle-11 hypotheses (shared blit math, tile-limit clipping, surface-cache download) are disproved.
+The §H.6 `image-blit` residual is a **PFIFO ↔ vCPU dispatch race against the never-published `NV_PGRAPH_STATUS`**, NOT a guest CPU cache-coherency issue. The race lives in PFIFO/PGRAPH machinery shared by GL, Vulkan and Metal backends. The same XBE should exhibit a similar PASS/FAIL split under `XEMU_RENDERER=GL`. Implications extend beyond §H.6: every retail title that uses `pb_wait_until_gr_not_busy` as a software fence between an IMAGE_BLIT (or other PGRAPH-resident operation) and a CPU VRAM read is silently affected.
 
 ## Next bounded slice (NOT started this cycle)
 
-Cycle 13 — investigate xemu's CPU/TLB read-back coherency between host pgraph memcpy writes to `d->vram_ptr + phys` and guest TCG vCPU reads through the cached (`0x80000000 + phys`) and AGP-aliased (`0xF0000000 + phys`) virtual mappings. See decision-log cycle-12 entry "Cycle-13 follow-up" for candidate diagnostic angles.
+Cycle 14 — run `image-blit.iso` through `scripts/apple-silicon/xbe-harness` under `XEMU_RENDERER=GL`. Confirms/disproves the renderer-agnostic race hypothesis cheaply. See `decision-log.md` 2026-05-22 cycle-13 entry "Cycle-14 next-slice plan" for the staged follow-on slices (`XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` diagnostic flag, real-Xbox oracle parity check).

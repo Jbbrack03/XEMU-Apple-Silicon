@@ -1,13 +1,25 @@
 # Validation Status
 
-- Active slice: cycle-12 §H.6 `image-blit` v0.3 commit/cleanup continuation.
+- Active slice: cycle-13 §H.6 `image-blit` residual code-path audit + state-sync closure (doc-only slice).
 - Validation state: **CLOSED — all closure gates met.**
-- Closure gates:
-  - `hw/xbox/nv2a/pgraph/mtl/blit.c` clean in the final closure diff (transient cycle-12 fprintf instrumentation reverted; evidence preserved durably in `benchmark-runs/xbe-harness-20260522-090729/image-blit/metal/xemu.log`).
-  - Codex `changes`-mode validation completed before commit (rule #15). Verdict: MAJOR ISSUES, three findings adopted.
-  - Codex findings adopted:
-    - HIGH (state-file drift): four state artifacts rewritten to durable CLOSED records before the closure commit so git history never carries the pre-commit ACTIVE/PENDING scaffolding.
-    - MEDIUM (BR encoding doc claim overstated B channel as bucket-of-32): comments in `scripts/apple-silicon/xbe-tests/image-blit/main.c` near `pos_color_argb`, plus the mirrored copies in README "Cycle-12 v0.3 diagnostic encoding", decision-log cycle-12 entry, and handoff.md cycle-12 banner all corrected. Runtime behavior unchanged.
-    - LOW (top-level README/manifest overview still showed solid-red FAIL): README §"The per-cell verdict is encoded as a 160×240 dashboard rectangle" and per-cell verdict table plus manifest.json `purpose` updated to describe the v0.3 2×2 FAIL layout.
-  - Durable state files synced to CLOSED. Slice commit hash: `e8fba9e925` (recorded in this follow-up state-sync commit).
-  - Post-commit `git status` clean.
+
+## Closure gates
+
+- [x] Fresh worker receipt posted after canonical-doc read (handoff.md, decision-log.md, orchestration-workflow.md, four orchestration-state files).
+- [x] Dirty files inspected and confirmed doc-only: `docs/apple-silicon/{handoff.md, decision-log.md, orchestration-state/*}`. Zero `xemu-fork/hw/` content. Zero `xemu-fork/scripts/apple-silicon/` content.
+- [x] All load-bearing audit citations spot-verified against the live tree:
+  - `grep -rn '0x400700\|PGRAPH_STATUS' hw/xbox/nv2a/` returns ZERO hits (PGRAPH_STATUS is never published anywhere under `hw/xbox/nv2a/`).
+  - `hw/xbox/nv2a/nv2a.c:247-248` — `qemu_thread_create("nv2a.pfifo_thread", pfifo_thread, ...)`.
+  - `hw/xbox/nv2a/pfifo.c` — `pfifo_write` ~84-110 → `pfifo_kick` ~112-115 (`qemu_cond_broadcast(&d->pfifo.fifo_cond)`); `pfifo_run_puller` ~226-272 acquires `d->pgraph.lock` and dispatches `pgraph_method`.
+  - `hw/xbox/nv2a/pgraph/pgraph.c:115-150` — `pgraph_read` fast path returns `qatomic_read(&pg->regs_[addr])` with no acquire barrier.
+  - `hw/xbox/nv2a/pgraph/mtl/{blit.c:215-220, renderer.c:2525}` — `perform_blit_cpu` CPU memcpy + `.image_blit = pgraph_mtl_image_blit` registration.
+  - `include/qemu/atomic.h:77-84` — `qatomic_read` = `__atomic_load_n(..., __ATOMIC_RELAXED)`.
+  - `nxdk/lib/pbkit/outer.h:461-462` — `NV_PGRAPH_STATUS = 0x00400700`, `NV_PGRAPH_STATUS_NOT_BUSY = 0`.
+  - `nxdk/lib/pbkit/pbkit.c:486-494` — `pb_wait_until_gr_not_busy` busy-poll body.
+  - `nxdk/lib/pbkit/pbkit_dma.c:55-58` — `pb_agp_access` returns `fb | AGP_MEMORY_REMAP`.
+  - `XEMU_PGRAPH_FAST_READ` default-on per `.claude/rules/flags-renderer.md` and `.claude/rules/renderer-state.md` (closed slice).
+- [x] Clean doc-only commit landed for the cycle-13 audit. Slice commit hash: `<closure-hash-tbd>` (recorded in the follow-up state-sync commit).
+- [x] `current-cycle.md`, `claude-status.md`, `validation-status.md`, `handoff-summary.md` resynced to durable CLOSED records before close (Codex HIGH finding from cycle-12 respected — no ACTIVE/PENDING scaffolding in git history).
+- [x] Repo left clean at slice close (final `git status --short` expected empty after the state-sync follow-up commit).
+- [N/A] Codex validation: doc-only slice, no `xemu-fork/hw/` or `xemu-fork/scripts/apple-silicon/` source change → rule #15 trivial-doc exemption applies.
+- [N/A] Visual / real-Xbox oracle validation: doc-only audit, no new renderer claim. Real-Xbox oracle parity check is staged for cycle-14 follow-on once the diagnostic flag flips all 8 cells green locally.
