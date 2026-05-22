@@ -19,7 +19,7 @@
 6. [x] Marker outcome interpreted conservatively in `handoff.md` + `decision-log.md` cycle-20 entries. Specifically NOT claimed: that the XBE crashes at any particular stage, that hypothesis #1 is universal across all `runxbe`-launched XBEs, or that hypotheses #2/#3/#4 are discriminated. Specifically IS claimed: that `D:\` write-back on the `runxbe` chainload path is blocked for image-blit irrespective of XBE stage or basename length.
 7. [x] Codex validation completed: mode `changes`, verdict MINOR ISSUES, one medium-severity FATX-overflow finding adopted in full (labels shortened, rebuilt, re-validated). Validation marker at `.claude/state/codex-validate-last-run`.
 8. [x] Canonical docs synced: handoff.md, decision-log.md, and all four orchestration-state files updated to reflect the cycle-20 actual outcome.
-9. [ ] Slice commit pending — caller's choice whether to commit the bounded slice in-session or close to a clearly-documented uncommitted state. Diff at session end is `main.c` (101 lines), `bin/default.xbe` + `image-blit.iso` (rebuild byproducts), and the orchestration-state + handoff + decision-log doc updates.
+9. [x] Slice committed as `8daed392af` (the cycle-20 closure commit). Tree clean at session end.
 
 ## Out-of-scope (kept bounded per the assignment)
 
