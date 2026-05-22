@@ -87,6 +87,19 @@ void xbed_texture_bind_stage0(const XbedTextureStage0 *p)
     uint32_t fmt = 0;
     fmt |= (p->dma_channel & XBED_FMT_CONTEXT_DMA_MASK);
     fmt |= XBED_FMT_DIMENSIONALITY;                              /* 2D */
+    /* BORDER_SOURCE bit 3 set = COLOR (border color comes from
+     * NV_PGRAPH_BORDERCOLOR register). Clear = TEXTURE (the in-VRAM
+     * texture is laid out at 2x logical size with a 4-texel border
+     * surrounding the inner image, per the GL renderer's convention
+     * in gl/texture.c:451-456). Diag XBEs that don't pre-populate a
+     * bordered layout MUST set this bit; otherwise xemu's psh.c emits
+     * the `apply_border_adjustment` UV transform `(uv*size+4)/(size*2)`
+     * which lands sub-quadrant UVs in Q0 of the un-doubled texture.
+     * nxdk samples/mesh/main.c:145 sets this bit (0x0001122a, bit 3 = 1).
+     * 2026-05-22 fix — was missing in v0.1 of this library; tickled the
+     * Metal-renderer non-cubemap-2D bordered-upload gap (decision-log
+     * 2026-05-21 cycle 4 / task #16). */
+    fmt |= XBED_FMT_BORDER_SOURCE_BIT;
     fmt |= ((p->color_format & 0xFFu) << XBED_FMT_COLOR_SHIFT);
     fmt |= ((p->mipmap_levels & 0xFu) << XBED_FMT_MIPMAP_SHIFT);
     fmt |= ((p->base_size_u_log2 & 0xFu) << XBED_FMT_BASE_SIZE_U_SHIFT);

@@ -1,5 +1,164 @@
 # Decision Log
 
+## 2026-05-22 (Hermes cycle 5): task #16 CLOSED — Metal non-cubemap-2D `s.border` 2x-upload + xbed_texture `BORDER_SOURCE_COLOR` default shipped; swizzle-mipmap PASS byte-exact on Metal
+
+**Decision.** Implement the two-bug fix scope identified by
+2026-05-21 (Hermes cycle 4) entry's "Net next-highest-value actions"
+in a single bounded slice, with the principled "option (c)" fix scope
+(both renderer and XBE library) so the renderer's bordered-texture
+upload path stays exercised by a future dedicated `swizzle-bordered`
+XBE without needing a library API change to flip the default back to
+`BORDER_SOURCE = TEXTURE`.
+
+**Code change set.**
+
+1. `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::decode_face_levels`
+   (lines ~737-756): adds `bool border_2d = !s.cubemap && s.border && !f.linear`;
+   when set, doubles both `src_*` AND `dst_*` dims so the swizzled
+   path reads the doubled-with-border VRAM layout (`MAX(16, s.width * 2)`,
+   `MAX(16, s.height * 2)`) AND emits the resulting MTLTexture at the
+   doubled size — `gl/texture.c:451-456`'s convention. Cubemap+border
+   (`crop_cubemap_border = s.cubemap && s.border && !f.linear`)
+   continues to double src dims AND crop the border away because the
+   cube sampler cannot reference border texels (the existing behavior;
+   not regressed).
+2. `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg`
+   (lines ~1140-1168, 1346-1349): computes
+   `border_2d_double = !s.cubemap && !f.linear && s.border`,
+   `adjusted_width`, `adjusted_height`, `adjusted_texture_length`
+   (the last via `pgraph_get_texture_length(pg, &s_doubled)` against a
+   tweaked TextureShape copy with doubled w/h). Plumbed into:
+   - `texture_length` (used for `pgraph_mtl_surface_download_in_range_if_dirty`,
+     `texture_range_dirty`, `pgraph_mtl_texture_invalidate_range`,
+     `pgraph_mtl_texture_bind_slot_full` byte_length, both
+     `pgraph_mtl_texture_bind_slot_surface_copy` and
+     `pgraph_mtl_texture_bind_slot_cached_full` byte_length).
+   - `pgraph_mtl_texture_bind_slot_cached_full` width/height
+     parameters (now `adjusted_width, adjusted_height` so the cache key
+     matches what `bind_slot_full` inserts via `l0->width/height`).
+   - `has_compatible_surface` guard: `!border_2d_double && ...`. Bordered
+     textures never alias a flat RT because the surface RT does not
+     contain the doubled-with-border VRAM layout; the surface fast path
+     would emit the wrong pixel data otherwise.
+3. `scripts/apple-silicon/xbe-tests/lib/xbed_texture.c::xbed_texture_bind_stage0`
+   (lines 87-93): adds `fmt |= XBED_FMT_BORDER_SOURCE_BIT;` to the
+   composed format word. Matches the nxdk `samples/mesh/main.c:145`
+   reference `0x0001122a` (bit 3 = 1 = `BORDER_SOURCE_COLOR`). The
+   four current library users (`swizzle-mipmap`, `texture-format-sweep`,
+   `texture-filter-wrap`, `texture-dma-ab`) now bind with `s.border = false`
+   so `psh.c:179`'s `if (!f.linear && !cubemap)` gate stays as the only
+   thing controlling whether the bordered-UV transform applies; for
+   the three LU_IMAGE_ XBEs the transform is skipped regardless (linear);
+   for `swizzle-mipmap` the transform is now correctly skipped so the
+   un-doubled 64x64 texture is sampled with raw UVs landing in the
+   correct quadrants per cell.
+
+**XBE binaries rebuilt (4).** swizzle-mipmap, texture-format-sweep,
+texture-filter-wrap, texture-dma-ab. All four `*.iso` + `bin/default.xbe`
++ `main.exe` + `main.obj` files refreshed. The shared `xbed_texture.c`
+is wired into all four via `lib/lib.mk`.
+
+**Manifest update.** `swizzle-mipmap/manifest.json` flips
+`expected_fail_renderers` from `["xemu/gl", "xemu/metal"]` to
+`["xemu/gl"]` and rewrites `expected_fail_notes` to describe the
+closure (Metal PASS, GL remains task #17). Closure marker that the
+harness rotation gate sees.
+
+**Validation evidence (durable).**
+
+- `benchmark-runs/20260522T054316Z-task16-swizzle-mipmap-validation/`:
+  swizzle-mipmap on Metal canonical — `changed_pixels=0`,
+  `mean_abs_error=0.0000`, `rms_error=0.0000`, `max_abs_error=0`,
+  `signal_total=268800 signal_match=268800 signal_match_pct=100.0000`
+  (gate ≥ 95.0). Pure byte-exact PASS.
+- `benchmark-runs/20260522T054422Z-task16-xbed-texture-regress/`:
+  texture-format-sweep + texture-filter-wrap + texture-dma-ab on
+  Metal — all 3 PASS. Confirms the library fix doesn't regress
+  LU_IMAGE_ users (whose `s.border` value is irrelevant per the
+  `!f.linear` gate in `psh.c:179`).
+- `benchmark-runs/20260522T055631Z-task16-wider-regress/`:
+  depth-floor + stencil-ops + native-quad-tri-depth + cmp-vertex-format
+  + flat-quad-propagation + crtc-publish ×2 — 7/7 PASS. Confirms the
+  renderer fix doesn't regress non-bordered texture paths or
+  non-texture XBEs (msaa-aa-factor not-built; pre-existing build
+  state, unrelated).
+- `benchmark-runs/20260522T054657Z-task16-renderer-regress-smoke/`:
+  pipeline-smoke + mirror + color-channel + combiner-basic + blend-matrix
+  — 4/5 PASS. pipeline-smoke FAILs but the captured candidate is
+  1280x960 vs the 640x480 math-derived reference (xemu mutates xemu.toml
+  on first launch to surface_scale=2 default; `XEMU_METAL_SCREENSHOT_SOURCE=drawable`
+  then captures the upscaled drawable). Confirmed deterministic across
+  a re-run at `benchmark-runs/20260522T055508Z-task16-pipeline-smoke-recheck/`.
+  This is a pre-existing harness/config-mutation issue, NOT regressed
+  by this slice — pipeline-smoke is Tier-4 (CPU-paints framebuffer,
+  no PGRAPH, no textures); my changes can't influence its output.
+
+**Codex review state (cycle 5).** COMPLETED via `/codex-validate changes`
+on the final diff. Verdict: **MINOR ISSUES** (one LOW finding adopted,
+one open question deferred to a documented follow-up slice).
+
+- Strengths Codex called out (all confirmed): the renderer change
+  updates all three sync points (decode dims, dirty-range byte length,
+  cache lookup dims); the surface fast-path guard prevents bordered
+  textures from aliasing a flat RT view; the XBE-library fix matches
+  the documented nxdk-style format word.
+- Finding (LOW, adopted): `scripts/apple-silicon/xbe-tests/lib/vs.inl`
+  and `xbed_tex_vs.inl` had workstation-absolute source-path comments
+  from the rebuild path. Reverted via `git checkout --` on those two
+  files; shader bytecode is identical so this is pure cosmetic noise.
+- Open question (deferred): should the helper expose `BORDER_SOURCE`
+  as an explicit field on `XbedTextureStage0` for a future dedicated
+  bordered-texture XBE? Tracked as a follow-up; the hardcoded COLOR
+  default matches the nxdk samples/mesh reference and unblocks the
+  four current users today, and the renderer's bordered path is still
+  reachable via a non-helper-using XBE.
+- Out-of-scope note (Codex): pipeline-smoke attribution to mutated
+  `surface_scale=2` was not independently verified by Codex; I
+  independently confirmed via a determinist re-run (see above).
+- Marker `~/.claude/state/codex-validate-last-run` written
+  post-revert-of-noise so the Stop hook recognizes this slice as
+  Codex-validated.
+
+**XBE rotation state after this slice.** 16 of 17 first-wave XBEs PASS
+on Metal (previously 15/17). 1 expected_fail (`logic-ops`, NV2A
+feature absent in both renderers — SPEC oracle). 1 expected_fail GL-only
+(`swizzle-mipmap` v0.2 — task #17 GL LOD-clamp regression, deliberately
+preserved as a SPEC oracle). 1 unstarted (`texture-shader-stages`,
+§4.13). Per `metal-renderer-plan.md` §M15 + the 2026-05-20 evening
+XBE-first methodology pivot, M15 default-on prerequisite (all 17
+first-wave XBEs PASS on Metal) is now closer to met — only the
+§4.13 author remains.
+
+**Cumulative code locations validated correct this slice (do NOT
+re-investigate unless code changes).**
+
+- `gl/texture.c:451-456`, `vk/texture.c:111`,
+  `mtl/texture_pg.c::mtl_get_cubemap_face_size:598-601` — three
+  cross-renderer references for the `!f.linear && s.border` doubling
+  convention; cited in the source comments next to the new fix.
+- `psh.c::apply_border_adjustment` — bordered UV transform
+  `(uv * size + 4) / (size * 2)` is correct under the GL convention
+  (cycle 4 finding); no change needed.
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::build_sampler_desc_from_pg`,
+  `mtl/texture.mm::get_sampler` / `sampler_desc_equal` — sampler
+  state path is correct per-cell (cycle 4 finding); no change needed.
+
+**Net next-highest-value actions when work resumes (not binding).**
+
+1. Author §4.13 `texture-shader-stages` — last unstarted first-wave XBE.
+2. Author a dedicated `swizzle-bordered` XBE that intentionally sets
+   `BORDER_SOURCE = TEXTURE` and provides 128x128 swizzled VRAM data;
+   guard against the Metal renderer's bordered-texture path regressing.
+   Consider exposing `BORDER_SOURCE` on `XbedTextureStage0` per Codex
+   open question.
+3. Investigate Task #17 (GL LOD-clamp regression) separately — likely
+   in `gl/texture.c` per-mip upload when `s.levels < 7` due to the
+   `pgraph_get_texture_shape::levels = MIN(levels, max + 1)` clamp.
+4. Investigate the pipeline-smoke `surface_scale=2` leak — harness /
+   xemu.toml interaction. Pre-existing.
+
+---
+
 ## 2026-05-21 (evening, Hermes cycle 4): task #16 sampler attribution + bordered-texture root cause — Metal renderer missing `s.border` 2x-upload + XBE library missing `BORDER_SOURCE_COLOR`
 
 **Decision.** Close the cycle-3 open question "is the sampler

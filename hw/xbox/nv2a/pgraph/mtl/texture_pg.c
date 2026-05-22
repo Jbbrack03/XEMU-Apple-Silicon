@@ -735,10 +735,24 @@ static bool decode_face_levels(PGRAPHState *pg, TextureShape s,
     const uint8_t *p = vram_base + face_byte_offset;
     const uint8_t *p_end = p + face_size;
     bool crop_cubemap_border = s.cubemap && s.border && !f.linear;
+    /* 2026-05-22 task #16 — non-cubemap 2D bordered: read AND keep the
+     * doubled-with-border layout (mirror gl/texture.c:451-456 +
+     * vk/texture.c:111). The psh.c::apply_border_adjustment UV transform
+     * `(uv*size+4)/(size*2)` expects the sampled texture to be 2x the
+     * logical size with a 4-texel border surrounding the inner image;
+     * uploading at the un-doubled size lands all sub-quadrant UVs in
+     * Q0 (decision-log 2026-05-21 cycle 4 / task #16 root cause). For
+     * cubemaps we keep the existing crop-after-double behavior because
+     * the cube sampler can't reference border texels. */
+    bool border_2d = !s.cubemap && s.border && !f.linear;
 
-    if (crop_cubemap_border) {
+    if (crop_cubemap_border || border_2d) {
         src_width = MAX(16, src_width * 2);
         src_height = MAX(16, src_height * 2);
+    }
+    if (border_2d) {
+        dst_width = MAX(16, dst_width * 2);
+        dst_height = MAX(16, dst_height * 2);
     }
 
     unsigned int levels_to_decode = s.levels;
@@ -1112,11 +1126,35 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
         texture_length = face_size * faces;
     }
 
+    /* 2026-05-22 task #16 — non-cubemap 2D bordered textures live in
+     * VRAM at 2x the reported logical size with a 4-texel border
+     * surrounding the inner image, per the GL renderer's convention
+     * in gl/texture.c:451-456. The Metal renderer's decode_face_levels
+     * now mirrors that doubling for the non-cubemap-2D !linear path
+     * (cubemap+border keeps its existing crop-after-double behavior),
+     * so the cached / surface / dirty-range paths here need the
+     * adjusted dims + byte length to stay consistent with the actual
+     * allocated MTLTexture and the doubled VRAM footprint. The cubemap
+     * case is already correct via mtl_get_cubemap_face_size's
+     * unconditional `!f.linear && s.border` doubling above. */
+    unsigned int adjusted_width = s.width;
+    unsigned int adjusted_height = s.height;
+    bool border_2d_double = !s.cubemap && !f.linear && s.border;
+    if (border_2d_double) {
+        adjusted_width = MAX(16, s.width * 2);
+        adjusted_height = MAX(16, s.height * 2);
+        TextureShape s_doubled = s;
+        s_doubled.width = adjusted_width;
+        s_doubled.height = adjusted_height;
+        texture_length = pgraph_get_texture_length(pg, &s_doubled);
+    }
+
     void *surface_tex = NULL;
     uint32_t surface_w = 0, surface_h = 0;
     uint32_t guest_w = 0, guest_h = 0;
     uint32_t surface_pitch = 0, surface_fmt = 0;
     bool has_compatible_surface =
+        !border_2d_double &&
         pgraph_mtl_surface_get_color_surface_info_for(
             (uint32_t)offset, s.width, s.height, /*pitch=*/0,
             &surface_tex, &surface_w, &surface_h,
@@ -1307,7 +1345,8 @@ bool pgraph_mtl_texture_bind_from_pg(PGRAPHState *pg, int stage)
     if (!has_compatible_surface && !texture_possibly_dirty &&
         pgraph_mtl_texture_bind_slot_cached_full(
             stage, (uint64_t)offset, (uint64_t)texture_length,
-            mtl_fmt, s.cubemap, levels, s.width, s.height, &sd)) {
+            mtl_fmt, s.cubemap, levels,
+            adjusted_width, adjusted_height, &sd)) {
         pg->texture_dirty[stage] = false;
         return true;
     }

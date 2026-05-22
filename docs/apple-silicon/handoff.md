@@ -1,10 +1,166 @@
 # Handoff
 
-Last updated: 2026-05-21 (evening, Hermes-supervised cycle 4 — task
-#16 sampler-attribution + bordered-texture diagnosis slice). **No new
-XBE PASS this cycle.** Task #16 still expected_fail on Metal; root
-cause now localized end-to-end. Cycle 4 banner appended; cycles 2 + 3
-+ mid-day banners preserved below for continuity.
+Last updated: 2026-05-22 (Hermes-supervised cycle 5 — task #16 closure
+slice). **Task #16 CLOSED.** `swizzle-mipmap` v0.2 now PASSes byte-exact
+on Metal (changed_pixels_pct=0.0000, signal_match_pct=100.0000) via
+the two-part fix Cycle 4 identified end-to-end. XBE rotation now stands
+at 16 of 17 first-wave XBEs PASS on Metal + 1 expected_fail (`logic-ops`,
+NV2A feature in neither renderer) + 1 expected_fail GL-only
+(`swizzle-mipmap` v0.2 still tracks task #17 GL LOD-clamp regression).
+1 unstarted (`texture-shader-stages`). Cycle 5 banner appended; cycles
+2 + 3 + 4 preserved below for continuity.
+
+## 2026-05-22 (Hermes cycle 5) — Task #16 closure: Metal bordered-texture fix + xbed_texture library BORDER_SOURCE_COLOR default
+
+**Status: CLOSED.** Implements the fix scope identified in Cycle 4
+(2026-05-21 evening). Single bounded slice landed; build clean;
+swizzle-mipmap byte-exact PASS on Metal; 0 regressions across 11 other
+XBEs exercised; Codex MINOR ISSUES (one LOW finding adopted, one open
+question deferred to a documented follow-up slice).
+
+**Code change set (3 files modified; aggregate ~58 LOC):**
+
+1. `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::decode_face_levels` (~12 LOC):
+   adds `border_2d = !s.cubemap && s.border && !f.linear` and doubles
+   both `src_*` and `dst_*` dims when set, mirroring `gl/texture.c:451-456`
+   and `vk/texture.c:111`. Cubemap+border path (`crop_cubemap_border`)
+   keeps its existing crop-after-double behavior because the cube
+   sampler cannot reference border texels.
+2. `hw/xbox/nv2a/pgraph/mtl/texture_pg.c::pgraph_mtl_texture_bind_from_pg`
+   (~22 LOC): computes `adjusted_width/height/texture_length` once for
+   `border_2d_double = !s.cubemap && !f.linear && s.border`; propagates
+   to (a) `texture_length` (used for dirty-range download, invalidate,
+   surface-overlap download, and `bind_slot_full` byte_length), (b) the
+   `pgraph_mtl_texture_bind_slot_cached_full` cache lookup (now uses
+   adjusted dims to match the dims `bind_slot_full` will insert), and
+   (c) the surface fast-path guard: `has_compatible_surface = !border_2d_double && ...`
+   so bordered textures never alias a flat RT (surfaces don't have the
+   doubled-with-border VRAM layout).
+3. `scripts/apple-silicon/xbe-tests/lib/xbed_texture.c::xbed_texture_bind_stage0`
+   (~14 LOC including comment): adds `fmt |= XBED_FMT_BORDER_SOURCE_BIT;`
+   so the composed format word sets `BORDER_SOURCE = COLOR` (bit 3 = 1),
+   matching the nxdk `samples/mesh/main.c:145` reference `0x0001122a`.
+   Previously bit 3 was 0 = `BORDER_SOURCE_TEXTURE`, which caused
+   `s.border = true` in xemu's `pgraph_get_texture_shape` and tickled
+   the Metal-renderer bordered-texture upload gap that Bug #1 above now
+   fixes. With the library fix, the four current xbed_texture users
+   (swizzle-mipmap + three LU_IMAGE_ XBEs) no longer trip the
+   bordered-UV transform in `psh.c::apply_border_adjustment`.
+
+**XBE binaries rebuilt (4):** swizzle-mipmap, texture-format-sweep,
+texture-filter-wrap, texture-dma-ab. All four `*.iso` + `bin/default.xbe`
++ `main.exe` + `main.obj` files refreshed via `make clean && make` in
+each test dir against the nxdk toolchain (the shared `xbed_texture.c`
+is included via `lib/lib.mk` so all four needed a rebuild).
+
+**Manifest update:** `swizzle-mipmap/manifest.json` flips
+`expected_fail_renderers` from `["xemu/gl", "xemu/metal"]` to
+`["xemu/gl"]`. GL leg still expected_fail under task #17 (LOD-clamp
+regression — `pgraph_get_texture_shape` truncates `levels` and uploads
+wrong data for cells 1-6).
+
+**Validation evidence (durable):**
+
+| Run dir | XBE(s) | Result |
+|---|---|---|
+| `benchmark-runs/20260522T054316Z-task16-swizzle-mipmap-validation/` | swizzle-mipmap | **PASS byte-exact** (changed_pixels=0, mean_abs_error=0.0000, signal_match=100.0000%) |
+| `benchmark-runs/20260522T054422Z-task16-xbed-texture-regress/` | texture-format-sweep, texture-filter-wrap, texture-dma-ab | 3/3 PASS (LU_IMAGE_ linear formats — `psh.c:179` `if (!f.linear && !cubemap)` skips bordered-UV transform regardless of `s.border` so the library fix is a no-op for them; verifies no regression) |
+| `benchmark-runs/20260522T055631Z-task16-wider-regress/` | depth-floor, stencil-ops, native-quad-tri-depth, cmp-vertex-format, flat-quad-propagation, crtc-publish ×2 variants | 7/7 PASS (msaa-aa-factor reports `not-built`, pre-existing — not in this slice's rebuild scope) |
+| `benchmark-runs/20260522T054657Z-task16-renderer-regress-smoke/` | pipeline-smoke, mirror, color-channel, combiner-basic, blend-matrix | 4/5 PASS; pipeline-smoke FAIL (see "Known pre-existing issue" below) |
+| `benchmark-runs/20260522T055508Z-task16-pipeline-smoke-recheck/` | pipeline-smoke | FAIL — same deterministic mode as previous run |
+
+Net: 14 PASS (incl. the originally-targeted swizzle-mipmap flip from
+expected_fail to PASS), 1 deterministic pre-existing FAIL
+(pipeline-smoke), 0 newly-introduced regressions.
+
+**Known pre-existing issue (NOT caused by this slice):** `pipeline-smoke`
+FAILs on Metal across two consecutive runs with `changed_pixels_pct=99.9997 > 0.5`.
+Root cause: the captured screenshot is `1280x960` while the math-derived
+oracle reference is `640x480` — `surface_scale=2` is leaking from xemu's
+mutated `xemu.toml` despite the harness writing `[display.quality] surface_scale = 1`
+into the fresh per-cell toml (`scripts/apple-silicon/xbe-harness/xbe_renderers.py:78-79`).
+The xemu.toml dumped from the cell dir has no `[display.quality]` block
+at all post-run, suggesting xemu strips it on toml-rewrite when it
+matches "the default" and then applies the Apple Silicon first-launch
+default = 2 on the next load. `swizzle-mipmap` survives this because
+its manifest declares `metal_canonical_overrides: {"XEMU_METAL_SCREENSHOT_SOURCE": "nv2a"}`
+which captures the unscaled NV2A surface; PGRAPH-rendered XBEs survive
+because their content downsamples cleanly; pipeline-smoke (Tier-4,
+CPU-paints a single white pixel) does not. **Out of scope for Task #16;**
+queued as a separate harness/config issue.
+
+**Codex review state (cycle 5):** COMPLETED. Verdict: MINOR ISSUES.
+Strengths: confirms all three sync points are updated correctly
+(decode dims, dirty-range byte length, cache lookup dims) and praises
+the surface fast-path guard for not aliasing RT-sized textures.
+Finding (LOW, adopted): `scripts/apple-silicon/xbe-tests/lib/vs.inl`
+and `xbed_tex_vs.inl` had workstation-absolute path comments from the
+rebuild; reverted those two cosmetic changes (`git checkout --` the
+two files; the shader bytecode is identical). Open question (deferred):
+whether to expose `BORDER_SOURCE` as an explicit field on
+`XbedTextureStage0` for a future dedicated bordered-texture XBE — yes,
+but tracked as a follow-up; for now hardcoding COLOR matches the nxdk
+samples/mesh reference and unblocks the four current users. Codex's
+"out of scope" note about pipeline-smoke attribution is addressed
+above by our own re-run confirmation.
+
+**Cycle 4 narrative resolution.** Cycle 4 identified the two-bug root
+cause end-to-end:
+- **Bug 1 (Metal renderer):** `decode_face_levels` did not double for
+  `s.border` in the non-cubemap-2D path. → Fixed by change set #1 + #2.
+- **Bug 2 (XBE library):** `xbed_texture_bind_stage0` never set
+  `BORDER_SOURCE_COLOR`. → Fixed by change set #3.
+
+Both fixes shipped together (Cycle 4's "preferred option (c)").
+
+**M15 default-on prerequisite status (per `metal-renderer-plan.md` §M15 +
+2026-05-20 evening XBE-first methodology pivot):** the first-wave XBE
+PASS count goes from **15 of 17** to **16 of 17** with this slice.
+`logic-ops` remains expected_fail (NV2A feature in neither renderer;
+SPEC oracle). `texture-shader-stages` (§4.13) is the only unstarted
+first-wave XBE. `swizzle-mipmap` PASSes on Metal but is still
+expected_fail on GL (task #17, separate fix slice).
+
+**Net next-highest-value actions (not binding):**
+
+1. **Author §4.13 `texture-shader-stages`** — the last unstarted
+   first-wave XBE. 19 NV2A texture-shader modes; needs combiner-helper
+   + texture-shader-stage infra. Significant scope.
+2. **Author a dedicated `swizzle-bordered` XBE** that intentionally
+   sets `BORDER_SOURCE = TEXTURE` and provides 128x128 swizzled VRAM
+   data so the bordered-UV transform produces correct per-quadrant
+   samples. Guards the Metal renderer's just-fixed bordered-texture
+   path against future regression. Per Codex's open question, also
+   consider exposing `BORDER_SOURCE` as a field on `XbedTextureStage0`
+   in this slice rather than hardcoding COLOR in `xbed_texture_bind_stage0`.
+3. **Investigate Task #17 (GL LOD-clamp regression)** — separate
+   slice. Cycle 3 evidence: GL renders cell 0 correctly but cells 1..6
+   BLACK when MIN_LOD_CLAMP == MAX_LOD_CLAMP > 0. Likely lives in
+   `gl/texture.c` per-mip upload when `s.levels < 7` due to the same
+   `pgraph_get_texture_shape::levels = MIN(levels, max + 1)` clamp.
+4. **Investigate the pipeline-smoke `surface_scale=2` leak** —
+   harness / xemu.toml interaction. Pre-existing; documented above.
+
+**Doc / instrumentation deltas landed this slice:**
+
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c` — renderer fix (functional;
+  removes the bordered-texture upload gap end-to-end).
+- `scripts/apple-silicon/xbe-tests/lib/xbed_texture.c` — library fix
+  (functional; nxdk-aligned `BORDER_SOURCE_COLOR` default).
+- 4 XBE binaries rebuilt (`swizzle-mipmap.iso` + 3 LU_IMAGE_ XBEs).
+- `scripts/apple-silicon/xbe-tests/swizzle-mipmap/manifest.json` —
+  flips `expected_fail_renderers` to GL-only with cycle 5 notes.
+- `docs/apple-silicon/handoff.md` — cycle 5 banner appended.
+- `docs/apple-silicon/decision-log.md` — cycle 5 entry appended.
+- `docs/apple-silicon/orchestration-state/*.md` — 4 orchestration-state
+  files refreshed to closure state.
+- Codex marker at `/Users/jbbrack03/XEMU_MacOS/.claude/state/codex-validate-last-run`.
+
+**Previous cycle 4 evening banner preserved below for continuity.**
+
+---
+
+
 
 ## 2026-05-21 (evening, Hermes cycle 4) — Task #16 sampler attribution + bordered-texture diagnosis (durable, no fix landed)
 
