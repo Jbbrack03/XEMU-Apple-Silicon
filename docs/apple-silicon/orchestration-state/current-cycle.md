@@ -1,22 +1,20 @@
 # Current Cycle
 
-- Started: 2026-05-22 02:35 CDT (approximate; fresh bounded session after cycle 6 commit `8defc984ce`).
-- Closed:  2026-05-22 03:10 CDT (approximate; tied to commit timestamp).
-- Owner: Claude Code (Hermes-supervised cycle 7 — fresh bounded session investigating task #18 with the v0.2 DIFFUSE-source bisect described in v0.1's `expected_fail_notes`).
-- Session goal: Investigate task #18 for `scripts/apple-silicon/xbe-tests/texture-shader-stages/` on xemu/metal. Implement the v0.2 DIFFUSE-source bisect variant; run the harness; if evidence localizes the bug to the renderer, make the smallest grounded renderer-side fix; otherwise stop at a bounded partial with crisp next code step.
-- Required reading consumed: `docs/apple-silicon/handoff.md` (cycle 6 banner), `docs/apple-silicon/decision-log.md` (cycle 6 entry), `docs/apple-silicon/orchestration-workflow.md`, `docs/apple-silicon/orchestration-state/*.md`, `docs/apple-silicon/diagnostic-xbe-plan.md` §4.13, plus the existing v0.1 XBE source files and the relevant renderer sources (`hw/xbox/nv2a/pgraph/glsl/psh.c`, `pgraph.h`, `glsl/shaders.c`, `mtl/state.c`).
+- Started: 2026-05-22 04:10 CDT (approximate; fresh bounded session after cycle 7 commit `aa67e4b6a1`).
+- Closed:  2026-05-22 04:35 CDT (approximate; tied to commit timestamp).
+- Owner: Claude Code (fresh bounded session implementing v0.3 control-row + sentinel bisect for task #18; full resolution).
+- Session goal: Implement v0.3 control-row bisect; run harness; if evidence localizes the bug, apply the smallest grounded fix. Exit on either clean close (A) or bounded partial (B).
+- Required reading consumed: `handoff.md` cycle-7 banner, `decision-log.md` cycle-7 entry, `orchestration-state/*.md`, `diagnostic-xbe-plan.md` §4.13, existing v0.2 source + manifest + expected.py, `glsl/psh.c`, `pgraph.h`, `psh_regs.h`, `ps.inl`, `xbed_tex_ps.inl`.
 - Scope guardrails (all honored):
   - Worked only inside `/Users/jbbrack03/XEMU_MacOS/xemu-fork`.
-  - Picked one bounded vertical slice (DIFFUSE-source bisect row) rather than the v0.3 control-row bisect or the psh.c PASS_THROUGH gate fix in the same cycle.
-  - Updated compact orchestration-state artifacts as the slice progressed.
-  - Codex validation completed: verdict **MINOR ISSUES**, all 3 findings adopted (MEDIUM softening of bisect verdict wording, MEDIUM addition of third candidate "combiner-rewrite ignored under textured-shader state", LOW doc-status sync across orchestration files).
-  - No renderer-correctness CLAIM made (slice ships as SPEC ORACLE; task #18 still tracking the broader-than-PASSTHROUGH bug with a surviving candidate documented).
-- Exit criteria taken: **Option B (bounded partial with durable evidence).**
-  - Sharply-bounded partial: 4 modified files under `scripts/apple-silicon/xbe-tests/texture-shader-stages/` (main.c, expected.py, manifest.json, rebuilt artifacts) + 4 doc updates (handoff cycle-7 banner, decision-log cycle-7 entry, 3 orchestration-state files refreshed).
-  - Durable evidence: `benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/` with full 256-PNG screenshot sequence + `key-evidence/` directory (4 frames + per-row-stats.md narrative).
-  - Exact blockers: v0.2 evidence rules out the PASS_THROUGH-specific reading of v0.1 hypothesis 1; the broader "override-not-honored under textured-shader state" reading remains live (per Codex 2026-05-22 finding 1). Two surviving candidates after Codex finding 2: (a) textured-shader state-machine interaction; (b) combiner-rewrite ignored under textured-shader state. Both need the v0.3 control-row bisect + combiner-sentinel instrumentation to narrow further. Separate PASS_THROUGH-degraded-to-NONE bug identified in psh.c:142-148 but queued as a separate future slice (not task #18 itself).
-  - Updated canonical docs + orchestration state: handoff cycle 7 banner appended; decision-log cycle 7 entry appended; 3 orchestration-state files refreshed.
-  - Next concrete code step for the following fresh session: v0.3 control-row bisect that uses `xbed_load_default_shaders` (no texturing) but still issues per-cell SHADER_STAGE_PROGRAM writes — isolates candidate (a) textured-shader state-machine interaction from the broader override-not-honored case. **In parallel (per Codex finding 2):** add a sentinel combiner config to test whether the row1→row2 `A_SOURCE` switch is honored at all — isolates candidate (b). Optionally: enable `XEMU_METAL_DIAG_ATTRIB_DUMP=1` to dump the per-draw pipeline cache key.
-- Initial expectation taken: read the v0.1 source + manifest, traced the SHADER_STAGE_PROGRAM path through `pgraph_glsl_set_psh_state` and identified a potential PASS_THROUGH-degraded-to-NONE bug in psh.c:142-148. Hypothesized that v0.2's row 2 (DIFFUSE-source bypass) would render correctly if that PASS_THROUGH bug was the root cause. Implemented v0.2, ran on Metal — row 2 ALSO produced pure BLACK, ruling out the PASS_THROUGH-only hypothesis. Pivoted to documenting the bisect verdict and the surviving candidate (textured-shader state-machine interaction) rather than attempting a renderer fix that wouldn't address the actual bug.
-- Prior slice status: cycle 6 committed cleanly at `8defc984ce`; resumed via fresh session as instructed.
-- Tree state pre-commit: 4 modified files + 1 new evidence dir + 4 doc updates. Codex marker to be written on post-commit clean fingerprint.
+  - Implemented v0.3 control-row + sentinel; ran on Metal; found D_SOURCE=0x0C XBE bug; fixed; ran again; all 4 rows passed; then identified and fixed the psh.c PASS_THROUGH gate bug; full PASS confirmed.
+  - Updated orchestration-state artifacts.
+  - Codex validation: COMPLETED. Verdict: **PASS** (no findings). D_SOURCE=0x04 confirmed correct; pgraph.h mode!=4 removal confirmed correct; sentinel logic confirmed correct; pgraph.h blast radius confirmed low (one caller, pre-existing TEXCTL0.ENABLE caveat is not introduced by this diff).
+  - Renderer-correctness CLAIM: MADE — §4.13 texture-shader-stages PASSES Metal (harness: 1 pass, 0 fail, 2026-05-22T04:29:05Z run).
+- Exit criteria taken: **Option A (clean localized fix + verified passing + docs updated).**
+  - Two bugs found and fixed:
+    1. XBE combiner D_SOURCE=0x0C bug (in `main.c`) — the real root cause of v0.2 ALL-BLACK.
+    2. `pgraph_is_texture_stage_active()` excluding PASS_THROUGH mode 4 (in `pgraph.h:331`) — separate psh.c gate bug, affects both renderers.
+  - Both bugs fixed; full harness PASS on Metal (all 16 cells byte-exact).
+  - Task #18 CLOSED.
+- Exit state: tree has uncommitted diff (main.c, expected.py, manifest.json, pgraph.h, rebuilt XBE artifacts, doc updates). Codex to run; then commit.

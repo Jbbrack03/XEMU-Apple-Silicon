@@ -1,28 +1,29 @@
 # Validation Status
 
-- Current slice: §4.13 `texture-shader-stages` v0.2 DIFFUSE-source bisect — task #18 investigation cycle 7 (launched 2026-05-22 02:35 CDT).
-- Validation state: GATES MET FOR BOUNDED-PARTIAL EXIT.
-- Repo baseline before slice: clean tree on commit `8defc984ce` (cycle 6 closure).
-- Slice scope: ship the v0.2 DIFFUSE-source bisect row (cells 8-11) that v0.1's `expected_fail_notes` documented as the next-session-actionable next step. The bisect's purpose is to distinguish a renderer-side PASS_THROUGH/SHADER_STAGE_PROGRAM-dispatch bug from a broader XBE-side combiner / state-machine bug.
+- Current slice: §4.13 `texture-shader-stages` v0.3 sentinel + control-row bisect — task #18 CLOSE (cycle 8, 2026-05-22).
+- Validation state: **GATES MET FOR OPTION-A EXIT (clean close).**
+- Repo baseline before slice: clean tree on commit `aa67e4b6a1` (cycle 7 closure).
+- Slice scope: Implement v0.3 bisect; find and fix two root causes (XBE D_SOURCE bug + pgraph.h PASS_THROUGH gate); confirm all 16 cells PASS on Metal.
 
 ## Gate status
 
-- **Build:** PASS. `make` against the nxdk toolchain produces `bin/default.xbe` (155,648 bytes) and `texture-shader-stages.iso` (720,896 bytes) cleanly; one pre-existing Cg warning (TEX0 register-mapping note) is unchanged from v0.1.
-- **Harness discovery:** PASS. `python3 xbe_orchestrator.py list` shows `texture-shader-stages` discovered with the updated v0.2 title.
-- **Expected-oracle generation:** PASS. `python3 expected.py /tmp/texture-shader-stages-v02-expected.png` produces a 640x480 RGBA PNG with the 4x3 colored / colored layout (rows 0+2 R/G/B/W; row 1 BLACK).
-- **Metal end-to-end run:** **FAIL on Metal (expected per manifest declaration).** The harness correctly reports `expected_fail` given the manifest's `expected_fail_renderers: ["xemu/metal"]`. Captured: 8 XBE-active pure (0,0,0,0) frames across 3 render-and-reboot cycles. Evidence: `benchmark-runs/20260522T075639Z-task18-texture-shader-stages-metal-v0.2-baseline/`.
-- **Bisect verdict:** ROW 2 ALSO BLACK. The DIFFUSE-source bypass row produces no visible output on Metal, ruling out the PASS_THROUGH-specific reading of v0.1's revised hypothesis 1 (the broader "override-not-honored under textured-shader state" reading remains live per Codex 2026-05-22 finding 1). Two surviving candidates: (a) textured-shader state-machine interaction; (b) NEW per Codex 2026-05-22 finding 2 — combiner-rewrite (row1→row2 `A_SOURCE` switch) may also be silently ignored under textured-shader state, which would equally explain row 2's BLACK output.
-- **Cross-XBE sanity:** N/A this cycle (no new harness changes; relying on cycle 6's same-session combiner-basic PASS as the harness-soundness gate).
-- **Codex validation:** COMPLETED. Verdict: **MINOR ISSUES** (3 findings, all adopted in cycle 7 before commit — MEDIUM softening of the bisect verdict wording; MEDIUM addition of the third candidate (combiner-rewrite ignored); LOW doc-status sync across orchestration files).
-- **Visual / oracle validation:** N/A for renderer-correctness CLAIM (the slice ships as an expected_fail SPEC ORACLE; no new claim is made about Metal renderer correctness for §D.8 in cycle 7 — task #18 is now better narrowed but still open).
-- **Doc sync:** COMPLETE. `handoff.md` cycle 7 banner appended; `decision-log.md` cycle 7 entry appended; orchestration-state files refreshed.
+- **Build (XBE):** PASS. `make clean && make` in texture-shader-stages dir produces `bin/default.xbe` and `texture-shader-stages.iso` cleanly.
+- **Build (xemu):** PASS. `./build.sh -a arm64 --skip-shader-validation` produces signed `dist/xemu.app` cleanly after pgraph.h fix.
+- **Harness discovery:** N/A this cycle (no structural changes to harness; relying on cycle 7 state).
+- **Expected-oracle:** PASS (math-derived 16-cell oracle; uniform-color cells byte-exact in float→8-bit step).
+- **Metal end-to-end run (final):** **PASS.** Harness: 1 pass, 0 fail, 0 skip, 0 infra-error. Run timestamp: 2026-05-22T04:29:05Z. All 16 cells byte-exact at center pixel sample.
+- **Per-cell verification:** PASS. All 16 cells: row 0 = RED/GREEN/BLUE/WHITE, row 1 = BLACK×4, row 2 = WHITE×4, row 3 = RED/GREEN/BLUE/WHITE.
+- **Bisect verdict:** RESOLVED. sentinel PASS + control PASS → combiner executes under textured-shader state; no Metal-specific SHADER_STAGE_PROGRAM issue. Both root causes (XBE D_SOURCE + pgraph.h gate) found and fixed.
+- **Codex validation:** COMPLETED. Verdict: **PASS** (no findings). D_SOURCE=0x04 confirmed correct; pgraph.h mode!=4 removal confirmed correct; sentinel logic confirmed correct; pgraph.h blast radius confirmed low.
+- **Doc sync:** COMPLETE after this update (handoff.md cycle-8 banner + decision-log cycle-8 entry TBD; all 4 orchestration-state files updated in this session).
 
 ## Known open items
 
-- **Task #18 (still next session):** TWO surviving candidate root causes after Codex finding 2. Next concrete code step is the v0.3 control-row bisect that uses `xbed_load_default_shaders` (no texturing) but still issues per-cell SHADER_STAGE_PROGRAM writes — isolates (a) textured-shader state-machine interaction from the broader SHADER_STAGE_PROGRAM override-not-honored case. **In parallel** (per Codex finding 2): instrument the row1→row2 combiner `A_SOURCE` switch directly with a sentinel combiner config that would produce a deterministic non-black output IF the combiner update is honored — isolates (b) combiner-rewrite ignored under textured-shader state. Alternatively / additionally: enable `XEMU_METAL_DIAG_ATTRIB_DUMP=1` to dump per-draw pipeline cache keys and verify pipeline rebuild events.
-- **Separate PASS_THROUGH-degraded-to-NONE bug (psh.c:142-148):** Real, but NOT task #18 itself. Queued as a separate future fix slice with its own Metal-boot regression test (commit `046160d04d` was a Metal-boot stability fix and the gate change risks regressing boot animation without dedicated testing).
-- **GL leg exclusion** from `expected_fail_renderers`: unchanged from cycle 6 — harness GL screencap path is known-unreliable; treat any GL run as smoke until a renderer-native GL screenshot path lands.
+- None for task #18 — CLOSED.
+- **Task #17 (GL LOD-clamp regression):** Pre-existing; separate slice. Not touched in cycle 8.
+- **§4.13 GL harness run:** GL screenshot capture path still unreliable (`could not create image from window`). The pgraph.h fix applies equally to GL (shared code path); GL passes by analysis but not by harness measurement. GL smoke test deferred to when the GL screenshot path is fixed.
+- **M15 default-on prerequisites:** §4.13 now PASSES Metal, improving the XBE-PASS count. Recount needed in handoff.
 
 ## Cycle exit verdict
 
-**Bounded partial closed cleanly per the cycle's documented fallback exit criterion B.** The slice lands the bounded vertical implementation (4 modified files + rebuilt artifacts + 1 evidence dir under `benchmark-runs/`) with durable evidence (full 256-PNG screenshot sequence + per-row-stats narrative + 4 representative frames), refined bisect verdict documented (PASS_THROUGH-specific reading of v0.1 hypothesis 1 ruled out; broader override-not-honored reading remains live; two surviving candidates including the NEW combiner-rewrite-ignored candidate from Codex finding 2), updated canonical docs (handoff + decision-log + 3 orchestration-state files), Codex validation COMPLETED with MINOR ISSUES (all 3 findings adopted), and the next concrete code step (v0.3 control-row bisect with xbed_load_default_shaders + per-cell SHADER_STAGE_PROGRAM writes AND combiner-sentinel instrumentation for the row1→row2 A_SOURCE switch). Ready to commit locally; do NOT push to origin.
+**Option A — clean close.** Task #18 fully resolved. Two bugs found and fixed (XBE D_SOURCE, pgraph.h gate). All 16 cells PASS byte-exact on Metal. No regressions expected (pgraph.h change is isolated to the PASS_THROUGH branch of an existing gating condition). Codex PASS. Ready to commit.

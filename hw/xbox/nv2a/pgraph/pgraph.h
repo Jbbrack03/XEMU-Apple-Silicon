@@ -328,7 +328,7 @@ static inline bool pgraph_is_texture_stage_active(PGRAPHState *pg, unsigned int 
 {
     assert(stage < NV2A_MAX_TEXTURES);
     uint32_t mode = (pgraph_reg_r(pg, NV_PGRAPH_SHADERPROG) >> (stage * 5)) & 0x1F;
-    return mode != 0 && mode != 4;// && mode != 0x11 && mode != 0x0a && mode != 0x09 && mode != 5;
+    return mode != 0; /* PASS_THROUGH (4) is active; only PROGRAM_NONE (0) is not */
 }
 
 static inline bool pgraph_is_texture_enabled(PGRAPHState *pg, int texture_idx)

@@ -1,5 +1,64 @@
 # Decision Log
 
+## 2026-05-22 (cycle 8): §4.13 `texture-shader-stages` v0.3 — task #18 CLOSED; two root causes found and fixed
+
+**Decision.** Task #18 fully resolved. Ship v0.3 as a clean close
+(Option A) with two bugs fixed: (1) XBE D_SOURCE code bug; (2)
+`pgraph_is_texture_stage_active` PASS_THROUGH gate bug. §4.13
+`expected_fail_renderers` cleared; test now passes all renderers.
+
+**Root cause 1 — XBE combiner D_SOURCE=0x0C bug (`main.c`).**
+The FINAL combiner CW0 `D_SOURCE` was set to `0x0C`
+(PS_REGISTER_R0) in both `program_combiners_with_a_source()` and
+`program_combiners_sentinel()`. OCW `AB_DST=0x4` writes to
+PS_REGISTER_V0 (0x04) — confirmed by tracing
+`psh.c::parse_combiner_output()` (`output.ab = (value>>4)&0xF`) →
+`get_var(ps, 0x4, true)` → `case PS_REGISTER_V0`. The working
+reference PS files (`ps.inl`, `xbed_tex_ps.inl`) both use
+`D_SOURCE=0x4`. Since R0 was never written, FINAL read 0 → BLACK
+for every cell across all three v0.2 rows. **The v0.2 ALL-BLACK
+results were entirely due to the XBE code bug — there was no
+Metal SHADER_STAGE_PROGRAM dispatch issue.** Fix: changed
+`D_SOURCE` from `0x0C` to `0x04` in `main.c`.
+
+**Root cause 2 — `pgraph_is_texture_stage_active` PASS_THROUGH
+gate (`pgraph.h:331`).** After fixing root cause 1, v0.3 row 0
+(PASS_THROUGH + T0, textured shaders) still produced BLACK while
+rows 1/2/3 all passed. `pgraph_is_texture_stage_active()` returned
+false for mode 4 (PASS_THROUGH) due to `mode != 4` in the return
+expression. `psh.c:143-148` then evaluated `enabled = false` and
+cleared the stage-0 program bits to NONE → T0=0 → BLACK. Fix:
+removed `mode != 4`; only PROGRAM_NONE (0x00) is an inactive stage
+(no texture access). Affects both GL and Metal (shared code path
+via `pgraph_glsl_set_psh_state` → called from `glsl/shaders.c`
+for GL and `mtl/renderer.c:1610` for Metal). The `mode != 4`
+exclusion was introduced in the fork-local commit `046160d04d`
+(2026-05-04). The boot-stability concern cited in cycle 7 for
+deferring this fix does not apply to removing the `mode != 4`
+clause: the gate's purpose was to avoid sampling from
+uninitialized texture units, and PASS_THROUGH does not sample the
+texture unit — it passes coordinates directly to t0.
+
+**v0.3 bisect results (with both fixes):**
+- Row 0 (PASS_THROUGH + T0, textured): RED/GREEN/BLUE/WHITE ✓
+- Row 1 (PROGRAM_NONE + T0, textured): BLACK×4 ✓
+- Row 2 (sentinel, textured): WHITE×4 ✓
+- Row 3 (control, default shaders): RED/GREEN/BLUE/WHITE ✓
+Harness: 1 pass, 0 fail, 2026-05-22T04:29:05Z Metal run.
+
+**Sentinel PASS + control PASS outcome:** Confirms combiner
+executes under textured-shader state; V0/DIFFUSE path works with
+default shaders; no Metal-specific SHADER_STAGE_PROGRAM override
+issue exists. Task #18's original concern (Metal not honoring
+per-cell SHADER_STAGE_PROGRAM writes) is RESOLVED as an XBE
+code bug. No superseding of prior decisions required. XBE
+first-wave count: **17 of 18 PASS Metal + 1 expected_fail**
+(logic-ops SPEC).
+
+**Codex validation:** COMPLETED. Verdict: PASS (no findings). D_SOURCE=0x04 confirmed correct; pgraph.h mode!=4 removal confirmed correct and low blast radius; sentinel logic confirmed correct.
+
+---
+
 ## 2026-05-22 (Hermes cycle 7): §4.13 `texture-shader-stages` v0.2 DIFFUSE-source bisect — v0.1 hypothesis 1 RULED OUT; bug is broader than the PASS_THROUGH path
 
 **Decision.** Land §4.13 v0.2 as a sharply-bounded partial slice that

@@ -1,13 +1,15 @@
 # Handoff
 
-Last updated: 2026-05-22 (Hermes-supervised cycle 7 — §4.13
-`texture-shader-stages` v0.2 DIFFUSE-source bisect). **v0.2
-bisect rules out only the PASS_THROUGH-SPECIFIC explanation of
-v0.1 hypothesis 1; the broader "any SHADER_STAGE_PROGRAM
-override under xbed_load_textured_shaders() is not honored"
-case remains live, alongside a newly-identified third
-candidate (combiner-rewrite not honored under textured-shader
-state) per Codex 2026-05-22.** §4.13 v0.2 expands the 4x2 grid
+Last updated: 2026-05-22 (cycle 8 — §4.13 `texture-shader-stages`
+v0.3 sentinel+control-row bisect; **TASK #18 CLOSED**).
+**§4.13 now PASSES Metal (all 16 cells byte-exact; harness:
+1 pass, 0 fail, 2026-05-22T04:29:05Z). Two root causes found and
+fixed: (1) XBE combiner D_SOURCE=0x0C→0x04 bug (v0.2 ALL-BLACK
+was an XBE code bug, NOT a Metal renderer bug); (2)
+`pgraph_is_texture_stage_active()` incorrectly excluded
+PASS_THROUGH mode 4 from active-stage detection (pgraph.h:331,
+removed `mode != 4`). XBE first-wave PASS count: 17 of 18 PASS
+on Metal + 1 expected_fail (logic-ops SPEC).** §4.13 v0.2 expands the 4x2 grid
 to a 4x3 grid by adding row 2 —
 `SHADER_STAGE_PROGRAM=PROGRAM_NONE` (same as row 1) + combiner
 ICW `A_SOURCE=V0` (DIFFUSE) with per-cell DIFFUSE = (R,G,B,1),
@@ -47,6 +49,41 @@ rotation unchanged: **16 of 18 PASS on Metal + 2 expected_fail**
 tracks task #18) + 1 expected_fail GL-only (swizzle-mipmap task
 #17). 0 unstarted of the §4 first-wave priority list. Cycle 7
 banner appended; cycle 6 preserved below for continuity.
+
+## 2026-05-22 (cycle 8) — §4.13 `texture-shader-stages` v0.3 sentinel+control-row bisect (task #18 CLOSED)
+
+**Status: OPTION A — CLEAN CLOSE. Task #18 fully resolved.**
+
+v0.3 expands the 4x3 grid to a 4x4 grid (16 cells, CELL_H=120px).
+Row 2 is a sentinel combiner (PROGRAM_NONE +
+A=B=INVERT(ZERO)=1.0, textured shaders; expected WHITE×4 —
+independent of T0/V0). Row 3 is a control row (PROGRAM_NONE +
+A=V0/DIFFUSE, DEFAULT shaders; expected RED/GREEN/BLUE/WHITE).
+
+**Root cause 1 (XBE code bug):** FINAL CW0 `D_SOURCE=0x0C`
+(PS_REGISTER_R0, never written) should have been `0x04`
+(PS_REGISTER_V0). OCW `AB_DST=0x4` writes to PS_REGISTER_V0
+(per `psh.c::parse_combiner_output` + `get_var` case
+PS_REGISTER_V0). R0 was never written → FINAL read 0 → BLACK.
+This was the root cause of v0.2 ALL-BLACK — NOT a Metal renderer
+bug. Fixed in `main.c` (`program_combiners_with_a_source` and
+`program_combiners_sentinel`).
+
+**Root cause 2 (renderer psh.c gate bug):** After fixing the
+D_SOURCE bug, row 0 (PASS_THROUGH + T0) still produced BLACK.
+`pgraph_is_texture_stage_active()` (`pgraph.h:331`) returned false
+for mode 4 (PASS_THROUGH) due to `mode != 4` exclusion. psh.c:145
+then cleared the stage program bits → PASS_THROUGH demoted to NONE
+→ T0=0. Fixed by removing `mode != 4`: only PROGRAM_NONE (0) is
+inactive. Affects both GL and Metal (shared code path).
+
+**Final result:** all 16 cells byte-exact on Metal (harness:
+1 pass, 0 fail, 2026-05-22T04:29:05Z). `expected_fail_renderers: []`.
+Task #18 CLOSED. XBE first-wave count: **17 of 18 PASS on Metal
++ 1 expected_fail** (logic-ops SPEC). Codex validation: PASS (no findings).
+Cycle 7 preserved below.
+
+---
 
 ## 2026-05-22 (Hermes cycle 7) — §4.13 `texture-shader-stages` v0.2 DIFFUSE-source bisect (task #18 investigation bounded partial)
 

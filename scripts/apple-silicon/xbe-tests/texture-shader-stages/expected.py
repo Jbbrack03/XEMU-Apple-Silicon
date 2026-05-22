@@ -1,68 +1,59 @@
 """
 texture-shader-stages — math-derived expected oracle.
 
-640x480 RGBA front buffer. 4-col x 3-row grid of 160x160 cells.
+640x480 RGBA front buffer. 4-col x 4-row grid of 160x120 cells.
 
-v0.2 exercises 2 of 19 NV2A SHADER_STAGE_PROGRAM modes at stage 0,
-combined with a 3rd-row bisect that bypasses the t0 path entirely:
+v0.3 exercises 2 of 19 NV2A SHADER_STAGE_PROGRAM modes at stage 0, plus
+two bisect rows isolating the two surviving candidates from the v0.2
+DIFFUSE-source bisect:
 
-  Row 0 (y   0..159):  PASS_THROUGH (0x04), combiner A=T0
+  Row 0 (y   0..119):  PASS_THROUGH (0x04), combiner A=T0, textured shaders
                         cells: RED, GREEN, BLUE, WHITE
                         path:  t0 = pT0 -> R0 -> fragColor
-  Row 1 (y 160..319):  PROGRAM_NONE (0x00), combiner A=T0
+  Row 1 (y 120..239):  PROGRAM_NONE (0x00), combiner A=T0, textured shaders
                         cells: BLACK x 4
-                        path:  t0 = vec4(0,0,0,1) -> R0 -> BLACK
-  Row 2 (y 320..479):  PROGRAM_NONE (0x00), combiner A=V0 (DIFFUSE)
+                        path:  t0 = vec4(0,0,0,1) -> R0=0 -> BLACK
+  Row 2 (y 240..359):  PROGRAM_NONE (0x00), sentinel combiner, textured shaders
+                        cells: WHITE x 4
+                        path:  A=INVERT(ZERO)=1.0, B=INVERT(ZERO)=1.0 ->
+                               R0=1.0 -> WHITE, independent of T0/V0/tex
+  Row 3 (y 360..479):  PROGRAM_NONE (0x00), combiner A=V0/DIFFUSE, DEFAULT shaders
                         cells: RED, GREEN, BLUE, WHITE
-                        path:  bypass t0; v0 (DIFFUSE) -> R0 -> fragColor
+                        path:  default shaders; v0=DIFFUSE -> R0 -> fragColor
 
-Shared combiner topology: A -> R0 -> fragColor.rgb (FINAL D = R0); final-
-combiner G = DIFFUSE.a (always 1.0) -> fragColor.a = 255. All cells encode
-saturated 0/255 cube-corner channels; the float -> 8-bit framebuffer
-quantize step is byte-exact in cell interiors. The manifest applies a
-small `compare_overrides` budget (max_changed_pct=5.0 / signal>=95.0%)
-only to absorb sub-pixel rasterizer edges along the 4 inter-cell
-vertical seams + the 2 horizontal row-boundary lines + harness frame-
-selection slack; the per-channel threshold remains the harness default
-(16).
+Shared combiner topology (rows 0, 1, 3): A -> R0 -> fragColor.rgb
+  (FINAL D = R0); final-combiner G = DIFFUSE.a -> fragColor.a = 255.
+Row 2 sentinel: A=B=INVERT(ZERO) -> R0=1.0; same FINAL CW structure.
+All cells encode saturated 0/255 cube-corner channels (or constant WHITE);
+the float -> 8-bit framebuffer quantize step is byte-exact in cell interiors.
 
-Catches:
-  - SHADER_STAGE_PROGRAM 5-bit field dispatch broken: any wrong mode
-    deviates visibly from BOTH the PASS_THROUGH and NONE expectations.
-  - PASS_THROUGH collapsed to NONE: row 0 renders BLACK instead of
-    R/G/B/W.
-  - NONE collapsed to PASS_THROUGH: row 1 renders the TEXCOORD0 colors
-    instead of BLACK.
-  - TEXCOORD0 attribute interpolation broken at the vertex pipe: row
-    0 renders one uniform color across all 4 cells.
-  - Dummy texture sample leaking into fragColor: row 0 renders MAGENTA
-    (the dummy texture content) instead of the per-cell PASS_THROUGH
-    color.
-  - v0.2-specific: bisect renderer-side PASS_THROUGH bug from XBE-side
-    combiner/state-machine bug. Row 2 routes DIFFUSE (slot 3) through
-    the combiner stage A=V0, bypassing the t0/pT0 chain entirely. If
-    row 2 renders correctly while row 0 stays BLACK, the failure is
-    localized to the renderer's PASS_THROUGH dispatch or t0
-    interpolation; the XBE's combiner / state-machine plumbing is
-    proven sound.
+The manifest applies compare_overrides (max_changed_pct=5.0 /
+signal>=95.0%) only to absorb sub-pixel rasterizer edges along the
+3 inter-cell vertical boundaries + 3 horizontal row-boundary lines +
+harness frame-selection slack.
 
-Does NOT catch (deferred to v0.3+): the other 17 of 19 modes
-(PROJECT2D, PROJECT3D, CUBEMAP, CLIPPLANE, BUMPENVMAP*, BRDF, DOT_*,
-DPNDNT_*, DOTPRODUCT, DOT_RFLCT_SPEC_CONST). Multi-stage chaining
-(stage 1+ reading t0 from stage 0). The
-NV097_SET_SHADER_OTHER_STAGE_INPUT register semantics.
+Bisect interpretation:
+  row 2 (sentinel) PASS on Metal: combiner IS executed under textured-shader
+    setup; prior failures (v0.2) are about T0/V0 inputs returning 0.
+  row 2 (sentinel) FAIL on Metal: draws are silently discarded before the
+    combiner executes under textured-shader setup.
+  row 3 (control) PASS on Metal: V0/DIFFUSE path works with default shaders;
+    textured-shader state machine specifically breaks the V0/DIFFUSE dispatch.
+  row 3 (control) FAIL on Metal: V0/DIFFUSE path broken even with default
+    shaders; more fundamental issue independent of shader setup.
 """
 from __future__ import annotations
 
 
 WIDTH = 640
 HEIGHT = 480
-CELL_W = WIDTH // 4    # 160
-CELL_H = HEIGHT // 3   # 160
+CELL_W = WIDTH // 4     # 160
+CELL_H = HEIGHT // 4    # 120
 
-# Row 0: PASS_THROUGH, A=T0 -> per-cell TEXCOORD0 (R, G, B, 1).
-# Row 1: PROGRAM_NONE, A=T0 -> (0, 0, 0, 1) regardless of TEXCOORD0.
-# Row 2: PROGRAM_NONE, A=V0 -> per-cell DIFFUSE (R, G, B, 1).
+# Row 0: PASS_THROUGH, A=T0, textured -> per-cell TEXCOORD0 colors
+# Row 1: PROGRAM_NONE, A=T0, textured -> BLACK (t0 = 0)
+# Row 2: PROGRAM_NONE, sentinel (A=B=INVERT(ZERO)=1.0), textured -> WHITE
+# Row 3: PROGRAM_NONE, A=V0/DIFFUSE, default shaders -> per-cell DIFFUSE colors
 CELL_RGBA = (
     (0xFF, 0x00, 0x00, 0xFF),  #  0 RED      PASS_THROUGH, A=T0
     (0x00, 0xFF, 0x00, 0xFF),  #  1 GREEN    PASS_THROUGH, A=T0
@@ -72,10 +63,14 @@ CELL_RGBA = (
     (0x00, 0x00, 0x00, 0xFF),  #  5 BLACK    PROGRAM_NONE, A=T0
     (0x00, 0x00, 0x00, 0xFF),  #  6 BLACK    PROGRAM_NONE, A=T0
     (0x00, 0x00, 0x00, 0xFF),  #  7 BLACK    PROGRAM_NONE, A=T0
-    (0xFF, 0x00, 0x00, 0xFF),  #  8 RED      PROGRAM_NONE, A=V0 (DIFFUSE)
-    (0x00, 0xFF, 0x00, 0xFF),  #  9 GREEN    PROGRAM_NONE, A=V0 (DIFFUSE)
-    (0x00, 0x00, 0xFF, 0xFF),  # 10 BLUE     PROGRAM_NONE, A=V0 (DIFFUSE)
-    (0xFF, 0xFF, 0xFF, 0xFF),  # 11 WHITE    PROGRAM_NONE, A=V0 (DIFFUSE)
+    (0xFF, 0xFF, 0xFF, 0xFF),  #  8 WHITE    PROGRAM_NONE, sentinel A=INVERT(0)
+    (0xFF, 0xFF, 0xFF, 0xFF),  #  9 WHITE    PROGRAM_NONE, sentinel A=INVERT(0)
+    (0xFF, 0xFF, 0xFF, 0xFF),  # 10 WHITE    PROGRAM_NONE, sentinel A=INVERT(0)
+    (0xFF, 0xFF, 0xFF, 0xFF),  # 11 WHITE    PROGRAM_NONE, sentinel A=INVERT(0)
+    (0xFF, 0x00, 0x00, 0xFF),  # 12 RED      PROGRAM_NONE, A=V0 (default shaders)
+    (0x00, 0xFF, 0x00, 0xFF),  # 13 GREEN    PROGRAM_NONE, A=V0 (default shaders)
+    (0x00, 0x00, 0xFF, 0xFF),  # 14 BLUE     PROGRAM_NONE, A=V0 (default shaders)
+    (0xFF, 0xFF, 0xFF, 0xFF),  # 15 WHITE    PROGRAM_NONE, A=V0 (default shaders)
 )
 
 
