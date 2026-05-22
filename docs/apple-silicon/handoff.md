@@ -1,6 +1,10 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 9 — M15 default-on gate check after task #18 closure; overall verdict: **NOT MET**).
+Last updated: 2026-05-22 (cycle 10 — first second-wave Gate 2 slice
+**§E.13 texture-pitch-alignment v0.2 PASS on Metal byte-correct**;
+v0.1 → v0.2 addressed Codex MAJOR findings (height oracle gap +
+cell-4 mislabel); M15 overall still **NOT MET** pending §H.6, §G.5,
+RT-as-texture).
 **§4.13 now PASSES Metal (all 16 cells byte-exact; harness:
 1 pass, 0 fail, 2026-05-22T04:29:05Z). Two root causes found and
 fixed: (1) XBE combiner D_SOURCE=0x0C→0x04 bug (v0.2 ALL-BLACK
@@ -49,6 +53,76 @@ tracks task #18) + 1 expected_fail GL-only (swizzle-mipmap task
 #17). 0 unstarted of the §4 first-wave priority list. Cycle 7
 banner appended; cycle 6 preserved below for continuity.
 
+
+## 2026-05-22 (cycle 10) — §E.13 `texture-pitch-alignment` v0.2 PASS on Metal
+
+**Status: OPTION A — clean close.** First second-wave Gate 2 XBE shipped and
+PASSes the math-derived oracle on Metal byte-correctly.
+
+**Slice:** `xbe-tests/texture-pitch-alignment/` — Tier-1 NV2A diag
+XBE covering §E.13 (linear-texture row pitch + IMAGE_RECT
+width/height) in `nv2a-feature-surface-research.md`. 4x2 grid, 8
+cells, single LU_IMAGE_A8R8G8B8 format, sweeps
+`(IMAGE_RECT.width, IMAGE_RECT.height, TEXCTL1.IMAGE_PITCH)` across
+baseline / oversized / odd-dimension combinations. v0.2 sizes each
+cell's allocation as `pitch * (height + EXTRA_PAD_ROWS)`
+(EXTRA_PAD_ROWS = 8) so trailing physical rows beneath the active
+rectangle stay sentinel-grey — a renderer that silently rounds
+`IMAGE_RECT.height` up to a power of two reads sentinel rather
+than uninitialised memory. The full allocation is sentinel-filled
+with 0xFF808080 BEFORE the first `height` rows have their leading
+`width * bpp` bytes overwritten with the cell's target cube-corner
+color, so any pitch-ignored / image-rect-rounded sampling path
+visibly leaks sentinel through to the framebuffer.
+
+**Result on Metal (v0.2):** **PASS** byte-correct against the
+math-derived oracle. Harness verdict `1 pass, 0 fail` with:
+- `changed_pixels_pct = 0.9919` (≪ 3.0 gate)
+- `signal_match_pct = 100.0000` (≥ 97 gate)
+- captured frame: `texture-pitch-alignment.0124.png`
+
+Durable evidence:
+`benchmark-runs/20260522T055517Z-texture-pitch-alignment-metal-v0.2-PASS/`
+(report.md, summary.json, key-evidence/{reference.png,
+texture-pitch-alignment.0124.png, baseline-crop.png,
+candidate-crop.png, diff-amplified.png, per-cell-stats.md}).
+
+**Reuse of existing infrastructure:** copies the
+`texture-format-sweep` 4x2 grid + xbed_texture-lib bind path
+verbatim; the only divergences are the per-cell
+`(width, height, pitch_bytes)` parameterization and the
+sentinel-then-overwrite VRAM fill in `fill_pitch_texture()`. No
+xbed_lib changes; no renderer changes.
+
+**Codex review (rule #15):** v0.1 raised MAJOR ISSUES — (a) height
+oracle gap (allocation was exactly `pitch * height`, so a
+height-ignored regression would have hit uninitialised memory
+rather than sentinel); (b) cell 4 mislabeled as a baseline (its
+pitch=20 carries 4 bytes of padding per row — cell 0 is the only
+true `pitch == w * bpp` baseline). v0.2 addresses both: added
+EXTRA_PAD_ROWS sentinel rows + corrected the labeling across
+main.c / expected.py / manifest / README / docs.
+
+**M15 default-on Gate 2 status update:**
+- §E.13 per-format pitch + image-rect alignment — **MET** (this cycle).
+- §H.6 IMAGE_BLIT — still unstarted.
+- §G.5 Z compression boundary — still unstarted.
+- RT-as-texture sampling XBE (PGR2 late-stage-0 class) — still unstarted.
+
+XBE first-wave Metal count unchanged at **17 of 18 PASS on Metal + 1
+expected_fail SPEC** (`logic-ops`). Second-wave coverage now reads
+**1 of 4 MET**.
+
+**Highest-value next bounded slice:** §H.6 IMAGE_BLIT XBE (NV2A
+`NV_IMAGE_BLIT` 2D blit; Tier 2 — guest VRAM oracle per
+`diagnostic-xbe-plan.md` §5).
+
+**Codex validation:** v0.1 → MAJOR ISSUES, v0.2 addresses both
+findings; see decision-log cycle-10 entry.
+
+Cycle 9 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 9) — M15 default-on gate check after task #18 closure
 

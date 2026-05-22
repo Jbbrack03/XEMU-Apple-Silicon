@@ -1,5 +1,74 @@
 # Decision Log
 
+## 2026-05-22 (cycle 10): §E.13 `texture-pitch-alignment` v0.2 — first second-wave Gate 2 slice PASSes byte-correct on Metal (after Codex MAJOR addressed)
+
+**Decision.** Ship `xbe-tests/texture-pitch-alignment/` v0.2 as the
+first second-wave M15-Gate-2 slice. The XBE covers §E.13
+(linear-texture row pitch + IMAGE_RECT alignment) in
+`nv2a-feature-surface-research.md`. 4x2 grid, 8 cells, single
+LU_IMAGE_A8R8G8B8 format. Each cell sweeps a different
+`(IMAGE_RECT.width, IMAGE_RECT.height, TEXCTL1.IMAGE_PITCH)`
+combination: only cell 0 is the true `pitch == width * bpp`
+baseline; cell 4 is the smallest non-baseline pitch case
+(`pitch = w * bpp + 4`); cells 1 / 5 oversize pitch 4× / 8×; cells
+2 / 3 / 6 / 7 mix non-power-of-two width / height with non-aligned
+pitch.
+
+Per-cell VRAM allocation is sized as
+`pitch * (height + EXTRA_PAD_ROWS)` with EXTRA_PAD_ROWS = 8; the
+entire allocation is pre-filled with sentinel gray `0xFF808080`
+BEFORE the first `height` rows have their leading `width * bpp`
+bytes overwritten with the cell's target cube-corner color. The
+trailing 8 sentinel rows give a SAFE oracle for the
+`IMAGE_RECT.height` register: a renderer that silently rounds
+height up to next_pow2(height) reads sentinel rows rather than
+uninitialised memory, and the cell visibly degrades.
+
+**Verdict on Metal (v0.2):** **PASS** byte-correct vs the
+math-derived oracle. Harness `1 pass, 0 fail` with
+`changed_pixels_pct = 0.9919` (≪ 3.0 gate),
+`signal_match_pct = 100.0000` (≥ 97.0 gate). The PASS profile is
+structurally identical to `texture-format-sweep` (cube-corner
+palette + cell-edge gamma boundary). Captured frame
+`texture-pitch-alignment.0124.png`. Durable evidence directory
+`benchmark-runs/20260522T055517Z-texture-pitch-alignment-metal-v0.2-PASS/`.
+
+**Reuse-of-infrastructure rationale.** Per cycle-9 verdict and
+project rule #5 (build tools when limit, not weaker evidence), this
+XBE intentionally copies the `texture-format-sweep` grid +
+`xbed_texture` bind sequence verbatim. The only XBE-side divergences
+are the per-cell `(width, height, pitch_bytes)` parameterization and
+the sentinel-then-overwrite VRAM fill in `fill_pitch_texture()`. No
+xbed_lib changes; no renderer changes; no new harness changes.
+
+**Codex validation (rule #15).** v0.1 raised MAJOR ISSUES:
+- (a, high) IMAGE_RECT.height not safely exercised: allocation was
+  exactly `pitch * height`, so a height-ignored sampler would have
+  read uninitialised memory rather than a deliberate sentinel
+  signal.
+- (b, medium) Cell 4 mislabeled as a `pitch == w * bpp` baseline:
+  cell 4 width=4 pitch=20 carries 4 bytes of padding per row —
+  cell 0 is the only true baseline in v0.1.
+- (c, low) `claude-status.md` left in "IN PROGRESS" while
+  handoff/decision-log already reflected closure.
+
+v0.2 addresses (a) by adding `EXTRA_PAD_ROWS = 8` sentinel rows
+below each active rectangle (covers max next_pow2 gap across cells
++ comfortable envelope) and rewriting the header / README to
+describe the height oracle. (b) was fixed across main.c,
+expected.py, manifest.json, README.md, and this entry. (c) was
+fixed in `claude-status.md` (sync to Option A closure).
+
+**What this enables.** Gate 2 (second-wave retail-implicated
+feature coverage) now reads **1 of 4 MET**. Remaining set:
+§H.6 IMAGE_BLIT, §G.5 Z compression boundary, RT-as-texture
+sampling XBE (PGR2 late-stage-0 class). M15 default-on overall
+remains NOT MET pending those three slices plus Gate 3
+retail-title re-verification.
+
+**Next bounded slice.** §H.6 IMAGE_BLIT XBE (Tier 2 — guest VRAM
+oracle per `diagnostic-xbe-plan.md` §5).
+
 ## 2026-05-22 (cycle 9): M15 default-on gate check after task #18 closure — overall NOT MET; next slice §E.13 per-format pitch + image-rect alignment XBE
 
 **Decision.** Record the post-task-#18 M15 gate verdict from canonical docs and

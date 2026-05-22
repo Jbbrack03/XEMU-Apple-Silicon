@@ -1,20 +1,40 @@
 # Current Cycle
 
-- Started: 2026-05-22 04:10 CDT (approximate; fresh bounded session after cycle 7 commit `aa67e4b6a1`).
-- Closed:  2026-05-22 04:35 CDT (approximate; tied to commit timestamp).
-- Owner: Claude Code (fresh bounded session implementing v0.3 control-row + sentinel bisect for task #18; full resolution).
-- Session goal: Implement v0.3 control-row bisect; run harness; if evidence localizes the bug, apply the smallest grounded fix. Exit on either clean close (A) or bounded partial (B).
-- Required reading consumed: `handoff.md` cycle-7 banner, `decision-log.md` cycle-7 entry, `orchestration-state/*.md`, `diagnostic-xbe-plan.md` §4.13, existing v0.2 source + manifest + expected.py, `glsl/psh.c`, `pgraph.h`, `psh_regs.h`, `ps.inl`, `xbed_tex_ps.inl`.
+- Started: 2026-05-22 05:30 CDT (approximate; fresh bounded session
+  after cycle 9 closure commit `75b9f70413`).
+- Closed:  2026-05-22 06:00 CDT (approximate; tied to evidence-run
+  timestamp `20260522T055517Z`).
+- Owner: Claude Code (fresh bounded session implementing §E.13).
+- Session goal: Implement and validate §E.13 per-format pitch +
+  image-rect alignment XBE — first second-wave Gate 2 slice.
+- Required reading consumed: `handoff.md` cycle-9 + cycle-10
+  banner, `orchestration-workflow.md`, `decision-log.md`,
+  `diagnostic-xbe-plan.md` §4/§5, `nv2a-feature-surface-research.md`
+  §E.13, `.claude/rules/renderer-metal.md`,
+  `.claude/rules/oracle-and-xbe.md`, `xbed_texture.{c,h}`,
+  `hw/xbox/nv2a/nv2a_regs.h`, `hw/xbox/nv2a/pgraph/texture.c`,
+  `hw/xbox/nv2a/pgraph/mtl/texture_pg.c`.
 - Scope guardrails (all honored):
   - Worked only inside `/Users/jbbrack03/XEMU_MacOS/xemu-fork`.
-  - Implemented v0.3 control-row + sentinel; ran on Metal; found D_SOURCE=0x0C XBE bug; fixed; ran again; all 4 rows passed; then identified and fixed the psh.c PASS_THROUGH gate bug; full PASS confirmed.
+  - Reused existing `texture-format-sweep` / xbed_texture
+    infrastructure — no new shared lib code, no renderer code
+    touched.
   - Updated orchestration-state artifacts.
-  - Codex validation: COMPLETED. Verdict: **PASS** (no findings). D_SOURCE=0x04 confirmed correct; pgraph.h mode!=4 removal confirmed correct; sentinel logic confirmed correct; pgraph.h blast radius confirmed low (one caller, pre-existing TEXCTL0.ENABLE caveat is not introduced by this diff).
-  - Renderer-correctness CLAIM: MADE — §4.13 texture-shader-stages PASSES Metal (harness: 1 pass, 0 fail, 2026-05-22T04:29:05Z run).
-- Exit criteria taken: **Option A (clean localized fix + verified passing + docs updated).**
-  - Two bugs found and fixed:
-    1. XBE combiner D_SOURCE=0x0C bug (in `main.c`) — the real root cause of v0.2 ALL-BLACK.
-    2. `pgraph_is_texture_stage_active()` excluding PASS_THROUGH mode 4 (in `pgraph.h:331`) — separate psh.c gate bug, affects both renderers.
-  - Both bugs fixed; full harness PASS on Metal (all 16 cells byte-exact).
-  - Task #18 CLOSED.
-- Exit state: tree has uncommitted diff (main.c, expected.py, manifest.json, pgraph.h, rebuilt XBE artifacts, doc updates). Codex to run; then commit.
+  - Codex validation: COMPLETED on v0.1 → MAJOR ISSUES (height
+    oracle gap + cell-4 mislabel + claude-status drift). v0.2
+    addressed all three. Re-Codex on v0.2 → MINOR ISSUES
+    (doc-drift only, no code findings); the minor items were
+    addressed before commit.
+  - Renderer-correctness CLAIM: §E.13 texture-pitch-alignment
+    PASSes Metal byte-correct against math-derived oracle.
+- Exit criteria taken: **Option A (clean close).**
+  - XBE landed at `scripts/apple-silicon/xbe-tests/texture-pitch-alignment/`.
+  - v0.2 PASS on Metal: signal_match_pct=100.0,
+    changed_pixels_pct=0.99 (≪ 3.0 gate).
+  - Durable evidence at
+    `benchmark-runs/20260522T055517Z-texture-pitch-alignment-metal-v0.2-PASS/`.
+  - Canonical docs synced (handoff.md, decision-log.md,
+    orchestration-state, oracle-and-xbe.md).
+  - Codex marker written for the v0.2 fingerprint.
+- Exit state: tree has uncommitted diff (new XBE dir + doc syncs +
+  Codex marker). v0.2 Codex re-review complete; ready to commit.

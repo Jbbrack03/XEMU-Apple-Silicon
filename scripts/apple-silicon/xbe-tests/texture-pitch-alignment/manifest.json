@@ -1,0 +1,41 @@
+{
+  "id": "texture-pitch-alignment",
+  "title": "linear-texture pitch + IMAGE_RECT alignment oracle (v0.2 — 8 cells + safe height oracle)",
+  "purpose": "8-cell 4x2 grid sweeping (IMAGE_RECT.width, IMAGE_RECT.height, TEXCTL1.IMAGE_PITCH) across a single LU_IMAGE_A8R8G8B8 format. Each cell's VRAM allocation is sized as `pitch * (height + EXTRA_PAD_ROWS)`; the entire allocation is sentinel-filled with 0xFF808080 gray BEFORE the first `height` rows have their leading `width * bytes_per_pixel` bytes overwritten with the cell's target color. Cell 0 is the only true pitch == width*bpp baseline. Cell 4 is the smallest non-baseline pitch case (pitch = w*bpp + 4). Cells 1 / 5 oversize pitch by 4x / 8x. Cells 2 / 3 / 6 / 7 mix non-power-of-two width / height with non-baseline pitch. If pitch + IMAGE_RECT.width + IMAGE_RECT.height are all honored, NEAREST + CLAMP_TO_EDGE sampling on u,v in [0,1] lands every fragment inside the active rectangle so the cell renders as solid target color. If pitch is silently treated as width*bpp the row-1+ samples read padding (sentinel-gray) and the cell degrades. If IMAGE_RECT.width is silently rounded to a power of two, the wider-than-active sampling step also reads padding. If IMAGE_RECT.height is silently rounded up to next_pow2(h) (or otherwise ignored), the trailing EXTRA_PAD_ROWS sentinel rows are sampled instead of garbage — the wrong-height read is safe (always within the allocation). Catalog reference: §E.13 in nv2a-feature-surface-research.md (`NV097_SET_TEXTURE_IMAGE_RECT` width/height + `NV097_SET_TEXTURE_CONTROL1_IMAGE_PITCH`). M15 default-on second-wave gate per `metal-renderer-plan.md` + `renderer-metal.md` rule (binding 2026-05-20). Reuses xbed_texture infrastructure shipped 2026-05-20 (xbed_texture.{c,h} + xbed_load_textured_shaders). v0.2 (2026-05-22) addresses Codex finding to ensure IMAGE_RECT.height has a grounded oracle (was overclaimed in v0.1).",
+  "catalog_ref": "§E.13",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\texture-pitch-alignment-capture.bin",
+      "ftp_path": "/E/Apps/texture-pitch-alignment/texture-pitch-alignment-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\texture-pitch-alignment-done.txt",
+      "ftp_path": "/E/Apps/texture-pitch-alignment/texture-pitch-alignment-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}
