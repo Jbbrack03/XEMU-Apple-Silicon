@@ -1,5 +1,28 @@
 # Decision Log
 
+## 2026-05-22 (cycle 9): M15 default-on gate check after task #18 closure — overall NOT MET; next slice §E.13 per-format pitch + image-rect alignment XBE
+
+**Decision.** Record the post-task-#18 M15 gate verdict from canonical docs and
+repo evidence. **Gate 1 is MET**: the first-wave XBE library now stands at
+**17 PASS on Metal + 1 expected_fail SPEC** (`logic-ops`, neither renderer).
+**Gate 2 is NOT MET**: the required second-wave minimum set is still unstarted
+(§E.13 per-format pitch + image-rect alignment, §H.6 IMAGE_BLIT, §G.5 Z
+compression boundary, and an RT-as-texture sampling XBE covering the
+late-stage-0 PGR2 class). **Gate 3 is NOT MET** because retail-title canary
+re-verification is blocked on Gate 2. **Gate 4 is MET** (no long-open
+correctness bug remains active at the gate threshold). Therefore the overall
+**M15 default-on verdict is NOT MET**.
+
+**Next bounded slice.** Start **§E.13 per-format pitch + image-rect alignment
+XBE** first. It is Tier 1, has a math-derived oracle, reuses existing
+`texture-format-sweep` / `crtc-publish` infrastructure, and directly exercises
+the surface-shape/alignment class still implicated by PGR2. After §E.13, queue
+§H.6 IMAGE_BLIT next, then return to Gate 3 with paired retail-title
+re-validation.
+
+**Implementation note.** This cycle made no code changes; it is doc-sync only,
+so Codex validation is N/A.
+
 ## 2026-05-22 (cycle 8): §4.13 `texture-shader-stages` v0.3 — task #18 CLOSED; two root causes found and fixed
 
 **Decision.** Task #18 fully resolved. Ship v0.3 as a clean close

@@ -1,7 +1,6 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 8 — §4.13 `texture-shader-stages`
-v0.3 sentinel+control-row bisect; **TASK #18 CLOSED**).
+Last updated: 2026-05-22 (cycle 9 — M15 default-on gate check after task #18 closure; overall verdict: **NOT MET**).
 **§4.13 now PASSES Metal (all 16 cells byte-exact; harness:
 1 pass, 0 fail, 2026-05-22T04:29:05Z). Two root causes found and
 fixed: (1) XBE combiner D_SOURCE=0x0C→0x04 bug (v0.2 ALL-BLACK
@@ -49,6 +48,39 @@ rotation unchanged: **16 of 18 PASS on Metal + 2 expected_fail**
 tracks task #18) + 1 expected_fail GL-only (swizzle-mipmap task
 #17). 0 unstarted of the §4 first-wave priority list. Cycle 7
 banner appended; cycle 6 preserved below for continuity.
+
+
+## 2026-05-22 (cycle 9) — M15 default-on gate check after task #18 closure
+
+**Status: OPTION A — gate verdict captured; next slice identified.**
+
+Task #18 closure cleared the final first-wave Metal blocker, so this cycle
+re-ran the documented M15 default-on gate using canonical docs,
+`diagnostic-xbe-plan.md` §4/§5/§7, `renderer-metal.md`, and the 18 first-wave
+XBE manifests.
+
+**Verdict: M15 default-on is NOT MET.**
+
+- **Gate 1 — first-wave XBE saturation:** **MET.** The §4 library now stands at
+  **17 of 18 PASS on Metal + 1 expected_fail SPEC** (`logic-ops`, neither
+  renderer implements the NV2A logic-op feature).
+- **Gate 2 — second-wave coverage of retail-implicated feature surfaces:**
+  **NOT MET.** The minimum set remains unstarted: **§E.13 per-format pitch +
+  image-rect alignment, §H.6 IMAGE_BLIT, §G.5 Z compression boundary, and an
+  RT-as-texture sampling XBE for the late-stage-0 PGR2 class.**
+- **Gate 3 — retail-title canary re-verification after XBE-library green:**
+  **NOT MET, blocked on Gate 2.**
+- **Gate 4 — no correctness bug ≥30 days:** **MET.**
+
+**Highest-value next bounded slice:** **§E.13 per-format pitch + image-rect
+alignment XBE** (Tier 1, math-derived oracle). It reuses existing
+`texture-format-sweep` / `crtc-publish` infrastructure and directly targets the
+surface-shape/alignment class implicated by late PGR2 behavior. After §E.13, do
+§H.6 IMAGE_BLIT next, then re-open Gate 3 with paired retail-title validation.
+
+Cycle 8 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 8) — §4.13 `texture-shader-stages` v0.3 sentinel+control-row bisect (task #18 CLOSED)
 
