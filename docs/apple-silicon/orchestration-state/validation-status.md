@@ -18,7 +18,7 @@
   - `nxdk/lib/pbkit/pbkit.c:486-494` — `pb_wait_until_gr_not_busy` busy-poll body.
   - `nxdk/lib/pbkit/pbkit_dma.c:55-58` — `pb_agp_access` returns `fb | AGP_MEMORY_REMAP`.
   - `XEMU_PGRAPH_FAST_READ` default-on per `.claude/rules/flags-renderer.md` and `.claude/rules/renderer-state.md` (closed slice).
-- [x] Clean doc-only commit landed for the cycle-13 audit. Slice commit hash: `<closure-hash-tbd>` (recorded in the follow-up state-sync commit).
+- [x] Clean doc-only commit landed for the cycle-13 audit. Slice commit hash: `0bd85f70fe` (recorded in this follow-up state-sync commit; the closure commit cannot reference its own SHA).
 - [x] `current-cycle.md`, `claude-status.md`, `validation-status.md`, `handoff-summary.md` resynced to durable CLOSED records before close (Codex HIGH finding from cycle-12 respected — no ACTIVE/PENDING scaffolding in git history).
 - [x] Repo left clean at slice close (final `git status --short` expected empty after the state-sync follow-up commit).
 - [N/A] Codex validation: doc-only slice, no `xemu-fork/hw/` or `xemu-fork/scripts/apple-silicon/` source change → rule #15 trivial-doc exemption applies.

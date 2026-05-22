@@ -20,7 +20,7 @@
   - `nxdk/lib/pbkit/pbkit_dma.c:55-58` — `pb_agp_access` returns `fb | AGP_MEMORY_REMAP`.
   - `XEMU_PGRAPH_FAST_READ` default-on confirmed via `.claude/rules/{flags-renderer.md, renderer-state.md}` and `docs/apple-silicon/automation.md`.
 - Codex validation NOT required: doc-only slice (rule #15 trivial-doc exemption — zero source change).
-- Slice commit hash: `<closure-hash-tbd>` (recorded in the follow-up state-sync commit).
+- Slice commit hash: `0bd85f70fe` (recorded in this follow-up state-sync commit; the closure commit cannot reference its own SHA).
 
 ## Carry-forward technical conclusion
 
