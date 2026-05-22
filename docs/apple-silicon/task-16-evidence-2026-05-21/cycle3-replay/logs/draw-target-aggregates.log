@@ -1,0 +1,374 @@
+xemu-perf: metal_draw_target_first vram_addr=0x32a4000 slot=0
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0001.png w=640 h=480
+xemu-perf: metal_draw_target_first vram_addr=0x2854000 slot=1
+xemu-perf: metal_draw_target_first vram_addr=0x2894000 slot=2
+xemu-perf: metal_draw_target_first vram_addr=0x28d4000 slot=3
+xemu-perf: metal_draw_target_first vram_addr=0x2914000 slot=4
+xemu-perf: metal_draw_target_first vram_addr=0x2954000 slot=5
+xemu-perf: metal_draw_target_first vram_addr=0x2994000 slot=6
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0002.png w=640 h=480
+xemu-perf: metal_draw_target_first vram_addr=0x2e06000 slot=7
+xemu-perf: metal_draw_target_first vram_addr=0x3628000 slot=8
+xemu-perf: metal_draw_target_first vram_addr=0x2c06000 slot=9
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0003.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0004.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0005.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0006.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0007.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=38
+xemu-perf: metal_draw_target vram_addr=0x2854000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2894000 count=433
+xemu-perf: metal_draw_target vram_addr=0x28d4000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2914000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2954000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2994000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=8246
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=1402
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=8246
+xemu-perf: metal_draw_target_zero count=15162
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0008.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0009.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0010.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0011.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0012.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0013.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0014.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0015.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=33
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=5208
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=10746
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=9114
+xemu-perf: metal_draw_target_zero count=13167
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0016.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0017.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0018.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0019.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0020.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0021.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0022.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0023.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0024.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=31
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=6944
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=13764
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=6510
+xemu-perf: metal_draw_target_zero count=12369
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0025.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0026.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0027.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0028.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0029.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0030.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0031.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0032.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=32
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=6944
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=14208
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=6944
+xemu-perf: metal_draw_target_zero count=12768
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0033.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0034.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0035.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0036.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0037.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0038.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0039.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0040.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=31
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=6510
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=13770
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=6944
+xemu-perf: metal_draw_target_zero count=12369
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0041.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0042.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0043.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0044.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0045.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0046.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0047.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0048.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0049.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=33
+xemu-perf: metal_draw_target vram_addr=0x2e06000 count=6510
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=13446
+xemu-perf: metal_draw_target vram_addr=0x2c06000 count=6510
+xemu-perf: metal_draw_target_zero count=11970
+xemu-perf: metal_draw_target_first vram_addr=0x2454000 slot=10
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0050.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0051.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0052.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0053.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0054.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0055.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0056.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0057.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=62
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=116
+xemu-perf: metal_draw_target vram_addr=0x2454000 count=11
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0058.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0059.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0060.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0061.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0062.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0063.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0064.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0065.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0066.png w=640 h=480
+xemu-perf: metal_draw_target_first vram_addr=0x3bd4000 slot=11
+xemu-perf: metal_draw_target_first vram_addr=0x3d00000 slot=12
+xemu-perf: metal_draw_target_first vram_addr=0x3aa8000 slot=13
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0067.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0068.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0069.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0070.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0071.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0072.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0073.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0074.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0075.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0076.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0077.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0078.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0079.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0080.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0081.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0082.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0083.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0084.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0085.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0086.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0087.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0088.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0089.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0090.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0091.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0092.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0093.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0094.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0095.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0096.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0097.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0098.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0099.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0100.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0101.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0102.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0103.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0104.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0105.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0106.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0107.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0108.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0109.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0110.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0111.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0112.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0113.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0114.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0115.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0116.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0117.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0118.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0119.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0120.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0121.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0122.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0123.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=63
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=61
+xemu-perf: metal_draw_target vram_addr=0x3bd4000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3d00000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3aa8000 count=700
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0124.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0125.png w=640 h=480
+xemu-perf: metal_draw_target_first vram_addr=0x3ba1000 slot=14
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0126.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0127.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0128.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0129.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0130.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0131.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0132.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0133.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0134.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0135.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0136.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0137.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0138.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0139.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0140.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0141.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0142.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0143.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0144.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0145.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0146.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0147.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0148.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0149.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0150.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0151.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0152.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0153.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0154.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0155.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0156.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0157.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0158.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0159.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0160.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0161.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0162.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0163.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0164.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0165.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0166.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0167.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0168.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0169.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0170.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0171.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0172.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0173.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0174.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0175.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0176.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0177.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0178.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0179.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0180.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0181.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0182.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0183.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0184.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0185.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0186.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0187.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0188.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0189.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=35
+xemu-perf: metal_draw_target vram_addr=0x2854000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2894000 count=433
+xemu-perf: metal_draw_target vram_addr=0x28d4000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2914000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2954000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2994000 count=433
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=34
+xemu-perf: metal_draw_target vram_addr=0x3bd4000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3d00000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3aa8000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3ba1000 count=7
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0190.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0191.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0192.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0193.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0194.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0195.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0196.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0197.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0198.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0199.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0200.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0201.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0202.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0203.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0204.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0205.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0206.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0207.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0208.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0209.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0210.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0211.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0212.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0213.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0214.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0215.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0216.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0217.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0218.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0219.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0220.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0221.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0222.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0223.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0224.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0225.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0226.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0227.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0228.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0229.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0230.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0231.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0232.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0233.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0234.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0235.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0236.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0237.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0238.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0239.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0240.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0241.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0242.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0243.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0244.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0245.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0246.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0247.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0248.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0249.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0250.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0251.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0252.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0253.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0254.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0255.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=35
+xemu-perf: metal_draw_target vram_addr=0x2854000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2894000 count=433
+xemu-perf: metal_draw_target vram_addr=0x28d4000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2914000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2954000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2994000 count=433
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=34
+xemu-perf: metal_draw_target vram_addr=0x3bd4000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3d00000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3aa8000 count=700
+xemu-perf: metal_draw_target vram_addr=0x3ba1000 count=7
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0256.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0257.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0258.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0259.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0260.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0261.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0262.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0263.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0264.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0265.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0266.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0267.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0268.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0269.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0270.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0271.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0272.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0273.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0274.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0275.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0276.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0277.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0278.png w=640 h=480
+xemu-perf: metal_screenshot_written path=docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/front-buffer-dump/harness-out/swizzle-mipmap/metal/screenshots/swizzle-mipmap.0279.png w=640 h=480
+xemu-perf: metal_draw_target vram_addr=0x32a4000 count=35
+xemu-perf: metal_draw_target vram_addr=0x2854000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2894000 count=433
+xemu-perf: metal_draw_target vram_addr=0x28d4000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2914000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2954000 count=433
+xemu-perf: metal_draw_target vram_addr=0x2994000 count=433
+xemu-perf: metal_draw_target vram_addr=0x3628000 count=34
+xemu-perf: metal_draw_target vram_addr=0x3bd4000 count=287
+xemu-perf: metal_draw_target vram_addr=0x3d00000 count=280
+xemu-perf: metal_draw_target vram_addr=0x3aa8000 count=280
+xemu-perf: metal_draw_target vram_addr=0x3ba1000 count=7

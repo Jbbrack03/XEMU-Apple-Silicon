@@ -2921,7 +2921,7 @@ behavior. See
 
 ## Diagnostic Toggles
 
-`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits three
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` (2026-05-21, task #16) emits four
 diagnostic streams to stderr (logged into `xemu.log` when the benchmark
 harness is in use): (1) for every Metal vertex-attribute stream
 collected in `pgraph_mtl_collect_all_vertex_streams` for slot 9 (TEX0)
@@ -2942,8 +2942,20 @@ collect-stream pass just saw inside the same dispatch — confirmed
 during the 2026-05-21 evening cycle that both passes agree on
 `uniform_attrs=0xFDF6` for the XBE's full-bind state, so the bug lives
 downstream of `set_attr_masks` (see handoff "task #16 deeper diagnosis
-2026-05-21 evening"). Output is large (up to ~3000 lines) but
-env-gated. Do not ship enabled.
+2026-05-21 evening"). (4) 2026-05-21 evening (Hermes cycle 3, task #16):
+for every `mtl_dispatch_decoded_draw` call where slot 9 has stride==44,
+dumps `metal_dispatch_draw_target color_addr=0x.. depth_addr=0x..
+uniform_attrs=0x.. vcount=N icount=M prim=P color_fmt=0xF
+depth_fmt=0xF v0={0,1} v3={0,1} v9={0,1} native_tri={0,1}
+native_quad={0,1}`, capped at 32 lines (matched to stream 3's cap so
+the two interleave 1:1). Used to attribute each XBE stride==44 draw to
+its concrete color/depth VRAM target — answers the cycle-2 open
+question "which render target does the XBE actually draw to". Verified
+cycle 3: every XBE stride==44 dispatch renders to back-buffer-class
+targets (`0x03aa8000`/`0x03bd4000`/`0x03d00000` cycling) with depth
+target `0x0397c000`; NEVER `0x032a4000` (front buffer). Output is
+large (up to ~3000 lines including all four streams) but env-gated.
+Do not ship enabled.
 
 `XEMU_METAL_DUMP_TARGET_SHADER` dumps the generated GLSL VSH/PSH
 source for pipelines as `pipeline_key_build` runs (translated MSL is

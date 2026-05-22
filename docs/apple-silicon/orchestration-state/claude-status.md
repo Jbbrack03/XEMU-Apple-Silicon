@@ -1,24 +1,11 @@
 # Claude Status
 
-- Objective: Close or decisively narrow Task #16 (Metal swizzle-mipmap intra-mip UV collapse). Exit option B (durable diagnosis) chosen — bounded fix not safely landable in this slice.
-- Current hypothesis (REVISED from prior handoff): prior narrative "slot 9 wholesale dropped from vertex descriptor, read as inlineValue[8], uniform_attrs=0xFFE0" is contradicted by the new instrumentation. Actual observed state: pg->uniform_attrs=0xFDF6 (correct) for stride==44 draws via `metal_set_attr_masks` log; pipelines passing the `stride44` heuristic dump filter (attrs[3]+attrs[9] populated) have v0, v3, v9 all streaming. Bug lives downstream of pgraph_mtl_set_attr_masks / pipeline_key_build — either in (a) which render target the per-cell draw_arrays hit, (b) per-subrange position-stream binding, or (c) front-buffer publish path the screenshot reflects.
-- Files changed:
-  - `hw/xbox/nv2a/pgraph/mtl/vertex.c` — env-gated diag dump of recomputed uniform_attrs after set_attr_masks (stride==44 filter, 32-line cap)
-  - `hw/xbox/nv2a/pgraph/mtl/renderer.c` — `XEMU_METAL_DUMP_TARGET_SHADER=stride44` mode (heuristic noise filter; attrs[3]+attrs[9] populated; 1024-dump cap; per Codex feedback this is necessary but not sufficient to identify XBE-bind-state pipelines)
-  - `docs/apple-silicon/automation.md` — Diagnostic Toggles updated for the new diag stream + new dump mode (reworded per Codex: GLSL VSH/PSH source not "GLSL/MSL pair"; stride44 reworded as heuristic)
-  - `docs/apple-silicon/handoff.md` — task #16 evening banner with durable diagnosis (Codex MAJOR findings adopted: stride44 reworded as heuristic; durable artifacts staged into `docs/apple-silicon/task-16-evidence-2026-05-21/`)
-  - `docs/apple-silicon/decision-log.md` — supersedes-prior-narrative entry with adopted Codex findings
-  - `.claude/rules/flags-renderer.md` — XEMU_METAL_DIAG_ATTRIB_DUMP + XEMU_METAL_DUMP_TARGET_SHADER index entries refreshed (Codex: removed "GLSL/MSL pair" claim)
-  - `docs/apple-silicon/task-16-evidence-2026-05-21/` — durable artifact dir staged with logs/, glsl-dumps/, screenshots/, reference/
-- Commands/tests run:
-  - 5 swizzle-mipmap repros under `XEMU_METAL_DIAG_ATTRIB_DUMP=1` with various dump configurations
-  - 4 rebuilds (`./build.sh -a arm64 --skip-shader-validation`)
-  - 1 `/codex-validate changes` pass: returned MAJOR ISSUES (3 findings), all 3 adopted in-slice
-- Evidence produced (durable):
-  - `docs/apple-silicon/task-16-evidence-2026-05-21/logs/collect-stream-and-vsh-diag.log`
-  - `docs/apple-silicon/task-16-evidence-2026-05-21/logs/set-attr-masks-stride44.log`
-  - `docs/apple-silicon/task-16-evidence-2026-05-21/glsl-dumps/xemu-metal-target-0x{03aa8000,03bd4000,03d00000}.glsl` — three back-buffer-class pipelines with v0+v3+v9 all streaming
-  - `docs/apple-silicon/task-16-evidence-2026-05-21/screenshots/symptom-corner-gradient-f0138.png` + `reference/math-derived-expected.png`
-- Blockers / uncertainties: front-buffer pipeline dump (`0x032a4000` with v3 uniform, v9 streaming) was overwritten before staging — would need a replay capture when work resumes. The `stride44` filter is heuristic (necessary, not sufficient).
-- Next proposed action: commit the diag tools + doc updates as a single commit.
-- Confidence / risk notes: HIGH confidence the prior task-#16 narrative is wrong about mechanism. MEDIUM confidence the new diagnosis correctly fingers the next investigation track. LOW confidence on what the actual bounded fix will look like — deferred to a future slice.
+- Objective: Task #16 — attribute stride==44 swizzle-mipmap draws to concrete VRAM targets and resolve the front-buffer (`0x032a4000`) vs back-buffer-class (`0x03aa8000`/`0x03bd4000`/`0x03d00000`) ambiguity. **DONE; ready to commit.**
+- Current hypothesis (resolved): XBE draws to back-buffer-class color targets cycling `0x03{aa8|bd4|d00}000` with depth target `0x0397c000`, NEVER `0x032a4000`. The "front-buffer pipeline" cycle 2 captured was a non-XBE uniform-only draw; the visible "corner gradient" in cycle 2's `symptom-corner-gradient-f0138.png` was BIOS / dashboard / VGA-direct noise (M5.13 deferred bug), NOT the XBE. The XBE's actual output (4×2 grid, per-mip RED tint ramp, intra-mip Q0 collapse) IS captured by the best-frame screenshot selector when `fallback-dominant-draw` momentarily picks an XBE back buffer (3/427 publishes — sufficient for the harness).
+- Files changed: 1 source (`hw/xbox/nv2a/pgraph/mtl/renderer.c` — env-gated `metal_dispatch_draw_target` diag in `mtl_dispatch_decoded_draw`, +43 LOC, zero impact when env unset, 32-line cap matched to existing `metal_set_attr_masks` diag); docs (`handoff.md` task #16 cycle-3 banner, `decision-log.md` cycle-3 entry, `automation.md` diag-toggle entry, `.claude/rules/flags-renderer.md`); evidence (`docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/` — README + 4 GLSL dumps + 6 log files + 2 representative PNG screenshots).
+- Commands/tests run: `./build.sh -a arm64 --skip-shader-validation` (PASS, codesign + version OK); two xbe-harness runs of `swizzle-mipmap` on Metal (run A: stride44 GLSL filter + dispatch-draw-target log; run B: 0x032a4000-only filter + publish diag); `/codex-validate changes` PASS (MINOR ISSUES, single histogram-arithmetic finding adopted in-slice; marker written).
+- Evidence produced: see `docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/README.md`. Key new artifacts: `logs/dispatch-draw-target-stride44.log` (32× per-dispatch attribution), `glsl-dumps/xemu-metal-target-0x032a4000.glsl` (replayed front-buffer dump — uniform_attrs=0xFFFF, ALL slots inlineValue[]), `screenshots/cycle3-best-frame-0124-xbe-per-mip-tint-ramp.png` (actual XBE symptom).
+- Blockers / uncertainties: None for this slice. Open Task #16 work moves to the texture sampler / fragment-shader UV-to-texel path per the README's "Next exact experiments" list.
+- Next proposed action: Commit the slice (source + docs + evidence directory) and exit; do not push.
+- Confidence / risk notes: High confidence in the render-target attribution (32 dispatches all show the same pattern; CPU stream + vertex descriptor + render target + pipeline-key + unswizzle decode all proven correct upstream of the bug). Higher confidence than cycle 2 that the bug lives in the sampler/PS path, not anywhere in vertex / pipeline-key / target-selection paths.
+- Codex review state: PASS with MINOR ISSUES; finding adopted (publish histogram corrected in 3 docs to match staged log exactly: 426 fallback-dominant-draw + 1 fallback-current-binding, and the 0x2454000/0x2994000 outliers now explicitly called out). Safe to commit.

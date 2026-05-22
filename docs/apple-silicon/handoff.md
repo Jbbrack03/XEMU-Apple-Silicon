@@ -1,8 +1,205 @@
 # Handoff
 
-Last updated: 2026-05-21 (evening, Hermes-supervised cycle 2 — task
-#16 deeper diagnosis slice). **No new XBE PASS this cycle.** Task #16
-banner appended; mid-day banner preserved below for continuity.
+Last updated: 2026-05-21 (evening, Hermes-supervised cycle 3 — task
+#16 render-target attribution slice). **No new XBE PASS this cycle.**
+Task #16 still expected_fail; investigation now narrowed to the
+texture sampler / fragment-shader UV-to-texel path. Cycle 3 banner
+appended; cycle 2 + mid-day banners preserved below for continuity.
+
+## 2026-05-21 (evening, Hermes cycle 3) — Task #16 render-target attribution (durable, no fix landed)
+
+**Status: still expected_fail on Metal.** This cycle resolves the
+top open ambiguity from cycle 2 ("which VRAM target do the XBE's
+stride==44 draws actually render to?") and replays the
+`0x032a4000` front-buffer GLSL dump cycle 2 lost. Both questions are
+now answered decisively; the open Task #16 surface area moves
+DOWNSTREAM of the vertex / pipeline-key / render-target paths
+(those are now all proven correct).
+
+**Tooling delta this cycle (env-gated, zero impact when env unset).**
+`hw/xbox/nv2a/pgraph/mtl/renderer.c::mtl_dispatch_decoded_draw`
+gains one new diag line per dispatch when
+`XEMU_METAL_DIAG_ATTRIB_DUMP=1` AND `pg->vertex_attributes[9].stride
+== 44` (same gate the cycle-2 `metal_set_attr_masks` diag uses; cap
+32 lines so the two diag streams interleave 1:1 across the same
+budget). Line shape:
+
+```
+xemu-perf: metal_dispatch_draw_target color_addr=0x.. depth_addr=0x.. \
+  uniform_attrs=0xfdf6 vcount=N icount=M prim=P color_fmt=0xF depth_fmt=0xF \
+  v0=1 v3=1 v9=1 native_tri=1 native_quad=0
+```
+
+Documented in `automation.md` "Diagnostic Toggles" and
+`.claude/rules/flags-renderer.md`.
+
+**Decisive findings this cycle (durable evidence under
+`docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/`; the
+parent cycle-2 directory still holds cycle 2's evidence).**
+
+1. **The XBE's stride==44 `xbed_draw_arrays(TRIANGLES, cell*24, 24)`
+   draws all render to back-buffer-class color targets `0x03aa8000`,
+   `0x03bd4000`, `0x03d00000` cycling round-robin per frame** (one
+   back buffer per frame, 7 cells per back buffer). Depth target is
+   uniformly `0x0397c000`. Color format `0x50`, depth format `0x104`.
+   prim=5 (TRIANGLES), vcount=24, native_tri=1. Evidence: 32
+   consecutive `metal_dispatch_draw_target color_addr=0x03{aa8|bd4|
+   d00}000 ... uniform_attrs=0xfdf6 v0=1 v3=1 v9=1` lines in
+   `cycle3-replay/logs/dispatch-draw-target-stride44.log`, each
+   interleaved 1:1 with the cycle-2 `metal_set_attr_masks
+   uniform_attrs=0xfdf6 [9]c=4,s=44` line in `set-attr-masks-
+   stride44.log`. Same dispatch, two diag streams, identical cap.
+
+2. **The XBE NEVER renders to `0x032a4000`.** Zero of the 32
+   stride==44 dispatches hit it. Per-interval
+   `metal_draw_target vram_addr=0x32a4000` shows ~30-35 flush_draws/
+   sec — flat dashboard-class cadence, not the XBE's 7-cells-per-frame
+   burst rhythm. The XBE's 3 back buffers each receive 700 flush_draws/
+   interval once the XBE is running. Evidence:
+   `cycle3-replay/logs/draw-target-aggregates.log`.
+
+3. **The replayed `0x032a4000` GLSL dump is a uniform-only draw.**
+   Captured this cycle via `XEMU_METAL_DUMP_TARGET_SHADER=0x032a4000`.
+   Every slot 0..15 reads from `inlineValue[N]`; NO `layout(location
+   = N) in vec4 vN` for any slot. I.e. `uniform_attrs == 0xFFFF`,
+   regs `0x...3f430700` (vs the back-buffer pipelines' `0x...3e830700`
+   from cycle 2). This is a non-XBE blit/publish pipeline. The cycle-2
+   narrative's `0x032a4000` pipeline with `v3 = inlineValue[2]` while
+   `v9` streaming (uniform_attrs=0xFDFE) was a different non-XBE draw
+   captured at a different moment (the `0xADDR`-mode "latest wins"
+   filter overwrites per-target). Either way, the XBE does not own
+   `0x032a4000`. Evidence:
+   `cycle3-replay/glsl-dumps/xemu-metal-target-0x032a4000.glsl`.
+
+4. **Front-buffer publish path under
+   `XEMU_METAL_FRONT_FB_FALLBACK=1`** (the xbe-harness canonical
+   Metal recipe via `METAL_CANONICAL_RECIPE` in `xbe_orchestrator.py:
+   55`) **overwhelmingly selects dashboard surfaces, NOT the XBE's
+   back buffer**. 427 publishes observed (`XEMU_METAL_DIAG_PUBLISH=1`):
+   376 → `0x3628000`, 26 → `0x2c06000`, 18 → `0x2e06000`, 3 →
+   `0x03aa8000` (an XBE back buffer), 3 → `0x2994000`, 1 →
+   `0x2454000`. Reason breakdown: 426 `fallback-dominant-draw` + 1
+   `fallback-current-binding` (the first publish in the run, to
+   `0x3628000`). The dashboard wins on dominance because it
+   accumulates ~10000 draws/interval to a single buffer while the
+   XBE splits its ~2100 draws/interval across 3 buffers; the
+   `0x2454000` / `0x2994000` outliers (4/427 ≈ 0.9%) are transient
+   non-XBE pipelines. Evidence: `cycle3-replay/logs/front-fb-
+   publish.log`.
+
+5. **The captured "best frame" screenshot IS the XBE's actual
+   output.** Frame 0124 (in cycle 3B run) shows a 4-column × 2-row
+   grid with per-mip RED tint ramp (cell 0 → cell 6 dark; cell 7
+   black) and each cell rendered as a SINGLE color (intra-mip Q0
+   collapse). This is exactly the manifest's documented
+   `expected_fail_notes` symptom. The cycle-2 banner's "smooth
+   corner-tinted gradient covering the full surface" description for
+   `symptom-corner-gradient-f0138.png` **does not match the XBE's
+   render** — it captured a different surface, likely the BIOS
+   animation routed through the M5.13 VGA-direct deferred path
+   (cycle 3's frame 0138 captures green-on-black dashboard noise —
+   same M5.13 noise class). Evidence:
+   `cycle3-replay/screenshots/cycle3-best-frame-0124-xbe-per-mip-tint-
+   ramp.png` versus `cycle3-frame-0138-dashboard-noise.png`.
+
+6. **CPU-side unswizzled texture buffer is correct for every mip.**
+   `metal_unswizzle_dump w=64 Q0=(B00 G00 Rff Aff) Q1=(B00 Gff R00
+   Aff) Q2=(Bff G00 R00 Aff) Q3=(B00 Gff Rff Aff)` and the same
+   per-quadrant 4-color pattern with per-mip-tinted intensity down to
+   `w=2 h=2`. Combined with cycle 2's per-vertex slot-9 stream
+   correctness, this localizes the bug to the **Metal texture sampler /
+   fragment-shader UV-to-texel path**, NOT the vertex pipeline,
+   pipeline-key, render-target selection, or unswizzle decode.
+   Evidence: `cycle3-replay/logs/unswizzle-dump-quadrants.log`.
+
+**Cycle 2 narrative resolution.** Cycle 2 left two competing
+hypotheses open: (a) XBE renders to back buffer; the screenshot
+samples a stale/wrong front-buffer pipeline; (b) XBE renders to front
+buffer through a path the diagnostics didn't catch. This cycle
+**confirms (a) and rules out (b)**. The screenshot is sampling the
+publish path's surface — usually dashboard, occasionally the XBE's
+back buffer — and the XBE's true Task #16 symptom (intra-mip Q0
+collapse + per-mip ramp working) is visible whenever the
+`fallback-dominant-draw` path happens to publish a back-buffer
+surface. The harness's best-frame selector lands those frames.
+
+**Code locations validated correct (cycle 2 + cycle 3 combined; do
+NOT re-investigate these unless code changes):**
+
+- `hw/xbox/nv2a/pgraph/mtl/vertex.c::pgraph_mtl_collect_all_vertex_streams`
+  — slot 9 stride=44 stream collected correctly per cell.
+- `hw/xbox/nv2a/pgraph/mtl/vertex.c::pgraph_mtl_set_attr_masks` —
+  recomputes `uniform_attrs=0xFDF6` correctly.
+- `hw/xbox/nv2a/pgraph/mtl/state.c::pgraph_mtl_build_pipeline_key` —
+  uses the correct uniform_attrs in the cache key.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c::pgraph_mtl_flush_draw_inner`
+  draw_arrays branch — dispatches to the correct color/depth VRAM
+  target per subrange.
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c::mtl_dispatch_decoded_draw` —
+  receives correct `draw_target_vram_addr` and passes it into
+  `mtl_dump_target_shader_once` correctly.
+- GLSL `vertex_main0_in` for back-buffer-class targets — emits
+  `layout(location = 0) in vec4 v0;`, `layout(location = 3) in vec4
+  v3;`, `layout(location = 9) in vec4 v9;` correctly (per cycle 2's
+  staged dumps; cycle 3 replay produces identical files).
+- CPU-side unswizzle of SZ_A8R8G8B8 mip chain — produces 4-quadrant
+  distinct colors per mip (cycle 2 + cycle 3 unswizzle log).
+
+**Implicated areas for the NEXT slice (downstream of everything
+above):**
+
+- `hw/xbox/nv2a/pgraph/mtl/texture_pg.c` and `mtl/texture.mm` —
+  sampler descriptor build, mip-chain texture upload, sampler
+  state binding. The cycle-2-morning LOD-clamp fix
+  (`build_sampler_desc_from_pg` honoring MIN_LOD_CLAMP /
+  MAX_LOD_CLAMP / MIPMAP_LOD_BIAS) closed the per-cell mip discrimination
+  half of the bug; the intra-mip Q0 collapse is the remaining half.
+- Fragment-shader UV path: GLSL emits `pT0.xyz = (pT0.xyz *
+  t0LogicalSize + vec3(4,4,4)) * vec3(0.007812, ...)` then
+  `textureProj(texSamp0, pT0.xyw)`. Verify per-vertex `pT0.xy`
+  is preserved through rasterization.
+
+**Net next-highest-value action when work resumes (suggested
+ordering; not binding):**
+
+1. Add a per-cell sampler-state attribution diag in
+   `pgraph_mtl_texture_bind_from_pg` (or
+   `build_sampler_desc_from_pg`) gated on the same stride==44
+   heuristic, logging resolved `min_lod_clamp` / `max_lod_clamp` /
+   `mip_filter` / `mag_filter` / `mip_levels` /
+   `texture_base_vram_addr` per draw. Cross-reference with the
+   cycle-3 dispatch-draw-target log.
+2. Use `XEMU_METAL_DUMP_DRAW_RT` to dump the post-draw color RT
+   per-cell. If the RT contains the 4-quadrant pattern but the
+   published front-fb does not, the bug is in publish/compose. If
+   the RT itself is uniform per cell, the bug is in the sampler.
+3. Consider an XBE-specific `metal_canonical_overrides` setting
+   `XEMU_METAL_FRONT_FB_FALLBACK=0` so the swizzle-mipmap publish
+   goes through CRTC resolution instead of the dominant-draw
+   fallback, removing a 99.3%-of-publishes confound from the
+   capture path.
+
+**Doc / instrumentation deltas landed this slice:**
+
+- `hw/xbox/nv2a/pgraph/mtl/renderer.c::mtl_dispatch_decoded_draw`:
+  added env-gated `metal_dispatch_draw_target` diag line (32-line
+  cap, gated on `XEMU_METAL_DIAG_ATTRIB_DUMP` + slot-9 stride==44;
+  same gate as cycle-2 `metal_set_attr_masks` so the two streams
+  interleave 1:1).
+- `automation.md` "Diagnostic Toggles": updated `XEMU_METAL_DIAG_
+  ATTRIB_DUMP` entry to describe the fourth stream.
+- `.claude/rules/flags-renderer.md`: updated `XEMU_METAL_DIAG_
+  ATTRIB_DUMP` summary to mention the dispatch-draw-target line.
+- `docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/`:
+  new evidence directory with replay README, 4 GLSL dumps (3
+  back-buffer + 1 front-buffer), 6 log files (per-dispatch
+  attribution, set_attr_masks, attrib_stream, publish stream,
+  draw-target aggregates, unswizzle quadrants), and 2 representative
+  screenshot frames (XBE actual output + dashboard noise contrast).
+
+**Previous cycle 2 evening banner preserved below for continuity.**
+
+---
 
 ## 2026-05-21 (evening, Hermes cycle 2) — Task #16 deeper diagnosis (durable, no fix landed)
 

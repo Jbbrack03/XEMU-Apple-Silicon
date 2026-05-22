@@ -1,12 +1,10 @@
 # Current Cycle
 
-- Started: 2026-05-21 20:29 local
-- Owner: Claude Code (fresh Hermes-supervised session)
-- Session goal: Task #16 Metal swizzle-mipmap diagnosis/fix slice
-- Scope: Investigate the selective omission of TEX0 slot-9 streaming attributes in the Metal pipeline-key / vertex-descriptor path causing `swizzle-mipmap` intra-mip UV collapse to Q0.
-- Canonical docs to read first: `docs/apple-silicon/handoff.md`, `docs/apple-silicon/orchestration-workflow.md`, relevant `docs/apple-silicon/diagnostic-xbe-plan.md` task-#16 sections, and `docs/apple-silicon/automation.md` references for `XEMU_METAL_DIAG_ATTRIB_DUMP`.
-- Exit criteria:
-  1. Either land a bounded fix for Task #16 with targeted validation evidence, Codex validation, doc sync, and clean commit;
-  2. Or, if a safe fix does not fit this slice, leave the tree clean and produce a compact durable diagnosis with exact next-step recommendation and evidence references.
-- Required validation if code changes: targeted swizzle-mipmap rerun on Metal, confirm diagnostic/evidence matches the claim, run Codex validation, sync `handoff.md` + `decision-log.md` + any plan/docs touched.
-- Out of scope: unrelated renderer cleanup, pushing to origin, broad retail-title reruns, Task #17 GL fix, §4.13 full texture-shader-stages implementation, §4.15 v0.2 harness expansion unless directly needed for Task #16 proof.
+- Started: 2026-05-21 21:36 local; closed 2026-05-21 22:01 local.
+- Owner: Claude Code (Hermes-supervised cycle 3 of task #16).
+- Session goal: Task #16 — attribute the swizzle-mipmap XBE's stride==44 Metal draws to concrete VRAM targets; replay the missing front-buffer `0x032a4000` shader dump; determine whether the corner-gradient symptom comes from a stale/wrong front-buffer publish path versus the XBE's own back-buffer pipeline.
+- Outcome: Exit option A — bounded diagnostic slice landed. The XBE renders to back-buffer-class color targets `0x03aa8000`/`0x03bd4000`/`0x03d00000` (depth `0x0397c000`), NEVER to `0x032a4000`. The replayed `0x032a4000` GLSL dump is uniform-only (uniform_attrs=0xFFFF). The visible symptom captured by the screenshot best-frame selector is the XBE's actual output (per-mip RED tint ramp + intra-mip Q0 collapse) when `fallback-dominant-draw` momentarily picks an XBE back buffer; the cycle-2 "corner gradient" frame captured a different surface (likely BIOS / VGA-direct). Investigation now narrowed to the texture sampler / fragment-shader UV-to-texel path; all upstream paths (vertex stream, vertex descriptor, pipeline-key, render target, unswizzle decode) are proven correct.
+- Tree state at close: 1 source file modified (`hw/xbox/nv2a/pgraph/mtl/renderer.c`, +43 LOC env-gated diag, zero behavior change with env unset). 5 doc files updated (`handoff.md`, `decision-log.md`, `automation.md`, `../.claude/rules/flags-renderer.md`, orchestration-state). New evidence dir `docs/apple-silicon/task-16-evidence-2026-05-21/cycle3-replay/` with README + 4 GLSL dumps + 6 log files + 2 screenshots. Codex validation PASS with MINOR ISSUES (single publish-histogram arithmetic finding adopted in-slice).
+- Validation performed: `./build.sh -a arm64 --skip-shader-validation` PASS; two `xbe_orchestrator.py run --xbe swizzle-mipmap --renderer metal` runs (stride44 GLSL filter + 0x032a4000-only filter); `/codex-validate changes` PASS (MINOR ISSUES, adopted); marker `~/.claude/state/codex-validate-last-run` written.
+- Out of scope (unchanged from cycle start): Task #17 GL fix, §4.13 texture-shader-stages implementation, broad harness sweeps, pushing to origin, unrelated renderer cleanup.
+- Next cycle's bounded assignment (suggested): instrument `pgraph_mtl_texture_bind_from_pg` or `build_sampler_desc_from_pg` with a per-cell sampler-state attribution diag gated on the same stride==44 heuristic; pair with `XEMU_METAL_DUMP_DRAW_RT` to isolate whether the intra-mip Q0 collapse lives in the sampler or in the publish/compose path.

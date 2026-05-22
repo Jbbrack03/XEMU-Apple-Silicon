@@ -1491,6 +1491,49 @@ static void mtl_dispatch_decoded_draw(NV2AState *d,
     pgraph_mtl_set_attr_masks(pg, &saved_uniform, &saved_compressed,
                               &saved_swizzle);
 
+    /* 2026-05-21 evening followup (task #16): per-dispatch draw-target
+     * attribution for stride==44 draws. Companion to the
+     * `metal_set_attr_masks` line that pgraph_mtl_set_attr_masks just
+     * emitted under the same gate (XEMU_METAL_DIAG_ATTRIB_DUMP set and
+     * pg->vertex_attributes[9].stride == 44). The set_attr_masks line
+     * proves which uniform_attrs mask the XBE's draws observe; this
+     * line ties that same mask to the actual color/depth VRAM target
+     * the pixel write hits, plus vcount/icount/prim so individual
+     * draw_arrays sub-ranges can be correlated to the screenshot.
+     *
+     * Gated, capped at 32 lines (matches the set_attr_masks cap so the
+     * two diag streams interleave one-to-one for stride==44 draws and
+     * the budget is exhausted at the same point in the run). Zero
+     * impact when the env is unset. */
+    {
+        const char *diag_env = getenv("XEMU_METAL_DIAG_ATTRIB_DUMP");
+        if (diag_env != NULL && diag_env[0] != '\0' && diag_env[0] != '0' &&
+            pg->vertex_attributes[9].stride == 44) {
+            static _Atomic unsigned int s_dispatch_target_lines = 0;
+            unsigned int idx =
+                atomic_fetch_add(&s_dispatch_target_lines, 1);
+            if (idx < 32) {
+                uint32_t depth_vram_addr =
+                    pgraph_mtl_surface_get_depth_vram_addr();
+                fprintf(stderr,
+                        "xemu-perf: metal_dispatch_draw_target "
+                        "color_addr=0x%08x depth_addr=0x%08x "
+                        "uniform_attrs=0x%04x vcount=%u icount=%u "
+                        "prim=%u color_fmt=0x%x depth_fmt=0x%x "
+                        "v0=%d v3=%d v9=%d native_tri=%d native_quad=%d\n",
+                        draw_target_vram_addr, depth_vram_addr,
+                        (unsigned)pg->uniform_attrs,
+                        vcount, icount,
+                        (unsigned)pg->primitive_mode,
+                        color_fmt, depth_fmt,
+                        streams[NV2A_VERTEX_ATTR_POSITION].data != NULL,
+                        streams[NV2A_VERTEX_ATTR_DIFFUSE].data != NULL,
+                        streams[9].data != NULL,
+                        (int)native_tri, (int)native_quad);
+            }
+        }
+    }
+
     /* Translated-pipeline lookup (shared with the original
      * inline_buffer flow). */
     void *translated_pipeline = NULL;
