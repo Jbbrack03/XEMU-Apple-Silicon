@@ -1,33 +1,109 @@
 # Handoff
 
-Last updated: 2026-05-22 (cycle 20 Path A — **image-blit
-instrumented with 13 staged progress markers writing
-`D:\image-blit-marker-NN-STAGE.txt` files. Local xemu validation
-shows all 13 markers fire via the existing `xemu-guest-log:` host
-channel but every `fopen("D:\\…","wb")` returns NULL on the
-ISO-mount path (CD-ROM, read-only) — the host-side screenshot path
-masks this for the existing xemu pipeline. Real-Xbox runs (twice,
-once with `default_state_set` / `before_capture_loop` labels at /
-over the FATX 42-char basename limit, once with Codex-shortened
-`state_set` / `pre_capture` labels) produced ZERO marker files in
-FTP-collect; only the uploaded `default.xbe` echo. Chainload→FTP-
-back gap stable at 22.4 s across all three cycle-19+cycle-20
-attempts. Conclusion: under the `runxbe` SITE-EXEC chainload
-path on this console, the chainloaded XBE cannot write any `D:\`
-file the FTP-collect step retrieves — independent of basename
-length and independent of how far into the XBE the writes are
-attempted. Cycle-19 hypothesis #1 (D:\ remap mismatch under
-`runxbe` chainload) is materially elevated; the other three
-hypotheses cannot be discriminated from this evidence alone
-because they share the same observation. Path A's specific
-question — "which stage fails on real Xbox" — is NOT directly
-answered; what IS answered is that the D:\ witness mechanism
-itself is the blocker, not stage-specific failures the markers
-were designed to bracket.** `XEMU_DIAG_PGRAPH_STATUS_DRAIN`
-default-on / long-term-fix decision remains DEFERRED. Cycle-17's
-xemu-side `8/8 mask=0xff` finding is NOT invalidated; the flag
-continues to ship opt-in, default OFF. M15 overall still
-**NOT MET** pending §H.6 default-on shape, §G.5, RT-as-texture.
+Last updated: 2026-05-22 (cycle 21 Path A.2 — **image-blit
+progress markers re-routed from `D:\image-blit-marker-NN-STAGE.txt`
+(proven blocked across three cycle-19+cycle-20 real-Xbox runs) to
+`E:\Apps\image-blit\image-blit-marker-NN-STAGE.txt` (the
+xbe-harness's existing `--ftp-collect /E/Apps/image-blit` target).
+The helper gained an idempotent `nxIsDriveMounted('E')` +
+`nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")` shim plus
+`CreateDirectoryA` on `E:\Apps\` and `E:\Apps\image-blit\` — the
+same well-trodden pattern shipped in `oracle-agent/controller.c`,
+`oracle-agent/tier2.c`, `lib/xbed_input_synth.c`, and
+`controller-readback/main.c`. Local xemu-Metal validation
+(`XEMU_GUEST_LOG=1`, 4 boots) shipped 52 marker lines (13 ×4) all
+reporting `e_mount=1` AND zero `fopen-failed` lines — vs cycle 20's
+52 markers with 52 fopen-failed; the v0.4 tally drift (3/8 mask=0x31
+on boots 1-2, 2/8 mask=0x30 on boots 3-4) is byte-identical to
+cycle 20, so no regression was introduced. The real-Xbox witness
+run produced a clear NEGATIVE answer: chainload→FTP-back gap 22.4 s
+(the FOURTH independent reproduction of that exact gap across
+cycle-19+cycle-20+cycle-21), `verdict.json status: ok`,
+`/E/Apps/image-blit/` retrieved EXACTLY ONE file (`default.xbe`,
+the upload echo), ZERO `image-blit-marker-*` files present. The
+cycle-21 hypothesis "D:\ was the sole witness-path blocker" is
+INVALIDATED — re-routing to a known-writeable, known-FTP-collectable
+partition does NOT make markers observable. The failure is upstream
+of any in-XBE fopen.** `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on /
+long-term-fix decision remains DEFERRED. Cycle-17's xemu-side
+`8/8 mask=0xff` finding is NOT invalidated; the flag continues to
+ship opt-in, default OFF. M15 overall still **NOT MET** pending
+§H.6 default-on shape, §G.5, RT-as-texture.
+
+## 2026-05-22 (cycle 21 Path A.2) — image-blit markers re-routed to `E:\Apps\image-blit\`; real-Xbox witness still BLOCKED (4th reproduction of the 22.4 s zero-output pattern); D:\-only hypothesis INVALIDATED
+
+**Status: SHIPPED (XBE-only marker-path slice; xemu host source untouched). Bounded slice CLOSED — local validation green, real-Xbox returned a clear NEGATIVE answer, cycle-19 hypothesis #1 demoted from leading to insufficient.**
+
+**Slice.** Cycle 20 closed with "Path A.2 (route markers to a known-writeable partition)" listed as the cheapest single follow-up per rule #1. Cycle 21 executed exactly that bounded slice: re-route the existing 13 staged markers in `scripts/apple-silicon/xbe-tests/image-blit/main.c` from `D:\image-blit-marker-NN-STAGE.txt` to `E:\Apps\image-blit\image-blit-marker-NN-STAGE.txt` — the partition+directory that the xbe-harness already (a) FTP-uploads `default.xbe` to BEFORE chainload and (b) `--ftp-collect`s recursively AFTER chainload (`scripts/apple-silicon/xbe-harness/xbe_renderers.py::run_real_xbox` lines 450-485). The cycle-21 question is binary: if E:\ markers land, cycle-19 hypothesis #1 (D:\ remap mismatch under `runxbe` SITE-EXEC chainload) is corroborated AND the highest-numbered file tells us the actual real-Xbox execution stage. If E:\ markers don't land either, the failure mode is bigger than a partition mismatch and a different next slice is required.
+
+**Why E:\ specifically (precise, conservative choice).** The harness's `_run_real_xbox` uploads to `E:\Apps\<id>\default.xbe` and ftp-collects `/E/Apps/<id>` — so writing to `E:\Apps\image-blit\…` is the SMALLEST possible re-route that's guaranteed FTP-retrievable. nxdk's automount-d only mounts D:\ for the launched XBE; E:\ requires explicit `nxIsDriveMounted('E')` + `nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")` (the standard FATX utility partition). The exact same shim is already shipped in `oracle-agent/controller.c::s_ensure_e_drive_mounted` lines 74-86, `oracle-agent/tier2.c` lines 56-60, `lib/xbed_input_synth.c` lines 43-47, and `controller-readback/main.c` lines 50-55. T:\ was rejected for cycle 21 because the harness FTP-collects from `/E/Apps/<id>` only — a T:\ write would not be retrievable without expanding harness scope. The cycle-21 slice deliberately did NOT relocate `xbed_render_loop_then_capture`'s `D:\image-blit-capture.bin` / `D:\image-blit-done.txt` writes (still under D:\); that's a separate decision pending the cycle-21 evidence.
+
+**Diff (uncommitted in xemu-fork/ at session close).**
+
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c` — re-routes the marker helper to `E:\Apps\image-blit\…`, adds a cached idempotent E:\ mount + `CreateDirectoryA` shim (`image_blit_ensure_e_mount`), bumps the path buffer from 64 to 96 bytes for the longer prefix (basenames stay ≤39 chars; FATX 42-char invariant unchanged from cycle 20), preserves the host-log mirror, preserves the path-overflow safety branch, and adds an explicit `e_mount=N` field to every marker host-log line so xemu logs can correlate mount success with fopen outcome. Helper-comment block updated with cycle-21 rationale, the rejected-T:\ explanation, and the path-length math. Bounded reviewable diff ~120 net lines added (~100 helper / comment, ~20 new mount fn), main.c only.
+- `scripts/apple-silicon/xbe-tests/image-blit/bin/default.xbe` + `image-blit.iso` — rebuilt via `eval "$(nxdk/bin/activate -s)" && make`. By-products of the build; staged with this slice's commit.
+- `docs/apple-silicon/orchestration-state/{current-cycle,claude-status,validation-status,handoff-summary}.md` — all four files updated for cycle 21.
+- `docs/apple-silicon/handoff.md` — this entry (cycle-20 entry preserved below).
+- `docs/apple-silicon/decision-log.md` — cycle-21 entry appended above cycle-20; cycle-17 / cycle-19 / cycle-20 NOT superseded.
+
+**Local validation (xemu-Metal, `XEMU_GUEST_LOG=1`).** Two local runs:
+
+- `benchmark-runs/cycle21-image-blit-markers-local-metal-guestlog-20260522T231623Z/` — first build, only-E:\-marker variant (no `CreateDirectoryA` yet). All 13 markers fire per boot, `e_mount=1` reported, BUT every fopen returns `fopen-failed` because the scratch xemu HDD image does NOT contain `E:\Apps\image-blit\` (only the real Xbox does, via the harness FTP-upload step). Surfaced an oversight that would mask local regression checks; fix landed immediately.
+- `benchmark-runs/cycle21-image-blit-markers-local-metal-guestlog-20260522T231823Z/` — second build, with `CreateDirectoryA("E:\\Apps", NULL); CreateDirectoryA("E:\\Apps\\image-blit", NULL)` (same pattern as `oracle-agent/controller.c::s_write_anchor_file` lines 95-97). All 13 markers fire per boot × 4 boots = 52 marker lines, `e_mount=1` everywhere, **zero `fopen-failed` lines** (compare cycle 20's 52 fopen-failed lines for the D:\ baseline; the count flip from 52→0 is the local-side proof that the new code path is correct). The v0.4 tally drift across the 4 boots is `3/8 mask=0x31, 3/8 mask=0x31, 2/8 mask=0x30, 2/8 mask=0x30` — BYTE-IDENTICAL to cycle 20's distribution, confirming the marker re-route did not perturb the race the cycle-17 diag flag addresses.
+
+**Real-Xbox run.**
+
+- Oracle smoke: 12/12 PASS at 2026-05-22 18:20 CDT (`/tmp/oracle-smoke-20260522T232023Z`). EEPROM sha256=871ed8a9…, controller buffer kernel-pool `anchor_ok=1`, PMC_BOOT_0=0x02a000e1.
+- `benchmark-runs/cycle21-real-xbox-image-blit-markers-20260522T232031Z/` — single attempt per the bounded assignment.
+- `chainload_at = 1779492077.015844`, `ftp_back_at = 1779492099.4170449`, gap = **22.40 s exactly** — matches cycle-19 attempt 1 (22.4 s), cycle-19 attempt 2 (22.3 s), and cycle-20 post-Codex attempt (22.4 s) to within 0.1 s. **Fourth independent reproduction.**
+- `verdict.json status: ok` for the chainload-and-collect cycle (the orchestrator path itself is healthy; this is not an infra failure).
+- FTP-collect from `/E/Apps/image-blit/` returned exactly **1 file**: `default.xbe` (the upload echo — same byte count as the local build, 159 744 bytes). **Zero `image-blit-marker-*` files retrieved.**
+
+**Yes/no answer to the cycle-21 question.** **NO.** Re-routing the marker writes from `D:\` to `E:\Apps\image-blit\` (a path provably writeable AND retrievable from xemu locally, and provably retrievable from real Xbox for any pre-existing file in the directory) does NOT make the markers observable on real Xbox under the current `runxbe`/oracle workflow. The cycle-21 evidence shows the failure mode is upstream of any in-XBE `fopen("E:\\…","wb")` call — either the XBE never reaches its first marker call, or the chainload environment under `SITE EXEC` does not allow this XBE's file writes to land on the FATX partition. The local-side success (52→0 fopen-failed flip) proves the code path is correct in principle; the real-Xbox failure proves something about the SITE-EXEC chainload context blocks the same code from executing the way it does on xemu local.
+
+**Hypothesis status after cycle 21.**
+
+1. **D:\ remap mismatch under `runxbe` chainload** — was promoted to leading hypothesis by cycle 20. Cycle 21 demotes it from "leading" to "INSUFFICIENT as a sole explanation." It may still be one factor, but it cannot account for the symmetric blockage of E:\ writes when the harness has visibly demonstrated that `E:\Apps\image-blit\` is fully writeable from the harness's own FTP upload context AND that the oracle agent (also launched via `SITE EXEC`) writes to `E:\Apps\oracle-agent\state\` successfully.
+2. **NV2A class-object instantiation mismatch / `pb_agp_access` divergence / generic early-init failure** — were "not discriminated" by cycle 20. Cycle 21 doesn't directly discriminate them either, but their relative weight goes UP because the partition-mismatch framing is no longer sufficient. The most consistent unifying explanation across cycles 19+20+21 is now: **the XBE either crashes very early (before marker 00's fopen attempt completes) OR the SITE-EXEC `runxbe` chainload runs the XBE in an environment where any in-XBE filesystem write fails silently**. Discriminating those two needs a non-fopen witness (e.g. writing to the oracle agent's persistent kernel-pool controller buffer — a path that is known-functional from `controller-readback` evidence) or a known-good comparator XBE that DOES survive `runxbe` chainload (Path A.3 provenance audit of the existing `xbox-real-references/` captures).
+3. **NEW (cycle 21):** The harness's UPLOAD step is what makes `E:\Apps\image-blit\` writeable — the file system semantics during chainloaded-XBE execution may be different from the FTP-server-time semantics. nxdk's `nxMountDrive` may report success but the FATX driver may be in a different state than a freshly-rebooted UnleashX provides for the FTP server. This is speculative — needs evidence.
+
+**Codex validation.** Mode: `changes`. Verdict: **MINOR ISSUES**. Two findings, both adopted in full:
+
+1. *(medium severity, doc sync)* "Canonical state/docs are still materially behind the recorded cycle-21 outcome at the moment Codex ran" — addressed by this very doc-sync pass.
+2. *(low severity, doc consistency)* "`claude-status.md` said all four orchestration-state files are updated but `handoff-summary.md` was not yet touched" — also addressed in this doc-sync pass.
+
+Codex also flagged a genuine open question worth recording: "with E:\ markers still absent on real Xbox, is the remaining discriminator a trivial write-only XBE on the same `runxbe` path, or an A.3 provenance check against the older real-Xbox references?" — this is the right framing for the next bounded slice; Hermes should choose. Validation marker written at `.claude/state/codex-validate-last-run` per rule #15. Prompt + last-message tempfiles removed per skill §6.
+
+**Files produced (evidence preserved on disk).**
+
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c` — cycle-21 instrumentation diff (uncommitted at session close).
+- `scripts/apple-silicon/xbe-tests/image-blit/bin/default.xbe` + `image-blit.iso` — rebuilt; ~159 744 B XBE / 720 896 B ISO.
+- `benchmark-runs/cycle21-image-blit-markers-local-metal-guestlog-20260522T231623Z/` — first local xemu run (no dir-create; surfaced the local-validation oversight).
+- `benchmark-runs/cycle21-image-blit-markers-local-metal-guestlog-20260522T231823Z/` — second local xemu run with `CreateDirectoryA`; 52/52 markers fire, 0/52 fopen-failed, byte-identical v0.4 tally drift to cycle 20.
+- `benchmark-runs/cycle21-real-xbox-image-blit-markers-20260522T232031Z/` — single real-Xbox run; 22.4 s gap, 1 file retrieved (`default.xbe` upload echo), 0 marker files.
+
+**Cycle 11 follow-up list — updated.**
+
+- ✅ #1 (Re-run image-blit on GL) — CLOSED cycle 15.
+- ✅ #2 (`XEMU_DIAG_PGRAPH_STATUS_DRAIN`) — CLOSED cycle 17.
+- 🟡 #3 (Real-Xbox parity check) — **REFRAMED AGAIN cycle 21.** Cycle 20 sharpened the framing from "which stage fails" to "D:\ write-back is blocked." Cycle 21 demonstrates that re-routing to E:\ does NOT unblock the witness, so the blocker is NOT (only) a partition mismatch. Remaining bounded slices:
+  - **A.3 (now top-priority).** Cross-check whether the existing `xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor}` captures came from `runxbe` SITE-EXEC chainload or from a different launch path. If from `runxbe`, the cycle-21 result is image-blit-specific and the failure is in the XBE itself (early crash, NV2A init divergence). If from a different launch path, the oracle pipeline needs a non-`runxbe` chainload mode for any XBE that depends on observable file writes. This is the cheapest single follow-up per rule #1 because it requires only inspecting existing artifacts + tooling history.
+  - **A.4 (new).** Add a non-fopen witness to image-blit: write a few bytes into the oracle-agent's persistent kernel-pool controller buffer (`oracle_ctrl_buffer` at the agent-published phys address) BEFORE attempting any marker fopen. The next agent boot reads the buffer via `controller.buffer-info` / `controller.get` (known-functional from cycle-17 oracle-smoke evidence). If the buffer changes, the XBE ran for at least that long; if it does not, the XBE crashes before reaching that point. This requires zero filesystem activity and bypasses every partition-mount + FATX-driver-state concern.
+  - **B.** Smaller PFIFO-race-only Tier-1 diag XBE that captures via PCRTC. Still on the table per cycle 19's recommendation list. Heavier than A.3 / A.4.
+
+**Out-of-scope (cycle-21 kept bounded).**
+
+- Did NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on.
+- Did NOT start Path A.3 (`xbox-real-references/` provenance audit) — that's the next bounded slice; Hermes chooses.
+- Did NOT start Path A.4 (oracle-agent kernel-pool buffer witness) — also pending Hermes selection.
+- Did NOT start Path B (smaller PFIFO-race-only Tier-1 diag XBE).
+- Did NOT modify xemu-fork host source (instrumentation slice is XBE-only).
+- Did NOT relocate `xbed_render_loop_then_capture` capture/done writes (still under D:\); cycle-21 scope was markers only.
+- Did NOT touch retail-title metrics, §G.5, RT-as-texture, or any second-wave XBE work.
+
+Cycle 20 details preserved below.
+
+---
 
 ## 2026-05-22 (cycle 20 Path A) — image-blit progress-marker instrumentation; D:\ witness path confirmed BLOCKED on real Xbox under `runxbe` chainload
 

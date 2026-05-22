@@ -144,6 +144,7 @@
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <hal/xbox.h>
+#include <nxdk/mount.h>
 #include <pbkit/pbkit.h>
 #include <pbkit/pbkit_dma.h>
 #include <pbkit/pbkit_pushbuffer.h>
@@ -156,36 +157,106 @@
 #include "nv2a_regs_image_blit.h"
 
 /* Cycle 20 Path A (2026-05-22): always-on, FTP-collectable progress
- * markers. Every staged checkpoint writes a tiny text file to
- * `D:\image-blit-marker-NN-STAGE.txt`. The harness's `--ftp-collect
- * /E/Apps/image-blit` pulls everything under that directory after the
- * chainloaded XBE reboots; the highest-numbered marker file present
- * after a real-Xbox run is the furthest stage the XBE actually reached.
+ * markers. Cycle 21 Path A.2 (2026-05-22): markers re-routed from
+ * `D:\image-blit-marker-NN-STAGE.txt` (proven blocked on real Xbox
+ * across three cycle-19+cycle-20 runs) to
+ * `E:\Apps\image-blit\image-blit-marker-NN-STAGE.txt` — the harness's
+ * existing FTP-collect target. Every staged checkpoint writes a tiny
+ * text file there; the harness pulls everything under `/E/Apps/<id>`
+ * after the chainloaded XBE reboots, so the highest-numbered marker
+ * file present after a real-Xbox run is the furthest stage the XBE
+ * actually reached.
  *
- * Why this matters: cycle 19 attempted a real-Xbox parity check by
- * chainloading the existing v0.4 image-blit XBE via the oracle agent's
- * `runxbe` RPC. Two independent attempts produced clean reboots back to
- * FTP but NO `D:\image-blit-capture.bin` and NO `D:\image-blit-done.txt`.
- * The single binary witness "either everything ran or nothing did" was
- * the entire problem — we could not tell whether the XBE crashed at
- * `xbed_init`, mid-blit, during oracle compare, in shader load, or
- * whether it ran to completion and the final `fopen("D:\\…","wb")` for
- * the capture/done files failed silently because `D:\` didn't map the
- * way `XLaunchXBE` (from an ISO mount on xemu) maps it.
+ * Why D:\ was the cycle-20 witness path: cycle 19 attempted a real-Xbox
+ * parity check by chainloading the existing v0.4 image-blit XBE via the
+ * oracle agent's `runxbe` RPC. Two independent attempts produced clean
+ * reboots back to FTP but NO `D:\image-blit-capture.bin` and NO
+ * `D:\image-blit-done.txt`. The single binary witness "either
+ * everything ran or nothing did" was the entire problem — we could not
+ * tell whether the XBE crashed at `xbed_init`, mid-blit, during oracle
+ * compare, in shader load, or whether it ran to completion and the
+ * final `fopen("D:\\…","wb")` for the capture/done files failed
+ * silently. Cycle 20 added 13 staged D:\ marker writes; three
+ * independent real-Xbox runs returned ZERO marker files, while xemu
+ * local proved every `fopen("D:\\…","wb")` returns NULL on the ISO
+ * mount path (CD-ROM, read-only). That elevated cycle-19 hypothesis
+ * #1 (D:\ remap mismatch under `runxbe` SITE-EXEC chainload) to the
+ * leading hypothesis.
  *
- * Path A markers turn that into a stage-decodable signal: each marker
- * is independently small (a few hundred bytes max), is written via the
- * same `fopen / fprintf / fclose` path as the cycle-19 done-marker (so
- * if D:\ fopen genuinely doesn't work on real Xbox we'll see ZERO
- * markers, which is itself a definitive answer), and is also mirrored
- * through the existing `xbed_host_log_writef` channel so xemu logs see
- * the progression too. A failed marker write is silently ignored — we
- * want maximum forward progress, not extra exit paths.
+ * Why E:\Apps\image-blit\ for cycle 21: the xbe-harness
+ * (`scripts/apple-silicon/xbe-harness/xbe_renderers.py::run_real_xbox`)
+ * uploads the diag XBE to `E:\\Apps\\<id>\\default.xbe` BEFORE
+ * chainload AND runs `--ftp-collect /E/Apps/<id>` AFTER chainload.
+ * That directory therefore (a) provably exists at run time (the
+ * upload echo is what every cycle-20 real-Xbox run retrieved), (b)
+ * lives on the persistent FATX utility partition
+ * `\Device\Harddisk0\Partition1` (E:), (c) needs only an idempotent
+ * `nxIsDriveMounted('E')` + `nxMountDrive('E', …)` shim because
+ * nxdk's automount-d mounts D:\ for the launched XBE but NOT E:\.
+ * The same shim is shipped in `oracle-agent/controller.c`,
+ * `oracle-agent/tier2.c`, `lib/xbed_input_synth.c`, and
+ * `controller-readback/main.c`. T:\ was rejected: the harness
+ * FTP-collects from `/E/Apps/<id>` only, so a T:\ write would not be
+ * retrievable without expanding harness scope.
+ *
+ * The cycle-21 question is binary and conservative: if E:\ markers
+ * land, cycle-19 hypothesis #1 (witness-path partition mismatch under
+ * `runxbe`) is corroborated AND the highest-numbered file tells us
+ * the actual real-Xbox execution stage. If E:\ markers DO NOT land,
+ * the failure mode is bigger than a partition mismatch (XBE crashes
+ * very early, or the chainload itself has a different runtime
+ * environment than the upload context) and a different next slice is
+ * required. The bounded scope does NOT relocate the
+ * `xbed_render_loop_then_capture` capture/done writes (still under
+ * `D:\`); that's a separate slice if cycle-21 evidence motivates it.
+ *
+ * Each marker is independently small (a few hundred bytes max), is
+ * written via `fopen / fprintf / fclose`, and is mirrored through the
+ * existing `xbed_host_log_writef` channel so xemu logs see the
+ * progression even when the FS write fails. A failed marker write is
+ * silently ignored — we want maximum forward progress, not extra
+ * exit paths.
  *
  * Markers MUST be numerically ordered. Adding a new one between two
  * existing markers requires renumbering everything after it. The
  * mapping (number -> stage) is the authoritative documentation; the
  * stage label string in the filename is for human readability. */
+
+/* Cycle 21 Path A.2 (2026-05-22): idempotent E:\ mount used by the
+ * marker helper. Same pattern as `oracle-agent/controller.c::
+ * s_ensure_e_drive_mounted` and `controller-readback/main.c::
+ * ensure_e_drive_mounted`. Cached after first success so we avoid
+ * re-mounting on every marker. Returns 1 iff E: is usable after the
+ * call; 0 on hard failure. Safe to call before any other init —
+ * `nxIsDriveMounted` / `nxMountDrive` only touch the NT symbolic-link
+ * table, no PFIFO / NV2A / pbkit dependency. */
+static int s_image_blit_e_mount_cached = 0;
+
+static int image_blit_ensure_e_mount(void)
+{
+    if (s_image_blit_e_mount_cached) return 1;
+    if (!nxIsDriveMounted('E')) {
+        /* OG Xbox standard FATX layout: Partition1 = E: (utility,
+         * ~5 GiB, persistent). See `oracle-agent/controller.c` for
+         * the full partition map. */
+        if (!nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")) {
+            return 0;
+        }
+    }
+    /* On real Xbox the harness FTP-uploads `default.xbe` to
+     * `E:\Apps\image-blit\` BEFORE chainload, so the target dir
+     * already exists; CreateDirectoryA is a no-op (returns FALSE on
+     * already-exists). On xemu local — where there is no harness
+     * upload step — the dir does not exist and CreateDirectoryA
+     * creates it so marker fopens land on the scratch HDD image
+     * instead of silently fopen-failing. Idempotent. Same pattern
+     * as `oracle-agent/controller.c::s_write_anchor_file`. */
+    CreateDirectoryA("E:\\Apps", NULL);
+    CreateDirectoryA("E:\\Apps\\image-blit", NULL);
+    s_image_blit_e_mount_cached = 1;
+    return 1;
+}
+
 static void image_blit_marker(unsigned idx, const char *stage)
 {
     /* Filename budget: FATX caps basenames at 42 characters. The
@@ -197,10 +268,18 @@ static void image_blit_marker(unsigned idx, const char *stage)
      * `before_capture_loop` labels for being at-limit / over-limit;
      * they were shortened to `state_set` / `pre_capture`.) The
      * `%02u` keeps lexical and numeric ordering identical so a
-     * sorted FTP listing reflects the stage-execution order. */
-    char path[64];
+     * sorted FTP listing reflects the stage-execution order.
+     *
+     * Cycle 21 path-length math: directory prefix
+     * `E:\Apps\image-blit\` is 19 chars; basename ≤ 39 chars; null
+     * terminator 1 char ⇒ worst case 59 chars. Buffer is 96 for
+     * comfortable safety margin. The basename invariant the FATX
+     * 42-char limit cares about is unchanged from cycle 20 — only
+     * the directory prefix grew. */
+    char path[96];
     int n = snprintf(path, sizeof(path),
-                     "D:\\image-blit-marker-%02u-%s.txt", idx, stage);
+                     "E:\\Apps\\image-blit\\image-blit-marker-%02u-%s.txt",
+                     idx, stage);
     if (n <= 0 || n >= (int)sizeof(path)) {
         /* Bad format / overflow: skip the FS write but still surface
          * through the host-log channel so xemu sees the stage tag. */
@@ -208,10 +287,19 @@ static void image_blit_marker(unsigned idx, const char *stage)
                              idx, stage);
         return;
     }
+    /* Cycle 21: ensure E: is mounted before each fopen. Idempotent
+     * after first success (cached). Failure to mount is surfaced
+     * through the host-log channel and the FS write below is
+     * attempted anyway — `fopen` on an unmounted drive will simply
+     * return NULL and take the existing fopen-failed branch. */
+    int e_mounted = image_blit_ensure_e_mount();
     /* Mirror through the host-log channel FIRST so the marker shows up
-     * in xemu logs even if the file open fails. Inert on real Xbox /
-     * stock xemu without XEMU_GUEST_LOG. */
-    xbed_host_log_writef("image-blit: marker %02u %s", idx, stage);
+     * in xemu logs even if the file open fails. The host-log channel
+     * is inert on real Xbox / stock xemu without XEMU_GUEST_LOG; on
+     * xemu with XEMU_GUEST_LOG=1 it surfaces every staged marker
+     * regardless of fopen outcome. */
+    xbed_host_log_writef("image-blit: marker %02u %s e_mount=%d",
+                         idx, stage, e_mounted);
     /* Then write the FTP-collectable file. Best-effort: ignore errors
      * silently so a single failing write can't strand the test. */
     FILE *f = fopen(path, "wb");
