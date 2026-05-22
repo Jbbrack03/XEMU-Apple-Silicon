@@ -1,39 +1,40 @@
 # Current Cycle
 
-- Cycle: 17 (**CLOSED 2026-05-22 — bounded implementation of `XEMU_DIAG_PGRAPH_STATUS_DRAIN` shipped + validated renderer-agnostically**).
-- Started: 2026-05-22 13:28 CDT.
-- Closed: 2026-05-22 14:01 CDT.
+- Cycle: 18 (**CLOSED 2026-05-22 — bounded cleanup/packaging slice for the completed cycle-17 status-drain milestone**).
+- Started: 2026-05-22 14:10 CDT.
+- Closed: 2026-05-22 (this slice).
 - State: CLOSED.
-- Owner: Claude Code (hermes_xemu_live_20260522_132851).
-- Bounded goal: implement the opt-in `XEMU_DIAG_PGRAPH_STATUS_DRAIN` diagnostic path so `NV_PGRAPH_STATUS` stays visibly busy while PFIFO has queued work, then validate whether `image-blit` flips from the current partial mask to all 8 cells green through the existing host-visible guest-log channel.
-- Outcome: MET. image-blit `pass=3/8 mask=0x31` → `pass=8/8 mask=0xff` on Metal (4 boots) AND GL (15 boots) under the flag; cycle-13 race hypothesis definitively confirmed. Codex `changes` review returned MINOR ISSUES; both adopted before close.
+- Owner: Claude Code (hermes_xemu_live_20260522_1410).
+- Bounded goal: close the carry-forward work from cycle 17 without mixing in new graphics investigation: verify the dirty worktree is coherent with the just-closed cycle-17 milestone, package the orchestration-state update into one clean reviewable checkpoint, and leave the repo/state ready for the next real-Xbox parity slice.
+- Why this slice exists: cycle 17 achieved the technical milestone and synced the canonical docs in commit `9024a548f7`, but Hermes then re-opened the orchestration-state quartet to mark cycle 18 STARTED, leaving a small carry-forward doc diff. This slice closes that diff cleanly before the next graphics-validation slice starts so context stays bounded.
 
 ## Exit criteria — all met
 
-1. ✅ Posted fresh worker receipt after re-reading the canonical docs and updated this file plus `claude-status.md`.
-2. ✅ Made one bounded implementation attempt for `XEMU_DIAG_PGRAPH_STATUS_DRAIN` within the workspace only; scope kept tight to the PFIFO/PGRAPH busy-publication path. Two failed iterations on the eligibility gate are preserved as evidence.
-3. ✅ Concrete validation evidence captured through the host-visible guest-log channel on both Metal (`benchmark-runs/cycle17-status-drain-metal-PASS-gl-timeout-20260522/`) and GL (`benchmark-runs/cycle17-status-drain-gl-long-timeout-20260522/`); baseline reruns also captured for diff.
-4. ✅ Mandatory Codex validation completed; both adopted findings recorded in the decision-log.
-5. ✅ `validation-status.md`, `handoff-summary.md`, `decision-log.md`, and `handoff.md` synced before closure.
+1. ✅ Re-read the canonical docs first, then posted a short worker receipt in the terminal and updated this file plus `claude-status.md` before deep work.
+2. ✅ Dirty diff reviewed: the four uncommitted quartet edits (`claude-status.md`, `current-cycle.md`, `handoff-summary.md`, `validation-status.md`) are **cycle-18 opening state authored by Hermes**, not cycle-17 leftover. Cycle-17 code + canonical doc updates already shipped in commit `9024a548f7`. No source / automation / flags touched in cycle 18.
+3. ✅ One clean packaging outcome produced: this quartet update commits as a `docs/state:` checkpoint that records the cycle-17 closure hash `9024a548f7` and marks cycle 18 CLOSED — same pattern as the cycle-16 packaging commit (`3b5257a498`) recording cycle-15's closure hash.
+4. ✅ `current-cycle.md`, `claude-status.md`, `validation-status.md`, and `handoff-summary.md` all aligned with reality through closure.
+5. ✅ Explicit handoff for the next fresh session captured in `handoff-summary.md`: real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` (cycle-11 follow-up item #3, gating the default-on / long-term-fix decision).
 
-## Next bounded slice (NOT started in cycle 17)
+## Cycle-17 closure record
 
-- Cycle-11 follow-up item #3: real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`. Gates the long-term-fix decision (default-on vs. properly published busy bit vs. default PFIFO barrier).
+- Cycle-17 implementation + canonical doc sync: commit `9024a548f7`.
+- Cycle-18 packaging (this slice) records that hash into the durable control plane.
+
+## Next bounded slice (NOT started in cycle 18)
+
+- Cycle 19: cycle-11 follow-up item #3 — real-Xbox oracle parity check on `image-blit.iso` under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1`. Decides default-on vs. properly published busy bit vs. default PFIFO barrier vs. shipping the diagnostic as-is. Start in a fresh session.
 
 ## Supervisor start note (2026-05-22)
 
-- Prior slice status verified: cycle 16 was already CLOSED in the artifacts, the repo was clean, and the worker was sitting at a closed-session prompt. That session was intentionally retired to preserve clean context boundaries.
-- Fresh-session requirement: read the canonical docs first, then give a short worker receipt before implementation.
+- Cycle 17 was verified CLOSED before rotation: the status-drain flag was implemented, validated on both renderers, reviewed by Codex, and synced into the canonical docs (`9024a548f7`).
+- The prior tmux worker session was intentionally retired to preserve a fresh context boundary.
+- This new session existed because the orchestration-state quartet still carried the supervisor's cycle-18 OPEN edit, which is now packaged cleanly.
 
-## Worker receipt (2026-05-22 — fresh session, cycle 17 open)
+## Worker receipt (2026-05-22 — cycle-18 packaging slice)
 
-- **Docs read:** orchestration-workflow.md; current-cycle.md; claude-status.md; validation-status.md; handoff-summary.md; handoff.md (cycle-15 + cycle-13 sections); decision-log.md (cycle-15 entry + cycle-13 follow-up plan); renderer-state.md; flags-renderer.md.
-- **Bounded slice objective:** add opt-in `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` so `pgraph_read(NV_PGRAPH_STATUS)` returns non-zero (busy) while `pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT] != pfifo.regs[NV_PFIFO_CACHE1_DMA_GET]`. Scope: surgical edit confined to `hw/xbox/nv2a/pgraph/pgraph.c` with an `NV_PGRAPH_STATUS` constant where appropriate; no behavior change when the env var is unset.
-- **Current hypothesis:** With the diagnostic flag on, `pb_wait_until_gr_not_busy` in the guest will now actually spin until the PFIFO puller has drained the IMAGE_BLIT push, closing the cycle-13 dispatch-race window. image-blit v0.4 tally should flip from `pass=3/8 mask=0x31` → `pass=8/8 mask=0xff` on both Metal and GL legs.
-- **First concrete action:** patch `pgraph_read` to add a `pgraph_status_drain_enabled()` cached env-var read (mirroring `pgraph_fast_read_enabled()` at pgraph.c:95-113) and a special case at PGRAPH-relative offset `0x700` (NV_PGRAPH_STATUS = 0x00400700 − 0x00400000). Build via `./build.sh -a arm64`.
-- **Planned validation path:** run `image-blit.iso` through `scripts/apple-silicon/xbe-harness` with `XEMU_GUEST_LOG=1 XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` on Metal first, then GL. Read tally lines from `xemu.log` via the cycle-15 host-visible guest-log channel (`xemu-guest-log: image-blit: tally pass=N/8 mask=0xXX`). Expected: 8/8 on both legs. Compare baseline (flag off, already characterised in cycle-15 evidence) versus with-flag for a clean delta. Codex `/codex-validate changes` mandatory before close.
-
-## Lessons captured in cycle 17
-
-- A naive `PUT != GET` check hangs the guest's pbkit busy poll forever during BIOS / pbkit early-init, because the pusher's stall conditions (`NV_PGRAPH_FIFO_ACCESS` off, `pgraph.waiting_for_nop` set, etc.) leave `DMA_GET` stuck without `DMA_PUT` having been advanced for the same reason. The diagnostic MUST gate on the same eligibility set as `pfifo_run_pusher`. Documented in the source comment block at `pgraph_read` cycle-17 branch + `decision-log.md` cycle 17 entry.
-- The default 35 s xbe-harness window assumes the existing flag baseline; adding wait latency per `pb_wait_until_gr_not_busy()` call makes the GL leg's BIOS/pbkit boot exceed the window. `XBE_HARNESS_TIMEOUT_SECONDS` is the durable override knob (env-var only, no CLI flag) — documented in the harness README and `flags-bench.md`.
+- **Docs read:** orchestration-workflow.md; current-cycle.md; claude-status.md; validation-status.md; handoff-summary.md; handoff.md (cycle-17 section + recent state); decision-log.md (cycle-17 entry); prior packaging-commit precedents (cycle-16 `3b5257a498`, cycle-14 `3aea4aee54`, cycle-12 `4f3b95a93a`).
+- **Bounded slice objective:** package the carry-forward cycle-17 closure state cleanly. Scope = doc-only.
+- **Current hypothesis:** the dirty diff is cycle-18 opening state authored by Hermes, not cycle-17 leftover. Cycle 17 is fully committed at `9024a548f7`.
+- **First concrete action:** advance the quartet from "STARTED — waiting for receipt" → "CLOSED — packaging outcome recorded" with the cycle-17 closure hash, plus an explicit next-session handoff for the real-Xbox parity check. Then one coherent `docs/state:` commit following the cycle-16 precedent.
+- **Planned validation path:** doc-only diff, no code / automation / flags touched, aggregate diff well below the codex-validate trigger; rule #15 skip is automatic and consistent with the cycle-16 packaging slice's "Codex re-validation was not triggered" precedent.
