@@ -309,6 +309,169 @@ Hard preconditions for an unambiguous cycle-30 readback:
 2. Baseline `witness.scan` precondition unchanged from cycle 26/28:
    exactly ONE live buffer with `reserved[0] == 0`.
 
+## Cycle-31 addendum (option (d), 2026-05-23)
+
+Cycle 30 closure (commit `dfe1480cba`) ran the cycle-29 build on real
+Xbox; outcome **E2** = `witness.scan = D-cycle-27` AND
+`witness.scan-self = count=0`. Per the cycle-30 discriminator table
+this makes **(γ)** "main() never reaches the fire calls" LEADING and
+re-strengthens the cycle-22 pre-main-crash hypothesis toward leading,
+but does NOT fully corroborate it: `main()` could equally well crash
+AFTER its first instruction but BEFORE either fire site. Cycle 31
+ships **option (d)** from the cycle-29 closure catalog: a pbkit-free
+`XVideoSetMode(640, 480, 32, REFRESH_DEFAULT)` + a direct CPU paint of
+distinguishable horizontal stripes into the resulting linear
+framebuffer. The breadcrumb is the first observable side effect of
+`main()`. If composite capture during the cycle-32 (or whatever Hermes
+schedules next) real-Xbox run records the top (RED) stripe, `main()`
+ran past its first executable instruction and **(γ) is INVALIDATED**.
+
+The cycle-31 paint helpers (`xbed_breadcrumb_init` /
+`xbed_breadcrumb_paint`) live entirely in `witness-only/main.c` — no
+shared-lib changes (no edits to `lib/xbed_a4_witness.{c,h}`, no edits
+to `lib/xbed_self_witness.{c,h}`, no edits to `lib/lib.mk`). The
+single new include is `<hal/video.h>` for `XVideoSetMode` +
+`XVideoGetFB` + `XVideoFlushFB`; `<string.h>` for `memset`. No pbkit
+is called. The kernel paths exercised (`AvGetSavedDataAddress`,
+`MmAllocateContiguousMemoryEx` with `PAGE_WRITECOMBINE`,
+`AvSetDisplayMode`, `XVideoSetGammaRamp`) are the same paths
+`lib/xbed_runtime.c:43-60`'s `xbed_init` already uses for every diag
+XBE that draws anything.
+
+### Cycle-31 breadcrumb stripe map
+
+Each stripe is 96 rows tall × 640 wide × 32 bpp ARGB8888 on a 640×480
+framebuffer (480 / 5 = 96):
+
+| Stripe (top→bottom) | Color  | ARGB8888    | What it proves                                          |
+|---|---|---|---|
+| 0  | RED    | `0xFFFF0000` | `main()` reached its first executable instruction      |
+| 1  | ORANGE | `0xFFFF7F00` | `xbed_a4_witness_fire(MAIN_ENTERED)` returned          |
+| 2  | YELLOW | `0xFFFFFF00` | `xbed_a4_witness_fire(POST_MARKER0)` returned          |
+| 3  | GREEN  | `0xFF00FF00` | `xbed_self_witness_fire(MAIN_ENTERED)` returned        |
+| 4  | BLUE   | `0xFF0000FF` | `xbed_self_witness_fire(POST_MARKER0)` returned        |
+
+The deepest visible stripe in a composite-captured frame is the
+deepest checkpoint reached. Stripe 0 alone visible = `main()` ran past
+its first call but did not return from `xbed_a4_witness_fire`. Stripes
+0+1 visible = cycle-23 fire1 returned but fire2 did not. Stripes
+0+1+2 visible = both cycle-23 fires returned but cycle-29 self-fire1
+did not (which would be unexpected — self-fire1 is the
+`MmAllocateContiguousMemoryEx` site that cycle 29 considered
+known-good). Stripes 0+1+2+3 visible = all of the above plus self-
+fire1 returned but self-fire2 did not. All 5 stripes visible = the
+full witness path through `main()` executed; the cycle-32 readback
+shape is then disambiguated by combining stripe count with the
+`(witness.scan, witness.scan-self)` two-tuple per the F1 / F5 / F6
+rows of the cycle-32 discriminator table below.
+
+### Cycle-32 discriminator semantics (9 rows; representative, NOT exhaustive)
+
+Reads as `(deepest visible stripe, witness.scan-self count, witness.scan shape)`:
+
+| Stripe(s) visible | `witness.scan-self`                    | `witness.scan`           | Interpretation                                                                                       | Next                                              |
+|---|---|---|---|---|
+| **0..4 (all)**          | `count=1 reserved0=0xA4000003 reserved1=2` | `D-cycle-27`               | `main()` ran past every checkpoint; WTNS landed; XCTR did NOT land (`witness.scan` still D-cycle-27 means no XCTR stamp survived on the agent's persistent buffer). γ INVALIDATED; (α) OR (β) is the XCTR-side failure mode. Outcome **F1**. | Cycle 33: re-elevate option (b) for α-vs-β discrimination on the XCTR side. |
+| **0..2 only**           | `count=0`                                  | `D-cycle-27`               | `main()` ran through cycle-23 fires but crashed before self-fire1 site. WTNS did NOT land (page was never allocated). XCTR also did not land. Outcome **F2**.              | Cycle 33: instrument the call site between fire2 and self-fire1 (or split the cycle-23-vs-cycle-29-fires window with a sleep or a static no-op call). |
+| **0 only**              | `count=0`                                  | `D-cycle-27` (or unchanged) | `main()` ran past first instruction but did NOT return from `xbed_a4_witness_fire(MAIN_ENTERED)`. Outcome **F3** — strong cycle-23 mechanism-on-real-Xbox failure signal. | Cycle 33: redesign cycle-23 witness mechanism (EEPROM scratchpad / abandon kseg0 scan). |
+| **(none visible)**      | `count=0`                                  | `D-cycle-27` (or unchanged) | Either (γ.0) execution never entered `main()` AT ALL OR (γ.1) `XVideoSetMode` itself faulted (`main()` never returned from the kernel display init). The init-failed state latches so only ONE `XVideoSetMode` call is at risk (see `xbed_breadcrumb_init` in `main.c`). Outcome **F4** — cycle-22 pre-main hypothesis FULLY CORROBORATED in its strongest form. Note: a graceful `XVideoSetMode` FALSE return does NOT land here — it lands at F4' below because the cycle-29 self-witness fires still execute and stamp the WTNS page. | Cycle 33: pre-main breadcrumbs (XCTR fire from a `.CRT$XCU` static-init slot OR a `.dllcharacteristics` early-call). |
+| **(none visible)**      | `count=1 reserved0=0xA4000003 reserved1=2` (or partial WTNS shape) | `D-cycle-27` | Graceful `XVideoSetMode` FALSE return — `main()` DID execute past `paint(0)` (which became a no-op when the helper latched FAILED) AND went on to run the cycle-29 self-witness fires. The AV encoder rejected the requested 640×480×32 mode (exotic AV configuration). γ INVALIDATED via the WTNS path; the stripe-0 absence is informative about kernel display init's behavior in this XBE context, NOT about `main()` execution. Outcome **F4'**. | Cycle 33: investigate the AV encoder rejection cause (probe `XVideoListModes` enumeration on this AV configuration); cycle-32 result still INVALIDATES γ even without a visible stripe. |
+| **0..4 (all)**          | `count=0`                                  | `D-cycle-27`               | Stripes painted but neither witness fire landed. Outcome **F5** — exotic; would mean the four fire-call instructions ran but their writes never reached RAM. Cache-attribute divergence on the kernel-pool page (β) or self-witness-page allocation failed silently. | Cycle 33: re-elevate option (b) — agent-side prior-phys dump + read-only kseg0 dump to characterize the cache attributes on the agent's persistent page from non-agent context. |
+| **0..4 (all)**          | `count=1 reserved0=0xA4000003 reserved1=2` | `count=1 reserved0=0xA4xxxxxx` (A1/A2 success shape) | Full success across BOTH mechanisms — `main()` ran past every checkpoint AND XCTR stamp survived on the agent's persistent buffer AND WTNS landed. Outcome **F6** — cycles 26 / 28 / 30 readings must have been observation-side artifacts; would be the cleanest possible discriminator outcome. | Cycle 33: full re-validation; consider declaring discriminator track CLOSED. |
+| **partial stripes** + bands missing intermediately | (any)                                | (any)                      | A paint landed for a later stripe but the earlier one didn't — should be vanishingly rare given the FB is PAGE_WRITECOMBINE + XVideoFlushFB sfences after each paint. Treat as ambiguous; re-run. | Cycle 33: re-run; if reproducible, instrument the paint helper. |
+| **(no composite capture)** | (any)                                  | (any)                      | Capture leg not running / capture-card not detected. Cycle-32 procedural failure, NOT a discriminator answer. | Cycle 32 redo with composite capture confirmed armed. |
+
+The table is **representative, not exhaustive**. Composite capture
+will record many frames during the witness-only run; the analyzer
+should sample a window of frames near `t = runxbe_issued + 2s` (just
+before the final 2 000 ms settle Sleep starts releasing for the
+reboot) to read the deepest stable stripe state.
+
+### Cycle-31 build artifacts
+
+- `bin/default.xbe` — 155 648 B (+4 096 B = +1 page from cycle 29's
+  151 552 B; the new `XVideoSetMode` linkage + ~150 LOC of paint
+  helpers fit in one nxdk XBE page boundary).
+- `witness-only.iso` — 720 896 B (unchanged — same ISO sector
+  boundary as cycle 29).
+
+### Cycle-32 deployment runbook (Hermes-scheduled; NOT this session)
+
+Hard preconditions (in addition to all cycle-30 preconditions):
+
+1. Composite-capture leg ARMED before `runxbe`:
+   `scripts/apple-silicon/composite-record.sh <label>` running in a
+   parallel terminal (see `docs/apple-silicon/automation.md`
+   "composite-record.sh" section). Verify MS2109 USB stick recognized
+   via `tools/xemu-capture/build/xemu-capture list`.
+2. Cycle-29 oracle-agent already deployed at `E:\Apps\oracle-agent\default.xbe`
+   (cycle 30 already deployed it; verify via `help` listing the
+   `witness.scan-self` verb).
+3. Cycle-31 witness-only deployed at `E:\Apps\witness-only\default.xbe`.
+   Local SHA-256 differs from cycle 29 (size mismatch — uploader will
+   replace without `--overwrite`; verify post-upload). Capture both
+   the cycle-31 SHA-256 and the remote-side mtime advance in the step
+   log.
+4. Baseline `witness.scan count=1 live=1 reserved0=0 reserved1=0`
+   AND baseline `witness.scan-self count=0`. Power-cycle if either
+   precondition fails.
+
+Sequence (extends the cycle-30 sequence with the composite-capture
+arm + analyze steps):
+
+```sh
+# 1. Reachability + state probe.
+./scripts/apple-silicon/oracle-orchestrator.py status
+
+# 2. Baseline both scans.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 3. Reboot to dashboard.
+./scripts/apple-silicon/oracle-client.py raw reboot
+# Wait for FTP/21 dashboard return (authenticated probe per cycle 30).
+
+# 4. FTP-upload cycle-31 witness-only (size differs — no --overwrite
+#    needed, but verify post-upload SHA-256).
+./scripts/apple-silicon/xbox-ftp-upload.py \
+    scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe \
+    /E/Apps/witness-only/default.xbe
+
+# 5. Relaunch agent, recheck both scans (preconditions).
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 6. *** ARM COMPOSITE CAPTURE *** in a parallel terminal:
+./scripts/apple-silicon/composite-record.sh cycle32-witness-only-screen
+
+# 7. Chainload witness-only.
+./scripts/apple-silicon/oracle-client.py runxbe 'E:\Apps\witness-only\default.xbe'
+
+# 8. Poll FTP/21 (authenticated) + 9001 + ICMP until dashboard FTP returns
+#    (cycle 30 observed t+39s on the cycle-29 build; cycle-31 timing
+#    may shift due to XVideoSetMode + 2 000 ms settle Sleep, expect
+#    t+5..15s longer on a clean exit).
+
+# 9. *** STOP COMPOSITE CAPTURE *** in parallel terminal.
+
+# 10. Post-run: ensure-agent + final both scans.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 11. Analyze composite recording: extract keyframes near t+2s and
+#     read the deepest stable stripe color per the cycle-31 stripe map.
+./scripts/apple-silicon/extract-keyframes.py \
+    benchmark-runs/<UTC>-composite-cycle32-witness-only-screen/
+# Then visually classify per the cycle-32 discriminator table.
+```
+
+The decisive readback combines the deepest-visible-stripe count with
+the cycle-30 `(witness.scan, witness.scan-self)` two-tuple per the
+8-row cycle-32 discriminator table.
+
 ## Cross-references
 
 - `lib/xbed_a4_witness.{h,c}` — the cycle-23 XCTR-scan witness mechanism.
@@ -316,7 +479,10 @@ Hard preconditions for an unambiguous cycle-30 readback:
 - `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan` — cycle-23 XCTR readback RPC.
 - `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan_self` — cycle-29 WTNS readback RPC.
 - `scripts/apple-silicon/xbe-tests/image-blit/main.c:789,806` — the cycle-23 witness call sites this XBE deliberately mirrors.
-- `docs/apple-silicon/handoff.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 entries — failure-mode delta + closure outcomes + cycle-29 design.
-- `docs/apple-silicon/decision-log.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 entries — discriminator design + branch decision logic.
+- `lib/xbed_runtime.c:43-60` — the existing `xbed_init` reference for the `XVideoSetMode` call pattern cycle 31 reuses (without `pb_init`).
+- `nxdk/lib/hal/video.h` + `nxdk/lib/hal/video.c:303-420` — `XVideoSetMode` / `XVideoGetFB` / `XVideoFlushFB` API surface cycle 31 depends on.
+- `docs/apple-silicon/handoff.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 / cycle-30 / cycle-31 entries — failure-mode delta + closure outcomes + cycle-29 + cycle-31 design.
+- `docs/apple-silicon/decision-log.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 / cycle-30 / cycle-31 entries — discriminator design + branch decision logic.
 - `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log` — cycle-24 indefinite-hang evidence to compare cycle-30 polling against.
 - `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/SUMMARY.md` — cycle-28 D-cycle-27 closure that motivated cycle 29.
+- `benchmark-runs/cycle30-real-xbox-witness-only-self-20260523T103624Z/SUMMARY.md` — cycle-30 E2 closure that motivated cycle 31.

@@ -1,7 +1,13 @@
 /*
  * witness-only — cycle-25 minimal A.4 witness-mechanism viability
- * discriminator. NO pbkit, NO NV2A, NO XVideoSetMode, NO file I/O,
- * NO xbed_init.
+ * discriminator + cycle-29 option (c) self-allocated witness + cycle-31
+ * option (d) on-screen visual breadcrumb. NO pbkit, NO NV2A
+ * class-object setup, NO xbed_init, NO file I/O. Cycle 31 ADDED a
+ * single pbkit-free XVideoSetMode + framebuffer-paint call path
+ * (used purely for breadcrumb display); the cycle-25 "NO
+ * XVideoSetMode" invariant therefore no longer holds. The remaining
+ * cycle-25 invariants (no pbkit, no NV2A class objects, no
+ * xbed_init, no file I/O) are intact.
  *
  * Why this XBE exists
  * -------------------
@@ -164,10 +170,65 @@
  *     (γ) leading; cycle 31+ should pursue option (d)
  *     (on-screen breadcrumb) for an independent main()-runs
  *     verification.
+ *
+ * Cycle-31 addendum (option (d), 2026-05-23)
+ * ------------------------------------------
+ * Cycle 30 (closure commit dfe1480cba) ran the cycle-29 build on real
+ * Xbox; outcome E2 = `witness.scan = D-cycle-27` AND
+ * `witness.scan-self = count=0`. Per the cycle-30 discriminator table
+ * this makes (γ) "main() never reaches the fire calls" LEADING and
+ * re-strengthens the cycle-22 pre-main-crash hypothesis, but does NOT
+ * fully corroborate it — main() could equally crash AFTER entering
+ * but BEFORE the first fire (between cycle-25's host-log breadcrumb
+ * write and `xbed_a4_witness_fire(MAIN_ENTERED)`). Cycle 31 adds the
+ * cheapest independent answer to "did main() execute at all on real
+ * Xbox?": a pbkit-free `XVideoSetMode(640, 480, 32, REFRESH_DEFAULT)`
+ * + a direct CPU paint of distinguishable horizontal stripes into the
+ * resulting linear framebuffer, captured during a follow-on cycle by
+ * the existing composite-capture leg (MS2109 USB stick + ffmpeg
+ * AVFoundation). The breadcrumb runs BEFORE the cycle-23 fires; if
+ * stripe 0 is visible on composite, main() reached its first executable
+ * instruction and (γ) is INVALIDATED. Absence of stripe 0 narrows the
+ * live causes to (γ.0) execution never entered `main()` at all (CRT
+ * `_start` / `__security_init_cookie` / static-init crash), or (γ.1)
+ * `XVideoSetMode` itself crashed before painting completed (kernel
+ * display init not safe in this context). Either γ.0 or γ.1
+ * strengthens cycle-22 further than cycle 30 could; a γ-invalidating
+ * stripe-0 presence redirects the next cycle toward (α)/(β) and
+ * re-elevates option (b) from the cycle-29 closure catalog.
+ *
+ * Cycle 31 also paints additional stripes AFTER each subsequent
+ * checkpoint (after `xbed_a4_witness_fire(MAIN_ENTERED)` returns,
+ * after `xbed_a4_witness_fire(POST_MARKER0)` returns, after
+ * `xbed_self_witness_fire(MAIN_ENTERED)` returns, after
+ * `xbed_self_witness_fire(POST_MARKER0)` returns). Each stripe uses a
+ * distinct ARGB8888 color so a single captured frame near reboot time
+ * directly indicates the deepest checkpoint reached. Each paint is
+ * just memory writes into a contiguous-allocated, write-combined
+ * framebuffer page — the marginal risk surface is concentrated in the
+ * single `XVideoSetMode` call. The final `Sleep(2000)` extends cycle
+ * 25's 500 ms drain to ~60 captured frames at 30 fps composite so the
+ * cycle-32 analyzer has redundant samples in case of capture-card
+ * frame drops.
+ *
+ * Cycle 31 is therefore additive but NOT a strict superset of cycle 25
+ * OR cycle 29 — the new `XVideoSetMode` path runs BEFORE the cycle-23
+ * fires, so a cycle-22-style crash that happens to fall inside
+ * `XVideoSetMode` would prevent BOTH the cycle-23 XCTR fires AND the
+ * cycle-29 WTNS fires from running. Cycle-31 ordering is required by
+ * the discriminator's purpose ("did main() execute past XVideoSetMode
+ * BEFORE we even attempt the fires?"). The trade-off is acceptable:
+ * if a cycle-32 readback shows `WTNS count=0` AND stripe 0 absent, the
+ * crash site is at-or-before XVideoSetMode (which is strictly earlier
+ * than cycle 30's narrowing); if `WTNS count=0` AND stripe 0 present,
+ * the crash is between XVideoSetMode return and the first fire (a NEW
+ * window cycle 30 could not isolate).
  */
 #include <hal/debug.h>
+#include <hal/video.h>
 #include <hal/xbox.h>
 #include <stdint.h>
+#include <string.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 
@@ -175,8 +236,147 @@
 #include "xbed_runtime.h"
 #include "xbed_self_witness.h"
 
+/* Cycle-31 option (d) on-screen breadcrumb.
+ *
+ * 5 horizontal stripes painted top-to-bottom on a 640x480x32 framebuffer,
+ * each 96 rows tall (480 / 5 = 96). Composite-capture interpretation:
+ *
+ *   Stripe  Color (ARGB8888)  What it proves
+ *   ------  ----------------  --------------
+ *   0       RED    0xFFFF0000  main() reached its first observable
+ *                              instruction (XVideoSetMode + paint of
+ *                              stripe 0 completed before the first fire)
+ *   1       ORANGE 0xFFFF7F00  xbed_a4_witness_fire(MAIN_ENTERED) returned
+ *   2       YELLOW 0xFFFFFF00  xbed_a4_witness_fire(POST_MARKER0) returned
+ *   3       GREEN  0xFF00FF00  xbed_self_witness_fire(MAIN_ENTERED) returned
+ *   4       BLUE   0xFF0000FF  xbed_self_witness_fire(POST_MARKER0) returned
+ *
+ * A cycle-32 composite capture takes one or more frames near reboot
+ * time. The deepest stripe whose color matches the table above
+ * indicates the deepest checkpoint reached. Stripes missing above
+ * the deepest visible one would indicate a write that landed in the
+ * framebuffer but did not survive cache eviction; the FB is
+ * MmAllocateContiguousMemoryEx-allocated with PAGE_WRITECOMBINE and
+ * XVideoFlushFB issues an sfence after each paint, so missing
+ * intermediate stripes should be vanishingly rare.
+ */
+#define XBED_BREADCRUMB_W      640
+#define XBED_BREADCRUMB_H      480
+#define XBED_BREADCRUMB_BANDS  5
+
+static const uint32_t s_breadcrumb_colors[XBED_BREADCRUMB_BANDS] = {
+    0xFFFF0000u,  /* stripe 0: main() entered */
+    0xFFFF7F00u,  /* stripe 1: XCTR fire1 (MAIN_ENTERED) returned */
+    0xFFFFFF00u,  /* stripe 2: XCTR fire2 (POST_MARKER0) returned */
+    0xFF00FF00u,  /* stripe 3: WTNS fire1 (MAIN_ENTERED) returned */
+    0xFF0000FFu,  /* stripe 4: WTNS fire2 (POST_MARKER0) returned */
+};
+
+/* Breadcrumb init state machine.
+ *
+ *   STATE  Meaning
+ *   -----  -------
+ *   0      Untried: the next paint will attempt XVideoSetMode.
+ *   1      Succeeded: XVideoSetMode returned TRUE; paints are live.
+ *   2      Failed (latched): XVideoSetMode returned FALSE on a prior
+ *          attempt; subsequent paints are permanent no-ops AND the
+ *          XVideoSetMode call is NOT retried.
+ *
+ * The latched failure state is load-bearing for cycle-32 outcome F4
+ * interpretation (Codex cycle-31 round-1 high finding adopted). If
+ * XVideoSetMode were re-invoked from every paint(N) after a prior
+ * failure, then a "no stripes visible" composite reading could equally
+ * mean "main() never ran past paint(0)" OR "XVideoSetMode failed
+ * gracefully then crashed on a later retry." Latching ensures the
+ * single XVideoSetMode call is concentrated at paint(0)'s invocation;
+ * paint(1..4) cannot re-enter the kernel display init path. */
+#define XBED_BREADCRUMB_INIT_UNTRIED 0
+#define XBED_BREADCRUMB_INIT_OK      1
+#define XBED_BREADCRUMB_INIT_FAILED  2
+
+static int s_breadcrumb_init_state = XBED_BREADCRUMB_INIT_UNTRIED;
+
+/* Bring up a 640x480x32 framebuffer ONCE. Returns nonzero on success.
+ * On a graceful FALSE return from XVideoSetMode (exotic AV
+ * configuration), latches the failure into XBED_BREADCRUMB_INIT_FAILED
+ * so subsequent paint calls become permanent no-ops AND the
+ * XVideoSetMode call is NOT retried (Codex cycle-31 round-1 high
+ * finding adopted: see state-machine doc above). XVideoSetMode
+ * internally calls AvGetSavedDataAddress + MmAllocateContiguousMemoryEx
+ * (with PAGE_WRITECOMBINE) + AvSetDisplayMode + XVideoSetGammaRamp —
+ * all well-trodden nxdk paths used by `xbed_init` and every diag XBE
+ * that draws anything (see `lib/xbed_runtime.c:45`). pbkit is NOT
+ * called — that is the cycle-31 design point. */
+static int xbed_breadcrumb_init(void)
+{
+    if (s_breadcrumb_init_state == XBED_BREADCRUMB_INIT_OK) {
+        return 1;
+    }
+    if (s_breadcrumb_init_state == XBED_BREADCRUMB_INIT_FAILED) {
+        return 0;
+    }
+    if (!XVideoSetMode(XBED_BREADCRUMB_W, XBED_BREADCRUMB_H, 32,
+                       REFRESH_DEFAULT)) {
+        s_breadcrumb_init_state = XBED_BREADCRUMB_INIT_FAILED;
+        return 0;
+    }
+    s_breadcrumb_init_state = XBED_BREADCRUMB_INIT_OK;
+    /* Clear to opaque black so any unpainted stripe is clearly
+     * distinct from a "no signal" composite reading. */
+    unsigned char *fb = XVideoGetFB();
+    if (fb) {
+        memset(fb, 0,
+               XBED_BREADCRUMB_W * XBED_BREADCRUMB_H * 4);
+        XVideoFlushFB();
+    }
+    return 1;
+}
+
+/* Paint stripe `stage` (0..XBED_BREADCRUMB_BANDS-1) with its assigned
+ * color. Each stripe is 96 rows tall on a 640-wide 32bpp framebuffer.
+ * Idempotent. No-op if display init failed or stage is out of range. */
+static void xbed_breadcrumb_paint(int stage)
+{
+    if (!xbed_breadcrumb_init()) {
+        return;
+    }
+    if (stage < 0 || stage >= XBED_BREADCRUMB_BANDS) {
+        return;
+    }
+    unsigned char *fb = XVideoGetFB();
+    if (!fb) {
+        return;
+    }
+    const int band_h = XBED_BREADCRUMB_H / XBED_BREADCRUMB_BANDS;
+    uint32_t *row = (uint32_t *)fb + stage * band_h * XBED_BREADCRUMB_W;
+    uint32_t color = s_breadcrumb_colors[stage];
+    for (int y = 0; y < band_h; y++) {
+        for (int x = 0; x < XBED_BREADCRUMB_W; x++) {
+            row[x] = color;
+        }
+        row += XBED_BREADCRUMB_W;
+    }
+    XVideoFlushFB();
+}
+
 int main(void)
 {
+    /* CYCLE-31 OPTION (d) BREADCRUMB #0: paint the top stripe RED
+     * BEFORE any other observable side effect of main(). If composite
+     * capture during a cycle-32 real-Xbox run records this stripe,
+     * main() ran past its first executable instruction — γ
+     * ("main() never reached the fire calls") is INVALIDATED. Absence
+     * narrows the live causes to (γ.0) execution never entered main()
+     * AT ALL (CRT _start / __security_init_cookie / static-init
+     * crash), or (γ.1) XVideoSetMode itself crashed before painting
+     * completed (kernel display init not safe in this context).
+     * Cycle-31 ordering rationale: this call MUST precede the
+     * cycle-25 host-log anchor and the cycle-23 fires because its
+     * value proposition is exactly to discriminate "did main() run
+     * at all?" — running it AFTER another visible side effect would
+     * defeat the purpose. */
+    xbed_breadcrumb_paint(0);
+
     /* Host-log anchor BEFORE the first witness fire. Inert on real
      * Xbox and on stock xemu (the OUT to port 0xE9 is a silent
      * no-op without `XEMU_GUEST_LOG=1`). On xemu-Metal local
@@ -192,7 +392,20 @@ int main(void)
      * kernel-allocator activity (one MmAllocateContiguousMemoryEx
      * + MmPersistContiguousMemory + page wipe + four 32-bit writes
      * per fire). Up to and including the second cycle-23 fire,
-     * cycle 29 is bit-identical to cycle 25. */
+     * cycle 29 is bit-identical to cycle 25.
+     *
+     * Cycle 31 option (d): the cycle-25 line is preserved verbatim
+     * AND is now itself preceded by a cycle-31 visual breadcrumb
+     * paint (see xbed_breadcrumb_paint(0) above). Cycle 31 is
+     * therefore additive but NOT a strict superset of cycle 25 OR
+     * cycle 29: a single XVideoSetMode call runs BEFORE all prior
+     * cycles' instructions. Bit-identicality with cycle 29 holds
+     * only from this xbed_host_log_write line through the second
+     * cycle-29 self-witness fire — the only new instructions
+     * relative to cycle 29 are concentrated in the four extra
+     * xbed_breadcrumb_paint calls between checkpoints (each of which
+     * is a few hundred memory writes into a write-combined linear
+     * framebuffer) plus the one XVideoSetMode kernel call. */
     xbed_host_log_write("witness-only: main() entered (cycle 25)");
 
     /* Fire 1: MAIN_ENTERED.
@@ -206,6 +419,8 @@ int main(void)
     uintptr_t r1 = xbed_a4_witness_fire(XBED_A4_STAGE_MAIN_ENTERED);
     xbed_host_log_writef("witness-only: fire1 returned phys=0x%08lx",
                          (unsigned long)r1);
+    /* CYCLE-31 BREADCRUMB #1: cycle-23 XCTR fire1 returned. */
+    xbed_breadcrumb_paint(1);
 
     /* Sleep between fires.
      *
@@ -234,6 +449,8 @@ int main(void)
     uintptr_t r2 = xbed_a4_witness_fire(XBED_A4_STAGE_POST_MARKER0);
     xbed_host_log_writef("witness-only: fire2 returned phys=0x%08lx",
                          (unsigned long)r2);
+    /* CYCLE-31 BREADCRUMB #2: cycle-23 XCTR fire2 returned. */
+    xbed_breadcrumb_paint(2);
 
     /* Cycle 29 option (c): self-allocated witness fires AFTER the
      * cycle-23 XCTR fires.
@@ -267,9 +484,13 @@ int main(void)
     uintptr_t rs1 = xbed_self_witness_fire(XBED_A4_STAGE_MAIN_ENTERED);
     xbed_host_log_writef("witness-only: self-fire1 returned phys=0x%08lx",
                          (unsigned long)rs1);
+    /* CYCLE-31 BREADCRUMB #3: cycle-29 WTNS self-fire1 returned. */
+    xbed_breadcrumb_paint(3);
     uintptr_t rs2 = xbed_self_witness_fire(XBED_A4_STAGE_POST_MARKER0);
     xbed_host_log_writef("witness-only: self-fire2 returned phys=0x%08lx",
                          (unsigned long)rs2);
+    /* CYCLE-31 BREADCRUMB #4: cycle-29 WTNS self-fire2 returned. */
+    xbed_breadcrumb_paint(4);
 
     /* Settle period before reboot.
      *
@@ -277,12 +498,30 @@ int main(void)
      * pre-witness image-blit (post-fault auto-reboot). Cycle-25's
      * intentional reboot path should be much faster:
      * HalReturnToFirmware(HalRebootRoutine) initiates a soft reset
-     * that reaches the dashboard FTP server in ~5..15 s.
-     * 500 ms here gives the host-log writes time to drain the
-     * port-0xE9 emit before the reboot kills the OUT instruction
-     * pipeline. Also matches the cycle-24 handoff recommendation
-     * verbatim. */
-    Sleep(500);
+     * that reaches the dashboard FTP server in ~5..15 s on a clean
+     * exit (cycles 26 + 28 reproduced ~70 s; cycle 30 reproduced
+     * ~39 s on the cycle-29 build — both consistent with an
+     * unhandled-fault auto-reboot path rather than the clean
+     * HalReturnToFirmware path actually being reached).
+     * Cycle 25's original 500 ms gave the host-log writes time to
+     * drain the port-0xE9 emit before the reboot kills the OUT
+     * instruction pipeline.
+     *
+     * CYCLE-31 OPTION (d): extend cycle-25's 500 ms to 2000 ms so
+     * a composite-capture stream running at ~30 fps captures the
+     * final painted stripe state across ≥60 frames. That gives the
+     * cycle-32 analyzer redundant samples in case of capture-card
+     * frame drops AND provides headroom for the BIOS to start
+     * reasserting its own video state during the soft reset (the
+     * AV encoder may take a few frames after HalReturnToFirmware to
+     * latch the dashboard's mode again). 2000 ms stays well under
+     * any plausible Xbox watchdog window AND still preserves the
+     * cycle-25 host-log drain guarantee (the drain completes in
+     * the first few ms; the remaining time is composite-headroom).
+     * The 500 → 2000 ms change cannot itself trigger a new failure
+     * mode (it is a passive Sleep on the same code path cycle 29
+     * already exercises). */
+    Sleep(2000);
 
     xbed_host_log_write("witness-only: rebooting via "
                         "HalReturnToFirmware(HalRebootRoutine)");

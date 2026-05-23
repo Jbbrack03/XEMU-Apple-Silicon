@@ -1,68 +1,55 @@
 # Current Cycle
 
-- Cycle: 30 Path A.4 real-Xbox deployment of the cycle-29 self-allocated-witness build vs cycle-29 witness-only XBE — **CLOSED on `apple-silicon-performance`; OUTCOME E2**.
-- Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run from this Mac).
+- Cycle: 31 Path A.4 option (d) on-screen visual breadcrumb — **CLOSED on `apple-silicon-performance`** (implementation slice; ZERO real-Xbox run; cycle-32 real-Xbox deployment is Hermes's call).
+- Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run).
 - Closed: 2026-05-23.
-- State: **CLOSED.** Outcome E2 per `witness-only/README.md` cycle-30 discriminator table = `witness.scan = D-cycle-27` AND `witness.scan-self = count=0`. **(γ) "main() never reaches the fire calls" is LEADING.** Cycle-22 pre-main-crash hypothesis RE-STRENGTHENED from weakened toward leading; α + β both REMAIN LIVE but DEPRIORITIZED (moot given γ leading); cycle-31 leading candidate is option (d) on-screen visual breadcrumb (option (b) DEMOTED). New timing observation: dashboard FTP recovery at t+39s (vs cycle 26/28's 70 s reproduced shape) — tracked open question, NOT load-bearing for the E2 conclusion.
+- State: **CLOSED.** Cycle 30 (closure commit `dfe1480cba`) observed outcome E2 = `witness.scan = D-cycle-27` AND `witness.scan-self = count=0`; (γ) "main() never reaches the fire calls" is LEADING; cycle-22 pre-main-crash hypothesis re-strengthened toward leading but not fully corroborated. Cycle 31 ships option (d) from the cycle-29 closure catalog: pbkit-free `XVideoSetMode(640, 480, 32, REFRESH_DEFAULT)` + a direct CPU paint of 5 distinguishable horizontal stripes into the resulting linear framebuffer; breadcrumb paint #0 runs as the FIRST observable side effect of `main()`, subsequent paints follow each checkpoint (XCTR fire1 return, XCTR fire2 return, WTNS self-fire1 return, WTNS self-fire2 return). The final settle Sleep is extended from cycle 25's 500 ms to 2 000 ms so a composite-capture stream at ~30 fps captures ≥60 frames of the deepest-painted state. NO shared-lib changes (helpers live entirely in `witness-only/main.c`); NO pbkit; NO NV2A class-object setup; NO xbed_init; NO file I/O. Single new include is `<hal/video.h>` (+`<string.h>` for `memset`).
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
-- HEAD at start: post-cycle-29 closure-doc-sync follow-up commit `54102a0b87` on `apple-silicon-performance`.
-- Bounded goal: "FTP-deploy cycle-29 oracle-agent + cycle-29 witness-only; run the canonical cycle-26/28-style sequence extended with `witness.scan-self` queries at baseline + post-run; record discriminator readback; update durable docs/state; close cleanly."
-- Result: SLICE COMPLETE. ZERO source/script code edits; ZERO XBE rebuilds; doc + evidence-file slice. Rule #15 carve-out for doc-only / run-only slices applies (same path as cycles 26 / 28).
+- HEAD at start: cycle-30 closure commit `dfe1480cba` on `apple-silicon-performance`.
+- Bounded goal: "Implement the smallest credible witness-only change that can answer the gamma question at a coarser granularity than cycle 30: did witness-only main() execute far enough to emit a synchronous visible breadcrumb on real hardware? Ship the implementation slice cleanly and leave a precise runbook for the next deployment slice."
+- Result: IMPLEMENTATION SLICE COMPLETE. `witness-only/main.c` modified to add `xbed_breadcrumb_init` + `xbed_breadcrumb_paint` static helpers + 5 paint sites; `witness-only/README.md` cycle-31 addendum + 8-row cycle-32 discriminator table + deployment runbook; `witness-only/manifest.json` purpose + `expected_results.real-xbox/physical/cycle-32` section. XBE rebuilt: `bin/default.xbe` 155 648 B (+4 096 B from cycle 29's 151 552 B); `witness-only.iso` 720 896 B (unchanged — same ISO sector boundary). Codex validation per rule #15 (non-trivial diff, ~250 lines C source + paired docs).
 
 ## Plan summary (this session, executed in order)
 
-1. Read required docs/state (handoff.md cycle-29 entry, decision-log.md cycle-29 entry, orchestration-state quartet, orchestration-workflow.md, cycle-29 closure docs for cycle-30 sequence + outcome table).
-2. Confirmed repo/git state (HEAD `54102a0b87`, two pre-existing untracked `.hermes_cycle*.txt` prompt files preserved un-staged).
-3. Reachability probe — Xbox @ 192.168.0.200: ping 0% loss, FTP/21 anonymous closed, 9001 OPEN (cycle-27 agent foreground).
-4. Baseline `witness.scan` against cycle-27 resident agent: `count=1 phys=0x03eb3000 reserved0=0 reserved1=0 mapped_pages_seen=419` (matches cycle-26/28 baselines exactly). NOTE: `witness.scan-self` not available on cycle-27 agent — verified via `help` listing.
-5. Reboot to dashboard. Initial anonymous-FTP poll timed out at +90s; authenticated `curl -u xbox:xbox ftp://...` confirmed dashboard at +218s. Methodology lesson encoded for future cycles.
-6. FTP-upload cycle-29 oracle-agent. First attempt skipped due to same-size diff; forced re-upload via `--overwrite` succeeded.
-7. FTP-upload cycle-29 witness-only. Single STOR succeeded (size mismatch vs cycle-25's binary).
-8. `ensure-agent` launched cycle-29 build; verified `witness.scan-self` verb registered in `help` output.
-9. Baseline both scans against cycle-29 agent: `witness.scan count=1 reserved0=0 reserved1=0` AND `witness.scan-self count=0`. **Hard preconditions MET.**
-10. `runxbe E:\Apps\witness-only\default.xbe`; polled FTP/21 (authenticated) + 9001 + ping. Dashboard FTP returned `226` at t+39s — NEW shape vs cycle 26/28's 70 s.
-11. Post-run: `ensure-agent` (cycle-29 build) + final both scans. **Final `witness.scan count=1 reserved0=0 reserved1=0` AND `witness.scan-self count=0`** = OUTCOME E2.
-12. Wrote evidence directory: `benchmark-runs/cycle30-real-xbox-witness-only-self-20260523T103624Z/` with 10 step logs + SUMMARY.md.
-13. Updated canonical docs: handoff.md cycle-30 entry on top (cycle-29 preserved unchanged); decision-log.md cycle-30 entry above cycle-29 (no supersession); orchestration-state quartet closure pass.
+1. Read required docs/state (handoff cycle-30 entry, decision-log cycle-30 entry, orchestration-state quartet, orchestration-workflow, witness-only/README.md, witness-only/main.c, witness-only/Makefile, witness-only/manifest.json, lib/xbed_runtime.{c,h}, nxdk/lib/hal/video.{h,c}).
+2. Confirmed repo/git state (HEAD `dfe1480cba`, three pre-existing untracked `.hermes_cycle*.txt` prompt files preserved un-staged; the new `.hermes_cycle31_option_d_prompt.txt` joins the cycle-22 + cycle-23 prompt files at root).
+3. Decided implementation approach: modify witness-only/main.c in place (vs. creating a sibling XBE). Modification preserves the natural evolution of witness-only (cycle 25 → cycle 29 → cycle 31); a sibling would have duplicated the cycle-25/29 invariants without clear added benefit; modifying in place keeps the smallest possible diff.
+4. Added cycle-31 head-comment addendum + 5 stripe-color constants + `xbed_breadcrumb_init` (XVideoSetMode + clear-to-black; idempotent) + `xbed_breadcrumb_paint(stage)` (96-row band fill + XVideoFlushFB).
+5. Inserted 5 `xbed_breadcrumb_paint(N)` calls into `main()`: paint(0) BEFORE the cycle-25 host-log line; paint(1) after fire1 return; paint(2) after fire2 return; paint(3) after self-fire1 return; paint(4) after self-fire2 return.
+6. Extended the pre-reboot Sleep from cycle 25's 500 ms to 2 000 ms with cycle-31 rationale comment block.
+7. Rebuilt witness-only XBE; verified +4 096 B size delta from cycle 29 (fits in one nxdk XBE page boundary).
+8. Updated paired docs: `witness-only/README.md` cycle-31 addendum + 5-stripe color map + 8-row cycle-32 discriminator table + cycle-32 deployment runbook + cross-references updated. `witness-only/manifest.json` title + purpose + `real-xbox/physical/cycle-32` expected_results section (F1..F8 outcomes).
+9. Ran Codex validation per rule #15.
+10. Synced canonical docs (handoff.md cycle-31 entry on top, decision-log.md cycle-31 entry on top, orchestration-state quartet closure pass).
 
 ## Exit criteria — final status
 
 1. [x] Required docs/state files read.
-2. [x] Repo/git state confirmed; two `.hermes_cycle*.txt` files preserved un-staged.
-3. [x] Xbox reachable; cycle-27 agent foreground confirmed via `help`.
-4. [x] Baseline `witness.scan` precondition MET against cycle-27 agent.
-5. [x] Reboot to dashboard completed; dashboard FTP confirmed up.
-6. [x] cycle-29 oracle-agent FTP-uploaded (forced via `--overwrite`).
-7. [x] cycle-29 witness-only FTP-uploaded.
-8. [x] `ensure-agent` launched cycle-29 build; `witness.scan-self` verb verified registered.
-9. [x] Baseline `witness.scan` AND `witness.scan-self` preconditions BOTH MET against cycle-29 agent.
-10. [x] `runxbe witness-only` issued; dashboard recovery measured (t+39s, NEW shape).
-11. [x] Post-run cycle-29 agent re-launched; final both scans captured.
-12. [x] Outcome classified as **E2** per `witness-only/README.md` cycle-30 discriminator table.
-13. [x] Evidence directory populated under `benchmark-runs/`.
-14. [x] Canonical docs synced (handoff.md, decision-log.md, orchestration-state quartet).
-15. [x] Closure commit landed on `apple-silicon-performance` (pending below).
+2. [x] Repo/git state confirmed; pre-existing `.hermes_cycle*.txt` files preserved un-staged.
+3. [x] `witness-only/main.c` modified (head-comment addendum + 2 static helpers + 5 paint sites + Sleep extension).
+4. [x] `witness-only/README.md` cycle-31 addendum + 5-stripe map + 8-row cycle-32 discriminator table + runbook.
+5. [x] `witness-only/manifest.json` title + purpose + cycle-32 expected_results.
+6. [x] `witness-only/bin/default.xbe` rebuilt (155 648 B, +4 096 B from cycle 29).
+7. [x] Codex validation per rule #15.
+8. [x] Canonical docs synced (handoff.md, decision-log.md, orchestration-state quartet).
+9. [x] Closure commit pending below.
 
-## Out-of-scope (kept bounded for cycle 30)
+## Out-of-scope (kept bounded for cycle 31)
 
 - NO xemu-fork host source touched.
-- NO `lib/xbed_a4_witness.{c,h}` touched.
-- NO `lib/xbed_self_witness.{c,h}` touched.
-- NO `oracle-agent/controller.c` touched.
-- NO image-blit / witness-only / oracle-agent source touched.
-- NO XBE rebuilds.
+- NO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 lockstep contract intact).
+- NO `lib/xbed_self_witness.{c,h}` touched (cycle-29 self-witness shim intact).
+- NO `lib/lib.mk` touched (cycle-29 opt-in policy intact).
+- NO `oracle-agent/*` touched (cycle-27 preserve gate + cycle-29 witness.scan-self verb intact).
+- NO image-blit source touched.
+- NO `xbed_runtime.{c,h}` touched (existing `xbed_init` reference pattern reused without modification).
+- NO real-Xbox run this session (cycle-32 scope, Hermes's call).
 - NO retail-title / §G.5 / RT-as-texture / second-wave-XBE work.
 - NO flag default flips.
-- NO PushNotification — bounded run/doc slice, not blocker / milestone.
+- NO PushNotification — bounded implementation slice, not blocker / milestone.
 
-## Outcome (cycle 30)
+## Recommended cycle-32 scope (NOT executed this session — Hermes's call)
 
-**E2** — `witness.scan = D-cycle-27` AND `witness.scan-self = count=0`. **(γ) "main() never reaches the fire calls" is LEADING.** Because the cycle-29 self-witness fires execute AFTER the cycle-23 XCTR fires (Codex round-1 high finding #1 ordering), E2 also rules out "main() reached cycle-23 fire #2 but crashed before the cycle-29 fires" — both fire pairs are equally invisible, and the cycle-29 path has no XCTR-side dependency. Cycle-22 leading hypothesis ("`witness-only`'s / `image-blit`'s `main()` does not execute its first fire-call instruction") is RE-STRENGTHENED toward LEADING, but not fully corroborated. (α) and (β) remain LIVE but DEPRIORITIZED (moot given γ leading).
+Deploy the cycle-31 `witness-only/bin/default.xbe` (155 648 B) to `/E/Apps/witness-only/default.xbe` and run the cycle-30 canonical sequence WITH the composite-capture leg ARMED via `scripts/apple-silicon/composite-record.sh` (MS2109 USB stick + ffmpeg AVFoundation) BEFORE issuing `runxbe`. Cycle-29 oracle-agent stays in place (already deployed by cycle 30; `witness.scan-self` verb still registered). Hard preconditions add: composite-capture leg ARMED + MS2109 recognized. Expected outcomes F1..F8 per `witness-only/README.md` cycle-32 discriminator table — keyed on the deepest visible stripe color × `(witness.scan, witness.scan-self)` two-tuple.
 
-## Recommended cycle-31 scope (NOT executed this session — Hermes's call)
-
-**Option (d)** — on-screen visual breadcrumb. Either composite-capture during `witness-only` execution OR re-architect `witness-only` to emit a synchronous visual marker (pbkit-free `XVideoSetMode` + framebuffer-write breadcrumb). Discriminates γ at the "did `main()` execute at all?" granularity: a known-pattern breadcrumb on screen proves `main()` ran; absence proves it did not.
-
-**Option (b) DEMOTED.** Cycle 30 makes α-vs-β moot for now; option (b) (agent-side prior-phys dump + read-only kseg0 dump verb) can be re-elevated if cycle 31 option (d) shows `main()` IS running but witness writes are silently no-op.
-
-**Cycle-30 timing observation tracked as cycle-31+ open question.** Dashboard FTP recovery at t+39s is a NEW shape; possible readings include faster early-crash bypassing witness lib `.text`, normal variance, or shifted crash site from +4 096 B of linked code. Repeat-sampling (3-5 cycle-30 chainloads) or composite capture would discriminate.
+The decisive readback combines deepest-stripe count with the cycle-30 two-tuple. F1 (all 5 stripes + WTNS success + XCTR D-cycle-27) means γ INVALIDATED with α/β live on XCTR side. F3 (stripe 0 only + count=0) indicates the cycle-23 witness mechanism is the failure source on real Xbox in this minimal XBE — redesign required. F4 (no stripes + count=0) covers γ.0 (`main()` never entered) OR γ.1 (XVideoSetMode faulted) — cycle-22 pre-main hypothesis FULLY CORROBORATED in its strongest form; next cycle ships pre-main breadcrumbs. F4' (no stripes + WTNS count=1) — graceful XVideoSetMode FALSE return — means `main()` DID execute and γ is INVALIDATED via the WTNS path (Codex round-2 high finding adopted distinguishing F4 from F4'). F2 / F5 / F6 (full success on both mechanisms) / F7 / F8 sit between these endpoints with their own follow-up branches per the 9-row F1..F8 + F4' table.
