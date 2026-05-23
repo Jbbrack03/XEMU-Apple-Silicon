@@ -1,54 +1,48 @@
 # Validation Status
 
-- Active slice: cycle 22 Path A.3 — provenance audit of `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}`. Doc/evidence-only audit; no code changes; no XBE rebuild; no real-Xbox runs.
-- Validation state: **CLOSED — five-set provenance audit completed with HIGH-confidence verdicts; cycle-19 hypothesis #1 fully invalidated; cycle-22 leading hypothesis (image-blit-specific early crash) is best-fit to all evidence.**
+- Active slice: cycle 23 Path A.4 — non-fopen kernel-pool controller-buffer witness for image-blit (XBE-only + oracle-agent RPC extension; no xemu-fork host source touched). Local xemu-Metal validation across 4 boots is green; Codex round-1 BLOCK with 4 findings → all adopted → round-2 PASS_WITH_FINDINGS → MINOR PARTIAL closed post-round-2.
+- Validation state: **CLOSED — implementation + local validation + Codex iteration complete; canonical docs synced; commit is the final step.** Real-Xbox discriminator run is OUT OF SCOPE for cycle 23 per the bounded assignment.
 
-## Gate status (cycle 22)
+## Gate status (cycle 23)
 
-- [x] Fresh worker receipt posted before deeper work (18:41 CDT).
-- [x] Inventory of every artifact under `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}`: six PNG files, **zero** README/metadata/provenance docs. Audit relies on git history + harness/agent source lineage.
-- [x] Git-history trace of each capture file → introducing commit:
-  - `pipeline-smoke/real-xbox.png` → `aae0138565` (2026-05-06 15:32 CDT).
-  - `color-channel/real-xbox.png` → `823733f2e6` (2026-05-06 23:03 CDT; file mtime 21:48 same day).
-  - `depth-floor/real-xbox.png` → `823733f2e6` (2026-05-06 23:03 CDT; file mtime 21:48 same day).
-  - `mirror/real-xbox.png` → `823733f2e6` (2026-05-06 23:03 CDT; file mtime 21:48 same day).
-  - `mirror/composite.png` → `58bf218838` (2026-05-07 10:39 CDT).
-  - `controller-roundtrip/real-xbox-zero.png` → `58bf218838` (2026-05-07 10:39 CDT).
-- [x] Cross-reference with dashboard-transition commit `e74715cd71` "Composite-capture leg + UnleashX dashboard switch + iND-BiOS findings" 2026-05-06 19:21 CDT. Conclusion: pipeline-smoke captured pre-switch (XBMC4Gamers/SITE RunXBE); all other captures post-switch (UnleashX/SITE EXEC).
-- [x] Source-lineage diff capture-time → HEAD:
-  - `oracle-agent/commands.c::cmd_runxbe` — 2 cosmetic edits (2026-05-10 path-arg parsing rework, 2026-05-12 SMC fan-curve cleanup); `XLaunchXBE(path)` kernel call unchanged.
-  - `oracle-orchestrator.py::run_diag` — 49-line diff, all comment-only.
-  - `xbe-harness/xbe_renderers.py::run_real_xbox` — diff adds /tmp QMP socket, env timeout knob, agent-launch + pre-run-setup helpers; real-Xbox chainload flow unchanged.
-- [x] Conservative per-set verdict recorded (all five sets: **runxbe path, HIGH confidence**) in handoff.md + decision-log.md cycle-22 entries.
-- [x] Cycle-21 interpretation re-cast against A.3 evidence — cycle-19 hypothesis #1 fully invalidated; cycle-21 hypothesis #3 invalidated for D:\\ writes; cycle-22 leading hypothesis is **image-blit crashes before its main() body's first instruction completes**.
+- [x] Fresh worker receipt posted before deeper work (19:18 CDT).
+- [x] Design locked (19:24 CDT) — kseg0 scan + MmGetPhysicalAddress per-page gate + shared `reserved[0]/reserved[1]` filter set + HIGHEST-phys targeting + new `witness.scan` RPC on the agent. No fopen anywhere in the witness path.
+- [x] Implementation: `xbed_a4_witness.{h,c}` (~170 lines) + `lib.mk` SRCS add + image-blit/main.c call sites (+26 lines) + oracle-agent `cmd_witness_scan` RPC (+127 lines) + main.c registration (+1 line).
+- [x] Clean build of both XBEs (image-blit + oracle-agent); only nxdk-internal warnings, no warnings on cycle-23 code.
+- [x] Local xemu-Metal validation across 4 boots: witness fires on every boot (`xbed_a4_witness: enter stage=1` + `enter stage=3` lines), scan correctly reports "no XCTR buffer found" on standalone xemu (no agent), `mapped_pages_seen=378` cold-boot / 77 warm-reboot.
+- [x] Local xemu-Metal validation: image-blit's first-boot v0.4 pass=3/8 mask=0x31 tally UNCHANGED (no instrumentation regression).
+- [x] Codex round 1: BLOCK with 4 findings — 2 BLOCKING (agent reader needs `MmGetPhysicalAddress` gate + filter parity with writer), 1 MEDIUM (writer first-match attribution ambiguous), 1 MINOR (header doc drift).
+- [x] All round-1 findings adopted in full:
+  - BLOCKING #1: `cmd_witness_scan` gains `MmGetPhysicalAddress` per-page gate via new `a4_reader_candidate_ok` helper.
+  - BLOCKING #2: `cmd_witness_scan` applies same `reserved[0]/reserved[1]` filters as writer (lockstep documented in commands.c body comment + filter helpers extracted on both sides).
+  - MEDIUM #3: writer changed from first-match to HIGHEST-phys-match (most recent agent allocation; deterministic across repeated runs in one power session).
+  - MINOR #4: header `xbed_a4_witness.h` Safety notes rewritten + "first occurrence/first match" wording replaced with "HIGHEST-phys passing candidate" wording.
+- [x] Codex round 2: PASS_WITH_FINDINGS — all 3 BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL (residual header "first match" wording in 2 places).
+- [x] MINOR PARTIAL closed post-round-2 via direct comment sync.
+- [x] Validation marker written at `.claude/state/codex-validate-last-run`: `2026-05-23T01:02:05Z cycle 23 Path A.4 — codex-validate changes round 2 PASS_WITH_FINDINGS (all BLOCKING resolved, MEDIUM resolved, MINOR resolved via header comment sync after round 2)`.
+- [x] Canonical docs synced (`handoff.md` cycle-23 entry, `decision-log.md` cycle-23 entry, orchestration-state quartet).
+- [ ] Commit covering code + docs + ISOs + validation marker — pending; cycle-23 closure commit hash to be recorded in `handoff-summary.md` after commit lands.
 
 ## Codex validation decision
 
-**SKIPPED under rule #15's "doc-only changes" carve-out. Per-slice justification recorded.**
+**Rule #15 trigger #2 (non-trivial uncommitted code in xemu-fork/ apple-silicon scripts > 30 lines) MET.** Ran `/codex-validate changes`. Round 1 verdict: BLOCK with 4 findings. Round 2 verdict (after adopting all round-1 findings): PASS_WITH_FINDINGS. Round-2 MINOR PARTIAL closed post-round-2 via direct comment sync. Validation marker written.
 
-Rule #15 enumerates three Codex triggers:
+The codex-validate workflow this cycle used the local Codex CLI in read-only sandbox mode (`-s read-only`) per skill conventions; preflight confirmed Codex was logged in via ChatGPT (not API key); no destructive operations. Round-1 prompt + diff payload at `/tmp/codex-cycle23-prompt-*.txt` + `/tmp/codex-cycle23-diff-*.txt`; round-1 output at `/tmp/codex-cycle23-output-*.txt`. Round-2 equivalents at `/tmp/codex-cycle23-r2-*`.
 
-1. **Substantive plan** (`ExitPlanMode` or ≥4-task `TaskCreate` batch). N/A — cycle 22 used a 5-task TaskCreate batch internally for progress tracking (not a substantive plan with implementation alternatives). Plan-style external alignment was not required because the assignment was already bounded with explicit exit criteria.
-2. **Non-trivial uncommitted code in `xemu-fork/`** (renderer / TCG / NV2A / build / runtime flag plumbing / apple-silicon scripts; aggregate diff > 30 lines). **N/A — cycle 22 produced zero code changes.** All edits are markdown under `docs/apple-silicon/` + `orchestration-state/*`. Rule #15 explicitly carves out "doc-only changes" from the >30-line threshold.
-3. **Stuck for 3 consecutive failed attempts or two distinct failed hypotheses.** N/A — A.3 produced a clean discriminating answer on first attempt.
+## What stands from cycles 17 + 19 + 20 + 21 + 22
 
-No validation marker was written at `.claude/state/codex-validate-last-run` for cycle 22. This paragraph IS the per-slice "why Codex was not required" record per the assignment's exit criterion.
-
-## What stands from cycles 17 + 19 + 20 + 21
-
-- xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged.
+- xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged. Cycle 23 does NOT regress the local xemu pass=3/8 mask=0x31 baseline.
 - §H.6 IMAGE_BLIT MET under the flag locally — unchanged.
 - Flag ships opt-in, default OFF — unchanged.
-- Cycle 20's empirical observation that **D:\\ markers don't land for image-blit on real Xbox under runxbe chainload** — unchanged (this is true; the interpretation changes per cycle 22, not the observation).
-- Cycle 21's empirical observation that **E:\\ markers don't land for image-blit on real Xbox under runxbe chainload** (4 reproductions of the 22.4 s gap) — unchanged.
+- Cycle 20 + cycle 21 empirical observation that image-blit's `fopen`-based markers (D:\\ then E:\\) produce ZERO files on real Xbox under `runxbe` chainload, with consistent 22.4 s chainload→FTP-back gap across 4 reproductions — unchanged; A.4 is the discriminator that targets this opaque failure with a fopen-free mechanism.
+- Cycle 22 invalidation of cycle-19 hypothesis #1 (launch-path blocker) and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged; cycle 23 implements A.4 specifically because of those invalidations.
 
-## What changed (cycle 22)
+## What changes (cycle 23)
 
-- **Cycle-19 hypothesis #1 (D:\\ remap mismatch / runxbe-SITE-EXEC chainload blocks witness-path file writes):** cycle 21 demoted it from leading to "insufficient as sole explanation"; cycle 22 **fully invalidates** it via comparator evidence (five reference captures produced via the same `XLaunchXBE`-based chainload path).
-- **Cycle-21 hypothesis #3 (FATX-driver / NT-mount state diverges between FTP-server-time and chainloaded-XBE-time):** invalidated for D:\\ by mirror/color-channel/depth-floor writing D:\\<id>-capture.bin successfully under UnleashX. Residual narrow uncertainty for E:\\ (no existing reference capture writes from a chainloaded XBE to E:\\).
-- **Cycle-22 new framing (image-blit crashes before main()'s first instruction):** elevated to LEADING. Best fit to every cycle 19/20/21 observation when read against A.3's comparator evidence.
-- Recommended next slice: **A.4** (non-fopen kernel-pool controller-buffer witness from cycle-21's proposed follow-up list). A.3 makes A.4 the right next discriminator: it tells us whether image-blit reaches its first instruction at all, which is the cycle-22 leading hypothesis's discriminator.
+- Cycle-22 leading hypothesis (image-blit dies before main()'s first instruction) becomes testable on real Xbox via the A.4 witness mechanism. Cycle 23 itself does NOT run the test — it ships the instrumentation. The discriminating real-Xbox run belongs to cycle 24.
 
-## Yes/no/inconclusive answer to the cycle-22 assignment question
+## Yes/no/inconclusive answer to the cycle-23 assignment question
 
-**YES** (HIGH confidence, all five reference sets). The existing `xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}` capture sets WERE produced through the same `runxbe`-SITE-EXEC-style chainload path that cycle-21's image-blit witness uses (specifically: orchestrator `run_diag` → `OracleClient.runxbe()` RPC → agent `cmd_runxbe` → `XLaunchXBE(path)`). The only material per-set differences are the dashboard the AGENT was FTP-launched from (XBMC4Gamers/SITE RunXBE for pipeline-smoke pre-19:21 dashboard switch; UnleashX/SITE EXEC for everything else) — and that difference is upstream of the diag XBE's process environment. The kernel-call chainload primitive `XLaunchXBE(path)` is provably unchanged between capture-time and cycle-21. The image-blit failure across cycle 19+20+21 is therefore **image-blit-specific**, not a launch-path defect.
+**Cycle 23 was "ADD the witness." Answer: YES — witness added, local-validated, Codex-validated, doc-synced; ready for cycle-24 real-Xbox discriminator run.**
+
+The discriminating result for cycle-22's leading hypothesis is PENDING cycle 24's real-Xbox run. Cycle 23's outcome shape was: ship the instrumentation + prove it works locally + Codex-validate before any real-Xbox run. All three are complete.

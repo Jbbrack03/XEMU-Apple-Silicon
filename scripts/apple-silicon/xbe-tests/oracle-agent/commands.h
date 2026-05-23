@@ -29,4 +29,12 @@ int cmd_reboot(struct netconn *c, const char *args);
 int cmd_bye(struct netconn *c, const char *args);
 int cmd_help(struct netconn *c, const char *args);
 
+/* Cycle 23 Path A.4: enumerate all `oracle_ctrl_buffer` instances in
+ * kseg0 with their `reserved[0]/reserved[1]` values. Discriminates
+ * the cycle-22 leading hypothesis (image-blit crashes before main()'s
+ * first instruction) by reading back the non-fopen witness written
+ * via `lib/xbed_a4_witness.{h,c}`. See `oracle-agent/commands.c::
+ * cmd_witness_scan` body comment for full semantics. */
+int cmd_witness_scan(struct netconn *c, const char *args);
+
 #endif /* ORACLE_COMMANDS_H */

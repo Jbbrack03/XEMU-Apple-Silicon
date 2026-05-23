@@ -1,41 +1,39 @@
 # Current Cycle
 
-- Cycle: 22 Path A.3 (**CLOSED — 2026-05-22 19:18 CDT**).
-- Started: 2026-05-22 18:41 CDT.
-- Worker receipt posted: 2026-05-22 18:41 CDT.
-- State: CLOSED — provenance audit completed with HIGH-confidence verdicts; cycle-21 interpretation materially sharpened; canonical docs synced; planned commit covers doc/state changes only.
+- Cycle: 23 Path A.4 (**CLOSED — 2026-05-22 20:05 CDT**).
+- Started: 2026-05-22 19:18 CDT.
+- Worker receipt posted: 2026-05-22 19:18 CDT.
+- State: CLOSED — non-fopen kernel-pool controller-buffer witness for image-blit SHIPPED + agent-side `witness.scan` RPC SHIPPED; local xemu-Metal validation green (4 boots, pass=3/8 mask=0x31 baseline UNCHANGED); Codex round 2 PASS_WITH_FINDINGS (all BLOCKING + MEDIUM resolved; MINOR resolved post-round-2); canonical docs synced; commit covers code + docs together.
 - Owner: Claude Code worker (Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell), fresh bounded session.
-- HEAD at start: `edee829e49` (cycle-21 Path A.2 docs/state closure).
-- Cycle-21 closure commit (HEAD-1): `df8eb65efc` (cycle-21 Path A.2 marker re-route + canonical doc sync).
-- Bounded goal (as assigned): determine, with file-backed evidence, whether the existing `xbox-real-references/` reference captures were produced through the same `runxbe` SITE-EXEC chainload path used by the current oracle workflow, or through a meaningfully different launch path.
-- Result: **YES, all five reference capture sets (pipeline-smoke / mirror / color-channel / depth-floor / controller-roundtrip + mirror-composite) were produced through the same `XLaunchXBE`-based chainload mechanism the cycle-21 image-blit witness uses.** Per-set verdicts at HIGH confidence (file-backed by git history + harness/agent source lineage). Cycle-19 hypothesis #1 ("D:\\ remap mismatch / runxbe-SITE-EXEC chainload blocks witness-path file writes") is **fully INVALIDATED** (cycle 21 only had it demoted). Cycle-21 hypothesis #3 (FATX-driver / NT-mount state diverges between FTP-server-time and chainloaded-XBE-time) invalidated for D:\\. Image-blit failure across cycle 19+20+21 conclusively re-classified as **image-blit-specific**, not a launch-path defect. Cycle-22 leading hypothesis: **image-blit crashes BEFORE its main() body's first instruction completes** (CRT init / static-init / DllCharacteristics / pre-main XBE thunking). Right next bounded slice: **Path A.4** (non-fopen kernel-pool controller-buffer witness from cycle-21's proposed follow-up list).
+- HEAD at start: `a023cda719` (cycle-22 Path A.3 closure — docs/state-only commit; provenance audit closed).
+- Cycle-22 closure commit (HEAD-0): `a023cda719`.
+- Bounded goal (as assigned by Hermes): "add a non-fopen kernel-pool controller-buffer witness for image-blit so we can tell whether the XBE dies before main() or reaches early runtime before file I/O." Keep scope tightly bounded to that discriminator.
+- Result: **SHIPPED.** New `scripts/apple-silicon/xbe-tests/lib/xbed_a4_witness.{h,c}` + 2 call sites in `scripts/apple-silicon/xbe-tests/image-blit/main.c` (bracketing the existing cycle-20 marker_00 fopen) + new oracle-agent RPC `witness.scan` in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.{h,c}` + registration in `main.c` + ISO/XBE rebuilds for both image-blit and oracle-agent. Local xemu-Metal validation across 4 boots: witness call sites fire on every boot (`xbed_a4_witness: enter stage=1` + `enter stage=3` lines), scan correctly reports "no XCTR buffer found" on standalone xemu (no agent), image-blit pass=3/8 mask=0x31 tally UNCHANGED on first boot. Codex round 1 returned BLOCK with 4 findings; all 4 adopted in full (BLOCKING #1: agent reader gains MmGetPhysicalAddress gate; BLOCKING #2: agent reader applies same reserved[0]/reserved[1] filters as writer; MEDIUM #3: writer changed from first-match to HIGHEST-phys-match for unambiguous repeated-run attribution; MINOR #4: header doc drift on "first match"/"first occurrence" wording). Codex round 2 returned PASS_WITH_FINDINGS with all 3 BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL (post-round-2 sync closed it). Validation marker written at `.claude/state/codex-validate-last-run`. The real-Xbox discriminator run is OUT OF SCOPE for cycle 23 per the bounded assignment; it belongs to cycle 24 (Hermes-scheduled).
 
 ## Exit criteria — final status
 
-1. [x] Worker receipt posted to claude-status.md + current-cycle.md before deeper work (18:41 CDT).
-2. [x] Inventory of every artifact under `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}`: 6 PNG files, ZERO README/metadata/provenance docs. Audit relies on git history + source lineage.
-3. [x] Git-history trace of each capture file:
-       - `pipeline-smoke/real-xbox.png` → `aae0138565` (2026-05-06 15:32 CDT, **pre-19:21 UnleashX-switch**) — XBMC4Gamers/SITE RunXBE.
-       - `color-channel,depth-floor,mirror/real-xbox.png` → `823733f2e6` (2026-05-06 23:03 CDT, file mtime 21:48, **post-switch**) — UnleashX/SITE EXEC.
-       - `mirror/composite.png + controller-roundtrip/real-xbox-zero.png` → `58bf218838` (2026-05-07 10:39 CDT) — UnleashX/SITE EXEC.
-       Dashboard-transition commit: `e74715cd71` (2026-05-06 19:21 CDT, "Composite-capture leg + UnleashX dashboard switch + iND-BiOS findings").
-4. [x] Source-lineage diff capture-time → HEAD:
-       - `oracle-agent/commands.c::cmd_runxbe`: 2 cosmetic edits only (path-arg parsing rework 2026-05-10; SMC fan-curve cleanup 2026-05-12); `XLaunchXBE(path)` kernel call unchanged.
-       - `oracle-orchestrator.py::run_diag`: 49-line diff, all comment-only.
-       - `xbe-harness/xbe_renderers.py::run_real_xbox`: diff adds /tmp QMP socket + env timeout knob + agent-launch + pre-run-setup helpers; real-Xbox chainload flow unchanged.
-5. [x] Conservative per-set verdict: **all five sets → runxbe path (HIGH confidence)**. Cycle-21 interpretation re-cast: image-blit failure is image-blit-specific. Leading hypothesis after cycle 22: image-blit crashes before its main() body's first instruction (`image_blit_marker(0, "program_entered")`) completes.
-6. [x] Canonical docs synced — `handoff.md` (cycle-22 entry on top; cycle-17/19/20/21 entries preserved); `decision-log.md` (cycle-22 entry above cycle-21; no supersession of earlier entries).
-7. [x] orchestration-state quartet updated (this file, claude-status.md, validation-status.md, handoff-summary.md).
-8. [x] Codex validation decision recorded in `validation-status.md`: **SKIPPED under rule #15's "doc-only changes" carve-out** (zero code changes; aggregate edits are markdown-only). Per-slice justification recorded.
-9. [ ] Intended-scope doc/state changes commit pending (next step). Stop after closure summary.
+1. [x] Worker receipt posted to claude-status.md + current-cycle.md + validation-status.md + handoff-summary.md before deeper work (19:18 CDT).
+2. [x] Inspect oracle-agent persistent controller buffer + image-blit main() entry + design witness mechanism (19:18-19:24 CDT).
+3. [x] Implement `xbed_a4_witness.{h,c}` + `lib.mk` wire-in.
+4. [x] Add `xbed_a4_witness_fire` call sites in `image-blit/main.c` (2 sites).
+5. [x] Add `cmd_witness_scan` RPC to oracle-agent (`commands.{h,c}` + `main.c` registration).
+6. [x] Build both XBEs (image-blit + oracle-agent) — clean builds, no warnings on cycle-23 code.
+7. [x] Local xemu validation across 4 boots — witness fires every time, image-blit's first-boot v0.4 pass=3/8 mask=0x31 tally UNCHANGED on Metal (no instrumentation regression).
+8. [x] Codex round 1 validation: BLOCK with 4 findings — all adopted (2 BLOCKING, 1 MEDIUM, 1 MINOR).
+9. [x] Codex round 2 validation: PASS_WITH_FINDINGS (all BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL → resolved post-round-2 via direct comment sync).
+10. [x] Canonical docs synced — `handoff.md` (cycle-23 entry on top; cycle-17/19/20/21/22 entries preserved); `decision-log.md` (cycle-23 entry above cycle-22; no supersession).
+11. [x] orchestration-state quartet updated (this file, claude-status.md, validation-status.md, handoff-summary.md).
+12. [ ] Commit (code + docs + ISOs + validation marker) — next step.
 
 ## Out-of-scope (kept bounded per the assignment)
 
-- Did NOT start Path A.4 (oracle-agent kernel-pool buffer witness for image-blit — now top-priority for next bounded slice per A.3's discriminating result).
-- Did NOT start Path B (smaller PFIFO-race-only Tier-1 diag XBE).
-- Did NOT modify xemu-fork host source.
-- Did NOT modify any XBE source (no rebuilds).
+- Did NOT take a real-Xbox run in this cycle — that's cycle 24 (Hermes-scheduled).
+- Did NOT modify the cycle-20+21 fopen-based marker mechanism — the A.4 witness is a strict ADD-ONLY discriminator that runs in parallel.
+- Did NOT touch xemu-fork host source (no `hw/`, `ui/`, `accel/`, `target/` edits).
+- Did NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on or any other flag.
+- Did NOT start Path B (smaller PFIFO-race-only Tier-1 diag XBE) — still on the table per cycle-19 recommendation list.
 - Did NOT touch retail-title metrics, §G.5, RT-as-texture, or any second-wave XBE work.
-- Did NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on.
-- Did NOT take any real-Xbox runs in this cycle.
-- Did NOT generate new reference captures (audit was strictly on existing artifacts).
+
+## Next bounded slice (NOT promoted this cycle)
+
+**Cycle 24.** Real-Xbox run of the patched image-blit + oracle-agent. Hard precondition (per `lib/xbed_a4_witness.h` doc): baseline `witness.scan` before chainload must show exactly ONE live buffer with `reserved[0] == 0`; if multiple orphans exist from a prior cycle-24 attempt in the same power session, Hermes must power-cycle the Xbox first. Then `runxbe E:\\Apps\\image-blit\\default.xbe`. Wait for FTP-back. Restart agent. Query `witness.scan` again. Interpretation per the discriminator semantics table in the cycle-23 decision-log entry.

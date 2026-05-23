@@ -79,6 +79,7 @@ static const struct cmd_entry s_cmds[] = {
     { "controller.axis",         cmd_controller_axis         },
     { "controller.clear",        cmd_controller_clear        },
     { "controller.buffer-info",  cmd_controller_buffer_info  },
+    { "witness.scan",            cmd_witness_scan            },
     { "tier2.preflight",         cmd_tier2_preflight         },
     { "tier2.install-jump-only", cmd_tier2_install_jump_only },
     { "tier2.install-noop",      cmd_tier2_install_noop      },

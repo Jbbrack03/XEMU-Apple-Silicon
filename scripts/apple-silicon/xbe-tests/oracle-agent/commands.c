@@ -15,6 +15,7 @@
  *     Larger payloads should use multiple calls.
  */
 #include "commands.h"
+#include "controller.h"
 #include "protocol.h"
 #include "smc.h"
 
@@ -405,6 +406,131 @@ int cmd_bye(struct netconn *c, const char *args)
     return 1;
 }
 
+/* Cycle 23 Path A.4 — non-fopen kernel-pool controller-buffer witness
+ * readback. Scans kseg0 [0x80010000, 0x84000000] in 4 KiB strides for
+ * every `oracle_ctrl_buffer` header instance that passes the SAME
+ * candidate filter set the writer uses in
+ * `lib/xbed_a4_witness.c::a4_candidate_ok`. For each match, reports
+ * `(phys_addr, virt_addr, live, reserved[0], reserved[1])`.
+ *
+ * Why this exists (cycle-23 design — see
+ * `docs/apple-silicon/decision-log.md` cycle-23 entry +
+ * `lib/xbed_a4_witness.h` body comment):
+ *
+ *   - The agent allocates a FRESH persistent buffer on every restart
+ *     (`controller.c::s_allocate_fresh` is unconditional; previous
+ *     opt-in reattach build was removed for production). It leaks a
+ *     4 KiB persistent page per restart until the Xbox is power-
+ *     cycled (`controller.c:207-208`).
+ *   - Image-blit's A.4 witness writes into the HIGHEST-phys candidate
+ *     it finds (the most recent agent allocation — the agent's
+ *     allocator grows monotonically per restart). The witness leaves
+ *     the magic + version intact, so subsequent scans still recognize
+ *     the buffer.
+ *   - After image-blit reboots back to FTP and the agent restarts,
+ *     calling `witness.scan` enumerates the live buffer + any orphan
+ *     persistent pages from earlier agent runs. The orphan that
+ *     image-blit stamped will appear with `reserved[0] = 0xA4xxxxxx`.
+ *
+ * Cycle-23 expected output shapes (from a CLEAN power-cycled state;
+ * see the "Hard precondition" line in `lib/xbed_a4_witness.h` —
+ * Hermes must power-cycle the Xbox if multiple orphans already
+ * exist before the cycle-24 run):
+ *
+ *   count=1 with reserved0=0x00000000        → no orphans; agent has
+ *                                               just started for the
+ *                                               first time this
+ *                                               power-cycle (witness
+ *                                               can't fire yet).
+ *   count=2 with orphan reserved0=0x00000000 → image-blit ran but did
+ *                                               NOT reach main()'s
+ *                                               first instruction
+ *                                               (cycle-22 leading
+ *                                               hypothesis CORROBORATED).
+ *   count=2 with orphan reserved0=0xA4000001 → image-blit reached
+ *                                               MAIN_ENTERED only
+ *                                               (marker_00 itself
+ *                                               crashed).
+ *   count=2 with orphan reserved0=0xA4000003 → image-blit reached
+ *                                               POST_MARKER0 (cycle-22
+ *                                               leading hypothesis
+ *                                               INVALIDATED; marker_00
+ *                                               fopen-fails silently
+ *                                               and code continues).
+ *
+ * Safety (Codex cycle-23 finding #1): kseg0 [0x80010000, 0x84000000]
+ * is NOT fully identity-mapped on the OG Xbox; only pages the kernel
+ * has actually allocated are valid. The writer's xemu-Metal local
+ * validation crashed on blind dereference (see
+ * `lib/xbed_a4_witness.c::xbed_a4_witness_fire` body comment) and
+ * required `MmGetPhysicalAddress` gating. The reader MUST use the
+ * same gate; this implementation does.
+ *
+ * Filter parity (Codex cycle-23 finding #2): magic + version alone
+ * matched random pages in the writer's local run. The reader applies
+ * the SAME extra filters the writer uses: `reserved[0]` must be 0 or
+ * A.4-tagged, `reserved[1]` must be < A4_MAX_PLAUSIBLE_COUNTER. Both
+ * sides MUST stay in lockstep on this filter set; if you change one,
+ * change the other in the same commit. */
+#define A4_RDR_KSEG0_SCAN_START  0x80010000u
+#define A4_RDR_KSEG0_SCAN_END    0x84000000u
+#define A4_RDR_PAGE_STRIDE       0x1000u
+#define A4_RDR_WITNESS_TAG       0xA4u
+#define A4_RDR_MAX_COUNTER       4096u
+
+static int a4_reader_candidate_ok(uintptr_t va)
+{
+    if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) return 0;
+    volatile uint32_t *p = (volatile uint32_t *)va;
+    if (p[0] != ORACLE_CTRL_MAGIC) return 0;
+    if (p[1] != ORACLE_CTRL_VERSION) return 0;
+    uint32_t r0 = p[2];
+    if (r0 != 0u && ((r0 >> 24) != A4_RDR_WITNESS_TAG)) return 0;
+    uint32_t r1 = p[3];
+    if (r1 > A4_RDR_MAX_COUNTER) return 0;
+    return 1;
+}
+
+int cmd_witness_scan(struct netconn *c, const char *args)
+{
+    (void)args;
+    op_send_text_begin(c, 0);
+    int reported = 0;
+    uint32_t mapped_pages_seen = 0;
+    for (uintptr_t va = A4_RDR_KSEG0_SCAN_START;
+         va < A4_RDR_KSEG0_SCAN_END;
+         va += A4_RDR_PAGE_STRIDE) {
+        if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) continue;
+        mapped_pages_seen++;
+        if (!a4_reader_candidate_ok(va)) continue;
+
+        volatile uint32_t *p = (volatile uint32_t *)va;
+        char buf[200];
+        uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
+        /* Mark the live buffer (the one this agent allocated this boot
+         * and pointed `oracle_ctrl_get()` at) so the host side doesn't
+         * have to cross-reference `controller.buffer-info`. */
+        const int is_live =
+            ((uintptr_t)oracle_ctrl_get() == va) ? 1 : 0;
+        snprintf(buf, sizeof(buf),
+                 "buf.%d phys=0x%08lx virt=0x%08lx live=%d "
+                 "reserved0=0x%08lx reserved1=0x%08lx",
+                 reported, (unsigned long)phys, (unsigned long)va,
+                 is_live,
+                 (unsigned long)p[2], (unsigned long)p[3]);
+        op_send_line(c, buf);
+        reported++;
+        if (reported >= 256) break;
+    }
+    char summary[96];
+    snprintf(summary, sizeof(summary),
+             "count=%d mapped_pages_seen=%u",
+             reported, (unsigned)mapped_pages_seen);
+    op_send_line(c, summary);
+    op_send_text_end(c);
+    return 0;
+}
+
 int cmd_help(struct netconn *c, const char *args)
 {
     (void)args;
@@ -425,6 +551,7 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "controller.get [port=N]               read back synthetic input state");
     op_send_line(c, "controller.clear [port=N]             zero one or all ports");
     op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
+    op_send_line(c, "witness.scan                          enumerate kseg0 oracle_ctrl_buffer instances + reserved[0,1] (cycle-23 A.4 readback)");
     op_send_line(c, "tier2.preflight                       read-only Tier-2 hook slot check");
     op_send_line(c, "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)");
     op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");

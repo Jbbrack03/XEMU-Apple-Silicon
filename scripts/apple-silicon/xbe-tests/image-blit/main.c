@@ -138,6 +138,7 @@
  *     under test; a separate slice would cover the surface-cache
  *     propagation path).
  */
+#include "xbed_a4_witness.h"
 #include "xbed_capture.h"
 #include "xbed_runtime.h"
 
@@ -771,6 +772,22 @@ static void render_dashboard_frame(uint32_t frame_idx, void *ctx)
 
 int main(void)
 {
+    /* Cycle 23 Path A.4 (2026-05-22): non-fopen kernel-pool witness.
+     * Fires BEFORE the cycle-20 marker_00 fopen. Cycle 22 invalidated
+     * cycle-19 hypothesis #1 (launch-path blocker) via comparator
+     * evidence — five reference captures wrote D:\\<id>-capture.bin
+     * successfully via the same `XLaunchXBE` chainload path that
+     * image-blit's marker fopens reproducibly produce ZERO files for.
+     * The leading hypothesis after cycle 22 is "image-blit crashes
+     * BEFORE main()'s first instruction completes" (CRT init / static
+     * init / XBE thunking). A.4 is the cheapest discriminator: it
+     * uses NO fopen — it scans kseg0 for the oracle agent's
+     * persistent `oracle_ctrl_buffer` and writes the witness stage
+     * to the buffer's `reserved[0]`. If the witness fires (visible
+     * via the agent's new `witness.scan` RPC after image-blit reboots
+     * back to FTP), the pre-main-crash hypothesis is INVALIDATED. */
+    xbed_a4_witness_fire(XBED_A4_STAGE_MAIN_ENTERED);
+
     /* Cycle 20 Path A: marker 00 fires BEFORE anything else — no
      * pbkit, no XVideoSetMode, no VRAM alloc. If real Xbox produces
      * this file but no later markers, the failure is in xbed_init or
@@ -778,6 +795,15 @@ int main(void)
      * D:\ doesn't fopen on this chainload path or the XBE crashes
      * before main() body runs. */
     image_blit_marker(0, "program_entered");
+
+    /* Cycle 23 Path A.4: second witness fire. If MAIN_ENTERED shows
+     * up in `witness.scan` but POST_MARKER0 does not, image-blit
+     * reached main() but `image_blit_marker(0, ...)` itself crashed
+     * (inside E:\\ mount, snprintf, or fopen). If both fire, the
+     * marker-helper code-path is healthy and the cycle-21 E:\\ marker
+     * absence is purely an fopen-write failure (not a control-flow
+     * issue). */
+    xbed_a4_witness_fire(XBED_A4_STAGE_POST_MARKER0);
 
     if (xbed_init(WIN_W, WIN_H) != XBED_OK) return 1;
     image_blit_marker(1, "xbed_init_ok");

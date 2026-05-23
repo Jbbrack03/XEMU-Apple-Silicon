@@ -22,7 +22,8 @@ XBED_LIB_DIR ?= $(CURDIR)/../lib
 SRCS += $(XBED_LIB_DIR)/xbed_runtime.c \
         $(XBED_LIB_DIR)/xbed_capture.c \
         $(XBED_LIB_DIR)/xbed_input_synth.c \
-        $(XBED_LIB_DIR)/xbed_texture.c
+        $(XBED_LIB_DIR)/xbed_texture.c \
+        $(XBED_LIB_DIR)/xbed_a4_witness.c
 
 SHADER_OBJS += $(XBED_LIB_DIR)/vs.inl \
                $(XBED_LIB_DIR)/ps.inl \
