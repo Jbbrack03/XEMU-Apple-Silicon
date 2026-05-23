@@ -2,7 +2,7 @@
 
 - Cycle: 29 Path A.4 option (c) self-allocated witness — **bounded code slice CLOSED on `apple-silicon-performance`**. Implementation + 4-round Codex (final round LOOKS GOOD) + paired-doc sync + rebuilt XBEs. Real-Xbox deployment is cycle-30 scope (Hermes's call).
 - Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run from this Mac).
-- Closed: 2026-05-23 (closure commit pending on `apple-silicon-performance`).
+- Closed: 2026-05-23 (closure commit `725bc97bbd` landed on `apple-silicon-performance`).
 - State: **CLOSED.** New shared diag-XBE lib `lib/xbed_self_witness.{h,c}` allocates the diag XBE's OWN persistent page via `MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory` and stamps a unique `'WTNS'` magic (0x534E5457) + version 1 + reserved0=(0xA4<<24)|stage + reserved1=counter; new oracle-agent read-only verb `witness.scan-self` enumerates kseg0 'WTNS' pages with the same `MmGetPhysicalAddress`-gated safety pattern + plausibility predicate as `cmd_witness_scan`; `witness-only/main.c` calls self-witness AFTER existing cycle-23 fires (Codex round-1 high ordering decision); shim opted in by `witness-only/Makefile` only (NOT `lib.mk` default SRCS). Positioned narrowly as a (γ)-only discriminator — α+β remain live on a successful cycle-30 readback because cycle-29 stamps a self-owned page, not the agent's XCTR page (Codex round-1 high finding adopted in all 5 doc surfaces). Build green; both XBEs rebuilt cleanly.
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
 - HEAD at start: post-cycle-28 closure commit `c77b509149` on `apple-silicon-performance`.
@@ -41,7 +41,7 @@
 7. [x] Both XBEs rebuilt cleanly (`oracle-agent` 417 792 B unchanged; `witness-only` 151 552 B = +4 096 B).
 8. [x] 4-round Codex validation completed (round 4 = LOOKS GOOD); validation marker written.
 9. [x] Canonical docs synced (handoff.md, decision-log.md, orchestration-state quartet).
-10. [ ] Closure commit landed on `apple-silicon-performance` — PENDING (next step).
+10. [x] Closure commit landed on `apple-silicon-performance`: `725bc97bbd`.
 11. [x] Two pre-existing untracked `.hermes_cycle*.txt` prompt files NOT staged.
 
 ## Out-of-scope (kept bounded for cycle 29)

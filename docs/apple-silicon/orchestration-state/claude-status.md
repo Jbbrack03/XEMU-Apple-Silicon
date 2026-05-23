@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 29 Path A.4 option (c) — ship the cycle-30 (γ)-discriminator infrastructure. Implementation + Codex + paired-doc sync + rebuilt XBEs. ZERO real-Xbox run.
-- Status: **CLOSED.** All exit criteria met except closure commit (next step). Codex round 4 = LOOKS GOOD; validation marker written.
+- Status: **CLOSED.** All exit criteria met. Closure commit `725bc97bbd` landed on `apple-silicon-performance`. Codex round 4 = LOOKS GOOD; validation marker written.
 
 ## Why cycle 29 ran this session
 
@@ -30,7 +30,7 @@ Hermes pre-session instruction explicitly assigned cycle-29 option (c) as the bo
 - [x] Rebuilt XBEs cleanly (after both round-1 adoption AND original implementation).
 - [x] Codex 4 rounds; round 4 LOOKS GOOD; marker written.
 - [x] Canonical docs synced.
-- [ ] Closure commit pending on `apple-silicon-performance` (next step).
+- [x] Closure commit landed on `apple-silicon-performance`: `725bc97bbd`.
 
 ## Confidence + risk notes
 
@@ -54,4 +54,4 @@ Hermes pre-session instruction explicitly assigned cycle-29 option (c) as the bo
 
 ## Next proposed action
 
-Closure commit on `apple-silicon-performance`. Cycle 30 (Hermes's call) deploys the cycle-29 oracle-agent + cycle-29 witness-only via FTP and runs the canonical cycle-26-style sequence extended with `witness.scan-self` queries at baseline + post-run. Expected outcomes E1/E1'/E1''/E2/E3/E4/E5 are enumerated in `witness-only/README.md` cycle-30 discriminator table.
+Cycle 30 (Hermes's call) deploys the cycle-29 oracle-agent + cycle-29 witness-only via FTP and runs the canonical cycle-26-style sequence extended with `witness.scan-self` queries at baseline + post-run. Expected outcomes E1/E1'/E1''/E2/E3/E4/E5 are enumerated in `witness-only/README.md` cycle-30 discriminator table.

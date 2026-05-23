@@ -19,7 +19,7 @@
 - [x] **Codex round 4 = LOOKS GOOD.** No new findings.
 - [x] Validation marker written at `.claude/state/codex-validate-last-run`.
 - [x] Canonical docs synced (handoff.md cycle-29 entry on top with cycle-28 preserved unchanged; decision-log.md cycle-29 entry above cycle-28; orchestration-state quartet closure pass).
-- [ ] Closure commit on `apple-silicon-performance` — PENDING (next step).
+- [x] Closure commit landed on `apple-silicon-performance`: `725bc97bbd`.
 - [ ] Cycle 30 (Hermes's call) — explicitly out of scope this session.
 
 ## Codex validation decision (cycle 29)
