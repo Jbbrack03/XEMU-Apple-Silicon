@@ -1,5 +1,45 @@
 # Decision Log
 
+## 2026-05-22 (cycle 26 Path A.4 real-Xbox witness-only deployment): PARTIAL DISCRIMINATOR (outcome shape D); hypothesis #5 PARTIALLY INVALIDATED in the catastrophic-hang sense; stamp-vs-no-stamp ambiguity left open for cycle 27; cycle-22 "pre-main crash" leading hypothesis STILL WEAKENED; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision REMAINS DEFERRED; NO source/script code edits; NO XBE rebuilds; Codex skipped under rule #15 doc-only carve-out
+
+**Decision.** Run the cycle-25-shipped `witness-only` diagnostic XBE on real Xbox autonomously from the Mac, document the outcome conservatively, and stop without source-code edits or XBE rebuilds. Treat the observed outcome (outcome shape D — clean dashboard recovery in ~70 s with no observable orphan, NOT in the cycle-25 design table's A/B/C set) as a partial discriminator: it RULES OUT cycle-24-like catastrophic hang (outcome B), but leaves the stamp-vs-no-stamp question OPEN. Defer the stamp-vs-no-stamp redesign to cycle 27 (Hermes's call), with 4 candidate approaches recorded in `orchestration-state/handoff-summary.md` "Next bounded slice".
+
+**What ran.** Claude Code worker (autonomous fresh session) executed the canonical cycle-26 sequence at 2026-05-22 / 2026-05-23 UTC:
+1. Verified Xbox @ 192.168.0.200 reachable in dashboard state (post-cycle-24 physical power-cycle by Hermes confirmed by `mapped_pages_seen=419` matching cycle-24 baseline exactly).
+2. `ensure-agent` + baseline `witness.scan`: count=1 buf phys=0x03eb3000 reserved[0]=0; precondition MET.
+3. FTP-uploaded `scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe` (147 456 B) to `/E/Apps/witness-only/default.xbe`.
+4. Chainloaded witness-only 4× plus 2 controls (invalid-path + mirror).
+5. Definitive timing via `curl FTP LIST` poll (the `nc -z -w 1` early-positive readings turned out to be artifacts during Xbox network-stack transitions): **~70.17 s for witness-only vs 20.67 s for invalid-path control vs ~36 s for known-good mirror control.**
+6. Post-run `witness.scan` after EVERY chainload: identical to baseline (no orphan ever observed).
+7. Recorded the outcome (Outcome D) in evidence summary + orchestration-state quartet + handoff.md + this decision-log entry.
+
+**Why this outcome shape was unexpected.** The cycle-25 design table enumerated 3 branches (A=clean reboot + orphan 0xA4000003; B=hang like cycle 24; C=clean reboot + orphan 0xA4000001). The session observed something that is neither A/C (no orphan) nor B (no hang) — outcome D. The cycle-25 design assumed an orphan would survive an agent re-launch. On this Xbox, the kernel pool deterministically returns the same phys=0x03eb3000 across 3 observed agent re-launches AND the agent's `s_allocate_fresh` at `oracle-agent/controller.c:147-198` always calls `memset(vp, 0, sizeof(*vp))` on its returned buffer (line 181). If a stamp landed, it would be silently wiped on the next ensure-agent. The cycle-25 design did not anticipate this collision. The controller.c:201-208 comment claiming "one persistent 4 KiB page per agent restart until the Xbox is power-cycled" predicts a different phys each restart, which is empirically falsified by this session's evidence.
+
+**What this resolves.**
+- **Hypothesis #5 PARTIALLY INVALIDATED in the catastrophic-hang sense.** Witness-only chainload does NOT hard-hang the Xbox in this minimal XBE. The Xbox fully recovered in 70 s without a physical power-cycle, vs cycle-24's 928 s+ silent.
+- Cycle-26 evidence DIFFERENTIATES witness-only (~70 s) from invalid-path (~20.67 s) and mirror (~36 s) — witness-only is being loaded by `XLaunchXBE` (otherwise would match invalid-path timing) and is NOT completing a normal known-good chainload cycle (otherwise would match mirror timing). Something in witness-only's execution delays recovery by ~30..50 s vs a known-good chainload.
+
+**What this leaves open.**
+- **Stamp-vs-no-stamp ambiguity:** no orphan observed → either (i) witness fire never landed a stamp OR (ii) stamp landed but new agent's memset wiped it.
+- **70 s delay shape:** could be slow kseg0 scan, delayed-fault watchdog window, or slow BIOS POST.
+- **Cycle-22 leading hypothesis status:** still WEAKENED. Not resolved by cycle 26.
+
+**Cycle 27 candidate scope (NOT promoted this session — Hermes's call).** Pick ONE to break the stamp-vs-no-stamp ambiguity:
+- (a) Modify `oracle-agent/controller.c::s_allocate_fresh` to NOT `memset` when it finds an existing `XCTR + version==1` buffer at the returned phys.
+- (b) Agent-side dump of prior controller-buffer phys+reserved[] to a known file BEFORE chainload + a read-only kseg0 dump verb that doesn't re-initialize the buffer.
+- (c) Witness-only allocates its own page via `MmAllocateContiguousMemoryEx` with a unique magic tag (separate from agent's allocator pattern).
+- (d) On-screen visual breadcrumb captured via `oracle-orchestrator.py capture` mid-run.
+
+**Methodology lesson.** `nc -z -w 1` produces spurious port=open readings during Xbox network-stack transitions. Use `curl --max-time 2 ftp://xbox:xbox@<host>/` issuing a real FTP LIST as the ground-truth signal for "dashboard fully ready". Encoded into future cycle-26-style poll loops.
+
+**Codex validation.** SKIPPED under rule #15's doc-only / ≤30-line uncommitted source diff carve-out. Zero source/script edits this session; all Xbox-side operations used existing agent verbs and existing Mac-side tooling. No validation marker written.
+
+**Files modified.** `docs/apple-silicon/handoff.md` (cycle-26 entry on top; cycle-25 entry preserved unchanged below); `docs/apple-silicon/decision-log.md` (this entry above cycle-25; no supersession); `docs/apple-silicon/orchestration-state/{current-cycle, claude-status, validation-status, handoff-summary}.md` (all four updated for cycle-26 closure). NEW evidence files at `benchmark-runs/cycle26-real-xbox-witness-only-20260523T041356Z/{00..20-*.log, SUMMARY.md}` (gitignored). ZERO source/script files touched. ZERO XBE rebuilds.
+
+**M15 status.** Still NOT MET. Pending §H.6 default-on shape (now blocked on cycle-27 stamp-vs-no-stamp discriminator + ~70 s delay discriminator), §G.5, RT-as-texture.
+
+---
+
 ## 2026-05-22 (cycle 25 Path A.4 witness-mechanism viability discriminator XBE): minimal `witness-only` diag XBE SHIPPED under `scripts/apple-silicon/xbe-tests/witness-only/` exactly per cycle-24 handoff recommendation; cycle-23 lib + agent + image-blit UNTOUCHED; local xemu-Metal smoke green; Codex 3-round validation green (round 3 = PASS_WITH_FINDINGS, all blocking + medium + low findings RESOLVED); cycle-26 real-Xbox deployment slice deferred to Hermes; cycle-22 "pre-main crash" leading hypothesis STILL WEAKENED carried from cycle 24; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision REMAINS DEFERRED
 
 **Decision.** Adopt the cycle-25 `witness-only` diag XBE as the discriminator implementation for cycle-24's NEW hypothesis #5 ("the kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context"). Five new files under `scripts/apple-silicon/xbe-tests/witness-only/`: `main.c` (~10-statement `main()` body), `Makefile` (lib.mk pattern identical to image-blit's), `manifest.json` (`real_xbox_only:true`, two record-only `expected_results` entries — one for the cycle-26 real-Xbox run, one for cycle-25 local xemu-Metal smoke), `README.md` (purpose / build / deploy / discriminator semantics table), `.gitignore` (peer convention). Built artifacts: `bin/default.xbe` 147 456 B + `witness-only.iso` 720 896 B. The bounded slice was "ship the discriminator XBE so Hermes can later schedule the real-Xbox deployment slice from durable docs"; cycle 25 does NOT include the real-Xbox run.
