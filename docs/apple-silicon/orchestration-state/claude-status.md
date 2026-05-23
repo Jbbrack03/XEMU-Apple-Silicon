@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 33 composite-capture fail-fast preflight slice — ship `scripts/apple-silicon/composite-preflight.sh` + default-on integration into `scripts/apple-silicon/composite-record.sh` so the cycle-32 OUTCOME F8 silent-stall (~93 s) aborts in ~8 s with an actionable physical-side checklist instead.
-- Status: **CLOSED.** Tool slice shipped; local validation green; docs/state synced; Codex validation closed at 6 rounds this closeout session (round 6 = LOOKS GOOD; full disposition in handoff.md + decision-log.md cycle-33 entries); validation marker written at `.claude/state/codex-validate-last-run`; closure commit pending.
+- Status: **CLOSED.** Tool slice shipped; local validation green; docs/state synced; Codex validation closed at 6 rounds this closeout session (round 6 = LOOKS GOOD; full disposition in handoff.md + decision-log.md cycle-33 entries); validation marker written at `.claude/state/codex-validate-last-run`; closure commit landed as `dcaf7a0206` on `apple-silicon-performance`. Bounded closeout-sync follow-up commit on top updates the orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md) to reference the landed hash instead of "closure commit pending"; rule #15 doc-only / state-only carve-out applies — no Codex required.
 
 ## Why cycle 33 ran this session
 
@@ -25,7 +25,7 @@ Cycle 32 closure (commit `ac515383bb`) documented OUTCOME F8 = "cycle-32 procedu
 - [x] `handoff.md` + `decision-log.md` cycle-33 entries on top.
 - [x] Orchestration-state quartet closure pass.
 - [x] Codex validation closed at 6 rounds (round 6 LOOKS GOOD). Marker written at `.claude/state/codex-validate-last-run`.
-- [ ] Closure commit pending.
+- [x] Closure commit landed as `dcaf7a0206`; bounded closeout-sync follow-up commit on top references the landed hash across the orchestration-state quartet.
 
 ## Confidence + risk notes
 
@@ -47,4 +47,4 @@ Cycle 32 closure (commit `ac515383bb`) documented OUTCOME F8 = "cycle-32 procedu
 
 ## Next proposed action
 
-Closure commit on `apple-silicon-performance`. Codex validation under rule #15 trigger #2 closed at 6 rounds this session (round 6 LOOKS GOOD). After commit, the substantive next slice remains the cycle-32 redo (Hermes's call after physical-side composite-cable / capture-input verification); the cycle-33 preflight makes that redo safer to run unattended.
+Closure commit `dcaf7a0206` landed on `apple-silicon-performance`; bounded closeout-sync follow-up commit on top updates the orchestration-state quartet to reference the landed hash. Codex validation under rule #15 trigger #2 closed at 6 rounds at the closure commit (round 6 LOOKS GOOD); the closeout-sync follow-up is doc-only / state-only and does not retrigger rule #15. The substantive next slice remains the cycle-32 redo (Hermes's call after physical-side composite-cable / capture-input verification); the cycle-33 preflight makes that redo safer to run unattended.

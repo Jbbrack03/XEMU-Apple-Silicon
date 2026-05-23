@@ -1,7 +1,7 @@
 # Validation Status
 
 - Active slice: cycle 33 composite-capture fail-fast preflight slice — implementation slice; new `scripts/apple-silicon/composite-preflight.sh` + integration into `scripts/apple-silicon/composite-record.sh` + paired docs/rules; aggregate uncommitted diff ~450 lines across two scripts + three docs + this state quartet.
-- Validation state: **Codex validation CLOSED** under rule #15 trigger #2. 6 rounds run this closeout session (rounds 1-5 = MINOR ISSUES, all adopted/deflected; round 6 = LOOKS GOOD); validation marker written at `.claude/state/codex-validate-last-run`; closure commit pending.
+- Validation state: **Codex validation CLOSED** under rule #15 trigger #2. 6 rounds run at cycle-33 closure (rounds 1-5 = MINOR ISSUES, all adopted/deflected; round 6 = LOOKS GOOD); validation marker written at `.claude/state/codex-validate-last-run`; closure commit landed as `dcaf7a0206` on `apple-silicon-performance`. Bounded closeout-sync follow-up commit on top is doc-only / state-only (orchestration-state quartet updated to reference the landed hash; no source/script touched); rule #15 doc-only / state-only carve-out applies — no Codex required for the closeout-sync slice itself.
 
 ## Rule #15 applicability (cycle 33)
 
@@ -27,7 +27,7 @@ The doc-only / run-only carve-out used by cycles 26 / 28 / 30 / 32 does NOT appl
 - [x] `handoff.md` + `decision-log.md` cycle-33 entries on top; cycle-32 entry preserved unchanged below.
 - [x] Orchestration-state quartet closure pass.
 - [x] Codex validation (rule #15 trigger #2) closed at 6 rounds (round 6 LOOKS GOOD). Marker written.
-- [ ] Closure commit pending.
+- [x] Closure commit landed as `dcaf7a0206` on `apple-silicon-performance`; bounded closeout-sync follow-up commit on top syncs the orchestration-state quartet to reference the landed hash (doc-only / state-only; no Codex required).
 
 ## Local validation evidence
 

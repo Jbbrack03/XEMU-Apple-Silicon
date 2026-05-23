@@ -1,6 +1,6 @@
 # Current Cycle
 
-- Cycle: 33 composite-capture fail-fast preflight slice — **CLOSED on `apple-silicon-performance`** pending closure commit. New `scripts/apple-silicon/composite-preflight.sh` + default-on integration into `scripts/apple-silicon/composite-record.sh` so the cycle-32 OUTCOME F8 silent-stall failure mode aborts in ~8 s instead of ~93 s.
+- Cycle: 33 composite-capture fail-fast preflight slice — **CLOSED on `apple-silicon-performance`** at closure commit `dcaf7a0206`. New `scripts/apple-silicon/composite-preflight.sh` + default-on integration into `scripts/apple-silicon/composite-record.sh` so the cycle-32 OUTCOME F8 silent-stall failure mode aborts in ~8 s instead of ~93 s. Bounded closeout-sync follow-up landed in this commit (orchestration-state quartet: this file + claude-status.md + validation-status.md + handoff-summary.md updated to reference the landed dcaf7a0206 instead of "closure commit pending"; no source/script touched; no Codex needed under rule #15 doc-only / state-only carve-out).
 - Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run).
 - Closed: 2026-05-23.
 - State: **CLOSED.** Implementation slice; ZERO real-Xbox run; cycle-32 redo remains Hermes's call after physical-side composite-cable / capture-input verification.
@@ -33,7 +33,7 @@
 7. [x] Handoff + decision-log cycle-33 entries on top; cycle-32 + cycle-31 entries preserved unchanged below.
 8. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
 9. [x] Codex validation closed at 6 rounds (round 6 LOOKS GOOD; full round-by-round disposition in handoff.md cycle-33 "Validation" paragraph + decision-log.md cycle-33 "Codex validation" paragraph + validation-status.md "Codex validation marker" section). Marker written at `.claude/state/codex-validate-last-run`.
-10. [ ] Closure commit pending.
+10. [x] Closure commit landed as `dcaf7a0206` on `apple-silicon-performance`. Bounded closeout-sync follow-up commit on top updates the orchestration-state quartet to reference the landed hash (no source/script touched; rule #15 doc-only / state-only carve-out applies — no Codex required).
 
 ## Out-of-scope (kept bounded for cycle 33)
 
