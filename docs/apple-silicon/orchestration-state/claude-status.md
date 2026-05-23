@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 23 Path A.4 — add a non-fopen kernel-pool controller-buffer witness to image-blit so we can tell, on real Xbox, whether image-blit dies before main()'s first instruction (cycle-22 leading hypothesis) or reaches early runtime before file I/O (alternative framing). Bypasses every partition-mount + FATX-driver-state concern by writing into the oracle-agent's persistent `oracle_ctrl_buffer` directly via kseg0, found via 'XCTR' magic scan with `MmGetPhysicalAddress` safety gate + reserved-field filters — no `fopen` anywhere in the witness path.
-- Status: **CLOSED — code shipped, local xemu-Metal validation green, Codex round-2 PASS_WITH_FINDINGS (all BLOCKING + MEDIUM resolved; MINOR resolved post-round-2 via comment sync); canonical docs synced; commit (code + docs + ISOs + validation marker) is the final remaining step.**
+- Status: **CLOSED — code shipped, local xemu-Metal validation green, Codex round-2 PASS_WITH_FINDINGS (all BLOCKING + MEDIUM resolved; MINOR resolved post-round-2 via comment sync); canonical docs synced; closure commit (code + docs + ISOs + validation marker) landed as `5fce3b14e4`.**
 - Active session: cycle 23 (Claude Code worker, Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell), fresh bounded session. HEAD at start = `a023cda719` (cycle-22 Path A.3 closure commit).
 
 ## Hypothesis being discriminated

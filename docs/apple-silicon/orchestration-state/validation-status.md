@@ -1,7 +1,7 @@
 # Validation Status
 
 - Active slice: cycle 23 Path A.4 — non-fopen kernel-pool controller-buffer witness for image-blit (XBE-only + oracle-agent RPC extension; no xemu-fork host source touched). Local xemu-Metal validation across 4 boots is green; Codex round-1 BLOCK with 4 findings → all adopted → round-2 PASS_WITH_FINDINGS → MINOR PARTIAL closed post-round-2.
-- Validation state: **CLOSED — implementation + local validation + Codex iteration complete; canonical docs synced; commit is the final step.** Real-Xbox discriminator run is OUT OF SCOPE for cycle 23 per the bounded assignment.
+- Validation state: **CLOSED — implementation + local validation + Codex iteration complete; canonical docs synced; closure commit landed as `5fce3b14e4`.** Real-Xbox discriminator run is OUT OF SCOPE for cycle 23 per the bounded assignment.
 
 ## Gate status (cycle 23)
 
@@ -21,7 +21,7 @@
 - [x] MINOR PARTIAL closed post-round-2 via direct comment sync.
 - [x] Validation marker written at `.claude/state/codex-validate-last-run`: `2026-05-23T01:02:05Z cycle 23 Path A.4 — codex-validate changes round 2 PASS_WITH_FINDINGS (all BLOCKING resolved, MEDIUM resolved, MINOR resolved via header comment sync after round 2)`.
 - [x] Canonical docs synced (`handoff.md` cycle-23 entry, `decision-log.md` cycle-23 entry, orchestration-state quartet).
-- [ ] Commit covering code + docs + ISOs + validation marker — pending; cycle-23 closure commit hash to be recorded in `handoff-summary.md` after commit lands.
+- [x] Commit covering code + docs + ISOs + validation marker landed as `5fce3b14e4` on `apple-silicon-performance`; hash recorded in `handoff-summary.md` and across the orchestration-state quartet.
 
 ## Codex validation decision
 

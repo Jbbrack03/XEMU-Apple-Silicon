@@ -3,7 +3,7 @@
 - Cycle: 23 Path A.4 (**CLOSED — 2026-05-22 20:05 CDT**).
 - Started: 2026-05-22 19:18 CDT.
 - Worker receipt posted: 2026-05-22 19:18 CDT.
-- State: CLOSED — non-fopen kernel-pool controller-buffer witness for image-blit SHIPPED + agent-side `witness.scan` RPC SHIPPED; local xemu-Metal validation green (4 boots, pass=3/8 mask=0x31 baseline UNCHANGED); Codex round 2 PASS_WITH_FINDINGS (all BLOCKING + MEDIUM resolved; MINOR resolved post-round-2); canonical docs synced; commit covers code + docs together.
+- State: CLOSED — non-fopen kernel-pool controller-buffer witness for image-blit SHIPPED + agent-side `witness.scan` RPC SHIPPED; local xemu-Metal validation green (4 boots, pass=3/8 mask=0x31 baseline UNCHANGED); Codex round 2 PASS_WITH_FINDINGS (all BLOCKING + MEDIUM resolved; MINOR resolved post-round-2); canonical docs synced; closure commit landed as `5fce3b14e4` (covers code + docs + ISOs + validation marker together).
 - Owner: Claude Code worker (Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell), fresh bounded session.
 - HEAD at start: `a023cda719` (cycle-22 Path A.3 closure — docs/state-only commit; provenance audit closed).
 - Cycle-22 closure commit (HEAD-0): `a023cda719`.
@@ -23,7 +23,7 @@
 9. [x] Codex round 2 validation: PASS_WITH_FINDINGS (all BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL → resolved post-round-2 via direct comment sync).
 10. [x] Canonical docs synced — `handoff.md` (cycle-23 entry on top; cycle-17/19/20/21/22 entries preserved); `decision-log.md` (cycle-23 entry above cycle-22; no supersession).
 11. [x] orchestration-state quartet updated (this file, claude-status.md, validation-status.md, handoff-summary.md).
-12. [ ] Commit (code + docs + ISOs + validation marker) — next step.
+12. [x] Commit (code + docs + ISOs + validation marker) landed as `5fce3b14e4` on `apple-silicon-performance`.
 
 ## Out-of-scope (kept bounded per the assignment)
 
