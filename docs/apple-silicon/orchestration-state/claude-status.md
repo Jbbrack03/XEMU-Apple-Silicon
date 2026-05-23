@@ -1,46 +1,57 @@
 # Claude Status
 
-- Objective: cycle 24 Path A.4 real-Xbox discriminator run for image-blit — use the cycle-23-shipped witness (writer in `image-blit/main.c`, reader in `oracle-agent/commands.c::cmd_witness_scan`) to answer the cycle-22 leading hypothesis on real hardware.
-- Status: **CLOSED with a CONCRETE BLOCKER outcome. Session 2026-05-22 21:30 → 21:55 CDT.** HEAD = `5e07380d33` at start; cycle-24 closure commit pending at session close.
+- Objective: cycle 25 Path A.4 witness-mechanism viability discriminator XBE — ship a minimal `witness-only` diag XBE under `scripts/apple-silicon/xbe-tests/witness-only/` so Hermes can later schedule the cycle-26 real-Xbox deployment slice from durable docs without relying on this session transcript.
+- Status: **CLOSED.** Fresh bounded session 2026-05-22; HEAD at start = `29a455a78e`. Cycle-25 closure commit pending at end of this session (final task in `TaskList`).
 
-## Current hypothesis status (delta from cycle 23 closure)
+## Why cycle 25 exists
 
-- Cycle-22 leading hypothesis ("image-blit crashes BEFORE main()'s first instruction"): **WEAKENED.** Cycle 19/20/21's reproducible 22.4 s chainload→FTP-back gap (5 attempts, max-min = 0.1 s) regressed in cycle 24 to **indefinite hang** (no FTP/21, no agent/9001, no ICMP ping for 928.3 s of continuous polling). The only difference between cycle-21 image-blit and cycle-23 image-blit is ~196 LOC of cycle-23 witness instrumentation. Most parsimonious explanation: the witness call IS firing inside `main()` and the resulting CPU state hangs the box — meaning at least some of `main()` executes that did not execute in cycle 21. Not invalidated because pre-main paths sensitive to the added `.text` (XBE thunking / CRT init / DllCharacteristics) could also explain the delta.
-- NEW (cycle 24) hypothesis #5: the kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context. Cycle-24 baseline `witness.scan` proved the mechanism is safe from the agent's process context; cycle-24 chainload failure suggests it may NOT be safe from image-blit's `main()` process context. Promote to top-priority candidate to discriminate before any further A.4 readback attempt.
-- Hypotheses #1 / #2 / #3 unchanged from cycle 22 closure.
+Cycle 24 ran the cycle-23 A.4 witness on real Xbox and CLOSED with a CONCRETE BLOCKER: cycle-23 image-blit hard-hung the Xbox for 928.3 s of continuous polling on FTP/21 + agent/9001 + ICMP ping. The cycle-22 leading hypothesis ("image-blit crashes BEFORE main()'s first instruction") is now WEAKENED but neither corroborated nor invalidated, because cycle 19/20/21's reproducible 22.4 s chainload→FTP-back gap regressed to indefinite hang — the only change between cycle-21 image-blit and cycle-23 image-blit is ~196 LOC of cycle-23 witness instrumentation, which is itself weak-but-real evidence that *something* inside that instrumentation is executing in cycle-23 image-blit that did not execute in cycle-21 image-blit. NEW hypothesis #5 (the kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context) was promoted as top-priority to discriminate before any further A.4 readback attempt.
 
-## What ran
+Cycle 25 ships the discriminator XBE: a minimal `witness-only` diag that fires the witness twice (MAIN_ENTERED + POST_MARKER0) with sleep gaps and `HalReturnToFirmware(HalRebootRoutine)`s. NO pbkit / NV2A / file I/O / xbed_init. **The intermediate marker helper (image-blit's `image_blit_marker(0, ...)` fopen) is REPLACED with a passive `Sleep(500)` — a successful cycle-26 outcome therefore proves the witness mechanism is real-Xbox-safe in this minimal context but does NOT independently exclude the marker helper as a contributor to image-blit's hang.** Builds via `lib/lib.mk` so it links `xbed_a4_witness.c` exactly the way image-blit does. Cycle 25 does NOT include the real-Xbox run — that is Hermes's call for cycle 26.
 
-1. Reachability + agent build check (2026-05-23T02:30:50Z) — Xbox reachable, but deployed agent was cycle-22 build (no `witness.scan` verb).
-2. Reboot Xbox to dashboard (2026-05-23T02:32:57Z) — dashboard FTP/21 back at +12 s.
-3. FTP-upload cycle-23 oracle-agent + image-blit XBEs (sizes confirmed via LIST).
-4. Re-launch agent via `oracle-orchestrator.py ensure-agent` — `SITE EXEC` succeeded; `witness.scan` verb recognized.
-5. Baseline `witness.scan` (2026-05-23T02:34:16Z) — exactly 1 live buffer, reserved[0]=0, reserved[1]=0; precondition MET.
-6. Chainload `E:\Apps\image-blit\default.xbe` via `oracle-client.py runxbe` (2026-05-23T02:34:34Z).
-7. Wait for FTP-back — **failed.** 928.3 s of polling on FTP/21 + agent/9001 + ICMP ping; all silent.
-8. Post-chainload `witness.scan` — **unrecoverable** without physical power-cycle.
+## What this session shipped
 
-## Files changed this cycle
+1. NEW `scripts/apple-silicon/xbe-tests/witness-only/`:
+   - `main.c` — minimal `main()` body (~10 statements) + ~100 lines of documentation comments.
+   - `Makefile` — lib.mk pattern (identical to `image-blit/Makefile`).
+   - `manifest.json` — `real_xbox_only: true`, `oracle_priority: ["real-xbox"]`, record-only `expected_results` for both cycle-26 real-Xbox and cycle-25 local xemu-Metal smoke.
+   - `README.md` — purpose / build / local validation / cycle-26 deployment sequence / discriminator-semantics table.
+   - `.gitignore` — peer-XBE convention (`*.obj`, `*.exe`, `*.c.d`, `*.cpp.d`, `__pycache__/`).
+2. BUILT `bin/default.xbe` (147 456 B) + `witness-only.iso` (720 896 B) via `eval "$(nxdk/bin/activate -s)" && make`.
+3. Local xemu-Metal smoke validation green (`benchmark-runs/cycle25-witness-only-xemu-metal-smoke-*/`).
+4. Codex 3-round validation green (round 3 = PASS_WITH_FINDINGS).
+5. Canonical docs synced (handoff.md cycle-25 entry on top, decision-log.md cycle-25 entry above cycle-24, orchestration-state quartet closure pass).
+6. Validation marker written to `.claude/state/codex-validate-last-run`.
 
-- `docs/apple-silicon/handoff.md` — cycle-24 entry on top; cycle-23 entry preserved unchanged.
-- `docs/apple-silicon/decision-log.md` — cycle-24 entry above cycle-23; no supersession.
-- `docs/apple-silicon/orchestration-state/{current-cycle.md, claude-status.md, validation-status.md, handoff-summary.md}` — closure pass.
-- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/{01-deploy.log, 02-baseline-witness-scan.log, 03-chainload-image-blit.log}` — evidence.
-- **ZERO source/script files touched.**
-- **ZERO XBE rebuilds.**
-- ZERO flag default flips.
+## Session progress
 
-## Codex validation
-
-**Skipped under rule #15's "doc-only / ≤30-line uncommitted diff" carve-out.** Cycle 24 ships zero source/script edits, zero XBE rebuilds, only doc + evidence-file edits. Per-slice justification recorded in `validation-status.md`. Validation marker NOT written. If cycle 25 implements the witness-only XBE, Codex validation becomes mandatory before deploying.
+- [x] Required docs/rules read; plan summarized to `current-cycle.md` + this file.
+- [x] Authored `scripts/apple-silicon/xbe-tests/witness-only/{main.c, Makefile, manifest.json, README.md, .gitignore}`.
+- [x] Built `bin/default.xbe` + `witness-only.iso` via nxdk.
+- [x] Local xemu-Metal smoke validation green (9 main() entries, 9 fire1, 9 fire2, 8 reboot lines under XEMU_GUEST_LOG=1 across 25 s).
+- [x] Codex round 1 (changes mode) → MAJOR ISSUES, 4 findings, ALL ADOPTED.
+- [x] Codex round 2 → BLOCK on residual #1 PARTIAL + new LOW, both adopted.
+- [x] Codex round 3 → **PASS_WITH_FINDINGS**, no new issues.
+- [x] Canonical docs synced (handoff.md cycle-25 entry on top; decision-log.md cycle-25 entry above cycle-24; orchestration-state quartet closure pass).
+- [x] Validation marker written.
+- [ ] Closure commit on `apple-silicon-performance` — final step in this session.
 
 ## Confidence + risk notes
 
-- HIGH confidence in baseline + chainload evidence (file-backed timing, port-state polling, ping evidence).
-- MEDIUM confidence in the "main() is being executed in cycle-23 image-blit" interpretation. Failure-mode delta is real and surprising; most parsimonious cause is the witness call but other explanations (pre-main path sensitivity to added `.text`) are not falsified.
-- LOW confidence in any specific NEXT step until cycle 25 discriminates the witness mechanism's real-Xbox safety. The witness-only XBE is the cheapest single experiment that answers it.
-- LOW risk of additional Xbox damage. The Xbox routinely tolerates hard-hang → power-cycle on this project (cycle 19+20+21 each ended with power-cycle for unrelated reasons); the iND-BiOS does cold-boot reliably. Hermes-side power-cycle is a 5-second ops step.
+- HIGH confidence in the XBE design — it is a direct restatement of the cycle-24 handoff recommendation, narrowed per Codex round-1 #1 finding.
+- HIGH confidence in the lib.mk linking pattern — image-blit and 15+ other XBEs already use it.
+- MEDIUM confidence that local xemu-Metal validation predicts real-Xbox behavior. The witness mechanism worked correctly on xemu-Metal for cycle 23 (4 boots green) but hard-hung real Xbox from image-blit's process context in cycle 24. xemu's RAM map and `MmGetPhysicalAddress` emulation cannot reproduce real-Xbox MMIO-aliasing failure modes. Local validation only proves the witness mechanism works in emulation — the real-Xbox answer is cycle-26's job.
+- LOW risk of additional Xbox damage from cycle 26's eventual deployment. Hermes-side power-cycle ops step is well-trodden across cycles 19+20+21+24.
+
+## What this session does NOT do
+
+- NO real-Xbox deployment (Hermes-scheduled cycle 26).
+- NO changes to `lib/xbed_a4_witness.{c,h}` (cycle-23 implementation is binding).
+- NO changes to `oracle-agent/` (its `witness.scan` reader is sufficient).
+- NO changes to image-blit (sibling XBE; image-blit stays untouched).
+- NO xemu-fork host source touched.
+- NO flag default flips.
 
 ## Next proposed action
 
-Close session cleanly. Hermes-scheduled cycle 25: build witness-only diag XBE (described in handoff.md + decision-log cycle-24 entries).
+Commit the cycle-25 closure on `apple-silicon-performance` and stop cleanly. Cycle-26 real-Xbox deployment is Hermes's call.

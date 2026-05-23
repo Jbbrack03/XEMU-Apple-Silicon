@@ -1,46 +1,59 @@
 # Validation Status
 
-- Active slice: cycle 24 Path A.4 real-Xbox discriminator run for image-blit. Operationally a docs/evidence + binary-deploy slice (no xemu-fork host code edits, no XBE rebuilds — used cycle-23 binaries as-is).
-- Validation state: **CLOSED with a CONCRETE BLOCKER outcome.**
+- Active slice: cycle 25 Path A.4 witness-mechanism viability discriminator XBE. Operationally a new-XBE source slice (5 new files under `scripts/apple-silicon/xbe-tests/witness-only/`; 2 built artifacts; cycle-23 lib + agent + image-blit UNTOUCHED; no xemu-fork host source touched).
+- Validation state: **CLOSED. Codex round-3 PASS_WITH_FINDINGS; all blocking + medium + low findings RESOLVED. Validation marker written.**
 
-## Gate status (cycle 24) — final
+## Gate status (cycle 25) — final
 
-- [x] Fresh worker receipt posted before deeper work (21:30 CDT).
-- [x] Xbox reachable at session start (`ping 192.168.0.200` 0% loss / ~0.5 ms RTT; `nc -z 192.168.0.200 9001` → port open).
-- [x] Cycle-23 oracle-agent + image-blit binaries FTP-uploaded to `/E/Apps/oracle-agent/default.xbe` and `/E/Apps/image-blit/default.xbe` after rebooting Xbox to dashboard. Remote sizes confirmed via `LIST` (417 792 B + 159 744 B = local sizes).
-- [x] Agent re-launched via `oracle-orchestrator.py ensure-agent` (`SITE EXEC` → `200 EXEC command succeeded`); `witness.scan` verb registered (`help | grep witness` returns the cycle-23 description).
-- [x] Baseline `witness.scan` returned `count=1 mapped_pages_seen=419` with the single live buffer at phys=0x03eb3000 / virt=0x83eb3000 / reserved[0]=0 / reserved[1]=0 / magic XCTR / anchor_ok=1 — precondition MET; no power-cycle needed before chainload.
-- [x] Chainload `runxbe E:\Apps\image-blit\default.xbe` issued at 2026-05-23T02:34:34Z. Chainload epoch recorded.
-- [ ] **FTP-back / agent-restart NOT observed.** 928.3 s of continuous polling on FTP/21 + agent/9001 + ICMP ping — all silent. Measurement aborted at 2026-05-23T02:50:02Z. Cycle 19/20/21 reproducible 22.3..22.4 s chainload→FTP-back gap regressed to indefinite hang.
-- [ ] **Post-chainload `witness.scan` UNRECOVERABLE.** Cannot read the persistent kernel-pool buffer without network reachability. The `MmPersistContiguousMemory`-tagged witness buffer survives soft reset but NOT power-off; the only recovery path (physical power-cycle by Hermes) erases the witness state. Cycle-24 A.4 byte is unrecoverable from this run.
-- [x] Conservative interpretation recorded against cycle-23 semantics: cycle-22 leading hypothesis WEAKENED (not corroborated or invalidated); NEW hypothesis #5 (witness mechanism real-Xbox safety from non-agent process context) promoted as top-priority discriminator candidate for cycle 25.
-- [x] Canonical docs synced (handoff.md cycle-24 entry on top; decision-log.md cycle-24 entry above cycle-23; orchestration-state quartet closure pass).
-- [x] Evidence preserved on disk: `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/{01-deploy.log, 02-baseline-witness-scan.log, 03-chainload-image-blit.log}`.
+- [x] Fresh worker receipt posted before deeper work (`docs/apple-silicon/orchestration-state/current-cycle.md` + `claude-status.md`).
+- [x] Required docs read (cycle-24 handoff entry, decision-log cycle-24 entry, oracle-and-xbe rule snapshot, peer-XBE patterns from `pipeline-smoke/`, `image-blit/`, `controller-readback/`).
+- [x] Authored: `scripts/apple-silicon/xbe-tests/witness-only/{main.c, Makefile, manifest.json, README.md, .gitignore}`.
+- [x] Built `bin/default.xbe` (147 456 B) + `witness-only.iso` (720 896 B) via `eval "$(nxdk/bin/activate -s)" && make`. Lib.mk pattern identical to image-blit's.
+- [x] Local xemu-Metal smoke validation green: 9× `witness-only: main() entered`, 9× `xbed_a4_witness: enter stage=1`, 9× `fire1 returned phys=0x00000000`, 9× `xbed_a4_witness: enter stage=3`, 9× `fire2 returned phys=0x00000000`, 8× `rebooting via HalReturnToFirmware(HalRebootRoutine)` lines across a 25 s timeout window under `XEMU_GUEST_LOG=1`. Evidence preserved at `benchmark-runs/cycle25-witness-only-xemu-metal-smoke-20260523T034519Z/{xemu.log, summary.txt}` (gitignored per project convention).
+- [x] Codex validation round 1 (changes mode): MAJOR ISSUES, 4 findings. All adopted:
+  - HIGH #1 — Outcome-A overclaim narrowed across README.md, manifest.json, current-cycle.md (and main.c during round 2).
+  - HIGH #2 — claude-status.md rewritten as strict in-progress receipt.
+  - MEDIUM #3 — .gitignore added per peer-XBE convention.
+  - LOW #4 — manifest success-case count restated as "exactly 2 total buffers (1 live + 1 new orphan)".
+- [x] Codex validation round 2: BLOCK on residual #1 PARTIAL (main.c had 2 leftover overclaim sites) + new LOW (current-cycle.md ↔ claude-status.md disagreement). Both adopted.
+- [x] Codex validation round 3: **PASS_WITH_FINDINGS**. Round-2 #1 RESOLVED (`main.c:47-55, 95-100`). Round-2 new LOW PARTIAL (claude-status.md residual stale wording — addressed in this update before final docs sync). Round-1 #2/#3/#4 CARRIED RESOLVED. No new issues. No open questions.
+- [x] Canonical docs synced: `handoff.md` cycle-25 entry on top (cycle-24 entry preserved unchanged); `decision-log.md` cycle-25 entry above cycle-24 (no supersession); orchestration-state quartet (`current-cycle.md`, `claude-status.md`, `validation-status.md` — this file, `handoff-summary.md`) closure pass.
+- [x] Validation marker written to `.claude/state/codex-validate-last-run`.
+- [ ] Closure commit landed on `apple-silicon-performance` — pending (next step).
+- [ ] **Cycle-26 real-Xbox deployment slice** — explicitly out of scope; Hermes-scheduled; cycle-25 deliberately stops here.
 
-## Codex validation decision
+## Codex validation decision (cycle 25)
 
-**Cycle 24 is a docs/evidence + binary-deploy slice. Skipped under rule #15's "doc-only changes" / "≤30-line uncommitted diff" carve-out.**
+Cycle 25 ships **non-trivial XBE source** (5 NEW files + 2 built artifacts; main.c is ~180 lines including docs/comments). Per rule #15, Codex validation is **mandatory** — NOT a doc-only carve-out. Three rounds were run; round 3 = PASS_WITH_FINDINGS. Validation marker written.
 
-**Skip justification (final).** Cycle 24 ships:
-1. Zero source/script code edits.
-2. Zero XBE rebuilds.
-3. Doc edits across `docs/apple-silicon/handoff.md`, `docs/apple-silicon/decision-log.md`, `docs/apple-silicon/orchestration-state/*`.
-4. Three new evidence log files under `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/`.
-5. Evidence-only operations on real Xbox: `reboot` (existing verb), FTP upload of cycle-23-built binaries (no rebuild), `ensure-agent` `SITE EXEC` (existing tool), `witness.scan` reads (read-only), `runxbe` chainload (existing verb), connectivity polling (`ping`, `nc -z`).
+Round 1 findings adopted:
+1. HIGH #1 — Outcome-A discriminator overclaim: witness-only's `Sleep(500)` substitution for the marker helper means a clean `0xA4000003` outcome does NOT independently exclude the marker helper as a contributor to image-blit's hang. Narrowed across all relevant files; marker-helper exclusion requires a follow-on cycle.
+2. HIGH #2 — claude-status.md overstated completion; rewritten as strict in-progress receipt; closure language deferred until validation marker landed.
+3. MEDIUM #3 — .gitignore added per peer-XBE convention.
+4. LOW #4 — manifest success-case count restated as "exactly 2 total buffers".
 
-Aggregate diff is markdown + evidence-log-only. Validation marker NOT written. If cycle 25 implements the witness-only XBE (the recommended follow-up), Codex validation becomes mandatory before deploying.
+Round 2 findings adopted:
+- Residual #1 PARTIAL on main.c: 2 leftover overclaim sites rewritten.
+- New LOW: current-cycle.md exit-checkbox state flipped to reflect actual on-disk state.
 
-## What stands from cycles 17 + 19 + 20 + 21 + 22 + 23
+Round 3 findings:
+- Round-2 #1 RESOLVED (main.c:47-55, 95-100).
+- Round-2 new LOW PARTIAL (claude-status.md residual stale wording about "round 2 pending") — addressed in this final update before docs sync.
+- No new issues; no open questions.
+
+## What stands from cycles 17 + 19 + 20 + 21 + 22 + 23 + 24
 
 - xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged.
 - §H.6 IMAGE_BLIT MET under the flag locally — unchanged.
 - Flag ships opt-in, default OFF — unchanged.
-- Cycle 19/20/21's 5× reproducible 22.4 s chainload→FTP-back gap for pre-witness image-blit binaries — UNCHANGED as a baseline. Cycle 24's regression vs that baseline is itself the central finding.
+- Cycle 19/20/21's 5× reproducible 22.4 s chainload→FTP-back gap for pre-witness image-blit binaries — UNCHANGED.
 - Cycle 22 invalidation of cycle-19 hypothesis #1 (launch-path blocker) and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged.
 - Cycle 23 closure (witness instrumentation Codex-validated round-2 PASS_WITH_FINDINGS + MINOR resolved post-round-2) — unchanged.
+- Cycle 24 concrete-blocker outcome (cycle-23 image-blit hard-hangs real Xbox; cycle-22 leading hypothesis WEAKENED; NEW hypothesis #5 promoted) — unchanged.
 
-## What changes (cycle 24)
+## What changes (cycle 25)
 
-- Cycle-22 leading hypothesis WEAKENED (not invalidated; not corroborated). New hypothesis #5 (witness mechanism real-Xbox safety from non-agent process context) added.
-- The 22.4 s chainload→FTP-back gap is no longer reproducible with the cycle-23 image-blit binary on this Xbox revision.
-- M15 default-on shape for §H.6 is now blocked on cycle-25 witness-mechanism viability discrimination (was blocked on cycle-24 A.4 result; cycle 24 did not deliver a result).
+- Cycle-24's recommended witness-only XBE is now SHIPPED, BUILT, smoke-validated, and Codex-validated. Cycle-26 real-Xbox deployment is unblocked from the source-slice side — Hermes can schedule it whenever.
+- Cycle-22 leading hypothesis status is UNCHANGED (still WEAKENED carried from cycle 24); cycle 26 will discriminate.
+- Hypothesis #5 (witness mechanism real-Xbox safety from non-agent process context) remains TOP-PRIORITY; cycle 26 discriminates.
+- §H.6 default-on shape decision is UNCHANGED (still blocked on cycle-26 witness-mechanism viability discrimination, NOT on cycle-25 itself).

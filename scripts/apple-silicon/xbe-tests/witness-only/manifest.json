@@ -1,0 +1,38 @@
+{
+  "id": "witness-only",
+  "title": "Cycle-25 A.4 witness-mechanism viability discriminator (cycle 24 follow-up)",
+  "purpose": "Minimal real-Xbox-only diagnostic XBE that fires the cycle-23 A.4 kseg0-scan witness twice (stages MAIN_ENTERED=1 + POST_MARKER0=3) with 500 ms sleep gaps, then HalReturnToFirmware(HalRebootRoutine)s. NO pbkit, NO NV2A, NO XVideoSetMode, NO file I/O, NO xbed_init. The intermediate marker helper (image-blit's `image_blit_marker(0, ...)` fopen) is REPLACED with a passive `Sleep(500)` — a successful cycle-26 outcome therefore proves the witness mechanism is real-Xbox-safe in this minimal context but does NOT independently exclude the marker helper as a contributor to image-blit's hang. Built via lib/lib.mk so it links xbed_a4_witness.c exactly the way image-blit does — keeps the cycle-25-vs-cycle-21-image-blit binary delta isolated to (a) the absence of pbkit/NV2A/draw-loop, (b) the absence of the marker helper, and (c) main()'s body shrinking. Cycle 26 (Hermes-scheduled) will deploy this XBE on real Xbox and query the oracle-agent's witness.scan to discriminate cycle-24's NEW hypothesis #5 (the kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context) before any further A.4 readback attempt on image-blit. See README.md for the full discriminator semantics table and the follow-on cycle 26.5 / 27 candidates needed to localize image-blit's hang further.",
+  "catalog_ref": "Path A.4 discriminator (cycle-24 follow-up; cycle 25 ships discriminator XBE, cycle 26 runs it)",
+  "self_validation_tier": 2,
+  "oracle_priority": ["real-xbox"],
+  "duration_seconds": 4,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [],
+  "artifacts": {
+    "witness_readback": {
+      "xbox_path": "(via oracle-agent RPC witness.scan; NOT a file on D:\\ or E:\\)",
+      "ftp_path": "(no file; readback is in-memory via TCP 9001)",
+      "format": "oracle_ctrl_buffer reserved[0]/reserved[1] enumerated by witness.scan",
+      "notes": "Cycle 26: after chainload reboots Xbox to dashboard FTP and the oracle agent is re-launched, run `oracle-client.py raw witness.scan` and inspect the highest-phys orphan's reserved[0]. Expected payloads: 0xA4000003 (both fires landed; witness mechanism real-Xbox-safe IN THIS MINIMAL XBE; marker helper exclusion requires a follow-on cycle) | 0xA4000001 (first fire only; second fire hung box but soft-reset eventually triggered) | (no readback because Xbox is hung indefinitely) | 0 (witness writes never landed; mechanism real-Xbox-incompatible)."
+    }
+  },
+  "expected_results": {
+    "real-xbox/physical/cycle-26": {
+      "kind": "record-only",
+      "notes": "Cycle 26 expected outcome A (witness mechanism real-Xbox-safe IN THIS MINIMAL XBE): Xbox reboots in ~5..15 s; agent witness.scan after re-launch shows exactly 2 total oracle_ctrl_buffer instances given the documented clean baseline precondition (1 fresh live buffer from re-launched agent + 1 NEW orphan from witness-only's writes). The NEW orphan's reserved[0] == 0xA4000003 and reserved[1] == 2 (counter ticked twice). If the cycle-26 run is repeated within a single power session without an intervening power-cycle, additional A.4-tagged orphans from prior attempts will accumulate; Hermes must verify the hard precondition (exactly ONE live buffer with reserved[0] == 0 BEFORE chainload) holds for every attempt. Outcome A discriminator scope: image-blit's hang is in code ABSENT from witness-only (pbkit / NV2A / xbed_init / xbed_render_loop_then_capture AND the image_blit_marker helper). Independently excluding the marker helper requires a follow-on cycle that exercises it between the two fires. Outcome B (witness mechanism real-Xbox-incompatible): Xbox hangs identically to cycle-24 image-blit (no FTP/21 / agent/9001 / ICMP ping response for 5+ minutes). Outcome C (less likely): Xbox reboots + orphan reserved[0] == 0xA4000001 (MAIN_ENTERED stamped; POST_MARKER0 hung the box and a watchdog soft-reset eventually fired)."
+    },
+    "xemu-metal/canonical/cycle-25-local-smoke": {
+      "kind": "record-only",
+      "notes": "Cycle-25 local xemu-Metal validation (this cycle, NOT cycle-26): with XEMU_GUEST_LOG=1 the XBE emits 'witness-only: main() entered (cycle 25)' + 'xbed_a4_witness: enter stage=1' + 'witness-only: fire1 returned phys=...' + 'xbed_a4_witness: enter stage=3' + 'witness-only: fire2 returned phys=...' + 'witness-only: rebooting via HalReturnToFirmware(HalRebootRoutine)' to xemu stderr. Standalone xemu has no oracle agent running so the witness scan reports 'no XCTR buffer found' and fire1/fire2 both return phys=0x00000000 — this is EXPECTED and proves only that the witness mechanism runs to completion in emulation; it does NOT predict real-Xbox behavior (xemu's MmGetPhysicalAddress emulation cannot reproduce real-Xbox MMIO-aliasing failure modes). Cycle-25 local validation is a smoke test only; the real discriminator answer lives in cycle 26."
+    }
+  },
+  "expected_fail_renderers": [],
+  "real_xbox_only": true,
+  "preconditions": [
+    "(cycle 26, Hermes) Xbox power-cycled before run if multiple A.4-tagged orphans pre-exist (witness state is MmPersistContiguousMemory-tagged; survives soft reset but NOT power-off)",
+    "(cycle 26) oracle-orchestrator.py ensure-agent succeeded (witness.scan verb registered)",
+    "(cycle 26) Baseline witness.scan shows exactly ONE live oracle_ctrl_buffer with reserved[0] == 0",
+    "(cycle 26) XBE deployed at E:\\Apps\\witness-only\\default.xbe (FTP-uploaded by Hermes)"
+  ]
+}
