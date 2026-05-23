@@ -18,7 +18,7 @@
 - [x] Post-run `ensure-agent` (cycle-27 build) + FINAL `witness.scan` = **count=1 buf.0 phys=0x03eb3000 reserved0=0 reserved1=0** = outcome D-cycle-27.
 - [x] Evidence preserved on disk: 9 logs + SUMMARY.md under `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/`.
 - [x] Canonical docs synced: handoff.md cycle-28 entry on top (cycle-27 preserved unchanged); decision-log.md cycle-28 entry above cycle-27 (no supersession); orchestration-state quartet closure pass (current-cycle.md, claude-status.md, validation-status.md = this file, handoff-summary.md).
-- [x] Closure commit landed on `apple-silicon-performance` (this commit).
+- [x] Closure commit landed on `apple-silicon-performance`: `c77b509149`.
 - [ ] **Cycle 29 design + run** — explicitly out of scope; Hermes-scheduled.
 
 ## Codex validation decision (cycle 28)

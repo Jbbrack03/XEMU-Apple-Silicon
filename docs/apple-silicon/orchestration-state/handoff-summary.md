@@ -27,7 +27,7 @@
 | 8 | `runxbe witness-only` + FTP-LIST poll | dashboard fully ready at t+70s (reproduces cycle 26's 70.17 s) |
 | 9 | Post-run `ensure-agent` (cycle-27) + final `witness.scan` | **count=1 buf.0 phys=0x03eb3000 reserved0=0 reserved1=0** = outcome D-cycle-27 |
 | 10 | Write SUMMARY.md + sync canonical docs | handoff.md + decision-log + orchestration-state quartet updated |
-| 11 | Closure commit on `apple-silicon-performance` | this commit |
+| 11 | Closure commit on `apple-silicon-performance` | `c77b509149` |
 
 ## Cycle 28 scope discipline
 
@@ -81,7 +81,7 @@ Cycle 28 is **run-only / doc-only** — ZERO source/script code edits, ZERO XBE 
 
 ## Closure commit (cycle 28)
 
-Lands on `apple-silicon-performance` as this commit.
+Landed on `apple-silicon-performance` as `c77b509149`.
 
 ## Cycle 27 design + outcome (locked at session close 2026-05-23)
 

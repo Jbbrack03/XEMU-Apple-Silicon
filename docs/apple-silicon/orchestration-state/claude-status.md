@@ -31,7 +31,7 @@ Hermes pre-session instruction explicitly assigned the cycle-28 real-Xbox deploy
 - [x] Restarted cycle-27 agent + captured final `witness.scan` = outcome D-cycle-27.
 - [x] Preserved 9 evidence logs + SUMMARY.md under `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/`.
 - [x] Synced handoff.md, decision-log.md, orchestration-state quartet.
-- [x] Closure commit landed on `apple-silicon-performance` (this commit).
+- [x] Closure commit landed on `apple-silicon-performance`: `c77b509149`.
 
 ## Confidence + risk notes
 
@@ -52,4 +52,4 @@ Hermes pre-session instruction explicitly assigned the cycle-28 real-Xbox deploy
 
 ## Next proposed action
 
-Cycle-28 closure commit (this commit) lands on `apple-silicon-performance`. Cycle 29 (Hermes's call) should promote option (c) [recommended — witness-only allocates its own persistent page with unique magic tag] to discriminate (α) "agent buffer not findable from non-agent context" from (γ) "witness-only never reaches main()." If option (c)'s self-allocated page IS findable post-run by an analogous read-only scanner, (α) was the cycle-26/28 blocker. If even option (c) lands nothing, (γ) becomes leading and cycle-22's "pre-main crash" hypothesis re-strengthens.
+Cycle-28 closure commit `c77b509149` lands on `apple-silicon-performance`. Cycle 29 (Hermes's call) should promote option (c) [recommended — witness-only allocates its own persistent page with unique magic tag] to discriminate (α) "agent buffer not findable from non-agent context" from (γ) "witness-only never reaches main()." If option (c)'s self-allocated page IS findable post-run by an analogous read-only scanner, (α) was the cycle-26/28 blocker. If even option (c) lands nothing, (γ) becomes leading and cycle-22's "pre-main crash" hypothesis re-strengthens.

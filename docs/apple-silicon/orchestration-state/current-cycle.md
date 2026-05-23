@@ -2,7 +2,7 @@
 
 - Cycle: 28 Path A.4 real-Xbox deployment of cycle-27 preserve-branch oracle-agent vs cycle-25 witness-only (**CLOSED — 2026-05-23**, outcome **D-cycle-27**: post-run `witness.scan` shows `count=1 live=1 reserved0=0 reserved1=0` after cycle-27 preserve-branch agent re-allocates the deterministic kernel-pool buffer phys=0x03eb3000; cycle-27 option (a) DEMONSTRATED INSUFFICIENT to break cycle-26 stamp-vs-no-stamp ambiguity to A1/A2; "stamp landed and got wiped" INVALIDATED; "stamp never landed" conclusion now isolated; cycle 29 promotes option (c) or (d)).
 - Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run from this Mac).
-- Closed: 2026-05-23 (this commit).
+- Closed: 2026-05-23 (closure commit `c77b509149` landed on `apple-silicon-performance`).
 - State: **CLOSED. Canonical cycle-26-style sequence executed against cycle-27 oracle-agent; 70 s dashboard-recovery shape REPRODUCED (matches cycle 26); kernel-pool deterministic phys=0x03eb3000 reuse REPRODUCED (≥6 consecutive observations in same power session); FINAL discriminator readback recorded; canonical docs synced; orchestration-state quartet closure pass.**
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
 - HEAD at start: post-cycle-27 closure-doc-sync commit `291b607a46` on `apple-silicon-performance`.
@@ -32,7 +32,7 @@
 5. [x] Final `witness.scan` captured = outcome D-cycle-27 (`count=1 live=1 reserved0=0 reserved1=0`).
 6. [x] Evidence preserved under `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/` (9 logs + SUMMARY.md).
 7. [x] Canonical docs synced: handoff.md cycle-28 entry, decision-log.md cycle-28 entry, orchestration-state quartet (current-cycle.md = this file, claude-status.md, validation-status.md, handoff-summary.md) closure pass.
-8. [x] Closure commit landed on `apple-silicon-performance` (this commit).
+8. [x] Closure commit landed on `apple-silicon-performance`: `c77b509149`.
 9. [x] Two pre-existing untracked `.hermes_cycle*.txt` prompt files NOT staged (consistent with cycles 26/27 handling).
 
 ## Out-of-scope (kept bounded for cycle 28)
