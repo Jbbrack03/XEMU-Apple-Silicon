@@ -4299,6 +4299,67 @@ to be supplied via a separate entitlements plist; without them,
 even after a TCC grant the OS may deny camera access. For an
 ad-hoc local tool we use the simpler unhardened ad-hoc path.
 
+## Composite capture preflight — `composite-preflight.sh` (cycle 33, 2026-05-23)
+
+Fail-fast detector that verifies the MS2109 USB stick is actually
+producing frames BEFORE `composite-record.sh` arms a long ffmpeg
+capture. Motivated by cycle 32 / OUTCOME F8: a no-signal MS2109 stuck
+ffmpeg for the full 70 s of `-t` plus the 20 s composite-record
+watchdog grace (wall-elapsed 93 s) before SIGKILL, with zero bytes of
+ffmpeg stderr. The preflight reproduces the cycle-32 capture-side
+behavior in seconds so unattended orchestration aborts BEFORE issuing
+`runxbe`, instead of silently recording zero frames during the
+chainload window.
+
+```sh
+./scripts/apple-silicon/composite-preflight.sh [flags]
+```
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--device NAME`        | `USB2`   | Substring match against AVFoundation video devices (MS2109 reads as `AV TO USB2.0`) |
+| `--audio-device NAME`  | `USB2`   | Recorded in JSON for diagnostic context; preflight never opens the audio interface |
+| `--width N --height N` | 720 / 480 | NTSC; matches composite-record.sh |
+| `--fps N`              | 30        | NTSC field-pair rate |
+| `--pixel-format FMT`   | uyvy422   | MS2109 native |
+| `--timeout SECONDS`    | 8         | Per-detector wall-clock seconds for `--mode {xemu-capture,ffmpeg}`. For `--mode auto` this is the OVERALL wall-clock budget — the ffmpeg fallback receives only the remaining time after the xemu-capture attempt, and is skipped entirely if < 0.5 s remains. |
+| `--warmup-frames N`    | 5         | xemu-capture path only |
+| `--mode auto\|xemu-capture\|ffmpeg` | `auto` | `auto` tries xemu-capture (TCC-approved app bundle path) first then falls back to ffmpeg |
+| `--out-dir DIR`        | (TMPDIR)  | Where `preflight-meta.json` + `preflight.png` land |
+| `--no-audio`           | off       | Recorded in JSON for context |
+| `--json`               | off       | Echo the final JSON object on stdout |
+| `--quiet`              | off       | Suppress human-readable banner; still writes meta |
+
+Exit codes:
+
+| rc | Meaning |
+| -- | ------- |
+| 0  | Signal detected — frame received within `--timeout` |
+| 2  | No-signal — at least one detector ran to its full per-detector timeout without seeing a frame (cycle-32 F8 hardware-side shape) |
+| 3  | Device not enumerated — substring did not match any AVFoundation video device (or `xemu-capture list` device list, when xemu-capture is the active backend) |
+| 4  | No detector backend available (no xemu-capture wrapper AND no ffmpeg on `$PATH`) |
+| 5  | Invalid CLI usage |
+| 1  | Host-side backend error / unexpected (e.g. TCC Camera-permission denial, ffmpeg quick-fail on device-busy / invalid format, xemu-capture binary missing/broken — every attempted detector failed BEFORE reaching its timeout). Cycle-33 closeout (Codex high #1 adopted): distinct from rc=2 so unattended orchestration can branch host-fix vs cable-fix without re-parsing `preflight-meta.json`. |
+
+Outputs under `--out-dir`:
+
+- `preflight-meta.json` — schema `composite-preflight/v1`. Status / exit_code / detector / elapsed_s / detail + device/format/timeout parameters + backend availability flags + path to the probe PNG when present.
+- `preflight.png` — the captured probe frame on success (deleted on failure so callers never see a stale frame).
+- `preflight-ffmpeg.log` / `preflight-xemu-capture.log` — raw detector stderr/stdout for debug.
+
+On any non-zero exit the script prints a 5-line physical-side
+checklist drawn from cycle-32 evidence (composite cable seating,
+MS2109 input selector, Xbox AV output mode, USB-port stability,
+plus the only xemu-capture verb that actually proves live frames are
+arriving: `xemu-capture snapshot DEVICE --out /tmp/probe.png` — use
+`inputs` / `set-input` only AFTER snapshot succeeds, to confirm the
+active input is composite vs S-Video). The same JSON output is
+preserved in `preflight-meta.json` for unattended orchestration.
+
+`composite-record.sh` runs this preflight by default before arming
+its long ffmpeg capture; see the next section for the integration
+contract.
+
 ## Composite A/V recording — `composite-record.sh` (2026-05-07)
 
 ffmpeg-based capture wrapper around the MS2109 USB stick that
@@ -4323,12 +4384,33 @@ full audiovisual signal.
 | `--label NAME`           | (none)    | Tag baked into the run dir name |
 | `--no-audio`             | off       | Skip audio capture |
 | `--pixel-format FMT`     | uyvy422   | AVFoundation pixel format the device emits |
+| `--skip-preflight`       | off       | Bypass the default composite-preflight.sh fail-fast check (cycle 33) |
+| `--preflight-timeout SECONDS` | 8     | Per-detector seconds for `--preflight-mode {xemu-capture,ffmpeg}`; OVERALL wall-clock budget for `--preflight-mode auto` (cycle 33) |
+| `--preflight-mode auto\|xemu-capture\|ffmpeg` | `auto` | Detector preference passed to composite-preflight.sh (cycle 33) |
 
 Outputs under the run directory:
 - `video.mp4` — H.264 (`h264_videotoolbox`) + AAC, mp4 container.
 - `capture-meta.json` — device names, format, duration, ffmpeg
-  argv, observed video duration, exit code.
+  argv, observed video duration, exit code, **and a `preflight`
+  object** (cycle 33) recording the preflight's status / exit_code /
+  detector / elapsed_s / meta_path. On preflight failure the schema
+  becomes `composite-record/v1` with `status="preflight-failed"` and
+  `ffmpeg_invoked=false`, and ffmpeg is never launched.
 - `capture-stderr.log` — raw ffmpeg stderr (debug failures).
+- `preflight/preflight-meta.json` + supporting logs (cycle 33) —
+  composite-preflight.sh artifacts, dropped under the same run
+  directory for evidence preservation across unattended cycles.
+
+**Preflight default (cycle 33, 2026-05-23).** `composite-record.sh`
+runs `composite-preflight.sh` before any long ffmpeg capture and
+aborts BEFORE arming ffmpeg if the MS2109 isn't producing frames.
+This prevents the cycle-32 OUTCOME F8 failure mode (~93 s silent
+stall when the composite signal is absent). Pass `--skip-preflight`
+to bypass intentionally (e.g. when probing the capture path itself
+or when the xemu-capture / ffmpeg single-frame probe is known to
+interact badly with the stick). Environment variables
+`COMPOSITE_PREFLIGHT_TIMEOUT` and `COMPOSITE_PREFLIGHT_MODE` set the
+defaults for the matching CLI flags.
 
 **Device-resolution note:** ffmpeg's AVFoundation driver ONLY
 accepts exact device names or numeric indices (xemu-capture's

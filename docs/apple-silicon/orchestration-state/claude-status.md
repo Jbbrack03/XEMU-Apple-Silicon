@@ -1,55 +1,50 @@
 # Claude Status
 
-- Objective: cycle 32 Path A.4 real-Xbox deployment of the cycle-31 visual-breadcrumb build vs the cycle-31 witness-only XBE — run the cycle-30 canonical sequence with the composite-capture leg ARMED + classify the outcome per the cycle-31 F1..F8 + F4' table.
-- Status: **CLOSED. OUTCOME F8 (cycle-32 procedural failure — MS2109 composite-capture leg recorded zero frames).** Xbox-side leg completed cleanly; capture failed at the hardware level (no live composite signal at the MS2109 input). Cycle-32 redo is Hermes's call after physical-side cable / capture-input verification.
+- Objective: cycle 33 composite-capture fail-fast preflight slice — ship `scripts/apple-silicon/composite-preflight.sh` + default-on integration into `scripts/apple-silicon/composite-record.sh` so the cycle-32 OUTCOME F8 silent-stall (~93 s) aborts in ~8 s with an actionable physical-side checklist instead.
+- Status: **CLOSED.** Tool slice shipped; local validation green; docs/state synced; Codex validation closed at 6 rounds this closeout session (round 6 = LOOKS GOOD; full disposition in handoff.md + decision-log.md cycle-33 entries); validation marker written at `.claude/state/codex-validate-last-run`; closure commit pending.
 
-## Why cycle 32 ran this session
+## Why cycle 33 ran this session
 
-Hermes pre-session instruction explicitly assigned cycle 32 as the bounded slice. Cycle 31 closure (commit `41f350c174`) shipped the option-(d) visual-breadcrumb infrastructure but explicitly left the real-Xbox deployment as Hermes's call. Cycle 32 is the highest-value next slice from canonical docs.
+Cycle 32 closure (commit `ac515383bb`) documented OUTCOME F8 = "cycle-32 procedural failure — MS2109 composite-capture leg recorded zero frames" and explicitly deferred cycle 33 implementation work to a later Hermes-scheduled session. Hermes's bounded prompt for this session was: "Ship a bounded cycle-33 tooling improvement that prevents another cycle-32-style silent composite-capture stall." A fresh prior session attempted the same scope but stopped after being launched in don't-ask permission mode and unable to write files; no source edits landed in that attempt, leaving the repo clean except intentional `.hermes_*` files.
 
 ## What this session shipped
 
-1. **Cycle-31 binary deployed to real Xbox.** `--overwrite` FTP-upload of `scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe` (155 648 B; SHA-256 `c00c726c96f2172badbe0dcd20c111ab89eee95960b8ce43d03c472db4e09edb`) to `/E/Apps/witness-only/default.xbe`. Post-upload list confirms `155648 Dec 10 17:17` (mtime advanced from cycle-29 build's prior timestamp; size mismatch 151 552 → 155 648 B triggered overwrite without `--overwrite`, but the flag was passed explicitly for safety per cycle-30 methodology lesson).
-2. **Canonical cycle-30 sequence executed** with the cycle-32 composite-capture addition. Baseline → reboot → upload → relaunch agent → pre-run scans (preconditions still MET) → arm composite capture → runxbe → dashboard FTP poll → post-run scans → MS2109 standalone probe.
-3. **Outcome F8 classified.** Per the cycle-31 cycle-32 discriminator table, F8 = "no composite capture available → procedural failure, NOT a discriminator answer → cycle-32 redo with composite capture confirmed armed." Capture failure root cause diagnosed in-session: AVFoundation opens the MS2109 device cleanly but ffmpeg never receives a frame across 70 s of `-t` plus 20 s watchdog grace (rc=137 SIGKILL; stderr 0 bytes). A follow-up 4 s standalone ffmpeg probe reproduced the same silent-no-frames behavior across 60+ s — confirms hardware-side capture failure (no live composite signal at MS2109 input), not a procedural bug in `composite-record.sh`.
-4. **Post-run witness-side readback preserved** (high-value even without stripe data). `witness.scan = D-cycle-27 (count=1 phys=0x03eb3000 reserved0=0 reserved1=0)` AND `witness.scan-self = count=0` — functionally IDENTICAL to cycle 30's E2. F4' (graceful XVideoSetMode FALSE return) RULED OUT by the `count=0` readback; F2 / F3 / F4 / F5 remain consistent with the two-tuple but cannot be discriminated without the visible-stripe count.
-5. **Evidence preserved on disk.** `benchmark-runs/cycle32-real-xbox-witness-only-visual-20260523T135646Z/{00..12-*.log, SUMMARY.md, composite-cycle32/{capture-meta.json, capture-stderr.log}}` (gitignored per project convention).
-6. **Canonical docs synced.** `handoff.md` cycle-32 entry on top (cycle-31 + cycle-30 preserved unchanged); `decision-log.md` cycle-32 entry on top (cycle-31 preserved unchanged); orchestration-state quartet closure pass.
+1. **New `scripts/apple-silicon/composite-preflight.sh`.** ~310 lines (executable bash + inline python3). Detects "MS2109 connected but no live signal" in seconds. Primary detector = xemu-capture snapshot via the TCC-approved app bundle path (`scripts/apple-silicon/bin/xemu-capture snapshot DEVICE --out preflight.png`); fallback = `ffmpeg -f avfoundation -frames:v 1` against the resolved AVFoundation numeric index, killed via a python3 wall-clock deadline if no frame arrives. `--mode auto` (default) tries xemu-capture first then falls back to ffmpeg; `--mode xemu-capture` and `--mode ffmpeg` force a single path. JSON output (schema `composite-preflight/v1`) always written to `preflight-meta.json` capturing status / exit_code / detector / elapsed_s / detail + every input parameter + backend availability flags + probe-image path. Exit codes: 0 ok, 2 no_signal, 3 device_not_found, 4 no_backend, 5 invalid CLI, 1 unexpected. On any non-zero exit the script prints a 5-line physical-side checklist drawn from cycle-32 evidence + deletes any non-empty probe PNG so callers never see a stale frame.
+2. **`scripts/apple-silicon/composite-record.sh` integration.** New flags: `--skip-preflight`, `--preflight-timeout SECONDS` (default 8), `--preflight-mode auto|xemu-capture|ffmpeg`. Two env-var overrides: `COMPOSITE_PREFLIGHT_TIMEOUT`, `COMPOSITE_PREFLIGHT_MODE`. Default-on: preflight runs first against the same device parameters with `--out-dir $OUT_DIR/preflight/`; on failure composite-record.sh writes a stub `capture-meta.json` (schema `composite-record/v1`, `status="preflight-failed"`, `ffmpeg_invoked=false`, embedded `preflight` summary object) and exits with the preflight's own rc (identity passthrough: 2 cycle-32 F8 no_signal / 3 device_not_found / 4 no_backend / 1 host-side backend error / 5 invalid CLI — full enumeration adopted from Codex cycle-33-closeout round 2) WITHOUT touching ffmpeg. On preflight success the long capture proceeds unchanged and the post-run capture-meta.json is patched with the same `preflight` summary alongside existing fields.
+3. **Paired doc sync.** `docs/apple-silicon/automation.md` (new "Composite capture preflight" section directly above "Composite A/V recording" + three new flag rows + new "Preflight default (cycle 33)" paragraph in the composite-record section). `.claude/rules/flags-bench.md` (new "Composite-capture preflight (cycle 33)" subsection listing env-var defaults + the `--skip-preflight` operator switch). `docs/apple-silicon/handoff.md` + `decision-log.md` cycle-33 entries on top. Orchestration-state quartet closure pass.
 
 ## Session progress
 
 - [x] Read required docs/state files.
-- [x] Verified MS2109 visible to AVFoundation (`AV TO USB2.0` video=[0] audio=[3]).
-- [x] Verified Xbox reachable (ping=true, agent=true, cycle-29 agent resident from cycle 30).
-- [x] Baseline scans → preconditions MET.
-- [x] Reboot → dashboard FTP `226` at t+12 s.
-- [x] FTP-upload cycle-31 XBE (155 648 B; size + mtime verified post-upload).
-- [x] Relaunch agent + pre-run scans (preconditions still MET).
-- [x] Arm composite capture (`composite-record.sh --duration 70 --label cycle32-witness-only-screen`).
-- [x] runxbe + dashboard FTP poll (returned at t+30 s; 9 s faster than cycle 30; weak signal NOT load-bearing).
-- [x] Post-run scans (D-cycle-27 + count=0; functionally identical to cycle 30 E2).
-- [x] Diagnosed capture failure (4 s standalone MS2109 probe → silent-no-frames; hardware-side).
-- [x] SUMMARY.md written.
-- [x] Canonical docs synced.
+- [x] Confirmed git state + intentional `.hermes_*` files preserved.
+- [x] Inspected composite-record.sh, xemu-capture-app.py wrapper, scripts/apple-silicon/bin/xemu-capture.
+- [x] Implemented `composite-preflight.sh` with xemu-capture + ffmpeg detectors + JSON output + checklist.
+- [x] Wired default-on preflight into `composite-record.sh` with `--skip-preflight` opt-out + `--preflight-timeout` + `--preflight-mode` controls + env-var defaults.
+- [x] Local validation: live no-signal MS2109 probe rc=2 in ~3.6 s; end-to-end preflight-failure structured marker; `--skip-preflight` legacy reproduction.
+- [x] `automation.md` + `flags-bench.md` synced.
+- [x] `handoff.md` + `decision-log.md` cycle-33 entries on top.
+- [x] Orchestration-state quartet closure pass.
+- [x] Codex validation closed at 6 rounds (round 6 LOOKS GOOD). Marker written at `.claude/state/codex-validate-last-run`.
 - [ ] Closure commit pending.
 
 ## Confidence + risk notes
 
-- **HIGH confidence in the F8 classification.** The cycle-31 cycle-32 discriminator table explicitly carves out F8 = "no composite capture available." Cycle-32's composite leg ran but produced zero frames; F8 is the canonical name for this shape. Classifying the slice as one of F2/F3/F4/F5 would over-claim — those four rows share the cycle-32 two-tuple `(D-cycle-27, count=0)` and are distinguishable ONLY by the visible-stripe count, which is missing.
-- **HIGH confidence in the witness-side readback.** Three independent scan triplets (baseline, pre-run, post-run) all returned identical `(D-cycle-27, count=0)`. Deterministic phys=0x03eb3000 reuse REPRODUCED for the ≥12th consecutive observation across cycles 26 / 28 / 30 / 32. `mapped_pages_seen=419` REPRODUCED for the 10th observation.
-- **HIGH confidence in the capture-failure root-cause diagnosis.** Two independent ffmpeg invocations against the same MS2109 device (the composite-record.sh launch and a follow-up minimal probe) both showed the canonical "device opens, no frames, no error" shape. Standalone probe ran with no audio mux and a minimal encoder choice to rule out a cycle-32 procedural bug in `composite-record.sh`.
-- **MEDIUM confidence in the F4' elimination.** The `witness.scan-self count=0` readback is incompatible with F4' (which requires count >= 1). However, this elimination assumes the cycle-31 XBE actually ran on the Xbox (which the timing observation supports: t+30 s dashboard recovery is consistent with the XBE chainloading and rebooting). If the chainload somehow failed before `XLaunchXBE` returned, F4' would technically still be a candidate for the cycle-32 redo; in practice this is unlikely given cycles 26 / 28 / 30 all observed clean chainload→dashboard timing.
-- **LOW risk to existing invariants.** ZERO source/script edits this cycle. ZERO XBE rebuilds. The cycle-31 binary deployed is bit-identical to the cycle-31 build that passed 3-round Codex green. The post-run readback shape matches cycle 30 exactly; no new failure mode introduced.
+- **HIGH confidence in the no-signal detection path.** The live MS2109 currently sees no composite signal (cycle 32's hardware-side failure mode persists in this session). Both the xemu-capture path (which falls back cleanly when the underlying AVFoundation session sees no frames) and the ffmpeg `-frames:v 1` path correctly time out within `--preflight-timeout` seconds and return rc=2 with `status=no_signal` and a populated checklist. The detection turnaround (~3.6 s in the validation run) reproduces the cycle-32 hardware-side failure faster than the long capture by >25×.
+- **MEDIUM confidence in the signal-present (rc=0) path.** This session could not exercise the "signal present" path because the live MS2109 has no composite input — that is the cycle-32 failure mode under investigation. The xemu-capture `snapshot` verb is unchanged from its 2026-05-06 design (referenced in `automation.md` "tools/xemu-capture/" section) and is the same path the retail oracle uses successfully, so a signal-present case should pass cleanly. Cycle-32 redo will exercise rc=0 end-to-end.
+- **LOW risk to existing capture path.** `--skip-preflight` reproduces the legacy `composite-record.sh` behavior bit-identically — verified in-session by an end-to-end `--skip-preflight --no-audio --duration 1` run that produced the canonical cycle-32 silent-stall + SIGKILL shape, with the only diff being a `preflight: {status: "skipped", ...}` summary object added to capture-meta.json.
+- **LOW risk to retail oracle / xemu-capture TCC grant.** The preflight invokes xemu-capture through the same `scripts/apple-silicon/bin/xemu-capture` wrapper the retail oracle uses; TCC sees the same `com.xemu-macos.capture` bundle identity; no new authorization prompt.
+- **LOW risk to project rule #14.** The preflight does NOT use QMP `screendump` or the `qmp` screenshot backend; rule #14 not engaged.
 
 ## What this session does NOT do
 
-- NO XVideoSetMode FALSE / kernel-display-init investigation (cycle-32 data does not support starting that investigation — F4' was the relevant outcome and it was RULED OUT).
-- NO cycle-33 implementation (the cycle-32 outcome is F8 = "redo before progressing").
-- NO PushNotification — bounded blocker closeout, not a milestone.
-- NO retail-title / §G.5 / RT-as-texture work.
-- NO flag default flips.
-- NO Codex validation (rule #15 doc-only / run-only carve-out applies; same path as cycles 26 / 28 / 30).
+- NO real-Xbox cycle-32 redo (Hermes's call after physical-side verification).
+- NO xemu host source touched.
+- NO XBE rebuilds; NO `lib/xbed_*` / `oracle-agent/*` / `witness-only/main.c` / image-blit / `xbed_runtime.{c,h}` touched.
+- NO `tools/xemu-capture/` source touched (the binary is already TCC-authorized; cycle 33 only consumes the wrapper output).
+- NO flag default flips; NO M15 movement; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` unchanged.
+- NO PushNotification — bounded tooling slice, not a milestone.
+- NO cleanup of `.hermes_*` files.
 
 ## Next proposed action
 
-Cycle 32 redo (Hermes's call): (1) Hardware-side verify composite cable seated + MS2109 input selector on composite; (2) Capture smoke test (`composite-record.sh --duration 4 --label smoke` → non-empty video.mp4; visually inspect first frame for Xbox-dashboard content); (3) OPTIONAL power-cycle Xbox; (4) Re-run the canonical cycle-32 sequence per `witness-only/README.md` cycle-31 addendum §"Cycle-32 deployment runbook" verbatim. The cycle-31 binary is already at `/E/Apps/witness-only/default.xbe`. F4' eliminated from candidate space; redo lands at one of F1 / F2 / F3 / F4 / F5 / F6 / F7.
+Closure commit on `apple-silicon-performance`. Codex validation under rule #15 trigger #2 closed at 6 rounds this session (round 6 LOOKS GOOD). After commit, the substantive next slice remains the cycle-32 redo (Hermes's call after physical-side composite-cable / capture-input verification); the cycle-33 preflight makes that redo safer to run unattended.
