@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 36 real-Xbox discriminator run for cycle-35 pre-main breadcrumb — execute the cycle-36 canonical runbook from `witness-only/README.md` cycle-35 addendum verbatim against the cycle-35 binary (155 648 B, SHA-256 `ab52df8dee...`) on the project's real Xbox; classify outcome per the cycle-35 G-row table; sync canonical docs/state.
-- Status: **CLOSED. OUTCOME G0.** Reproduced across two runxbe attempts in same physical power session. SUMMARY.md written. handoff.md + decision-log.md cycle-36 entries on top; orchestration-state quartet closure pass complete. Codex SKIPPED per rule #15 doc-only / run-only carve-out. Closure commit pending.
+- Status: **CLOSED. OUTCOME G0.** Reproduced across two runxbe attempts in same physical power session. SUMMARY.md written. handoff.md + decision-log.md cycle-36 entries on top; orchestration-state quartet closure pass complete. Codex SKIPPED per rule #15 doc-only / run-only carve-out. Closure commit `265010549f` LANDED on `apple-silicon-performance`; bounded doc-sync follow-up commit on top syncs orchestration-state quartet to reference the landed hash.
 
 ## Why cycle 36 ran this session
 
@@ -35,7 +35,7 @@ Cycle 35 closure (commit `515e03f4e7`) shipped the option-(1) pre-main breadcrum
 - [x] handoff.md + decision-log.md cycle-36 entries on top; cycle-35 entries preserved unchanged below.
 - [x] Orchestration-state quartet closure pass.
 - [x] Codex SKIPPED per rule #15 doc-only/run-only carve-out — justified by ZERO source/script/XBE edits this cycle.
-- [ ] Closure commit on `apple-silicon-performance` pending.
+- [x] Closure commit on `apple-silicon-performance` landed as `265010549f`.
 
 ## Confidence + risk notes
 
@@ -62,4 +62,4 @@ Cycle 35 closure (commit `515e03f4e7`) shipped the option-(1) pre-main breadcrum
 
 ## Next proposed action
 
-Closure commit (`apple-silicon-performance` branch). The substantive next slice is cycle 37+ (Hermes's call): pick one of the three G0 "Next" candidates per the cycle-35 README G0-row + cycle-36 closure rationale (custom XBE-header callback; static binary diff against pipeline-smoke/mirror; EEPROM scratchpad write inside `xbed_self_witness_fire`).
+Cycle 36 closed as commit `265010549f` on `apple-silicon-performance`. The substantive next slice is cycle 37+ (Hermes's call): pick one of the three G0 "Next" candidates per the cycle-35 README G0-row + cycle-36 closure rationale (custom XBE-header callback; static binary diff against pipeline-smoke/mirror; EEPROM scratchpad write inside `xbed_self_witness_fire`).

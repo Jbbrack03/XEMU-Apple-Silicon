@@ -35,7 +35,7 @@ Doc-only / run-only carve-out APPLIES — same path as cycles 26 / 28 / 30 / 32 
 - [x] handoff.md + decision-log.md cycle-36 entries on top with cycle-35 entries preserved unchanged below.
 - [x] Orchestration-state quartet closure pass.
 - [-] Codex SKIPPED per rule #15 carve-out (explicit justification recorded).
-- [ ] Closure commit pending.
+- [x] Closure commit landed as `265010549f` on `apple-silicon-performance`.
 
 ## Real-Xbox evidence
 

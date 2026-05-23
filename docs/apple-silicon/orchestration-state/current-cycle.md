@@ -2,7 +2,7 @@
 
 - Cycle: 36 real-Xbox discriminator run for cycle-35 pre-main breadcrumb — **CLOSED on `apple-silicon-performance`**. Bounded run-only slice: deploy cycle-35 `witness-only/bin/default.xbe` (155 648 B, SHA-256 `ab52df8dee...`) via FTP `--overwrite` to `/E/Apps/witness-only/default.xbe`, run the cycle-36 canonical sequence (composite-capture leg + runxbe + final `witness.scan-self` for G-row classification), and classify the outcome against the cycle-35 G-row discriminator table.
 - Started: 2026-05-23 22:53:06Z (Hermes-supervised bounded session; Claude Code worker run launched after cycle-35 closure commit `515e03f4e7`).
-- Closed: 2026-05-23 (G-row classified; canonical docs/state synced; closure commit pending).
+- Closed: 2026-05-23 (G-row classified; canonical docs/state synced; closure commit `265010549f` landed on `apple-silicon-performance`).
 - State: **CLOSED — OUTCOME G0** (zero stripes + `witness.scan-self count=0` + `witness.scan = D-cycle-27`). REPRODUCED across two runxbe attempts in same physical power session.
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
 - HEAD at start: cycle-35 closure commit `515e03f4e7` on `apple-silicon-performance`.
@@ -25,8 +25,8 @@
 12. Second `runxbe` issued 23:06:43Z + 25-snap burst over t+0..t+29.5s with explicit `--width 720 --height 480` (cycle-34-style snapshot-burst substitution).
 13. Stripe analysis: ZERO stripe colors detected across all 26 snaps (13 pure-black, 13 dashboard transition/return).
 14. Final scans (second run): D-cycle-27 + count=0 — REPRODUCED.
-15. SUMMARY.md written to run dir; canonical docs/state updates (handoff.md + decision-log.md + orchestration-state quartet) pending closure commit.
-16. Closure commit on `apple-silicon-performance` pending.
+15. SUMMARY.md written to run dir; canonical docs/state updates (handoff.md + decision-log.md + orchestration-state quartet) landed as commit `265010549f`.
+16. Closure commit on `apple-silicon-performance` LANDED as `265010549f`; bounded doc-sync follow-up commit on top syncs orchestration-state quartet to reference the landed hash.
 
 ## Exit criteria — final status
 
@@ -42,7 +42,7 @@
 10. [x] `handoff.md` + `decision-log.md` cycle-36 entries on top; cycle-35 entries preserved unchanged below.
 11. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
 12. [-] Codex SKIPPED per rule #15 doc-only / run-only carve-out (same path as cycles 26/28/30/32/34); cycle-35 marker `515e03f4e7` remains relevant for the deployed artifact.
-13. [ ] Closure commit pending.
+13. [x] Closure commit landed as `265010549f` on `apple-silicon-performance`.
 
 ## Out-of-scope (kept bounded for cycle 36)
 
