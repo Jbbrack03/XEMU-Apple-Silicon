@@ -32,7 +32,7 @@ Hermes pre-session instruction explicitly assigned cycle-27 option (a) as the bo
 - [x] Validation marker written at `.claude/state/codex-validate-last-run`.
 - [x] Updated orchestration-state quartet for cycle-27 closure.
 - [x] Updated handoff.md cycle-27 entry; appended decision-log cycle-27 entry.
-- [ ] Closure commit on `apple-silicon-performance` (pending this session's commit).
+- [x] Closure commit landed on `apple-silicon-performance`: `df999e41ea`.
 
 ## Confidence + risk notes
 
@@ -54,4 +54,4 @@ Hermes pre-session instruction explicitly assigned cycle-27 option (a) as the bo
 
 ## Next proposed action
 
-Commit cycle-27 closure (this session) and stop cleanly. Cycle 28 (real-Xbox deployment of the cycle-27 oracle-agent) is Hermes's call.
+Cycle-27 closure commit `df999e41ea` already landed on `apple-silicon-performance`. Cycle 28 (real-Xbox deployment of the cycle-27 oracle-agent) is Hermes's call.

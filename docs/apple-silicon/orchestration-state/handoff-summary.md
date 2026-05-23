@@ -24,7 +24,7 @@
 | 7 | Codex validation round 3 | LOOKS GOOD: round-2 PARTIAL RESOLVED; round-1 MEDIUM still RESOLVED; no new findings |
 | 8 | Write validation marker | `.claude/state/codex-validate-last-run` updated |
 | 9 | Canonical docs sync | handoff.md cycle-27 entry on top; decision-log cycle-27 entry above cycle-26; orchestration-state quartet closure pass |
-| 10 | Closure commit on `apple-silicon-performance` | Landing in this commit |
+| 10 | Closure commit on `apple-silicon-performance` | Landed as `df999e41ea` |
 
 ## Cycle 27 scope discipline
 
@@ -63,4 +63,4 @@ Cycle 27 ran 3 rounds (rule #15 mandatory — non-trivial diff on renderer-adjac
 
 ## Closure commit
 
-Landing in this commit on `apple-silicon-performance`.
+Landed as `df999e41ea` on `apple-silicon-performance`.

@@ -2,7 +2,7 @@
 
 - Cycle: 27 Path A.4 option (a) — `oracle-agent/controller.c::s_allocate_fresh` preserves an existing plausible `oracle_ctrl_buffer` witness header across agent restart instead of unconditionally `memset`-wiping it (**CLOSED — 2026-05-23**, XBE source slice green; cycle-28 real-Xbox deployment is Hermes's call).
 - Started: 2026-05-23 (Hermes-supervised fresh bounded session; Claude Code worker autonomous run).
-- Closed: 2026-05-23 (this update + closure commit).
+- Closed: 2026-05-23 (closure commit `df999e41ea` landed on `apple-silicon-performance`).
 - State: **CLOSED. Option (a) implemented minimally; oracle-agent XBE rebuilt; Codex 3-round validation green (round 3 = LOOKS GOOD); canonical docs synced; orchestration-state quartet closure pass.**
 - Owner: Claude Code worker (fresh bounded session), launched 2026-05-23.
 - HEAD at start: post-cycle-26 closure commit `a31e061144` on `apple-silicon-performance`.
@@ -33,7 +33,7 @@
 8. [x] Codex validation 3 rounds, round 3 = LOOKS GOOD. Validation marker written at `.claude/state/codex-validate-last-run`.
 9. [x] Canonical docs synced: handoff.md cycle-27 entry, decision-log.md cycle-27 entry, orchestration-state quartet (current-cycle.md = this file, claude-status.md, validation-status.md, handoff-summary.md) closure pass.
 10. [x] Two pre-existing untracked prompt files (`.hermes_cycle22_path_a3_prompt.txt`, `.hermes_cycle23_docsync_prompt.txt`) preserved un-staged per Hermes pre-session instruction.
-11. [ ] Closure commit pending (this commit on `apple-silicon-performance`).
+11. [x] Closure commit landed: `df999e41ea` on `apple-silicon-performance`.
 
 ## Out-of-scope (kept bounded for cycle 27)
 

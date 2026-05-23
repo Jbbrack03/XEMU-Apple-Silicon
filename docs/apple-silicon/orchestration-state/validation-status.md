@@ -15,7 +15,7 @@
 - [x] Codex validation round 3 (changes mode, post-PARTIAL-fix diff): LOOKS GOOD (round-2 PARTIAL RESOLVED; round-1 MEDIUM still RESOLVED; no new round-3 findings; one out-of-scope note pointing at decision-log.md cycle-26 entry, addressed by adding cycle-27 entry above without superseding cycle-26).
 - [x] Validation marker written at `.claude/state/codex-validate-last-run`.
 - [x] Canonical docs synced: handoff.md cycle-27 entry on top (cycle-26 preserved unchanged); decision-log.md cycle-27 entry above cycle-26 (no supersession); orchestration-state quartet closure pass (current-cycle.md, claude-status.md, validation-status.md = this file, handoff-summary.md).
-- [ ] Closure commit on `apple-silicon-performance` (pending this session's commit).
+- [x] Closure commit landed on `apple-silicon-performance`: `df999e41ea`.
 - [ ] **Cycle 28 real-Xbox deployment** — explicitly out of scope; Hermes-scheduled.
 
 ## Codex validation decision (cycle 27)
