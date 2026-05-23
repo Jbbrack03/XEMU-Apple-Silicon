@@ -1,57 +1,79 @@
 # Validation Status
 
-- Active slice: cycle 33 composite-capture fail-fast preflight slice — implementation slice; new `scripts/apple-silicon/composite-preflight.sh` + integration into `scripts/apple-silicon/composite-record.sh` + paired docs/rules; aggregate uncommitted diff ~450 lines across two scripts + three docs + this state quartet.
-- Validation state: **Codex validation CLOSED** under rule #15 trigger #2. 6 rounds run at cycle-33 closure (rounds 1-5 = MINOR ISSUES, all adopted/deflected; round 6 = LOOKS GOOD); validation marker written at `.claude/state/codex-validate-last-run`; closure commit landed as `dcaf7a0206` on `apple-silicon-performance`. Bounded closeout-sync follow-up commit on top is doc-only / state-only (orchestration-state quartet updated to reference the landed hash; no source/script touched); rule #15 doc-only / state-only carve-out applies — no Codex required for the closeout-sync slice itself.
+- Active slice: cycle 34 cycle-32 redo on real Xbox vs cycle-31 visual-breadcrumb build — run-only / doc-only slice; ZERO source/script edits.
+- Validation state: **Rule #15 doc-only / run-only carve-out applies** (same path as cycles 26 / 28 / 30 / 32). Codex SKIPPED. The cycle-31 binary observed this cycle is bit-identical to the cycle-31 build that passed 3-round Codex green at cycle-31 closure (`41f350c174`); the `.claude/state/codex-validate-last-run` marker from cycle-31 closure remains the relevant marker for the deployed artifact.
 
-## Rule #15 applicability (cycle 33)
+## Rule #15 applicability (cycle 34)
 
-Rule #15 mandates Codex validation for non-trivial uncommitted source diffs (renderer / TCG / NV2A / build / runtime flag plumbing / **apple-silicon scripts**; aggregate > 30 lines). Cycle 33's diff includes:
+Rule #15 trigger #2 (non-trivial uncommitted code in `xemu-fork/`; renderer / TCG / NV2A / build / runtime flag plumbing / apple-silicon scripts; aggregate diff > 30 lines) does NOT fire this cycle. Cycle-34 changes are:
 
-- New `scripts/apple-silicon/composite-preflight.sh` (~310 lines).
-- `scripts/apple-silicon/composite-record.sh` (+~140 lines: new flags, env-var defaults, default-on preflight invocation block, stub `capture-meta.json` on failure, OK-path preflight summary embed).
-- `docs/apple-silicon/automation.md` (new "Composite capture preflight" section + extended "Composite A/V recording" section; ~70 lines).
-- `.claude/rules/flags-bench.md` (new "Composite-capture preflight (cycle 33)" subsection; ~5 lines).
-- `docs/apple-silicon/handoff.md` + `docs/apple-silicon/decision-log.md` cycle-33 entries on top + this orchestration-state quartet closure pass.
+- ZERO source/script edits.
+- ZERO XBE rebuilds.
+- ZERO host source touched.
+- ZERO `tools/xemu-capture/` source touched.
+- Doc-only edits to canonical state: `docs/apple-silicon/handoff.md` cycle-34 entry on top; `docs/apple-silicon/decision-log.md` cycle-34 entry above cycle-33; orchestration-state quartet (this file + current-cycle.md + claude-status.md + handoff-summary.md) closure pass.
+- Run evidence under `benchmark-runs/cycle34-cycle32-redo-real-xbox-witness-only-visual-20260523T203702Z/` (gitignored per project convention; 9 numbered evidence logs + 4 snapshot directories + `SUMMARY.md`).
 
-Aggregate is well above the 30-line rule #15 threshold. **Codex validation is required.** Same rule #15 path as cycles 23 / 25 / 27 / 29 / 31.
+Same rule-15 disposition as cycles 26 / 28 / 30 / 32 (each of which was a real-Xbox discriminator run that touched no source). The doc-only / run-only carve-out is the explicit rationale.
 
-The doc-only / run-only carve-out used by cycles 26 / 28 / 30 / 32 does NOT apply here because cycle 33 ships a new script + non-trivial edits to an existing apple-silicon script.
-
-## Gate status (cycle 33)
+## Gate status (cycle 34)
 
 - [x] Required docs read.
-- [x] Repo/git state confirmed; 9 pre-existing `.hermes_cycle*.txt` + `.hermes_launch_cycle*.sh` files preserved un-staged.
-- [x] New `composite-preflight.sh` shipped (`bash -n` clean; live no-signal probe rc=2 in ~3.6 s).
-- [x] `composite-record.sh` integration shipped (`bash -n` clean; end-to-end preflight-failure structured marker verified; `--skip-preflight` legacy reproduction verified).
-- [x] `automation.md` + `flags-bench.md` synced.
-- [x] `handoff.md` + `decision-log.md` cycle-33 entries on top; cycle-32 entry preserved unchanged below.
+- [x] Repo/git state confirmed; pre-existing tracked drift + untracked `.hermes_*` + `composite_preflight.py` preserved un-staged per cycle-34 prompt guardrail.
+- [x] Composite preflight `--mode auto` `status=ok` in 1.671 s via xemu-capture; real 720x480 dashboard probe PNG saved.
+- [x] FTP-list confirmed cycle-31 witness-only + cycle-29 oracle-agent still resident at expected paths.
+- [x] ensure-agent OK; baseline both scans MET — `witness.scan = count=1 phys=0x03eb3000 reserved0=0 reserved1=0` AND `witness.scan-self = count=0`.
+- [x] Composite-record substitution executed (xemu-capture snapshot burst in place of ffmpeg AVFoundation recording; ZERO source changes).
+- [x] Second `runxbe witness-only` issued with NTSC dimensions; 22-frame burst captured; pre-runxbe dashboard frame proves capture pipeline healthy.
+- [x] Post-runxbe scans = `(D-cycle-27, count=0)` identical to cycle 30 / cycle 32 post-states.
+- [x] Outcome classified as **F4** with row-by-row reasoning in `benchmark-runs/.../SUMMARY.md`.
+- [x] `handoff.md` + `decision-log.md` cycle-34 entries on top.
 - [x] Orchestration-state quartet closure pass.
-- [x] Codex validation (rule #15 trigger #2) closed at 6 rounds (round 6 LOOKS GOOD). Marker written.
-- [x] Closure commit landed as `dcaf7a0206` on `apple-silicon-performance`; bounded closeout-sync follow-up commit on top syncs the orchestration-state quartet to reference the landed hash (doc-only / state-only; no Codex required).
+- [x] Rule #15 doc-only / run-only carve-out applies — Codex SKIPPED.
+- [ ] Closure commit on `apple-silicon-performance` (pending at session end).
 
 ## Local validation evidence
 
-- `bash -n scripts/apple-silicon/composite-preflight.sh` — clean.
-- `bash -n scripts/apple-silicon/composite-record.sh` — clean.
-- `scripts/apple-silicon/composite-preflight.sh --device NonExistentDeviceXYZ --timeout 3 --quiet` → rc=3 (`device_not_found`), JSON populated.
-- `scripts/apple-silicon/composite-preflight.sh --mode ffmpeg --device USB2 --timeout 3 --quiet` → rc=2 (`no_signal`), elapsed ~3.6 s, `detector="ffmpeg"` in JSON (live MS2109 has no composite signal — reproduces cycle-32 hardware-side failure mode).
-- `scripts/apple-silicon/composite-record.sh --device USB2 --duration 2 --preflight-timeout 3 --preflight-mode ffmpeg` → rc=2 in ~3.6 s, `capture-meta.json` carries `schema="composite-record/v1"`, `status="preflight-failed"`, `ffmpeg_invoked=false`, embedded `preflight` summary object; ffmpeg was never launched.
-- `scripts/apple-silicon/composite-record.sh --skip-preflight --device USB2 --duration 1 --no-audio` → reproduces cycle-32 silent-stall (rc=137 SIGKILL after ~24 s wall-elapsed; `capture-meta.json` carries `status="ffmpeg-failed"`, `ffmpeg_rc=137`, `capture_timed_out=true`, plus a `preflight: {status: "skipped"}` summary object). Confirms the `--skip-preflight` escape hatch reproduces the legacy behavior unchanged.
+- `composite-preflight.sh --device USB2 --timeout 8 --json --out-dir benchmark-runs/.../preflight` → rc=0 `status=ok` 1.671 s, real 720x480 NTSC probe PNG (652 unique colors).
+- `composite-preflight.sh --device USB2 --timeout 8 --mode ffmpeg --json --out-dir benchmark-runs/.../preflight-ffmpeg` → rc=2 `no_signal` 8.93 s (documents the xemu-capture-yes / ffmpeg-no asymmetry — cycle-35+ filed finding).
+- `xemu-capture snapshot USB2 --out snap_diag_ntsc.png --width 720 --height 480` → 720x480 PNG with 42 926 unique colors and max=(255,255,255) (confirms NTSC-dimensions path delivers real frames; PAL-default returns all-zero).
+- `oracle-orchestrator.py status` → `ping=true, ftp=true, agent=false` (pre-session); after ensure-agent, `agent ready at 192.168.0.200:9001`.
+- `oracle-client.py raw witness.scan` baseline → `count=1 phys=0x03eb3000 reserved0=0 reserved1=0 mapped_pages_seen=419`; `oracle-client.py raw witness.scan-self` baseline → `count=0 mapped_pages_seen=419`.
+- 22 NTSC-correct snapshots in `snapshots-runxbe2-ntsc/` over t+0.07..t+24.17s post-runxbe → every frame RGB(0,0,0) pure black with unique=1 (analyzed via inline python3 with PIL: 5-band classification + per-pixel min/max).
+- Final post-runxbe-and-recovery scans → identical to baseline `(D-cycle-27, count=0)`.
 
 ## Codex validation marker
 
-Written at `.claude/state/codex-validate-last-run` after round 6 LOOKS GOOD. Validation methodology: 6 rounds of `/codex-validate changes` against the evolving uncommitted diff; each round's findings either ADOPTED (with the fix landed before the next round) or DEFLECTED (with explicit scope rationale recorded in handoff.md + decision-log.md cycle-33 entries). The full round-by-round disposition lives in those two canonical docs; this orchestration-state file points at them rather than duplicating.
+Cycle-31 closure marker at `.claude/state/codex-validate-last-run` (round 3 LOOKS GOOD against the cycle-31 build) remains the relevant marker for the deployed `witness-only/bin/default.xbe`. Cycle-33 closure marker (round 6 LOOKS GOOD against composite-preflight.sh + composite-record.sh) remains the relevant marker for the cycle-33 tooling. Cycle 34 does NOT retrigger rule #15 (no source/script edits) so no new marker is written.
 
 ## Why this is not a regression of any prior cycle's validation guarantees
 
-- Cycle 23 / 25 / 27 / 29 / 31 each Codex-validated their own implementation slices (XBE source + oracle-agent source). Cycle 33 does not touch any of those slices' code: `lib/xbed_a4_witness.{c,h}` intact, `lib/xbed_self_witness.{c,h}` intact, `oracle-agent/*` intact, `lib/lib.mk` intact, `lib/xbed_runtime.{c,h}` intact, image-blit intact, `witness-only/main.c` intact (the cycle-31 source is bit-identical to what was committed at cycle-31 closure).
-- Cycle 33 is a Mac-side host-only tooling slice + paired docs/rules; prior cycles' guarantees remain valid.
-- Cycle-31 Codex marker (`.claude/state/codex-validate-last-run`) remains the relevant marker for the deployed `witness-only/bin/default.xbe` (cycle-33 does not touch any XBE source/build).
+- Cycle 23 / 25 / 27 / 29 / 31 / 33 each Codex-validated their own implementation slices (XBE source + oracle-agent source + apple-silicon scripts). Cycle 34 does not touch any of those slices' code: `lib/xbed_a4_witness.{c,h}` intact, `lib/xbed_self_witness.{c,h}` intact, `oracle-agent/*` intact, `lib/lib.mk` intact, `lib/xbed_runtime.{c,h}` intact, image-blit intact, `witness-only/main.c` intact (bit-identical to cycle-31 closure), `tools/xemu-capture/` intact, `scripts/apple-silicon/composite-record.sh` + `scripts/apple-silicon/composite-preflight.sh` intact.
+- Cycle 34 is a real-Xbox run + doc/state sync slice; prior cycles' guarantees remain valid.
+- The deployed cycle-31 `witness-only/bin/default.xbe` (155 648 B) at `/E/Apps/witness-only/default.xbe` and the deployed cycle-29 `oracle-agent/bin/default.xbe` (417 792 B) at `/E/Apps/oracle-agent/default.xbe` are bit-identical to the artifacts that passed Codex green at their respective closures.
 
 ## Evidence integrity
 
-- No `benchmark-runs/` directory this cycle (no real-Xbox run; no XBE harness sweep).
-- Two modified script files + three modified doc files + the orchestration-state quartet are the entire change surface.
+- No source-file modifications this cycle.
+- Run evidence under `benchmark-runs/cycle34-cycle32-redo-real-xbox-witness-only-visual-20260523T203702Z/` (gitignored). Contents:
+  - `00-reachability.log`, `00-composite-preflight.log`
+  - `01-ftp-list-binaries.log`
+  - `02-ensure-agent.log`
+  - `03-baseline-both-scans.log`
+  - `04-composite-record.log`, `composite-cycle34/capture-meta.json`
+  - `05-runxbe.log`
+  - `06-poststate-post-first-runxbe.log`
+  - `07-postrun-first-runxbe-scans.log`
+  - `08-runxbe2.log`
+  - `09-final-scans-after-runxbe2.log`
+  - `SUMMARY.md`
+  - `preflight/` (xemu-capture preflight; rc=0 status=ok)
+  - `preflight-ffmpeg/` (ffmpeg preflight; rc=2 no_signal — documents asymmetry)
+  - `composite-cycle34/` (capture-meta.json with preflight-failed status; ffmpeg_invoked=false)
+  - `snapshots/` (PAL-default first burst — all-zero; PRESERVED for audit + as evidence of the cycle-33 step-11 example-invocation gap)
+  - `snapshots-runxbe2-ntsc/` (NTSC-correct second burst — pre-runxbe dashboard real signal + 22 post-runxbe pure-black)
+  - `snap_diag_ntsc.png` (one-shot diag confirming NTSC dimensions deliver real frames)
+- Three modified canonical docs + one orchestration-state quartet (4 files) are the entire change surface staged for the closure commit.
 
 ## Out of scope for this cycle (validation perspective)
 
@@ -59,5 +81,7 @@ Written at `.claude/state/codex-validate-last-run` after round 6 LOOKS GOOD. Val
 - No shared-lib edits; no oracle-agent edits.
 - No XBE rebuilds.
 - No `tools/xemu-capture/` source edits.
-- No cycle-32 redo (Hermes's call after physical-side composite-cable / capture-input verification).
+- No `composite-record.sh` / `composite-preflight.sh` source edits.
 - No retail-title / §G.5 / RT-as-texture work.
+- No cycle-35+ pre-main breadcrumb implementation (Hermes's call).
+- No cleanup of pre-existing untracked `.hermes_*` files or pre-existing tracked drift in `capture-composite-reference.sh` / `retail-*.py` scripts (preserved per cycle-34 prompt guardrail).

@@ -1,61 +1,73 @@
 # Current Cycle
 
-- Cycle: 33 composite-capture fail-fast preflight slice — **CLOSED on `apple-silicon-performance`** at closure commit `dcaf7a0206`. New `scripts/apple-silicon/composite-preflight.sh` + default-on integration into `scripts/apple-silicon/composite-record.sh` so the cycle-32 OUTCOME F8 silent-stall failure mode aborts in ~8 s instead of ~93 s. Bounded closeout-sync follow-up landed in this commit (orchestration-state quartet: this file + claude-status.md + validation-status.md + handoff-summary.md updated to reference the landed dcaf7a0206 instead of "closure commit pending"; no source/script touched; no Codex needed under rule #15 doc-only / state-only carve-out).
-- Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run).
-- Closed: 2026-05-23.
-- State: **CLOSED.** Implementation slice; ZERO real-Xbox run; cycle-32 redo remains Hermes's call after physical-side composite-cable / capture-input verification.
+- Cycle: 34 cycle-32 redo on real Xbox vs cycle-31 visual-breadcrumb build — **CLOSED on `apple-silicon-performance`** (closure commit pending at session end). OUTCOME **F4** = zero stripes visible across 22 NTSC-correct composite snapshots + `witness.scan = D-cycle-27` + `witness.scan-self = count=0`. Per cycle-31 cycle-32 9-row discriminator table this is γ.0 OR γ.1 → **cycle-22 pre-main-crash hypothesis FULLY CORROBORATED in its strongest form**. The cycle-32 redo finally moved from F8 (no-capture-procedural-failure recorded at cycle-32 closure `ac515383bb`) to F4 (genuine discriminator answer) now that Josh's physical Xbox restart + QuickTime composite-capture verification cleared the hardware-side blocker. Run-only / doc-only slice; ZERO source/script edits; Codex SKIPPED under rule #15 doc-only / run-only carve-out (same path as cycles 26 / 28 / 30 / 32).
+- Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker autonomous run launched 20:36:25Z UTC).
+- Closed: 2026-05-23 (run-evidence captured, classification reasoning written, canonical docs/state synced, commit pending at exit).
+- State: **CLOSED.** Real-Xbox discriminator slice; the substantive cycle-32 redo has finally produced its discriminator answer.
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
-- HEAD at start: cycle-32 closure commit `ac515383bb` on `apple-silicon-performance`.
-- Bounded goal: "Ship a fail-fast composite-capture preflight that converts the cycle-32 OUTCOME F8 silent-stall (~93 s) into a fast actionable abort (~8 s), wire it into `composite-record.sh` by default with an explicit `--skip-preflight` opt-out, sync canonical docs/state, run Codex validation, and commit the bounded slice."
-- Result: **Tool slice SHIPPED.** Preflight reproduces cycle-32's hardware-side failure in ~3.6 s vs cycle 32's ~93 s (>25× speedup at the unattended-orchestration boundary). `composite-record.sh` aborts BEFORE arming ffmpeg on no-signal MS2109 and writes a structured `preflight-failed` capture-meta.json instead of recording zero frames. `--skip-preflight` preserves the legacy behavior.
+- HEAD at start: cycle-33 closeout-sync commit `6385e2f326` on `apple-silicon-performance`.
+- Bounded goal: "Execute the substantive cycle-32 redo now that composite capture is confirmed alive. Follow the canonical deployment/runbook path and classify the outcome using the cycle-31/32 discriminator table."
+- Result: **F4 discriminator answer landed.** γ.0 OR γ.1; cycle-22 pre-main-crash hypothesis FULLY CORROBORATED in strongest form. M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-35+ pre-main breadcrumb implementation); cycle-35+ scope is Hermes's call.
 
 ## Plan summary (this session, executed in order)
 
-1. Read canonical docs/state (cycle-32 handoff + decision-log entries, orchestration-state quartet, automation.md composite sections, flags-bench.md, composite-record.sh, xemu-capture-app.py wrapper contract).
-2. Inspected git status + recent commits (cycle-32 closure resident; intentional `.hermes_*` files preserved un-staged).
-3. Designed minimal robust preflight: xemu-capture snapshot as primary detector (TCC-approved path); ffmpeg `-frames:v 1` fallback against resolved AVFoundation index; JSON output; physical-side checklist on failure.
-4. Implemented `scripts/apple-silicon/composite-preflight.sh` (~310 lines).
-5. Wired into `scripts/apple-silicon/composite-record.sh` (+~140 lines): default-on with `--skip-preflight` opt-out, `--preflight-timeout` / `--preflight-mode` configurability, env-var defaults via `COMPOSITE_PREFLIGHT_TIMEOUT` / `COMPOSITE_PREFLIGHT_MODE`.
-6. Local validation: `bash -n` both scripts; live no-signal probe rc=2 in ~3.6 s; end-to-end aborted with structured `preflight-failed` capture-meta.json; `--skip-preflight` reproduces legacy silent-stall.
-7. Doc sync: `automation.md` (new preflight section + extended composite-record.sh section), `.claude/rules/flags-bench.md` (new Composite-capture preflight subsection), `docs/apple-silicon/handoff.md` + `decision-log.md` cycle-33 entries on top.
-8. Orchestration-state quartet (this file + claude-status.md + validation-status.md + handoff-summary.md) closure pass.
-9. Codex validation per rule #15 — 6 rounds run this closeout session; round 6 = LOOKS GOOD with all adopted findings landed in the script + docs.
-10. Closure commit pending.
+1. Read canonical docs/state (cycle-32 + cycle-33 handoff + decision-log entries; orchestration-state quartet; automation.md composite sections; witness-only/README.md cycle-31 addendum + cycle-32 deployment runbook; composite-record.sh; composite-preflight.sh; oracle-and-xbe.md rule).
+2. Inspected git status + recent commits (HEAD = cycle-33 closeout-sync `6385e2f326`; cycle-33 closure `dcaf7a0206` resident).
+3. Pre-flight composite capture probe — `composite-preflight.sh --device USB2 --timeout 8 --json --mode auto` → `status=ok` in 1.671 s via xemu-capture detector with real 720x480 dashboard frame (652 unique colors). Confirms Josh's Mac Studio QuickTime verification.
+4. Xbox reachability check — `ping=true, ftp=true, agent=false` (dashboard, post Josh's physical restart).
+5. FTP-list confirms cycle-31 `witness-only/bin/default.xbe` (155 648 B) + cycle-29 `oracle-agent/bin/default.xbe` (417 792 B) still resident at expected paths (preserved across the power-cycle because both live on `/E/Apps/...` HDD).
+6. ensure-agent launches the cycle-29 agent from dashboard (SITE EXEC OK; agent ready at 9001).
+7. Baseline both scans — `witness.scan = count=1 phys=0x03eb3000 reserved0=0 reserved1=0 mapped_pages_seen=419` AND `witness.scan-self = count=0`. Hard preconditions MET; matches cycle 30 / cycle 32 baselines exactly.
+8. Compose substitution discovery: `composite-record.sh` (ffmpeg-AVFoundation-based) cannot run in this bash session because ffmpeg is unavailable on inherited PATH; even with explicit `FFMPEG=/opt/homebrew/bin/ffmpeg` the direct ffmpeg AVFoundation probe silent-stalls (ZERO bytes of stderr across full timeout — reproducing cycle-32 OUTCOME F8 shape locally) while xemu-capture against the same device succeeds in ~2 s — hypothesized TCC camera-access permission inheritance asymmetry between the two binaries.
+9. Substituted the ffmpeg leg with an xemu-capture snapshot burst. ZERO source changes — only different invocations of already-shipped tools.
+10. First `runxbe witness-only` issued; first burst into `snapshots/` accidentally used xemu-capture's 720x576 PAL default dimensions (because bare `snapshot DEVICE --out PATH` omits `--width`/`--height`) — all 19 PNGs returned RGB(0,0,0) with identical SHAs (Claude-side procedural error; NOT XBE evidence; preserved for audit).
+11. Verified Xbox returned to dashboard cleanly after first runxbe; post-first-runxbe scans = `(D-cycle-27, count=0)` — already enough to land F4 if no-stripe finding holds after the format mismatch is corrected.
+12. Second `runxbe witness-only` issued with `--width 720 --height 480` explicit in every snapshot invocation. Pre-runxbe snap_00 shows REAL dashboard signal (25 357 unique colors, max=(255,255,255)) — capture pipeline confirmed healthy. 22-frame burst at ~1.2 s cadence over t+0.07s..t+24.17s post-runxbe: EVERY frame RGB(0,0,0) pure black with unique=1.
+13. Post-burst-15s status check + ensure-agent + final scans = `witness.scan = D-cycle-27` AND `witness.scan-self = count=0` (matches cycle-32 post-state exactly).
+14. Classification reasoning written in `benchmark-runs/cycle34-cycle32-redo-real-xbox-witness-only-visual-20260523T203702Z/SUMMARY.md` against the cycle-31 cycle-32 9-row discriminator table: only F4 matches all three axes simultaneously (none-visible + count=0 + D-cycle-27).
+15. Canonical docs sync — handoff.md cycle-34 entry on top with cycle-33 + cycle-32 preserved unchanged below; decision-log.md cycle-34 entry above cycle-33; orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
+16. Closure commit pending at session end.
 
 ## Exit criteria — final status
 
 1. [x] Required docs/state files read.
-2. [x] Repo/git state confirmed; 9 pre-existing `.hermes_cycle*.txt` + `.hermes_launch_cycle*.sh` files preserved un-staged.
-3. [x] New `composite-preflight.sh` shipped with xemu-capture primary + ffmpeg fallback + JSON output + physical-side checklist.
-4. [x] `composite-record.sh` integration: default-on preflight, `--skip-preflight` opt-out, `--preflight-timeout` + `--preflight-mode` configurability, env-var overrides.
-5. [x] Local validation: happy-path no-signal abort in ~3.6 s; end-to-end preflight-failure structured marker; `--skip-preflight` escape hatch verified.
-6. [x] `automation.md` + `flags-bench.md` synced with the new tool + flags.
-7. [x] Handoff + decision-log cycle-33 entries on top; cycle-32 + cycle-31 entries preserved unchanged below.
-8. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
-9. [x] Codex validation closed at 6 rounds (round 6 LOOKS GOOD; full round-by-round disposition in handoff.md cycle-33 "Validation" paragraph + decision-log.md cycle-33 "Codex validation" paragraph + validation-status.md "Codex validation marker" section). Marker written at `.claude/state/codex-validate-last-run`.
-10. [x] Closure commit landed as `dcaf7a0206` on `apple-silicon-performance`. Bounded closeout-sync follow-up commit on top updates the orchestration-state quartet to reference the landed hash (no source/script touched; rule #15 doc-only / state-only carve-out applies — no Codex required).
+2. [x] Repo/git state confirmed; pre-existing untracked `.hermes_*` + `composite_preflight.py` files preserved un-staged; pre-existing tracked-but-uncommitted modifications to `capture-composite-reference.sh` + 3 `retail-*.py` scripts preserved unstaged per cycle-34 prompt guardrail.
+3. [x] Xbox reachability + composite preflight + ftp-list preconditions verified.
+4. [x] Baseline both scans MET (witness.scan D-cycle-27 + witness.scan-self count=0).
+5. [x] Canonical cycle-31 cycle-32 deployment runbook executed with one bounded substitution (xemu-capture burst in place of ffmpeg AVFoundation recording — ZERO source changes).
+6. [x] Second runxbe executed with NTSC-correct snapshot dimensions; 22-frame burst captured; pre-runxbe dashboard frame proves capture pipeline healthy.
+7. [x] Post-runxbe scans confirm `(D-cycle-27, count=0)` two-tuple identical to cycle 30 / cycle 32 post-states.
+8. [x] Outcome classified as **F4** (γ.0 OR γ.1; cycle-22 pre-main-crash hypothesis FULLY CORROBORATED in strongest form) with full row-by-row reasoning in `benchmark-runs/.../SUMMARY.md`.
+9. [x] Handoff + decision-log cycle-34 entries on top; cycle-33 + cycle-32 entries preserved unchanged below.
+10. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
+11. [x] Rule #15 disposition: doc-only / run-only carve-out applies (same path as cycles 26 / 28 / 30 / 32) — Codex SKIPPED. Cycle-31 marker at `.claude/state/codex-validate-last-run` remains the relevant marker for the deployed cycle-31 binary.
+12. [ ] Closure commit on `apple-silicon-performance` (pending at session end).
 
-## Out-of-scope (kept bounded for cycle 33)
+## Out-of-scope (kept bounded for cycle 34)
 
-- NO real-Xbox cycle-32 redo (Hermes's call after physical-side verification).
 - NO host xemu source touched (no `hw/`, `ui/`, `target/`, `include/`).
 - NO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 lockstep contract intact).
 - NO `lib/xbed_self_witness.{c,h}` touched (cycle-29 self-witness shim intact).
 - NO `oracle-agent/*` touched (cycle-27 preserve gate + cycle-29 `witness.scan-self` verb intact).
 - NO `xbed_runtime.{c,h}` touched; NO image-blit touched; NO `witness-only/main.c` touched (cycle-31 source intact).
 - NO XBE rebuilds; NO `tools/xemu-capture/` source touched.
+- NO `scripts/apple-silicon/composite-record.sh` source touched (cycle-33 implementation intact).
+- NO `scripts/apple-silicon/composite-preflight.sh` source touched (cycle-33 implementation intact).
 - NO retail-title / §G.5 / RT-as-texture / second-wave-XBE work.
 - NO flag default flips.
-- NO PushNotification — bounded tooling slice, not a milestone.
-- NO cleanup of intentional `.hermes_*` files at repo root.
+- NO PushNotification — bounded run-only / doc-only slice, not a milestone.
+- NO cleanup of pre-existing `.hermes_*` files at repo root.
+- NO touch of pre-existing tracked-but-uncommitted modifications to `capture-composite-reference.sh` / `retail-gameplay-oracle.py` / `retail-oracle-workflow.py` / `retail-title-automation-proof.py` (preserved per cycle-34 prompt guardrail).
+- NO touch of pre-existing untracked `scripts/apple-silicon/composite_preflight.py` (preserved per the same guardrail).
+- NO widening into the cycle-33-preflight wrapper-gating slice (the xemu-capture-yes / ffmpeg-no asymmetry and the xemu-capture PAL-default dimensions are filed as cycle-35+ secondary findings, NOT cycle-34 fixes).
 
-## Recommended cycle-34 scope (NOT executed this session — Hermes's call)
+## Recommended cycle-35+ scope (NOT executed this session — Hermes's call)
 
-The substantive next slice remains the cycle-32 redo, unchanged from cycle 32's closure recommendation:
+Per cycle-31 cycle-32 discriminator table F4 "Next" column: pre-main breadcrumbs. Candidates:
+1. nxdk `.CRT$XCU` static-init slot stamp that runs after PE-load but before `main()`.
+2. Custom XBE-header callback (kernel-controlled entry slot, runs before `.CRT$*`).
+3. Thinner alternative to `XVideoSetMode` (e.g. direct NV2A CRTC register writes that bypass the kernel display init path entirely).
 
-1. **Hardware-side verification (cannot be done from a Claude session):** composite cable seated at Xbox AV port; MS2109 input selector on composite (not S-Video); Xbox AV output on composite. Optionally `cd tools/xemu-capture && make` and use `xemu-capture snapshot USB2 --out /tmp/probe.png` (the only xemu-capture verb that actually proves live frames are arriving); `inputs` / `set-input` only AFTER snapshot succeeds, to confirm the active input is composite vs S-Video.
-2. **Smoke test the cycle-33 preflight** standalone: `scripts/apple-silicon/composite-preflight.sh --device USB2 --timeout 8 --json` should now return `status=ok` after the physical-side problem is fixed.
-3. **Optional power-cycle.**
-4. **Re-run the canonical cycle-32 sequence per `witness-only/README.md` cycle-31 addendum §"Cycle-32 deployment runbook" steps 1-11 verbatim.** The cycle-31 binary remains deployed at `/E/Apps/witness-only/default.xbe`; cycle-33 preflight will now refuse to arm the long capture if the physical-side problem reappears, returning a structured `preflight-failed` capture-meta.json in ~8 s rather than 90+ s.
-
-On cycle-32 redo, the F-row landings collapse to F1 / F2 / F3 / F4 / F5 / F6 / F7 (F4' eliminated by cycle-32 data). F1 / F2 / F3 / F5 / F6 / F7 → γ INVALIDATED → cycle 35+ re-elevates option (b) for α-vs-β. F4 → γ.0 OR γ.1 → cycle-22 leading hypothesis FULLY CORROBORATED → cycle 35+ ships pre-main breadcrumbs.
+Secondary findings worth queuing alongside:
+- Extend cycle-33 preflight `--mode auto` so the ffmpeg leg is gated EVEN when xemu-capture reports ok (closes the TCC-asymmetry blind spot exposed this cycle).
+- Either default xemu-capture snapshot dimensions to NTSC for MS2109 source, OR update the `witness-only/README.md` example invocation at line 180 to include `--width 720 --height 480` (closes the PAL-default-on-NTSC-signal silent-zero failure mode exposed this cycle).
