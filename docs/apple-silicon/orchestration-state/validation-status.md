@@ -1,55 +1,60 @@
 # Validation Status
 
-- Active slice: cycle 27 Path A.4 option (a) — `oracle-agent/controller.c::s_allocate_fresh` now preserves an existing plausible `oracle_ctrl_buffer` witness header across agent restart instead of unconditionally `memset`-wiping it. Substantive C source slice (~100 LOC across new helper + branch refactor + paired doc-only edits across 4 other files).
-- Validation state: **CLOSED. Codex 3-round validation green; round 3 = LOOKS GOOD. Validation marker written at `.claude/state/codex-validate-last-run`.**
+- Active slice: cycle 28 Path A.4 real-Xbox deployment of cycle-27 preserve-branch oracle-agent vs cycle-25 witness-only XBE. **Run-only / doc-only slice** — ZERO source/script code edits, ZERO XBE rebuilds.
+- Validation state: **CLOSED. Outcome D-cycle-27 observed (`count=1 live=1 reserved0=0 reserved1=0` in final `witness.scan` after cycle-27 preserve-branch agent re-allocates the deterministic kernel-pool buffer phys=0x03eb3000). Codex validation skipped under rule #15 doc-only / run-only carve-out (same path as cycle 26).**
 
-## Gate status (cycle 27) — final
+## Gate status (cycle 28) — final
 
-- [x] Required docs read (handoff.md cycle-26/25/24, orchestration-workflow.md, decision-log entries, current-cycle/claude-status/validation-status/handoff-summary, oracle-and-xbe rule snapshot, controller.{c,h}, lib/xbed_a4_witness.{c,h}, commands.c witness reader).
+- [x] Required docs read (handoff.md cycle-27/26 entries, orchestration-workflow.md, decision-log.md cycle-27/26 entries, orchestration-state quartet, oracle-and-xbe rule snapshot, oracle-orchestrator.py ensure_agent flow, cycle-26 SUMMARY.md).
 - [x] Worker receipt posted to current-cycle.md + claude-status.md.
-- [x] Option (a) implementation: `s_page_has_plausible_witness_header` helper added with strict-subset predicate (Codex round-1 medium); `s_allocate_fresh` two-branch preserve/legacy refactor; conditional debugPrint breadcrumb in preserve branch; cache_writeback_invalidate after either branch.
-- [x] Paired doc edits: `controller.h` `oracle_ctrl_init` updated; `commands.c::cmd_witness_scan` body comment extended; `witness-only/README.md` discriminator table updated; `witness-only/manifest.json` `artifacts.witness_readback.notes` + `expected_results.real-xbox/physical/cycle-26.notes` extended.
-- [x] oracle-agent XBE rebuilt via nxdk `make`; bin/default.xbe = 417 792 B (size unchanged from cycle 26); oracle-agent.iso = 983 040 B; benign `lld: warning: .edata=.rdata` repeats from prior cycles. manifest.json re-parses cleanly.
-- [x] Codex validation round 1 (changes mode): MINOR ISSUES (medium predicate-too-loose + low witness-only-docs-orphan-only-shape). Both adopted in full.
-- [x] Codex validation round 2 (changes mode, post-adoption diff): MINOR ISSUES (round-1 MEDIUM RESOLVED; round-1 LOW PARTIAL — manifest `expected_results.real-xbox/physical/cycle-26.notes` retained legacy-only wording). Adopted: that field now describes both shapes.
-- [x] Codex validation round 3 (changes mode, post-PARTIAL-fix diff): LOOKS GOOD (round-2 PARTIAL RESOLVED; round-1 MEDIUM still RESOLVED; no new round-3 findings; one out-of-scope note pointing at decision-log.md cycle-26 entry, addressed by adding cycle-27 entry above without superseding cycle-26).
-- [x] Validation marker written at `.claude/state/codex-validate-last-run`.
-- [x] Canonical docs synced: handoff.md cycle-27 entry on top (cycle-26 preserved unchanged); decision-log.md cycle-27 entry above cycle-26 (no supersession); orchestration-state quartet closure pass (current-cycle.md, claude-status.md, validation-status.md = this file, handoff-summary.md).
-- [x] Closure commit landed on `apple-silicon-performance`: `df999e41ea`.
-- [ ] **Cycle 28 real-Xbox deployment** — explicitly out of scope; Hermes-scheduled.
+- [x] Xbox reachability + cycle-23 agent responsiveness probed (08:44:29Z).
+- [x] Baseline `witness.scan` precondition MET (count=1 phys=0x03eb3000 reserved0=0 reserved1=0 mapped_pages_seen=419 — matches cycle 26 exactly).
+- [x] `reboot` agent → dashboard FTP-LIST OK at t+27s.
+- [x] FTP STOR cycle-27 `oracle-agent/bin/default.xbe` (417 792 B) → verified remote size.
+- [x] Confirmed cycle-25 `witness-only/default.xbe` (147 456 B) still resident from cycle-26 deploy.
+- [x] `ensure-agent` launches cycle-27 build; SITE EXEC OK; ready at port 9001 within ~10s; banner unchanged (`v0.4 (Phase 2 + controller.* + smc.*)` — expected, internal allocator logic only).
+- [x] Post-launch `witness.scan` identical to baseline (kernel pool returned same persistent phys to cycle-27 agent; preserve gate saw `(0,0)` predicate match).
+- [x] `runxbe E:\Apps\witness-only\default.xbe` via cycle-27 agent → agent died on chainload → FTP-LIST + 9001 + ICMP poll → **dashboard fully ready at t+70s** (reproduces cycle 26's 70.17s).
+- [x] Post-run `ensure-agent` (cycle-27 build) + FINAL `witness.scan` = **count=1 buf.0 phys=0x03eb3000 reserved0=0 reserved1=0** = outcome D-cycle-27.
+- [x] Evidence preserved on disk: 9 logs + SUMMARY.md under `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/`.
+- [x] Canonical docs synced: handoff.md cycle-28 entry on top (cycle-27 preserved unchanged); decision-log.md cycle-28 entry above cycle-27 (no supersession); orchestration-state quartet closure pass (current-cycle.md, claude-status.md, validation-status.md = this file, handoff-summary.md).
+- [x] Closure commit landed on `apple-silicon-performance` (this commit).
+- [ ] **Cycle 29 design + run** — explicitly out of scope; Hermes-scheduled.
 
-## Codex validation decision (cycle 27)
+## Codex validation decision (cycle 28)
 
-Cycle 27 is a **substantive code-source slice** on `oracle-agent/controller.c` (++97 lines of substantive C plus paired doc-only edits totaling ~170 lines across 5 files). Rule #15 trigger #2 fires unambiguously (non-trivial uncommitted code in `xemu-fork/`, aggregate diff > 30 lines on the renderer-adjacent oracle-agent C source). Three Codex rounds run; round 3 = LOOKS GOOD with no new findings. Adoption record:
+Cycle 28 is a **run-only / doc-only slice** — ZERO source/script code edits, ZERO XBE rebuilds, all Xbox-side operations used existing agent verbs and existing Mac-side tooling (`oracle-client.py`, `oracle-orchestrator.py`, `curl FTP`). Rule #15 trigger #2 (non-trivial uncommitted code in xemu-fork/) does NOT fire. The rule #15 doc-only / ≤30-line uncommitted source diff carve-out applies. **Skipped per the same path as cycle 26**, which also ran the canonical sequence with ZERO source edits.
 
-- Round 1 MEDIUM (predicate too loose): RESOLVED.
-- Round 1 LOW (docs only describe orphan-shape success): RESOLVED across `cmd_witness_scan` body comment, witness-only README, and both manifest fields.
-- Round 2 PARTIAL (manifest `expected_results.real-xbox/physical/cycle-26.notes` residual): RESOLVED.
-- Round 3 no new findings; out-of-scope note about decision-log cycle-26 entry not applicable (decision-log cycle-27 entry added above cycle-26 in this same commit, preserving cycle-26 as historical record).
-
-## What stands from cycles 17 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26
+## What stands from cycles 17 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27
 
 - xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged.
 - §H.6 IMAGE_BLIT MET under the flag locally — unchanged.
 - Flag ships opt-in, default OFF — unchanged.
 - Cycle 19/20/21's 5× reproducible 22.4 s chainload→FTP-back gap for pre-witness image-blit binaries — UNCHANGED.
-- Cycle 22 invalidation of cycle-19 hypothesis #1 (launch-path blocker) and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged.
-- Cycle 23 closure (witness instrumentation Codex round-2 PASS_WITH_FINDINGS + MINOR resolved post-round-2) — unchanged.
-- Cycle 24 concrete-blocker outcome (cycle-23 image-blit hard-hangs real Xbox; cycle-22 leading hypothesis WEAKENED; NEW hypothesis #5 promoted) — unchanged.
-- Cycle 25 witness-only XBE SHIPPED + Codex round-3 PASS_WITH_FINDINGS + local xemu-Metal smoke green — unchanged.
-- Cycle 26 closure (outcome shape D = ~70 s recovery + no observable orphan; hypothesis #5 PARTIALLY INVALIDATED in the catastrophic-hang sense; stamp-vs-no-stamp ambiguity OPEN) — unchanged from a state-of-the-world perspective; cycle 27 SHIPS THE TOOL to break that ambiguity but does not RUN it on real Xbox.
+- Cycle 22 invalidation of cycle-19 hypothesis #1 and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged.
+- Cycle 23 closure (witness instrumentation Codex round-2 PASS_WITH_FINDINGS + MINOR resolved) — unchanged.
+- Cycle 24 concrete-blocker outcome (image-blit hard-hangs real Xbox; cycle-22 leading hypothesis WEAKENED; NEW hypothesis #5 promoted) — unchanged.
+- Cycle 25 witness-only XBE SHIPPED + Codex round-3 PASS_WITH_FINDINGS — unchanged.
+- Cycle 26 closure (outcome shape D = ~70 s recovery + no observable orphan; hypothesis #5 PARTIALLY INVALIDATED in catastrophic-hang sense; stamp-vs-no-stamp ambiguity OPEN) — UPDATED by cycle 28 (see below).
+- Cycle 27 closure (`s_allocate_fresh` preserve branch SHIPPED with Codex 3-round green) — unchanged; preserve branch was correctly built and deployed (cycle 28 confirms wiring is correct, just had nothing to preserve).
 
-## What changes (cycle 27)
+## What changes (cycle 28)
 
-- Agent's `s_allocate_fresh` no longer unconditionally wipes a `MmPersistContiguousMemory`-tagged page that already carries a plausible `oracle_ctrl_buffer` header.
-- A new positive cycle-26-style readback shape `count=1 live=1 reserved0=0xA4xxxxxx` is now documented across `commands.c::cmd_witness_scan` body comment, `witness-only/README.md`, and `witness-only/manifest.json`. Either this new live-buffer shape OR the legacy orphan shape counts as "witness landed".
-- Cycle-22 leading hypothesis status: UNCHANGED (still WEAKENED). Cycle 27 ships the discriminator-sharpening tool; cycle 28 runs it.
-- Hypothesis #5 status: UNCHANGED from cycle 26 (PARTIALLY INVALIDATED in the catastrophic-hang sense).
+- The cycle-26 indistinguishable-causes pair "stamp landed and got wiped vs stamp never landed" collapses on the wiped side. **Stamp-landed-then-wiped hypothesis INVALIDATED.**
+- Cycle-26 ambiguity now resolved to **"stamp never landed"** with three live sub-causes (α/β/γ) recorded in handoff.md cycle-28 entry, SUMMARY.md, and the cycle-29 candidate scope discussion.
+- Cycle-27 option (a) is **demonstrated insufficient** for breaking the cycle-26 ambiguity to A1/A2.
+- 70 s chainload→dashboard-ready for witness-only is now **two-cycle-reproducible real Xbox behavior** (cycle 26 ~70.17 s + cycle 28 ~70 s).
+- Kernel-pool deterministic phys=0x03eb3000 reuse is now **≥6 consecutive observations in same physical power session** (cycle 26's 3 + cycle 28's ≥3).
+- Cycle-22 leading hypothesis status: UNCHANGED (still WEAKENED). Cycle 28 cannot move it.
+- Hypothesis #5 status: **REFINED**. Catastrophic-hang sense remains PARTIALLY INVALIDATED; subtler "silently no-ops" sense now consistent with cycle-28 evidence but indistinguishable from (γ) without further instrumentation.
 - §H.6 default-on shape decision REMAINS DEFERRED.
-- M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-28 real-Xbox discriminator run with cycle-27 oracle-agent), §G.5, RT-as-texture.
+- M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-29 design + run), §G.5, RT-as-texture.
 
-## What cycle 27 does NOT resolve
+## What cycle 28 does NOT resolve
 
-- **Stamp-vs-no-stamp question at the real-Xbox level.** Cycle 27 ships the tool; cycle 28 runs it.
-- **The cycle-26 ~70 s recovery shape.** Preserve branch only sharpens the post-chainload readback, not the chainload-→dashboard-ready timing.
-- **Cycle-22 leading hypothesis.** Will be resolved one way or the other by cycle 28's `witness.scan` readback.
+- **Why the stamp never landed.** Three live causes:
+  - (α) `xbed_a4_witness::a4_candidate_ok` kseg0 scan doesn't find agent's XCTR buffer from non-agent process context.
+  - (β) Scan finds it but write faults silently (PAT/WC/WB attribute divergence or stale cache line).
+  - (γ) Witness-only's main() never reaches the fire calls (consistent with cycle-22 leading hypothesis).
+- **The ~70 s recovery shape.** Could be slow kseg0 scan, delayed-fault watchdog window, or slow BIOS POST. Cycle 29 may collapse this ambiguity as a side-effect if option (c)'s self-allocated-page approach shows BIOS-POST-like timing (~17 s) instead of 70 s.
+- **Cycle-22 leading hypothesis.** Still WEAKENED; cycle 29 option (c) or (d) is the path forward.

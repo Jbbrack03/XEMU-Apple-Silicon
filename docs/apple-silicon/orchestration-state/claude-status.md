@@ -1,57 +1,55 @@
 # Claude Status
 
-- Objective: cycle 27 Path A.4 option (a) — preserve an existing oracle controller buffer witness stamp across agent restart by modifying `oracle-agent/controller.c::s_allocate_fresh` (XBE source slice only; no real-Xbox run this session).
-- Status: **CLOSED.** Fresh bounded session 2026-05-23; option (a) shipped with Codex 3-round validation green (round 3 = LOOKS GOOD).
+- Objective: cycle 28 Path A.4 real-Xbox deployment of cycle-27 preserve-branch oracle-agent vs cycle-25 witness-only XBE — discriminate cycle-26 stamp-vs-no-stamp ambiguity.
+- Status: **CLOSED.** Outcome **D-cycle-27** observed; cycle-27 option (a) demonstrated insufficient; cycle-26 "stamp landed and got wiped" INVALIDATED; "stamp never landed" conclusion now isolated; cycle 29 candidate scope identified.
 
-## Why cycle 27 ran this session
+## Why cycle 28 ran this session
 
-Hermes pre-session instruction explicitly assigned cycle-27 option (a) as the bounded slice for this session, citing the cycle-26 closure (commit `a31e061144`) which left the stamp-vs-no-stamp ambiguity OPEN and listed 4 candidate cycle-27 redesigns. Option (a) was selected as the LOW-risk LOW-LOC pick to address the most-likely failure mode (kernel-pool-reuse-driven memset-wipe in the relaunched agent). The other three options (b/c/d) remain on the table for cycle 29+ if cycle 28 does not resolve the ambiguity.
+Hermes pre-session instruction explicitly assigned the cycle-28 real-Xbox deployment slice as the bounded slice for this session, citing cycle-27 closure (commit `df999e41ea`, doc-sync `291b607a46`) which shipped the `s_allocate_fresh` preserve-branch oracle-agent and recorded the cycle-28 expected positive shapes (A1: `count=1 live=1 reserved0=0xA4xxxxxx`; A2: `count>=2` with stamped orphan) and negative shapes (D-cycle-27, B). Cycle 28 is the first chance to discriminate the cycle-26 ambiguity into either "stamp landed" (A1/A2) or "stamp never landed" (D-cycle-27) or "real-Xbox hang" (B). This is also the first real-Xbox run since the cycle-27 source change.
 
 ## What this session shipped
 
-1. New static helper `s_page_has_plausible_witness_header(vp)` in `oracle-agent/controller.c` mirroring the cycle-23 lockstep plausibility filter but TIGHTENED (Codex round-1 medium) to accept only the two header shapes the agent's writer paths actually produce: `(reserved0==0, reserved1==0)` or `((reserved0>>24)==0xA4, 1<=reserved1<=4096)`. The preserve gate is a strict subset of the cycle-23 scan filter (false negative → safe fallback; false positive → would silently retain garbage as a real header).
-2. `s_allocate_fresh` two-branch refactor: preserve branch keeps magic/version/reserved[0,1] and clears only `port[]`; legacy branch keeps full-zero + re-stamp magic/version. `cache_writeback_invalidate` after either branch.
-3. One conditional `debugPrint` breadcrumb in the preserve branch reports `phys`, `reserved[0]`, `reserved[1]` so on-screen verification (composite capture / debug overlay) can confirm the branch activated without `witness.scan`.
-4. `controller.h` `oracle_ctrl_init` doc comment extended to describe the cycle-27 refinement.
-5. `commands.c::cmd_witness_scan` body comment extended with a "Cycle-27 additional success shape" block listing the new `count=1 live=1 reserved0=0xA4xxxxxx` positive shape alongside the legacy orphan shape.
-6. `witness-only/README.md` discriminator-semantics table updated to list both success shapes and clarify cycle-28 follow-on.
-7. `witness-only/manifest.json` `artifacts.witness_readback.notes` + `expected_results.real-xbox/physical/cycle-26.notes` both extended to describe both shapes.
-8. `oracle-agent/bin/default.xbe` rebuilt (size unchanged at 417 792 B); `oracle-agent.iso` rebuilt (983 040 B).
-9. Codex 3 rounds: round 1 = MINOR ISSUES (medium + low; both adopted); round 2 = MINOR ISSUES (round-1 MEDIUM RESOLVED, round-1 LOW PARTIAL; adopted); round 3 = LOOKS GOOD. Validation marker written.
-10. Canonical docs synced: handoff.md cycle-27 entry, decision-log.md cycle-27 entry, orchestration-state quartet (current-cycle.md, claude-status.md = this file, validation-status.md, handoff-summary.md) closure pass.
+1. Executed canonical cycle-26-style sequence against the cycle-27 preserve-branch oracle-agent:
+   - Reachability probe (cycle-23 agent resident as foreground since cycle 26).
+   - Baseline `witness.scan` precondition (count=1 phys=0x03eb3000 reserved0=0 mapped_pages_seen=419 — matches cycle 26 exactly).
+   - `reboot` → dashboard FTP-LIST at t+27s.
+   - FTP STOR new cycle-27 oracle-agent (417 792 B) → verified.
+   - `ensure-agent` launches cycle-27 build → banner unchanged (expected) → rescan identical to baseline.
+   - `runxbe witness-only` → FTP-LIST poll → dashboard ready at t+70s (reproduces cycle 26's 70.17 s).
+   - Post-run `ensure-agent` (cycle-27 build) + final `witness.scan` = **count=1 buf.0 phys=0x03eb3000 reserved0=0 reserved1=0**.
+2. Wrote `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/SUMMARY.md` documenting all 9 evidence logs and full hypothesis analysis.
+3. Canonical docs synced: handoff.md cycle-28 entry, decision-log.md cycle-28 entry, orchestration-state quartet closure pass.
 
 ## Session progress
 
-- [x] Read required docs/state files (handoff.md cycle-26/25/24 entries, orchestration-workflow.md, decision-log entries, all four orchestration-state files, oracle-and-xbe rule snapshot, controller.{c,h}, lib/xbed_a4_witness.{c,h}, commands.c witness reader).
-- [x] Designed preserve-branch predicate + branch logic (tightened in Codex round 1).
-- [x] Implemented option (a) minimally in `controller.c` + paired doc-only edits in `controller.h`, `commands.c`, `witness-only/README.md`, `witness-only/manifest.json`.
-- [x] Rebuilt oracle-agent XBE; verified size unchanged + binary built cleanly.
-- [x] Codex round 1 (changes mode): MINOR ISSUES; both findings adopted in full.
-- [x] Codex round 2 (changes mode): MINOR ISSUES; round-1 MEDIUM RESOLVED, round-1 LOW PARTIAL adopted.
-- [x] Codex round 3 (changes mode): LOOKS GOOD; no new findings.
-- [x] Validation marker written at `.claude/state/codex-validate-last-run`.
-- [x] Updated orchestration-state quartet for cycle-27 closure.
-- [x] Updated handoff.md cycle-27 entry; appended decision-log cycle-27 entry.
-- [x] Closure commit landed on `apple-silicon-performance`: `df999e41ea`.
+- [x] Read required docs/state files.
+- [x] Probed Xbox reachability + captured baseline `witness.scan` (precondition MET).
+- [x] Rebooted agent → dashboard FTP-LIST ready (t+27s).
+- [x] FTP-uploaded cycle-27 oracle-agent (417 792 B); verified remote size.
+- [x] Re-launched cycle-27 oracle-agent via `ensure-agent`; confirmed responsive + post-launch rescan identical to baseline.
+- [x] Chainloaded cycle-25 witness-only; FTP-LIST poll measured dashboard recovery at t+70s.
+- [x] Restarted cycle-27 agent + captured final `witness.scan` = outcome D-cycle-27.
+- [x] Preserved 9 evidence logs + SUMMARY.md under `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/`.
+- [x] Synced handoff.md, decision-log.md, orchestration-state quartet.
+- [x] Closure commit landed on `apple-silicon-performance` (this commit).
 
 ## Confidence + risk notes
 
-- HIGH confidence in the predicate tightness (predicate is a strict subset of the cycle-23 scan filter; false negative falls back to legacy safe behavior; false positive would require the kernel-pool page to coincidentally spell `XCTR+1+(0,0)` or `XCTR+1+(0xA4xxxxxx, 1..4096)`).
-- HIGH confidence in the preserve branch's correctness (the branch only memsets `port[]`, leaves the 16-byte header intact, preserves cache-writeback semantics).
-- HIGH confidence in build + Codex green (3 rounds; round 3 LOOKS GOOD).
-- MEDIUM confidence in the cycle-28 outcome shape A1 (`count=1 live=1 reserved0=0xA4xxxxxx`). It assumes: (i) kernel pool still returns the same phys deterministically across agent re-launches as cycle 26 observed; (ii) the relaunched agent's `MmAllocateContiguousMemoryEx` returns that same phys (not some other pool page); (iii) the preserve gate matches on that page. Any of those failing falls back to legacy behavior or surfaces a different outcome shape, all of which are documented in the discriminator semantics.
-- LOW risk to existing behavior: non-preserve branch is identical to the pre-cycle-27 code path.
+- **HIGH confidence** in the outcome shape classification (D-cycle-27). The cycle-27 preserve gate's strict predicate `(reserved0==0, reserved1==0)` OR `((reserved0>>24)==0xA4, 1<=reserved1<=4096)` covers BOTH header shapes `xbed_a4_witness.c` actually writes; any landed stamp would survive `s_allocate_fresh`'s preserve branch and appear in the readback. Observed `(0,0)` is unambiguous.
+- **HIGH confidence** in the "stamp-landed-then-wiped INVALIDATED" conclusion. The cycle-27 build is the same one Codex 3-round-validated at cycle-27 closure; the preserve branch logic is reviewed and correct.
+- **MEDIUM confidence** in the three live "stamp never landed" causes (α/β/γ). Cycle-28 evidence cannot distinguish them; cycle-29 instrumentation needed.
+- **HIGH confidence** in reproducibility findings (70 s recovery shape; deterministic phys=0x03eb3000 reuse). Both reproduced across cycle 26 + cycle 28.
+- **LOW risk** to existing state. Cycle 28 made no source changes, no XBE rebuilds, and the cycle-27 oracle-agent + cycle-25 witness-only XBEs were already on the Xbox (cycle-25 from cycle 26; cycle-23 was being overwritten by cycle-27 FTP-upload, but cycle-27 is functionally a superset).
 
 ## What this session does NOT do
 
-- NO real-Xbox deployment.
-- NO host source touched.
-- NO image-blit source touched.
-- NO witness-only source touched (manifest/README doc edits only).
-- NO `lib/xbed_a4_witness.{c,h}` touched.
+- NO source/script code edits.
+- NO XBE rebuilds.
+- NO cycle-29 design promotion (Hermes's call).
+- NO retail-title / §G.5 / RT-as-texture work.
 - NO flag default flips.
-- NO cycle-27 options (b)/(c)/(d) pursued.
+- NO PushNotification — outcome is partial-discriminator result, not a milestone / blocker.
 
 ## Next proposed action
 
-Cycle-27 closure commit `df999e41ea` already landed on `apple-silicon-performance`. Cycle 28 (real-Xbox deployment of the cycle-27 oracle-agent) is Hermes's call.
+Cycle-28 closure commit (this commit) lands on `apple-silicon-performance`. Cycle 29 (Hermes's call) should promote option (c) [recommended — witness-only allocates its own persistent page with unique magic tag] to discriminate (α) "agent buffer not findable from non-agent context" from (γ) "witness-only never reaches main()." If option (c)'s self-allocated page IS findable post-run by an analogous read-only scanner, (α) was the cycle-26/28 blocker. If even option (c) lands nothing, (γ) becomes leading and cycle-22's "pre-main crash" hypothesis re-strengthens.
