@@ -53,3 +53,7 @@ Full rationale + branch decision logic in handoff.md and decision-log cycle-24 e
 - `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/01-deploy.log`
 - `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/02-baseline-witness-scan.log`
 - `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log`
+
+## Closure commit
+
+- `487e729d4f` (cycle-24 closure; doc-only six files; ~135 net lines; landed on `apple-silicon-performance` 2026-05-22 21:55 CDT).

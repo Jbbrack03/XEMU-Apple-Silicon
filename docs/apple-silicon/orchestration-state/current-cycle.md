@@ -8,7 +8,7 @@
 - Owner: Claude Code worker (Claude Max via /Users/jbbrack03/.local/bin/claude-max-shell), fresh bounded session.
 - HEAD at start: `5e07380d33` (cycle-23 closure-doc sync follow-up).
 - Cycle-23 closure commit: `5fce3b14e4` (code + docs + ISOs + validation marker).
-- Cycle-24 commit (pending): to be created at session close (doc-only + new evidence directory).
+- Cycle-24 closure commit: `487e729d4f` (doc-only; evidence dir `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/` preserved on disk per project gitignore convention).
 - Bounded goal: "Run the cycle-24 real-Xbox A.4 discriminator for image-blit, interpret the result conservatively, sync docs/state, and stop cleanly."
 - Result: CONCRETE BLOCKER documented. No A.4 byte recovered; failure-mode delta vs cycle 19/20/21 captured + reasoned about.
 
@@ -27,7 +27,7 @@
 7. [x] Canonical docs synced — handoff.md cycle-24 entry on top (cycle-23 entry preserved unchanged); decision-log.md cycle-24 entry above cycle-23 (no supersession); orchestration-state quartet closure pass.
 8. [x] Evidence preserved on disk under `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/{01-deploy.log, 02-baseline-witness-scan.log, 03-chainload-image-blit.log}`.
 9. [x] Codex validation gate cleared (per rule #15) via the explicit "doc-only / ≤30-line uncommitted diff" carve-out; per-slice justification in `validation-status.md`.
-10. [ ] Commit (doc-only + new evidence directory) — pending session close.
+10. [x] Closure commit landed as `487e729d4f` on `apple-silicon-performance` (doc-only, six files; ~135 net lines).
 
 ## Out-of-scope (kept bounded for cycle 24)
 
