@@ -32,7 +32,7 @@
 6. [x] `witness-only/bin/default.xbe` rebuilt (155 648 B, +4 096 B from cycle 29).
 7. [x] Codex validation per rule #15.
 8. [x] Canonical docs synced (handoff.md, decision-log.md, orchestration-state quartet).
-9. [x] Closure commit pending below.
+9. [x] Closure commit landed as `41f350c174` on `apple-silicon-performance`.
 
 ## Out-of-scope (kept bounded for cycle 31)
 

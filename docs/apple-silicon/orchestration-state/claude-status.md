@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 31 Path A.4 option (d) on-screen visual breadcrumb — ship the smallest credible witness-only change that answers the γ question at coarser granularity than cycle 30 ("did `main()` execute far enough to emit a synchronous visible breadcrumb on real hardware?"). Leave a precise runbook for the cycle-32 deployment slice.
-- Status: **CLOSED.** Implementation slice complete; XBE rebuilt; docs synced; Codex validation completed; closure commit pending.
+- Status: **CLOSED.** Implementation slice complete; XBE rebuilt; docs synced; Codex validation completed; closure commit `41f350c174` landed on `apple-silicon-performance`.
 
 ## Why cycle 31 ran this session
 
@@ -27,7 +27,7 @@ Hermes pre-session instruction explicitly assigned cycle 31 as the bounded slice
 - [x] Updated paired docs: README + manifest.
 - [x] Codex validation per rule #15.
 - [x] Canonical docs synced.
-- [x] Closure commit pending on `apple-silicon-performance`.
+- [x] Closure commit landed as `41f350c174` on `apple-silicon-performance`.
 
 ## Confidence + risk notes
 

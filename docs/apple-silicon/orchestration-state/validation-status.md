@@ -60,7 +60,7 @@ LOOKS GOOD. Round-1 + round-2 findings all RESOLVED. No new findings. Validation
 - [x] Round-2 findings adopted (F4 split into F4 + F4'; stripe-map prose updated).
 - [x] Codex round 3 ran; verdict LOOKS GOOD with no new findings; round-1 + round-2 findings all RESOLVED.
 - [x] Validation marker `.claude/state/codex-validate-last-run` written.
-- [x] Closure commit pending on `apple-silicon-performance`.
+- [x] Closure commit landed as `41f350c174` on `apple-silicon-performance`.
 
 ## Codex validation marker
 
