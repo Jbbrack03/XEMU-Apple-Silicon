@@ -33,6 +33,7 @@
   - Cycle 23 does NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on or any other flag.
 - `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision REMAINS DEFERRED. Cycle-17's xemu-side `8/8 mask=0xff` finding is NOT invalidated. The flag continues to ship opt-in, default OFF.
 - **Cycle 23 closure commit `5fce3b14e4` covers** the file list above (code + ISOs + docs + validation marker). No xemu-fork host source files touched; no flag default flips.
+- **Cycle 23 closure-doc sync follow-up `b614bdbc83`** (2026-05-22, doc-only) replaces the residual "commit pending / final remaining step / hash to be recorded later" wording across the orchestration-state quartet and `handoff.md` cycle-23 entry with the actual closure hash `5fce3b14e4`; no code, no XBE rebuilds, no real-Xbox runs, no flag flips.
 - **Next bounded slice (NOT promoted in this cycle):**
   - **Cycle 24.** Real-Xbox run of the patched image-blit + oracle-agent. Hard precondition: baseline `witness.scan` before chainload must show exactly ONE live buffer with `reserved[0] == 0`; if multiple orphans pre-exist from a prior cycle-24 attempt in the same power session, Hermes must power-cycle the Xbox first. Then `runxbe E:\\Apps\\image-blit\\default.xbe`. Wait for FTP-back. Restart agent. Query `witness.scan` again. Interpretation per the discriminator semantics enumerated above.
 - All evidence and canonical-doc updates are on disk by cycle-23 closure; the next session can resume cold from files per the orchestration-workflow.md §7 model.
