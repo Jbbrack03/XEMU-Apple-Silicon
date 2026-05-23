@@ -7,7 +7,7 @@
 - State: **CLOSED. `witness-only` discriminator XBE SHIPPED + Codex round-3 PASS_WITH_FINDINGS + canonical docs synced. Cycle-26 real-Xbox deployment slice deferred to Hermes.**
 - Owner: Claude Code worker (fresh bounded session), launched 2026-05-22.
 - HEAD at start: `29a455a78e` (cycle-24 closure-doc sync follow-up).
-- Cycle-25 closure commit: (recorded after this update lands on `apple-silicon-performance`).
+- Cycle-25 closure commit: this commit on `apple-silicon-performance`.
 - Bounded goal: "Ship the cycle-25 witness-only diagnostic XBE under `scripts/apple-silicon/xbe-tests/witness-only/` so Hermes can later schedule the real-Xbox deployment slice from durable docs, without relying on this session transcript. NO real-Xbox deployment in this session."
 - Result: SHIPPED. 5 new files + 2 built artifacts; cycle-23 lib + agent + image-blit UNTOUCHED; xemu-fork host source UNTOUCHED.
 
@@ -27,7 +27,7 @@
    - Round 3: **PASS_WITH_FINDINGS**, all blocking + medium + low RESOLVED, no new issues.
    - Validation marker written.
 6. ✅ Synced canonical docs: handoff.md cycle-25 entry on top (cycle-24 entry preserved unchanged); decision-log.md cycle-25 entry above cycle-24 (no supersession); orchestration-state quartet (current-cycle.md = this file, claude-status.md, validation-status.md, handoff-summary.md) closure pass.
-7. ⏳ Closure commit on `apple-silicon-performance` — this update IS the closure commit (final step in this session).
+7. ✅ Closure commit landed on `apple-silicon-performance` in this commit.
 8. ✅ Stop cleanly. Cycle-26 real-Xbox deployment is Hermes's call.
 
 ## Exit criteria — final status
@@ -38,7 +38,7 @@
 4. [x] Local xemu-Metal smoke validation green: 9× `witness-only: main() entered`, 9× `xbed_a4_witness: enter stage=1`, 9× `xbed_a4_witness: enter stage=3`, 8× `rebooting via HalReturnToFirmware` lines under `XEMU_GUEST_LOG=1`. Evidence preserved under `benchmark-runs/cycle25-witness-only-xemu-metal-smoke-*/`. Local validation only proves the mechanism's logic-level correctness in emulation; real-Xbox MMIO-aliasing failure modes are NOT reproducible in xemu and remain cycle-26 scope.
 5. [x] Codex validation 3 rounds (round 3 = **PASS_WITH_FINDINGS**); validation marker written.
 6. [x] Canonical docs synced (handoff.md, decision-log.md, orchestration-state quartet).
-7. [ ] Cycle-25 closure commit on `apple-silicon-performance` — pending (this update IS the closure commit; final step).
+7. [x] Cycle-25 closure commit landed on `apple-silicon-performance`.
 
 ## Out-of-scope (kept bounded for cycle 25)
 

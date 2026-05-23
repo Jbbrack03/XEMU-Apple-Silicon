@@ -21,7 +21,7 @@
 | 6 | Codex round 2 | BLOCK on residual #1 PARTIAL + new LOW; both adopted |
 | 7 | Codex round 3 | **PASS_WITH_FINDINGS**; round-2 #1 RESOLVED; round-2 LOW PARTIAL addressed; no new issues; validation marker written |
 | 8 | Canonical docs sync | handoff.md cycle-25 entry on top; decision-log.md cycle-25 entry above cycle-24; orchestration-state quartet closure pass |
-| 9 | Closure commit on `apple-silicon-performance` | (recorded after this update) |
+| 9 | Closure commit on `apple-silicon-performance` | Landed in this commit. |
 
 ## Cycle 25 scope discipline
 
@@ -67,4 +67,4 @@ Cycle 25 ran 3 rounds. Round 3 = PASS_WITH_FINDINGS with all blocking + medium +
 
 ## Closure commit
 
-To be recorded as soon as the cycle-25 closure commit lands on `apple-silicon-performance` after this update.
+Landed in this commit on `apple-silicon-performance`.

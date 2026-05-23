@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 25 Path A.4 witness-mechanism viability discriminator XBE — ship a minimal `witness-only` diag XBE under `scripts/apple-silicon/xbe-tests/witness-only/` so Hermes can later schedule the cycle-26 real-Xbox deployment slice from durable docs without relying on this session transcript.
-- Status: **CLOSED.** Fresh bounded session 2026-05-22; HEAD at start = `29a455a78e`. Cycle-25 closure commit pending at end of this session (final task in `TaskList`).
+- Status: **CLOSED.** Fresh bounded session 2026-05-22; HEAD at start = `29a455a78e`. Cycle-25 closure commit lands in this commit.
 
 ## Why cycle 25 exists
 
@@ -34,7 +34,7 @@ Cycle 25 ships the discriminator XBE: a minimal `witness-only` diag that fires t
 - [x] Codex round 3 → **PASS_WITH_FINDINGS**, no new issues.
 - [x] Canonical docs synced (handoff.md cycle-25 entry on top; decision-log.md cycle-25 entry above cycle-24; orchestration-state quartet closure pass).
 - [x] Validation marker written.
-- [ ] Closure commit on `apple-silicon-performance` — final step in this session.
+- [x] Closure commit on `apple-silicon-performance` landed in this commit.
 
 ## Confidence + risk notes
 

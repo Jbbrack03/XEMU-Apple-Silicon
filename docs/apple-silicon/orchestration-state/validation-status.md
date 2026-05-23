@@ -19,7 +19,7 @@
 - [x] Codex validation round 3: **PASS_WITH_FINDINGS**. Round-2 #1 RESOLVED (`main.c:47-55, 95-100`). Round-2 new LOW PARTIAL (claude-status.md residual stale wording — addressed in this update before final docs sync). Round-1 #2/#3/#4 CARRIED RESOLVED. No new issues. No open questions.
 - [x] Canonical docs synced: `handoff.md` cycle-25 entry on top (cycle-24 entry preserved unchanged); `decision-log.md` cycle-25 entry above cycle-24 (no supersession); orchestration-state quartet (`current-cycle.md`, `claude-status.md`, `validation-status.md` — this file, `handoff-summary.md`) closure pass.
 - [x] Validation marker written to `.claude/state/codex-validate-last-run`.
-- [ ] Closure commit landed on `apple-silicon-performance` — pending (next step).
+- [x] Closure commit landed on `apple-silicon-performance` in this commit.
 - [ ] **Cycle-26 real-Xbox deployment slice** — explicitly out of scope; Hermes-scheduled; cycle-25 deliberately stops here.
 
 ## Codex validation decision (cycle 25)
