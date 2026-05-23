@@ -223,6 +223,160 @@
  * than cycle 30's narrowing); if `WTNS count=0` AND stripe 0 present,
  * the crash is between XVideoSetMode return and the first fire (a NEW
  * window cycle 30 could not isolate).
+ *
+ * Cycle-35 addendum (pre-main breadcrumb via .CRT$X* slots, 2026-05-23)
+ * --------------------------------------------------------------------
+ * Cycle 34 (cycle-32 redo on real Xbox vs cycle-31 binary; closure
+ * commit `b5327d4d17`) observed OUTCOME F4 = zero stripes visible
+ * across 22 NTSC-correct composite snapshots over t+0.07s..t+24.17s
+ * post-runxbe + `witness.scan = D-cycle-27` + `witness.scan-self =
+ * count=0`. Per the cycle-31 cycle-32 9-row discriminator table this
+ * collapses to (γ.0) "execution never entered `main()` AT ALL" OR
+ * (γ.1) "`XVideoSetMode` itself faulted hard before returning." The
+ * cycle-22 pre-main-crash hypothesis is now FULLY CORROBORATED in its
+ * strongest form, but cycle 34 alone cannot tell γ.0 from γ.1.
+ *
+ * Cycle 35 adds the cheapest discriminator that runs strictly BEFORE
+ * `main()`: nxdk's CRT registers two function-pointer-table sections
+ * (`crt_initializers.c` lines 8-13) — `.CRT$XI*` (C initializers,
+ * `_PIFV = int(*)(void)`) and `.CRT$XC*` (C++ initializers,
+ * `_PVFV = void(*)(void)`) both walked by `_PDCLIB_xbox_run_crt_initi-
+ * alizers()` from the `main_wrapper` thread, plus `.CRT$XX*` (pre-
+ * initializers, `_PVFV`) walked by `_PDCLIB_xbox_run_pre_initializers()`
+ * from `WinMainCRTStartup` BEFORE `thrd_create(main_wrapper)`. Cycle 35
+ * registers two slots that each call `xbed_self_witness_fire(stage)`
+ * with new pre-main stage codes:
+ *
+ *   - .CRT$XXC slot — stage WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XX = 4.
+ *     Runs in the entry thread after `__security_init_cookie` + TLS
+ *     setup + `_PDCLIB_xbox_libc_init` but BEFORE `thrd_create`. This
+ *     is the EARLIEST point in process lifetime where straight-line C
+ *     code can run.
+ *   - .CRT$XCU slot — stage WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XC = 5.
+ *     Runs in `main_wrapper`'s thread immediately before `main()`
+ *     after `_PDCLIB_xbox_run_crt_initializers()`'s XI pass returns
+ *     zero.
+ *
+ * Each fire increments the WTNS counter (`reserved1`) by 1 and writes
+ * its stage byte into `reserved0`'s low 24 bits with the 0xA4 tag in
+ * the high byte. The fires run in lockstep order (XX → XC →
+ * main()'s WTNS MAIN_ENTERED → main()'s WTNS POST_MARKER0) so the
+ * final `reserved1` counter == number of WTNS fires that landed:
+ *
+ *   (count, reserved1)    | meaning (cycle-36 readback)
+ *   ------------------    | -----------------------------------------
+ *   (0, n/a)              | NO WTNS page allocated → not even the
+ *                           .CRT$XX slot ran (OR MmAllocateContiguous-
+ *                           MemoryEx itself returned NULL from
+ *                           .CRT$XX — edge case in
+ *                           lib/xbed_self_witness.c:54-74) → γ.0
+ *                           NARROWED to "_start / __security_init_cookie
+ *                           / TLS setup / libc_init crash" — strictly
+ *                           EARLIER than anything cycle 34 could
+ *                           distinguish.
+ *   (1, 1) stage=4        | .CRT$XX slot ran; .CRT$XC slot did NOT →
+ *                           either `thrd_create(main_wrapper)` failed
+ *                           OR `main_wrapper`'s
+ *                           `_PDCLIB_xbox_run_crt_initializers` XI pass
+ *                           faulted. γ.0 NARROWED to "in
+ *                           thread-create or in XI initializer pass."
+ *   (1, 2) stage=5        | both pre-main slots ran but no in-main
+ *                           WTNS fire landed. γ.1 *candidate* window
+ *                           (NOT corroborated): TWO sub-cases share
+ *                           this shape and cycle-35 evidence CANNOT
+ *                           distinguish them — (γ.0 sub) main() never
+ *                           entered after .CRT$XC return OR (γ.1)
+ *                           main() entered AND crashed inside paint(0)
+ *                           = XVideoSetMode before any in-main WTNS
+ *                           fire could tick the counter higher.
+ *                           Cycle 37 can separate by adding a .CRT$XCV
+ *                           slot inside main_wrapper that fires AFTER
+ *                           .CRT$XCU but BEFORE main()'s first
+ *                           instruction.
+ *   (1, 3..4) no stripes  | cycle-35 analogue of cycle-32 F4':
+ *                           graceful XVideoSetMode FALSE return
+ *                           latched xbed_breadcrumb_init FAILED so
+ *                           paint(0..4) became no-ops; main()
+ *                           continued through cycle-23 XCTR + cycle-29
+ *                           in-main WTNS fires. γ INVALIDATED via WTNS
+ *                           path; cycle 37 investigates AV-encoder
+ *                           rejection.
+ *   (1, 3..4) stripes vis | main() entered AND paint(0) ran
+ *   stage in {1,3}          (XVideoSetMode succeeded) AND reached at
+ *                           least one in-main WTNS fire. γ.0
+ *                           INVALIDATED. Apply cycle-32 F-row rules
+ *                           for the in-main half.
+ *
+ * The fires use the existing `xbed_self_witness_fire(stage)` shim
+ * (cycle-29 lib, unchanged) so ZERO new shared-lib code is needed and
+ * the cycle-23 lockstep contract + cycle-29 self-witness shim remain
+ * bit-identical to their last Codex-validated state. The new code is
+ * confined to `witness-only/main.c`. The pre-main fires use a brand-
+ * new stage-code namespace (4, 5) that does NOT overlap the existing
+ * XBED_A4_STAGE_* values (1, 2, 3) so the agent's `witness.scan-self`
+ * reader (which only tag-byte-filters with `(reserved0 >> 24) ==
+ * 0xA4`) accepts them without modification.
+ *
+ * Why this design over the other cycle-34 F4 "Next"-column candidates
+ * ------------------------------------------------------------------
+ * 1) `.CRT$X*` static-init slot stamp (CHOSEN). nxdk's CRT walks these
+ *    sections unconditionally; the mechanism is documented in
+ *    `nxdk/lib/pdclib/platform/xbox/crt_initializers.c` and exercised
+ *    every time any nxdk-built XBE runs (nxdk's own crt registers
+ *    `__xc_a[] / __xc_z[]` etc. as section terminators in the same
+ *    file). ZERO nxdk source, linker, or XBE-header schema changes are
+ *    required. ZERO new shared-lib code is required because the fires
+ *    reuse `xbed_self_witness_fire`. Scope = `witness-only/main.c`
+ *    only.
+ * 2) Custom XBE-header callback (REJECTED). nxdk's XBE header generator
+ *    does not expose a documented "pre-CRT entry slot" mechanism; an
+ *    implementation would have to modify nxdk's PE / XBE-header
+ *    generation (`nxdk/tools/cxbe/` or the linker script), widening
+ *    scope to nxdk itself AND making the new mechanism untested on the
+ *    Xbox kernel-entry path. Strictly earlier than `.CRT$XX*` but the
+ *    EARLIEST `.CRT$XX*` slot is already after only `_start` +
+ *    `__security_init_cookie` + a TLS-size computation + a libc_init
+ *    mutex setup, so the γ.0 sub-windows it could uniquely distinguish
+ *    (crash inside `_start` / inside `__security_init_cookie` / inside
+ *    TLS setup) are vanishingly unlikely to be the cycle-22 hang site.
+ *    The marginal discriminator value does NOT justify modifying nxdk.
+ * 3) Thinner alternative to `XVideoSetMode` (e.g. direct NV2A CRTC
+ *    register writes that bypass kernel display init; REJECTED). Does
+ *    not address the γ.0 vs γ.1 question — if `main()` does not enter
+ *    at all, no `main()`-body code runs whether it touches CRTC
+ *    registers or `XVideoSetMode`. Also widens the NV2A surface
+ *    (cycle-23 lockstep contract + cycle-29 self-witness shim would
+ *    have to coexist with direct register pokes), which violates the
+ *    cycle-34 prompt's "tightly scoped" guardrail. Filed for cycle-36+
+ *    only IF cycle-36 narrows the crash site to γ.1 AND a less-invasive
+ *    paint mechanism becomes useful.
+ *
+ * Cycle-35 ordering rationale
+ * ---------------------------
+ * The two pre-main fires execute in nxdk's natural CRT order
+ * (`.CRT$XX*` from entry thread BEFORE `.CRT$XC*` from `main_wrapper`),
+ * which is bit-identical to every other nxdk-built XBE's startup
+ * sequence. No new ordering invariants are introduced. The four in-
+ * `main()` fires (cycle-23 XCTR ×2 + cycle-29 WTNS ×2) AND the cycle-
+ * 31 visual breadcrumb sequence are unchanged. The WTNS page is now
+ * allocated by the FIRST `.CRT$XX` fire (instead of by the first in-
+ * `main()` WTNS fire as in cycle 29); subsequent fires (CRT$XC + both
+ * in-main WTNS) reuse the same page via the shim's idempotent
+ * `s_witness_page != 0` early return. The cycle-23 XCTR fires are
+ * unchanged and continue to target the agent's persistent XCTR buffer
+ * (an entirely separate kseg0 page); no interaction with the cycle-35
+ * additions.
+ *
+ * Cycle 35 is therefore additive but NOT a strict superset of cycle 25
+ * OR cycle 29 OR cycle 31 — the WTNS page now gets allocated EARLIER
+ * in the process lifetime (from `.CRT$XX*` instead of from main()'s
+ * first WTNS fire). The cycle-26-style "WTNS allocator interacts with
+ * unmapped kseg0 read" hypothesis is NOT a concern because the
+ * allocator path doesn't sweep kseg0; it only calls
+ * `MmAllocateContiguousMemoryEx`, which is known-safe at every point
+ * post-`_start` (the agent itself calls it during its own startup
+ * from its own `main()`'s first instruction). The cycle-35 win is
+ * granularity, not a new failure mode.
  */
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -358,6 +512,75 @@ static void xbed_breadcrumb_paint(int stage)
     }
     XVideoFlushFB();
 }
+
+/* Cycle-35 pre-main breadcrumb stage codes.
+ *
+ * Local to this XBE so the cycle-23 lockstep contract on `xbed_a4_witness.h`
+ * (which owns stage codes 1, 2, 3 = MAIN_ENTERED / PRE_MARKER0 /
+ * POST_MARKER0) stays intact and the cycle-35 namespace cannot
+ * accidentally collide with future cycle-23 stage additions. The
+ * `xbed_self_witness_fire` shim accepts any uint32_t in the low 24
+ * bits of `reserved0`; the agent's `witness.scan-self` reader filters
+ * only on the 0xA4 tag in the high byte. */
+#define WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XX  4u  /* .CRT$XXC slot fired */
+#define WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XC  5u  /* .CRT$XCU slot fired */
+
+/* Pre-main breadcrumb runners. Each is a `_PVFV = void(*)(void)`-shaped
+ * function whose address lives in a `.CRT$X*` section so nxdk's CRT
+ * walks it automatically. The body calls `xbed_self_witness_fire` with
+ * the corresponding stage code; the shim is idempotent (first call
+ * allocates + zeros + stamps magic/version + stamps stage; subsequent
+ * calls just stamp + tick counter), so this is safe to invoke from
+ * both pre-main slots AND from main()'s WTNS fires later.
+ *
+ * Side effects intentionally minimized: no kseg0 sweep (the WTNS path
+ * touches only its own page); no XCTR fire (the cycle-23 lockstep
+ * contract stays intact); no framebuffer paint (XVideoSetMode is the
+ * γ.1 candidate-crash-site so we DELIBERATELY do not touch it from
+ * pre-main slots — that would defeat the cycle-35 discriminator). */
+static void witness_only_pre_main_crt_xx(void)
+{
+    xbed_host_log_write(
+        "witness-only: .CRT$XXC pre-main breadcrumb running (cycle 35)");
+    uintptr_t rpm1 = xbed_self_witness_fire(WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XX);
+    xbed_host_log_writef(
+        "witness-only: pre-main-xx fire returned phys=0x%08lx",
+        (unsigned long)rpm1);
+}
+
+static void witness_only_pre_main_crt_xc(void)
+{
+    xbed_host_log_write(
+        "witness-only: .CRT$XCU pre-main breadcrumb running (cycle 35)");
+    uintptr_t rpm2 = xbed_self_witness_fire(WITNESS_ONLY_STAGE_PRE_MAIN_CRT_XC);
+    xbed_host_log_writef(
+        "witness-only: pre-main-xc fire returned phys=0x%08lx",
+        (unsigned long)rpm2);
+}
+
+/* nxdk CRT initializer-table function-pointer type. Mirrors the
+ * `_PVFV` typedef in `nxdk/lib/pdclib/platform/xbox/crt_initializers.c`
+ * (which is file-local there, so we re-declare ours locally too). */
+typedef void (__cdecl *witness_only_pvfv_t)(void);
+
+/* Slot pointer in .CRT$XXC — walked by `_PDCLIB_xbox_run_pre_initi-
+ * alizers()` from `WinMainCRTStartup` BEFORE `thrd_create(main_wrapper)`.
+ * The `used` attribute prevents dead-code-elimination from dropping
+ * the symbol since nothing in this translation unit otherwise
+ * references it. nxdk's `crt_initializers.c` provides the `.CRT$XXA`
+ * (start sentinel) and `.CRT$XXZ` (end sentinel) terminators; our
+ * `.CRT$XXC` slot sorts alphabetically between them. */
+__attribute__((section(".CRT$XXC"), used))
+static witness_only_pvfv_t s_witness_only_pre_main_crt_xx_slot =
+    witness_only_pre_main_crt_xx;
+
+/* Slot pointer in .CRT$XCU — walked by `_PDCLIB_xbox_run_crt_initi-
+ * alizers()` from `main_wrapper` AFTER the .CRT$XI* C-initializer pass
+ * AND immediately BEFORE the user's `main()`. Same `_PVFV` shape +
+ * `used` attribute pattern as the XX slot. */
+__attribute__((section(".CRT$XCU"), used))
+static witness_only_pvfv_t s_witness_only_pre_main_crt_xc_slot =
+    witness_only_pre_main_crt_xc;
 
 int main(void)
 {

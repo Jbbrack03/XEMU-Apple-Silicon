@@ -472,6 +472,181 @@ The decisive readback combines the deepest-visible-stripe count with
 the cycle-30 `(witness.scan, witness.scan-self)` two-tuple per the
 8-row cycle-32 discriminator table.
 
+## Cycle-35 addendum (pre-main breadcrumb via .CRT$X* slots, 2026-05-23)
+
+Cycle 34 closure (commit `b5327d4d17`) landed OUTCOME **F4** = zero
+stripes visible across 22 NTSC-correct composite snapshots over
+t+0.07s..t+24.17s post-`runxbe` + `witness.scan = D-cycle-27` +
+`witness.scan-self = count=0`. Per the cycle-31 cycle-32 9-row table
+this collapses to **(γ.0)** "execution never entered `main()` AT ALL"
+OR **(γ.1)** "`XVideoSetMode` itself faulted hard before returning."
+Cycle-22 pre-main-crash hypothesis FULLY CORROBORATED in its strongest
+form. Cycle 34 alone cannot tell γ.0 from γ.1.
+
+Cycle 35 adds the cheapest mechanism that runs strictly BEFORE `main()`:
+two new function-pointer slots in nxdk's CRT-initializer sections so the
+diag XBE fires its existing `xbed_self_witness_fire` shim TWICE before
+`main()` is entered. The fires use brand-new pre-main stage codes that
+do NOT overlap the existing `XBED_A4_STAGE_*` namespace (1, 2, 3 owned
+by cycle 23 / `xbed_a4_witness.h`):
+
+| Stage | Slot      | When                                                                                                                         | Where (thread / phase)                                                          |
+|-------|-----------|------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| 4     | `.CRT$XXC` | After `__security_init_cookie` + TLS setup + `_PDCLIB_xbox_libc_init`, BEFORE `thrd_create(main_wrapper)`                    | `WinMainCRTStartup` entry thread (earliest straight-line user C in process)     |
+| 5     | `.CRT$XCU` | After `_PDCLIB_xbox_run_crt_initializers()`'s `.CRT$XI*` pass succeeds, immediately BEFORE `main()`                          | `main_wrapper` thread (the same thread `main()` itself runs on)                 |
+
+Each fire ticks `xbed_self_witness_fire`'s counter (`reserved1`) and
+overwrites the stage byte in `reserved0`. The shim is idempotent:
+`.CRT$XXC` slot allocates + zeroes + magic/version-stamps the WTNS page
+on first call and stamps stage=4; `.CRT$XCU` reuses the same page and
+stamps stage=5; the in-`main()` WTNS fires stamp stage=1 / stage=3 in
+the same fashion. After a fully successful run, the page carries
+`reserved0=0xA4000003` (the last-stamped POST_MARKER0 byte) and
+`reserved1=4` (2 pre-main + 2 in-main WTNS fires).
+
+### Why .CRT$X* over the other cycle-34 F4 "Next"-column candidates
+
+| Candidate                                                                                | Verdict   | Reasoning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|------------------------------------------------------------------------------------------|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| (1) nxdk `.CRT$X*` static-init slot stamp                                                | **CHOSEN** | Mechanism documented + exercised on every nxdk-built XBE (`nxdk/lib/pdclib/platform/xbox/crt_initializers.c`). ZERO nxdk / linker / XBE-header changes required. ZERO new shared-lib code: fires reuse `xbed_self_witness_fire` (cycle-29). Scope = `witness-only/main.c` only. Local xemu smoke confirms slots fire BEFORE `main()` in the expected order with WTNS counter ticking to 2 before main entry.                                                                                                                                              |
+| (2) Custom XBE-header callback (kernel-controlled entry slot, runs before `.CRT$*`)      | REJECTED  | No documented "pre-CRT entry slot" in nxdk's XBE-header generator (`nxdk/tools/cxbe/`). Implementing would have to modify nxdk itself, widening scope beyond `witness-only` + paired docs. Strictly earlier than `.CRT$XX*` but the γ.0 sub-windows it could uniquely distinguish (`_start` / `__security_init_cookie` / TLS-size computation crashes) are vanishingly unlikely cycle-22 hang sites. Marginal discriminator value does NOT justify modifying nxdk.                                                                                          |
+| (3) Thinner alternative to `XVideoSetMode` (direct NV2A CRTC register writes)            | REJECTED  | Does not address the γ.0-vs-γ.1 question — if `main()` does not enter at all, no in-`main()` code runs regardless of whether it pokes CRTC registers or calls `XVideoSetMode`. Also widens the NV2A surface (cycle-23 lockstep + cycle-29 self-witness shim would have to coexist with direct register pokes), violating the cycle-34 prompt's "tightly scoped" guardrail. Filed for cycle-36+ IF cycle-36 narrows the crash site to γ.1 AND a less-invasive paint mechanism becomes useful (likely deferred indefinitely since γ.1 alone is rare-shape). |
+
+### Cycle-36 discriminator table (G rows; extends cycle-32 F rows)
+
+Cycle 36 (Hermes-scheduled) deploys the cycle-35 build on real Xbox and
+runs the cycle-32 canonical sequence verbatim (composite-capture arm +
+runxbe + post-run scans). The composite + cycle-29 WTNS readback rules
+from the cycle-32 table still apply for F1..F8 + F4'; cycle 35 adds the
+finer-grained G rows that disambiguate F4 (cycle-34's observed shape)
+into γ.0 sub-cases plus a NEW γ.1 candidate window. The cycle-36 readback
+combines deepest-visible-stripe + `(witness.scan, witness.scan-self)` two-
+tuple + WTNS `reserved1` counter:
+
+Reads as `(stripes visible, witness.scan-self count, witness.scan-self reserved1, witness.scan shape)`:
+
+| Stripes  | scan-self count | scan-self reserved1 | scan shape       | Interpretation                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Next                                                                                                                                                                                                          |
+|----------|-----------------|---------------------|-----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| none     | 0               | n/a                 | `D-cycle-27`    | **G0**: NO WTNS page allocated → not even `.CRT$XXC` slot ran. γ.0 **NARROWED** to "`_start` / `__security_init_cookie` / TLS-size computation / `_PDCLIB_xbox_libc_init` crash." Strictly earlier than anything cycle 34 could distinguish. NB: also surfaces if `MmAllocateContiguousMemoryEx` itself returned NULL from the `.CRT$XXC` slot (allocation-failure edge case in `lib/xbed_self_witness.c:54-74`); a single host-log line `xbed_self_witness: MmAllocateContiguousMemoryEx failed` would discriminate that sub-case (visible if the cycle-36 run also captured `XEMU_GUEST_LOG=1`-equivalent breadcrumbs, which real Xbox does NOT). | Cycle 37: option (2) custom XBE-header callback OR pivot to XBE-level static binary diff against a known-good nxdk XBE (mirror or pipeline-smoke) to localize the pre-libc-init crash. Independently confirm allocator viability via a known-good nxdk XBE re-run. |
+| none     | 1               | 1                   | `D-cycle-27`    | **G1**: `.CRT$XXC` slot ran; `.CRT$XCU` did NOT. γ.0 **NARROWED** to "`thrd_create(main_wrapper)` failed OR `main_wrapper`'s `.CRT$XI*` C-initializer pass faulted." `main()` never entered.                                                                                                                                                                                                                                                                                                                                              | Cycle 37: add a `.CRT$XIC` slot that fires between XX and XC to halve the window. Or instrument `thrd_create` return code via host-log breadcrumb.                                                              |
+| none     | 1               | 2                   | `D-cycle-27`    | **G2** (γ.1 **candidate** window — narrowed but NOT corroborated): BOTH pre-main slots ran but no in-`main()` WTNS fire landed. Two sub-cases share this shape and the cycle-35 evidence CANNOT distinguish them from each other: (γ.0 sub) `main()` was never entered (crash anywhere between `.CRT$XCU` return and `main()`'s first instruction); OR (γ.1) `main()` entered and crashed inside paint(0) = `XVideoSetMode` BEFORE the cycle-23 XCTR fires + cycle-29 in-`main()` WTNS fires could tick the counter higher. The absence of stripe 0 is **consistent with** but does NOT prove either. | Cycle 37: instrument the `.CRT$XCU` → `main()` entry gap with a `.CRT$XCV` slot fire that ticks reserved1 to `3` BEFORE `main()`'s first instruction (separating γ.0-sub from γ.1). If a cycle-37 run isolates γ.1, option (3) direct NV2A CRTC writes becomes the next slice. |
+| none     | 1               | 3 or 4              | `D-cycle-27`    | **G2'** (cycle-35 analogue of cycle-32 F4'): no stripes visible BUT in-`main()` WTNS fires landed (count=1, reserved1=3 if only MAIN_ENTERED in-main fire; reserved1=4 if both). γ INVALIDATED — `main()` entered AND ran past the cycle-23 XCTR fires AND reached at least one cycle-29 in-`main()` WTNS fire. The stripe-0 absence here reflects `xbed_breadcrumb_init` latching FAILED on a graceful `XVideoSetMode` FALSE return (no-op'd `paint(0..4)`); main() continued through the rest of its body. Identical structurally to cycle-32 F4'; cycle 35 inherits that interpretation. | Cycle 37: investigate AV-encoder rejection cause (probe `XVideoListModes` enumeration); γ INVALIDATED via WTNS path; α-vs-β on the XCTR side becomes the live question — re-elevate option (b). |
+| 0..4     | 1               | 3 or 4              | `D-cycle-27`    | **G3**: stripes visible + pre-main slots ran + at least one in-`main()` WTNS fire landed (count=1 page; reserved1=3 means in-main MAIN_ENTERED self-fire ran, reserved1=4 means POST_MARKER0 self-fire also ran). γ.0 **INVALIDATED.** `XVideoSetMode` succeeded (stripe 0 visible). Stripe count + remaining cycle-32 F-row rules apply for the in-`main()` checkpoint reached. | Cycle 37: apply the F1/F2/F3 row from the cycle-32 table for the in-`main()` half of the discriminator. |
+| 0..4     | 1               | 4                   | A1/A2 success    | **G4**: full success across BOTH mechanisms — pre-main + in-`main()` WTNS landed AND XCTR stamp survived on agent's persistent buffer. Strongest possible cycle-36 outcome. | Cycle 37: declare discriminator track CLOSED; cycles 26/28/30/32/34 must have been observation-side artifacts. |
+
+The cycle-36 readback's `reserved1` counter is the load-bearing signal:
+it counts WTNS fires that LANDED. Combine with stripe count (composite
+side) and `witness.scan` shape (XCTR side) per the cycle-32 F-table for
+the in-`main()` interpretation.
+
+### Cycle-35 build artifacts
+
+- `bin/default.xbe` — 155 648 B (same nxdk XBE page boundary as cycle 31's
+  155 648 B; the new ~200 bytes of pre-main breadcrumb code + 2 `.CRT$X*`
+  slot pointers fit within the existing page).
+- `witness-only.iso` — 720 896 B (unchanged — same ISO sector boundary).
+
+### Cycle-35 local validation evidence
+
+- Build success via `eval "$(nxdk/bin/activate -s)" && make`: same benign
+  `lld: warning: .edata=.rdata: already merged into .edataxb` repeats prior
+  cycles. ZERO new warnings.
+- Local xemu smoke (timeout-12s spawn against witness-only.iso with
+  `XEMU_GUEST_LOG=1`): host-log channel emitted, in order:
+  1. `.CRT$XXC pre-main breadcrumb running (cycle 35)`
+  2. `xbed_self_witness: allocated self-witness page phys=0x03fdf000 ... magic='WTNS' version=1`
+  3. `xbed_self_witness: fired stage=4 ... counter=1`
+  4. `witness-only: pre-main-xx fire returned phys=0x03fdf000`
+  5. `.CRT$XCU pre-main breadcrumb running (cycle 35)`
+  6. `xbed_self_witness: fired stage=5 ... counter=2`
+  7. `witness-only: pre-main-xc fire returned phys=0x03fdf000`
+  8. `witness-only: main() entered (cycle 25)` (cycle-31 in-`main()` path runs unchanged)
+  9. cycle-23 XCTR fires → phys=0 (expected on standalone xemu with no agent)
+  10. cycle-29 in-`main()` WTNS fires → counter=3 then counter=4 on same self-allocated page
+- The ordering and counter values match the cycle-35 design exactly: the
+  `.CRT$X*` machinery fires BOTH slots BEFORE main() enters; the shim's
+  idempotent same-page reuse holds across all 4 WTNS calls.
+
+### Cycle-36 deployment runbook (Hermes-scheduled; NOT this session)
+
+Hard preconditions (in addition to cycle 30 / cycle 32 preconditions):
+
+1. Composite-capture leg ARMED before `runxbe` (same as cycle 32 / 34).
+2. Cycle-29 oracle-agent already deployed at `E:\Apps\oracle-agent\default.xbe`
+   (cycle 32 / 34 deployed it; verify via `help` listing the `witness.scan-self`
+   verb).
+3. Cycle-35 witness-only deployed at `E:\Apps\witness-only\default.xbe`.
+   Size unchanged (155 648 B same as cycle 31); FTP uploader will replace
+   only with `--overwrite` since the size matches the cycle-31 binary
+   exactly. Capture BOTH local and remote-side SHA-256 + mtime advance
+   in the step log to confirm the cycle-35 binary actually replaced the
+   cycle-31 one on the Xbox HDD.
+4. Baseline `witness.scan count=1 live=1 reserved0=0 reserved1=0` AND
+   baseline `witness.scan-self count=0`. Power-cycle if either fails.
+
+Sequence (extends the cycle-32 runbook by one upload + the cycle-36-aware
+analyze step):
+
+```sh
+# 1. Reachability + state probe.
+./scripts/apple-silicon/oracle-orchestrator.py status
+
+# 2. Baseline both scans.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 3. Reboot to dashboard.
+./scripts/apple-silicon/oracle-client.py raw reboot
+# Wait for FTP/21 dashboard return (authenticated probe per cycle 30).
+
+# 4. FTP-upload cycle-35 witness-only WITH --overwrite (size matches
+#    cycle 31; the uploader's default size-only diff would otherwise
+#    skip the upload — cycle 30 methodology lesson).
+./scripts/apple-silicon/xbox-ftp-upload.py --overwrite \
+    scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe \
+    /E/Apps/witness-only/default.xbe
+
+# 5. Relaunch agent, recheck both scans (preconditions).
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 6. *** ARM COMPOSITE CAPTURE *** in a parallel terminal:
+./scripts/apple-silicon/composite-record.sh cycle36-witness-only-pre-main
+
+# 7. Chainload witness-only.
+./scripts/apple-silicon/oracle-client.py runxbe 'E:\Apps\witness-only\default.xbe'
+
+# 8. Poll FTP/21 (authenticated) + 9001 + ICMP until dashboard FTP returns
+#    (cycle 32/34 observed t+30..70 s on the cycle-31 build; cycle 35 may
+#    shift slightly due to two extra pre-main allocations — likely <1s).
+
+# 9. *** STOP COMPOSITE CAPTURE *** in parallel terminal.
+
+# 10. Post-run: ensure-agent + final both scans. The KEY new signal is
+#     witness.scan-self's reserved1 counter:
+#       reserved1=0/count=0           → G0 (pre-libc-init crash; or alloc NULL)
+#       reserved1=1                   → G1 (between XX and XC)
+#       reserved1=2                   → G2 (γ.1 candidate — main() never entered OR crashed in paint(0); cycle-35 cannot distinguish — full table)
+#       reserved1=3..4 + no stripes   → G2' (graceful XVideoSetMode FALSE; main() continued; γ INVALIDATED via WTNS path)
+#       reserved1=3..4 + stripe(s)    → G3 (main() entered; apply cycle-32 F-row rules)
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 11. Analyze composite recording: extract keyframes near t+2s and
+#     read the deepest stable stripe color per the cycle-31 stripe map.
+#     IMPORTANT: pass --width 720 --height 480 explicitly to every
+#     xemu-capture snapshot invocation when using the cycle-34 burst
+#     substitution (cycle-34 lesson: the bare `snapshot DEVICE --out
+#     PATH` invocation defaults to 720x576 PAL which decodes NTSC as
+#     pure-zero RGB).
+./scripts/apple-silicon/extract-keyframes.py \
+    benchmark-runs/<UTC>-composite-cycle36-witness-only-pre-main/
+# Combine deepest stripe + witness.scan-self counter per the G-row table.
+```
+
 ## Cross-references
 
 - `lib/xbed_a4_witness.{h,c}` — the cycle-23 XCTR-scan witness mechanism.
@@ -486,3 +661,5 @@ the cycle-30 `(witness.scan, witness.scan-self)` two-tuple per the
 - `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log` — cycle-24 indefinite-hang evidence to compare cycle-30 polling against.
 - `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/SUMMARY.md` — cycle-28 D-cycle-27 closure that motivated cycle 29.
 - `benchmark-runs/cycle30-real-xbox-witness-only-self-20260523T103624Z/SUMMARY.md` — cycle-30 E2 closure that motivated cycle 31.
+- `nxdk/lib/pdclib/platform/xbox/crt0.c` — `WinMainCRTStartup` + `main_wrapper`; documents the entry-thread → thread-create → main_wrapper sequence cycle 35 hooks into.
+- `nxdk/lib/pdclib/platform/xbox/crt_initializers.c` — nxdk's `.CRT$XX*` / `.CRT$XI*` / `.CRT$XC*` section terminators + walker functions (`_PDCLIB_xbox_run_pre_initializers` + `_PDCLIB_xbox_run_crt_initializers`). Cycle 35 registers `.CRT$XXC` and `.CRT$XCU` slots that sort alphabetically between nxdk's A and Z sentinels.
