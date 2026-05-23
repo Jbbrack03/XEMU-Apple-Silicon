@@ -1,73 +1,76 @@
 # Current Cycle
 
-- Cycle: 35 Path A.4 pre-main breadcrumb via `.CRT$X*` static-init slots — **CLOSED on `apple-silicon-performance`** (closure commit `515e03f4e7`). Bounded implementation slice: option (1) `.CRT$XXC` (stage=4) + `.CRT$XCU` (stage=5) function-pointer slots in `witness-only/main.c` that each fire `xbed_self_witness_fire` BEFORE `main()` enters. Adds the γ.0-vs-γ.1 discriminator that cycle 34's F4 outcome left ambiguous. ZERO shared-lib / oracle-agent / xbed_runtime / nxdk source touched. Local xemu smoke confirms both slots fire BEFORE `main()` with WTNS counter ticking to 2 before main entry; counter ticks to 4 by end of run (2 pre-main + 2 in-main WTNS fires).
-- Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker run launched after cycle-34 closure commit `b5327d4d17`).
-- Closed: 2026-05-23 (implementation landed + local xemu smoke passed + canonical docs/state synced + Codex disposition recorded; closure commit landed as `515e03f4e7`).
-- State: **CLOSED.** Implementation-only slice; no real-Xbox run (Hermes's call for cycle 36).
+- Cycle: 36 real-Xbox discriminator run for cycle-35 pre-main breadcrumb — **CLOSED on `apple-silicon-performance`**. Bounded run-only slice: deploy cycle-35 `witness-only/bin/default.xbe` (155 648 B, SHA-256 `ab52df8dee...`) via FTP `--overwrite` to `/E/Apps/witness-only/default.xbe`, run the cycle-36 canonical sequence (composite-capture leg + runxbe + final `witness.scan-self` for G-row classification), and classify the outcome against the cycle-35 G-row discriminator table.
+- Started: 2026-05-23 22:53:06Z (Hermes-supervised bounded session; Claude Code worker run launched after cycle-35 closure commit `515e03f4e7`).
+- Closed: 2026-05-23 (G-row classified; canonical docs/state synced; closure commit pending).
+- State: **CLOSED — OUTCOME G0** (zero stripes + `witness.scan-self count=0` + `witness.scan = D-cycle-27`). REPRODUCED across two runxbe attempts in same physical power session.
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
-- HEAD at start: cycle-34 closure commit `b5327d4d17` on `apple-silicon-performance`.
-- Bounded goal: "Add a pre-main breadcrumb to witness-only that can distinguish γ.0 (`main()` never entered AT ALL) from γ.1 (`XVideoSetMode` itself faulted before returning). Preferred least-invasive candidate. Keep scope inside `witness-only/` + paired docs/state. Preserve cycle-23 / cycle-29 / cycle-31 contracts. Rebuild + local-validate + Codex per rule #15 + canonical-docs/state sync + commit."
-- Result: **Cycle-35 binary built (155 648 B, same nxdk page boundary as cycle 31). Both `.CRT$X*` slots verified to fire BEFORE `main()` in local xemu smoke. WTNS counter mechanism extended from cycle 29's `0 → 1 → 2` (in-main only) to cycle 35's `0 → 1 → 2 → 3 → 4` (pre-main XX → pre-main XC → in-main MAIN_ENTERED → in-main POST_MARKER0). Cycle-36 readback `reserved1` counter becomes load-bearing γ.0-vs-γ.1 discriminator.** M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-36 real-Xbox discriminator run + downstream cycles), §G.5, RT-as-texture; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision REMAINS DEFERRED.
+- HEAD at start: cycle-35 closure commit `515e03f4e7` on `apple-silicon-performance`.
+- Bounded goal: "Execute cycle 36 only — the real-Xbox discriminator run for the cycle-35 witness-only pre-main breadcrumb build. Use the canonical runbook from `witness-only/README.md` cycle-35 addendum. ZERO source/script/XBE edits expected. Classify the outcome per the G-row table; sync canonical docs/state; commit cleanly."
+- Result: **G0** — the crash occurred BEFORE the `.CRT$XXC` slot (stage=4) fired. Three pre-`.CRT$XXC`-fire sub-cases share this shape and cannot be distinguished by cycle-35 evidence on real Xbox (no host-log breadcrumb): (a) crash in `_start`/`__security_init_cookie`/TLS/`_PDCLIB_xbox_libc_init`; (b) walker invoked but helper body crashed before `MmAllocateContiguousMemoryEx`; (c) `MmAllocateContiguousMemoryEx` returned NULL silently. γ.1 ("`XVideoSetMode` faulted") INVALIDATED. Cycle-22 pre-main hypothesis NARROWED FURTHER beyond cycle-34's F4 to pre-`.CRT$XXC` window. M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-37+ pre-`.CRT$XXC` discriminator work + downstream cycles).
 
 ## Plan summary (this session, executed in order)
 
-1. Read canonical docs/state (handoff.md cycle-34 + cycle-31 entries; decision-log.md cycle-34 entry; orchestration-workflow.md; oracle-and-xbe.md; witness-only/README.md cycle-31 addendum cycle-32 discriminator table; witness-only/main.c cycle-31 source; manifest.json; lib/xbed_a4_witness.h; lib/xbed_self_witness.h).
-2. Inspected git status + recent commits (HEAD = cycle-34 closure `b5327d4d17`).
-3. Designed cycle-35 mechanism: chose option (1) `.CRT$X*` static-init slot stamp; documented why options (2) custom XBE-header callback and (3) direct NV2A CRTC writes were rejected.
-4. Verified nxdk CRT entry-point structure (`nxdk/lib/pdclib/platform/xbox/crt0.c` + `crt_initializers.c`): `WinMainCRTStartup` → `__security_init_cookie` → TLS setup → `_PDCLIB_xbox_libc_init` → `_PDCLIB_xbox_run_pre_initializers` (walks `.CRT$XX*`) → `thrd_create(main_wrapper)` → main_wrapper → `_PDCLIB_xbox_run_crt_initializers` (walks `.CRT$XI*` then `.CRT$XC*`) → `main()`. Picked `.CRT$XXC` (entry-thread, earliest) and `.CRT$XCU` (main_wrapper-thread, immediately before main).
-5. Edited `witness-only/main.c`: cycle-35 head-comment addendum (~100 LOC); two locally-defined stage constants (4 and 5; NOT added to `xbed_a4_witness.h` to keep cycle-23 lockstep namespace untouched); two static `_PVFV` helper functions (`witness_only_pre_main_crt_xx` / `witness_only_pre_main_crt_xc`); two `__attribute__((section(".CRT$X*C"), used))` function-pointer slot declarations.
-6. Rebuilt witness-only: `eval "$(nxdk/bin/activate -s)" && make` succeeded cleanly (one benign `lld: warning: .edata=.rdata: already merged into .edataxb` repeats prior cycles). Artifact size 155 648 B — UNCHANGED from cycle 31 (new code fits in existing nxdk page boundary).
-7. Local xemu smoke: spawned `dist/xemu.app/Contents/MacOS/xemu` for 12 s against `witness-only.iso` with `XEMU_GUEST_LOG=1`. Captured stderr lines confirm `.CRT$XXC` fires (stage=4 counter=1) → `.CRT$XCU` fires (stage=5 counter=2) → `main() entered` → cycle-23 XCTR fires (phys=0 expected on standalone) → in-main WTNS fires (counter=3 then counter=4). Mechanism wired correctly.
-8. Updated `witness-only/README.md` with cycle-35 addendum: design rationale (option 1 chosen, options 2/3 rejected with reasoning table); expanded WTNS counter encoding; new cycle-36 G-row discriminator table (G0..G4 + G2' (cycle-32 F4'-analogue)); cycle-36 deployment runbook (11-step, extends cycle-32 runbook with `--overwrite` upload flag); cycle-35 build artifacts + local validation evidence + cross-references to nxdk CRT source.
-9. Updated `witness-only/manifest.json`: title + purpose extension; new `real-xbox/physical/cycle-36` `expected_results` section enumerating G0..G4 + G2' (cycle-32 F4'-analogue). Validated JSON parses cleanly with python3.
-10. Updated `docs/apple-silicon/handoff.md` cycle-35 entry on top with full cycle-34 entry preserved unchanged below; `docs/apple-silicon/decision-log.md` cycle-35 entry above cycle-34.
-11. Updated orchestration-state quartet: this file + claude-status.md + validation-status.md + handoff-summary.md.
-12. Ran Codex validation per rule #15 (non-trivial diff ~200 lines C source + ~150 lines docs). Disposition recorded below + at `.claude/state/codex-validate-last-run` on LOOKS GOOD.
-13. Closure commit landed as `515e03f4e7` on `apple-silicon-performance`.
+1. Read canonical docs/state (CLAUDE.md, orchestration-workflow.md, handoff cycle-35+34, decision-log cycle-35+34, orchestration-state quartet, witness-only/README.md cycle-35 addendum, witness-only/manifest.json).
+2. Inspected git status + recent commits (HEAD = cycle-35 closure `515e03f4e7`).
+3. Probed reachability: ping=true ftp=false agent=true (cycle-29 agent resident from cycle 34).
+4. Baseline scans: `witness.scan = D-cycle-27` AND `witness.scan-self = count=0` — preconditions MET.
+5. Reboot to dashboard; FTP-uploaded cycle-35 `default.xbe` with `--overwrite` (mtime advanced confirms file replaced).
+6. Ensure-agent + recheck both scans (still MET).
+7. Composite preflight ok (xemu-capture, 1.591 s); armed `composite-record.sh --duration 80`.
+8. composite-record.sh ffmpeg SILENT-STALLED for 103 s (`rc=137 capture_timed_out=true`); cycle-34 finding (i) reproduced in a SEPARATE physical power session.
+9. First `runxbe` issued 23:02:38Z; dashboard FTP back 23:03:16Z = t+38s (clean recovery).
+10. Final scans (first run): D-cycle-27 + count=0 — already enough to land G0.
+11. Pre-runxbe xemu-capture snap_00 verification: 720x480 RGB, 25 874 unique colors (capture path healthy).
+12. Second `runxbe` issued 23:06:43Z + 25-snap burst over t+0..t+29.5s with explicit `--width 720 --height 480` (cycle-34-style snapshot-burst substitution).
+13. Stripe analysis: ZERO stripe colors detected across all 26 snaps (13 pure-black, 13 dashboard transition/return).
+14. Final scans (second run): D-cycle-27 + count=0 — REPRODUCED.
+15. SUMMARY.md written to run dir; canonical docs/state updates (handoff.md + decision-log.md + orchestration-state quartet) pending closure commit.
+16. Closure commit on `apple-silicon-performance` pending.
 
 ## Exit criteria — final status
 
 1. [x] Required docs/state files read.
-2. [x] Repo/git state confirmed; pre-existing tracked drift + untracked `.hermes_*` + `composite_preflight.py` preserved un-staged per cycle-34 prompt guardrail (carried forward to cycle 35).
-3. [x] Pre-main breadcrumb mechanism chosen (option 1 `.CRT$X*` slot stamp) and rationale documented (options 2/3 rejected with reasoning).
-4. [x] `witness-only/main.c` edited with cycle-35 head-comment addendum + helpers + slot declarations.
-5. [x] witness-only XBE rebuilt cleanly (155 648 B unchanged from cycle 31).
-6. [x] Local xemu smoke passed: both `.CRT$X*` slots fire BEFORE `main()` with WTNS counter ticking to 2 pre-main + 4 total.
-7. [x] `witness-only/README.md` + `manifest.json` updated with cycle-35 addendum + cycle-36 expected_results.
-8. [x] `handoff.md` + `decision-log.md` cycle-35 entries on top; cycle-34 entries preserved unchanged below.
-9. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
-10. [x] Codex validation per rule #15 run; disposition recorded.
-11. [x] Closure commit on `apple-silicon-performance` landed as `515e03f4e7`.
+2. [x] Repo/git state confirmed; pre-existing tracked drift + untracked `.hermes_*` + `composite_preflight.py` preserved un-staged per cycle-34 prompt guardrail (carried forward through cycles 35 + 36).
+3. [x] Canonical cycle-36 runbook from `witness-only/README.md` executed verbatim (with cycle-34 snapshot-burst fallback when composite-record.sh ffmpeg silent-stalled).
+4. [x] Cycle-35 XBE FTP-uploaded with `--overwrite` (size matches cycle 31's; the uploader's default size-only diff would otherwise have skipped); remote mtime advance verifies replacement.
+5. [x] ARM composite-capture leg ran before runxbe (preflight OK + ffmpeg launched; subsequent silent-stall is the cycle-34-finding-(i) failure mode, not a procedural failure of cycle 36).
+6. [x] Two runxbe attempts produced REPRODUCED scans = (D-cycle-27, count=0).
+7. [x] 26-snap NTSC composite burst over t+0..t+29.5s captured + classified: ZERO stripes detected.
+8. [x] G-row classification = **G0**; rationale + three pre-`.CRT$XXC` sub-cases documented; γ.1 ruled out.
+9. [x] SUMMARY.md written.
+10. [x] `handoff.md` + `decision-log.md` cycle-36 entries on top; cycle-35 entries preserved unchanged below.
+11. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
+12. [-] Codex SKIPPED per rule #15 doc-only / run-only carve-out (same path as cycles 26/28/30/32/34); cycle-35 marker `515e03f4e7` remains relevant for the deployed artifact.
+13. [ ] Closure commit pending.
 
-## Out-of-scope (kept bounded for cycle 35)
+## Out-of-scope (kept bounded for cycle 36)
 
-- NO host xemu source touched (no `hw/`, `ui/`, `target/`, `include/`).
-- NO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 lockstep contract intact; cycle-35 stage codes 4 and 5 are defined locally in `witness-only/main.c` to avoid altering this header).
-- NO `lib/xbed_self_witness.{c,h}` touched (cycle-29 self-witness shim intact; cycle 35 only adds new CALL SITES from new `.CRT$X*` slots — the shim API + implementation are unchanged).
-- NO `lib/lib.mk` touched (cycle-29 opt-in policy intact).
+- NO host xemu source touched.
+- NO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 lockstep contract intact).
+- NO `lib/xbed_self_witness.{c,h}` touched (cycle-29 self-witness shim intact).
+- NO `lib/lib.mk` touched.
 - NO `oracle-agent/*` touched (cycle-27 preserve gate + cycle-29 `witness.scan-self` verb intact).
 - NO `xbed_runtime.{c,h}` touched.
 - NO image-blit touched.
-- NO `nxdk/` source touched (the `.CRT$X*` mechanism is CONSUMED from nxdk's stable CRT API, NOT modified).
+- NO `witness-only/main.c` touched (cycle-35 source intact).
+- NO `nxdk/` source touched.
 - NO `tools/xemu-capture/` source touched.
-- NO `scripts/apple-silicon/composite-record.sh` source touched (cycle-33 implementation intact).
-- NO `scripts/apple-silicon/composite-preflight.sh` source touched (cycle-33 implementation intact); the cycle-34-filed secondary findings (xemu-capture-yes / ffmpeg-no TCC asymmetry + xemu-capture PAL-default-on-NTSC silent-zero) are explicitly OUT of cycle-35 scope per the cycle-34 prompt guardrail.
+- NO `scripts/apple-silicon/composite-record.sh` / `composite-preflight.sh` source touched (cycle-33 implementations intact; cycle-36 reproduction of cycle-34 finding (i) filed; cycle-37+ fix scope).
 - NO retail-title / §G.5 / RT-as-texture / second-wave-XBE work.
 - NO flag default flips.
-- NO real-Xbox run (cycle 36 scope, Hermes's call).
-- NO PushNotification — bounded implementation slice, not blocker / milestone.
+- NO XBE rebuilds (cycle-35 build observed; bit-identical to closure `515e03f4e7`).
+- NO PushNotification — bounded run-only slice, not blocker / milestone (G0 outcome is informative but does not unblock M15; it narrows the cycle-37+ scope window).
 - NO cleanup of pre-existing untracked `.hermes_*` files at repo root.
-- NO touch of pre-existing tracked-but-uncommitted modifications to `capture-composite-reference.sh` / `retail-gameplay-oracle.py` / `retail-oracle-workflow.py` / `retail-title-automation-proof.py` (preserved per cycle-34 prompt guardrail; carried forward to cycle 35).
-- NO touch of pre-existing untracked `scripts/apple-silicon/composite_preflight.py` (preserved per cycle-34 prompt guardrail; carried forward).
+- NO touch of pre-existing tracked-but-uncommitted modifications to `capture-composite-reference.sh` / `retail-gameplay-oracle.py` / `retail-oracle-workflow.py` / `retail-title-automation-proof.py` (preserved per cycle-34 prompt guardrail; carried forward).
+- NO touch of pre-existing untracked `scripts/apple-silicon/composite_preflight.py` (preserved per the same guardrail; carried forward).
 
-## Recommended cycle-36 scope (NOT executed this session — Hermes's call)
+## Recommended cycle-37+ scope (NOT executed this session — Hermes's call)
 
-FTP-deploy cycle-35 `witness-only/bin/default.xbe` (155 648 B; SAME path `/E/Apps/witness-only/default.xbe`) USING `--overwrite` because the cycle-35 XBE size matches cycle 31's exactly and the FTP uploader's default size-only diff would otherwise skip the upload (cycle-30 methodology lesson). Cycle-29 oracle-agent stays in place from cycle 32 / 34. ARM composite-capture leg via `scripts/apple-silicon/composite-record.sh cycle36-witness-only-pre-main` BEFORE issuing `runxbe`. Run the cycle-32 canonical sequence. KEY new signal: `witness.scan-self`'s `reserved1` counter:
-- `count=0 reserved1=n/a` → **G0**: pre-libc-init crash (strictly earlier than cycle-34's F4); OR `MmAllocateContiguousMemoryEx` itself returned NULL from `.CRT$XXC` (edge case).
-- `count=1 reserved1=1` → **G1**: `.CRT$XXC` slot ran but `.CRT$XCU` did NOT (`thrd_create` failed OR `.CRT$XI*` faulted).
-- `count=1 reserved1=2` → **G2**: BOTH pre-main slots ran but no in-`main()` WTNS fire landed. γ.1 **candidate** window (NOT corroborated): cycle-35 evidence CANNOT distinguish between (γ.0-sub) `main()` never entered after `.CRT$XCU` AND (γ.1) `main()` entered and crashed inside paint(0) = `XVideoSetMode`. Cycle 37 should add a `.CRT$XCV` slot to separate.
-- `count=1 reserved1=3..4` + no stripes visible → **G2'** (cycle-35 analogue of cycle-32 F4'): graceful `XVideoSetMode` FALSE; `main()` continued through in-`main()` WTNS fires. γ INVALIDATED via WTNS path.
-- `count=1 reserved1=3..4` + stripe(s) visible → **G3**: `main()` entered AND paint(0) ran AND reached at least one in-`main()` WTNS fire. γ.0 INVALIDATED. Apply cycle-32 F-row rules for the in-main half.
-- `count=1 reserved1=4` + A1/A2 XCTR success shape + 5 stripes visible → **G4**: full success across BOTH mechanisms; declare discriminator track CLOSED.
+Cycle 36 G0 narrowed the crash window to one of three pre-`.CRT$XXC`-fire sub-cases that cycle-35 evidence cannot distinguish. The cycle-35 README G0-row "Next" column enumerates three candidates; pick one or combine:
 
-Secondary findings worth queuing for cycle 37+ (NOT cycle-36 fix scope): same two cycle-34 findings still open — (i) extend `composite-preflight.sh --mode auto` so the ffmpeg leg is gated EVEN when xemu-capture reports ok (closes TCC asymmetry); (ii) default xemu-capture snapshot dimensions to NTSC for MS2109 source OR update `witness-only/README.md` example invocations to include `--width 720 --height 480`.
+1. **Custom XBE-header callback that runs before nxdk's `_start`** — requires modifying nxdk's `tools/cxbe/` XBE-header generator to expose a kernel-controlled entry slot; widens scope across nxdk but uniquely distinguishes sub-case (a) (`_start`/`__security_init_cookie`/TLS/`_PDCLIB_xbox_libc_init` crash).
+2. **Static binary diff against a known-good nxdk XBE** (`pipeline-smoke` or `mirror` — both boot and paint successfully on real Xbox per cycles 26/28/30/32/34) to localize the `xbed_self_witness.c` / `xbed_a4_witness.c` / `lib/xbed_runtime.c` / pre-main-breadcrumb code differences; ZERO new XBE source required; could surface a stack alignment / TLS-layout / section-attribute drift that pre-dates `.CRT$XXC` walker invocation.
+3. **EEPROM-scratchpad write inside `xbed_self_witness_fire`** BEFORE the `MmAllocateContiguousMemoryEx` call, using the agent's `unsafe.enable` + EEPROM-write path; a successful EEPROM tick would discriminate sub-case (c) (`MmAllocateContiguousMemoryEx` returned NULL) from (a)/(b); adds substantial scope (new shared-lib API + EEPROM transactional commit + agent verb).
+
+Secondary findings worth queuing for cycle 37+ (NOT cycle-36 fix scope): (i) cycle-34 finding upgraded — composite-record.sh ffmpeg silent-stall reproduced across two physical power sessions; cycle 37 candidate is to extend composite-preflight.sh with `--require-both-detectors` OR have composite-record.sh always run a brief ffmpeg liveness check before arming the full duration. (ii) cycle-34 secondary finding (ii) — xemu-capture snapshot defaults to 720x576 PAL — remains open; cycle-35 README cycle-36 runbook now includes explicit `--width 720 --height 480` in the example invocation as a partial mitigation.
