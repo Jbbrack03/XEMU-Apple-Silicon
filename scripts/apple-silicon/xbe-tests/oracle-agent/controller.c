@@ -45,6 +45,74 @@ static inline void cache_writeback_invalidate(void)
     __asm__ __volatile__("wbinvd" ::: "memory");
 }
 
+/* Cycle 27 option (a) — preserve-existing-witness-stamp helper.
+ *
+ * Mirrors the lockstep candidate filter used by the cycle-23 witness
+ * writer (`lib/xbed_a4_witness.c::a4_candidate_ok`) and reader
+ * (`commands.c::a4_reader_candidate_ok`). Returns 1 iff the 16-byte
+ * `oracle_ctrl_buffer` header at `vp` already looks like a valid
+ * previously-initialized buffer — magic == 'XCTR', version == 1,
+ * `reserved[0]` is either 0 (fresh agent buffer untouched) or carries
+ * the cycle-23 A.4 witness tag in its top byte (0xA4), and
+ * `reserved[1]` is within the plausibility ceiling.
+ *
+ * Used by `s_allocate_fresh` to decide whether to preserve a witness
+ * stamp that an earlier diagnostic-XBE chainload (e.g. cycle-25
+ * `witness-only`) may have landed on the kernel-pool page the
+ * allocator just returned. Real-Xbox cycle 26 observed the kernel
+ * pool deterministically returns the same persistent phys=0x03eb3000
+ * across agent re-launches; without this branch, the existing
+ * unconditional `memset` would wipe any witness stamp before the
+ * cycle-26-style readback could observe it. See decision-log cycle-27
+ * entry + handoff.md cycle-27 entry.
+ *
+ * Filters (TIGHTER than the cycle-23 scan filter — Codex cycle-27
+ * round-1 medium finding): the agent's writer / init paths only ever
+ * produce two header shapes — a freshly-initialized buffer
+ * `(reserved0=0, reserved1=0)` or a cycle-23 A.4-stamped buffer
+ * `((reserved0 >> 24) == 0xA4, reserved1 in [1, 4096])`. Accept
+ * exactly those two shapes; the cycle-23 scan filter additionally
+ * accepts `(reserved0==0, reserved1!=0)` which no real writer
+ * produces. Narrowing the preserve gate here reduces the chance the
+ * branch falsely fires on a kernel-pool page whose first 16 bytes
+ * coincidentally spell `XCTR+1+0+nonzero`.
+ *
+ *   1. magic == ORACLE_CTRL_MAGIC
+ *   2. version == ORACLE_CTRL_VERSION
+ *   3. either:
+ *        (reserved0 == 0 && reserved1 == 0)            — fresh buffer
+ *        OR
+ *        ((reserved0 >> 24) == 0xA4 && 1 <= reserved1 <= 4096) — A.4
+ *
+ * The cycle-23 scan filter intentionally stays wider so it can find
+ * partially-corrupted candidates on a real-Xbox kseg0 sweep; the
+ * preserve gate is allowed to be stricter because a false negative
+ * here just falls back to legacy full-zero behavior (safe), while a
+ * false positive would silently retain garbage as if it were a real
+ * witness header. If you change the canonical writer shapes, update
+ * `lib/xbed_a4_witness.c::a4_candidate_ok` and
+ * `oracle-agent/commands.c::a4_reader_candidate_ok` in the SAME
+ * commit; the preserve gate's narrower predicate must remain a strict
+ * subset of those filters. */
+#define ORACLE_CTRL_WITNESS_TAG          0xA4u
+#define ORACLE_CTRL_WITNESS_MAX_COUNTER  4096u
+
+static int s_page_has_plausible_witness_header(
+    const struct oracle_ctrl_buffer *vp)
+{
+    const volatile uint32_t *p = (const volatile uint32_t *)vp;
+    if (p[0] != ORACLE_CTRL_MAGIC) return 0;
+    if (p[1] != ORACLE_CTRL_VERSION) return 0;
+    uint32_t r0 = p[2];
+    uint32_t r1 = p[3];
+    if (r0 == 0u && r1 == 0u) return 1;                    /* fresh init */
+    if ((r0 >> 24) == ORACLE_CTRL_WITNESS_TAG &&
+        r1 >= 1u && r1 <= ORACLE_CTRL_WITNESS_MAX_COUNTER) {
+        return 1;                                          /* A.4 stamped */
+    }
+    return 0;
+}
+
 /* ---- persistence anchor: state/ctrl-addr.txt ---------------------- */
 
 /* Path of the per-console state directory we own. Anchor file lives at
@@ -178,10 +246,56 @@ static struct oracle_ctrl_buffer *s_allocate_fresh(uintptr_t *out_phys)
      * keeps RPC writes and diag reads on the same page-table path. */
     struct oracle_ctrl_buffer *vp =
         (struct oracle_ctrl_buffer *)(phys | 0x80000000u);
-    memset(vp, 0, sizeof(*vp));
-    vp->magic = ORACLE_CTRL_MAGIC;
-    vp->version = ORACLE_CTRL_VERSION;
+
+    /* Cycle 27 option (a): preserve an existing witness header if the
+     * kernel pool returned a page that already carries a plausible
+     * `oracle_ctrl_buffer` header (e.g. a cycle-25 `witness-only`
+     * chainload stamped this page with `reserved[0] == 0xA4xxxxxx`
+     * just before exiting via HalReturnToFirmware). Real-Xbox cycle 26
+     * observed the kernel pool deterministically returns the same
+     * persistent phys=0x03eb3000 across agent re-launches in one
+     * power session; the previous unconditional `memset(vp, 0, ...)`
+     * silently wiped that stamp before any readback could see it,
+     * leaving the cycle-25/26 stamp-vs-no-stamp question unresolved.
+     *
+     * Branch semantics:
+     *  - Plausible header present → preserve magic / version /
+     *    reserved[0] / reserved[1]; ONLY zero the port[] payload so
+     *    the new agent session is usable (any prior synthetic-input
+     *    state is intentionally cleared). The witness stamp survives
+     *    so a subsequent `witness.scan` reports it.
+     *  - Otherwise → full zero + re-stamp magic/version (legacy
+     *    behavior; the page contained unrelated kernel state, so the
+     *    safest thing is a clean re-init).
+     *
+     * `port[]` clearing in the preserve branch must NOT touch the
+     * 16-byte header at offset 0; use the `port` member offset
+     * directly. */
+    int preserved_witness = 0;
+    if (s_page_has_plausible_witness_header(vp)) {
+        memset(&vp->port[0], 0, sizeof(vp->port));
+        preserved_witness = 1;
+    } else {
+        memset(vp, 0, sizeof(*vp));
+        vp->magic = ORACLE_CTRL_MAGIC;
+        vp->version = ORACLE_CTRL_VERSION;
+    }
     cache_writeback_invalidate();
+
+    if (preserved_witness) {
+        /* One-line breadcrumb so a real-Xbox session that re-launches
+         * the agent after a witness-bearing chainload can confirm via
+         * the on-screen debugPrint overlay (or composite capture) that
+         * the preserve branch actually fired. Reports the surviving
+         * `reserved[0]/reserved[1]` so the on-screen banner is enough
+         * to discriminate "stamp survived" vs "stamp absent" without
+         * needing `witness.scan`. */
+        volatile uint32_t *p = (volatile uint32_t *)vp;
+        debugPrint("oracle_ctrl: preserved existing witness header at "
+                   "phys=0x%08lx reserved0=0x%08lx reserved1=0x%08lx\n",
+                   (unsigned long)phys,
+                   (unsigned long)p[2], (unsigned long)p[3]);
+    }
 
     /* Anchor the address so a chainloaded diag XBE / re-launched
      * agent can find it. */

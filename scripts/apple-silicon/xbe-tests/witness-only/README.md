@@ -137,11 +137,22 @@ Sequence:
 ./scripts/apple-silicon/oracle-client.py raw witness.scan
 ```
 
-## Discriminator semantics table (carried forward from cycle-24 handoff)
+## Discriminator semantics table (carried forward from cycle-24 handoff; updated cycle 27)
+
+Cycle-27 update: with `oracle-agent/controller.c::s_allocate_fresh`
+preserving an A.4-stamped header across agent re-launch (cycle 27
+option (a), commit on `apple-silicon-performance`), "witness stamped
+the buffer successfully" now ALSO surfaces as `count=1` with
+`live=1 reserved0=0xA4xxxxxx` whenever the kernel pool returns the
+same persistent phys to the relaunched agent (the cycle-26-observed
+behavior on this Xbox). Either the orphan shape OR the live shape is
+a positive "witness landed" outcome under cycle 27. Treat
+`count=1 live=1 reserved0=0` as the unambiguous "no stamp landed"
+baseline.
 
 | Cycle-26 outcome | Cycle-25-XBE reservoir state | Interpretation | Next cycle |
 |---|---|---|---|
-| **Reboots in ~5..15 s; agent witness.scan shows orphan with `reserved[0] == 0xA4000003`** | Both fires landed; `reserved[1]` counter ticked twice | **Witness mechanism IS real-Xbox-safe in this minimal XBE.** Image-blit's hang is in code that is ABSENT from witness-only — that set is pbkit / NV2A / xbed_init / xbed_render_loop_then_capture AND the `image_blit_marker(0, ...)` helper itself. **Cycle-22 leading hypothesis "pre-main crash" is INVALIDATED.** Independently excluding the marker helper requires a follow-on cycle that runs it between the two fires. | Cycle 27: split image-blit's instrumentation across multiple smaller discriminator XBEs (e.g. witness-plus-marker, witness-plus-pbkit-init, witness-plus-xbed_init) to localize. |
+| **Reboots in ~5..15 s; agent witness.scan shows either (i) orphan with `reserved[0] == 0xA4000003` OR (ii) live buffer with `reserved[0] == 0xA4000003` on the cycle-26-reused phys** | Both fires landed; `reserved[1]` counter ticked twice (orphan case) or the live buffer carries the surviving stamp (preserve-branch case) | **Witness mechanism IS real-Xbox-safe in this minimal XBE.** Image-blit's hang is in code that is ABSENT from witness-only — that set is pbkit / NV2A / xbed_init / xbed_render_loop_then_capture AND the `image_blit_marker(0, ...)` helper itself. **Cycle-22 leading hypothesis "pre-main crash" is INVALIDATED.** Independently excluding the marker helper requires a follow-on cycle that runs it between the two fires. | Cycle 28: split image-blit's instrumentation across multiple smaller discriminator XBEs (e.g. witness-plus-marker, witness-plus-pbkit-init, witness-plus-xbed_init) to localize. |
 | **Hangs Xbox identically to cycle 24** (no FTP/21 / agent/9001 / ping response for 5+ min) | UNRECOVERABLE without power-cycle that erases the buffer | **Witness mechanism itself is real-Xbox-incompatible.** Either the kseg0 scan hits a mapped-but-MMIO-aliased page whose read hangs the bus, or `MmGetPhysicalAddress` returns non-zero for such a page. | Cycle 27: redesign the witness. Candidates: (a) EEPROM scratchpad (survives power-cycle but requires `unsafe.enable` + careful timing); (b) abandon in-XBE witness and pivot to XBE-level static binary diff of cycle-23 vs cycle-21 image-blit; (c) restrict the scan to a single known-safe physical page (the agent's currently-live `oracle_ctrl_buffer`, address persisted to `/E/Apps/oracle-agent/state/ctrl-addr.txt`). |
 | **Reboots cleanly but orphan has `reserved[0] == 0xA4000001`** (MAIN_ENTERED only) | First fire landed; second fire's write did not land (or `reserved[1]` ticked from 1 to 2 but `reserved[0]` did not update — would need to inspect `reserved[1]` value to fully disambiguate) | Witness fires once but second fire perturbs CPU state enough to delay or hang the box (with a watchdog soft-reset eventually firing). Less likely; worth surfacing. | Cycle 27: design the witness to fire only once, OR add a longer settle period between fires. |
 

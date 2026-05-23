@@ -458,6 +458,32 @@ int cmd_bye(struct netconn *c, const char *args)
  *                                               fopen-fails silently
  *                                               and code continues).
  *
+ * Cycle-27 additional success shape (`controller.c::s_allocate_fresh`
+ * preserve branch): real-Xbox cycle 26 observed the kernel pool
+ * deterministically returns the same persistent phys (e.g.
+ * phys=0x03eb3000) across agent re-launches in one power session.
+ * When that happens AND the relaunched agent's `s_allocate_fresh` now
+ * detects a plausible A.4-tagged header on the returned page, the
+ * preserve branch keeps `reserved[0,1]` intact. Therefore the LIVE
+ * buffer itself can now carry the stamp:
+ *
+ *   count=1 with live=1 reserved0=0xA4xxxxxx → witness fire DID land
+ *                                               AND the kernel pool
+ *                                               returned the same
+ *                                               persistent page on
+ *                                               agent re-launch; the
+ *                                               preserve branch
+ *                                               retained the stamp on
+ *                                               the live buffer (no
+ *                                               separate orphan in
+ *                                               this case).
+ *
+ * Operationally: with cycle-27 in effect, EITHER the legacy orphan
+ * shape (count>=2 with a stamped orphan) OR the new live-buffer shape
+ * (count=1 with live=1 and a stamped reserved0) is a positive
+ * "witness landed" outcome; `count=1 live=1 reserved0=0` remains the
+ * "no stamp landed" baseline.
+ *
  * Safety (Codex cycle-23 finding #1): kseg0 [0x80010000, 0x84000000]
  * is NOT fully identity-mapped on the OG Xbox; only pages the kernel
  * has actually allocated are valid. The writer's xemu-Metal local

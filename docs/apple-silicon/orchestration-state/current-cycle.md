@@ -1,78 +1,71 @@
 # Current Cycle
 
-- Cycle: 26 Path A.4 real-Xbox witness-only deployment (**CLOSED — 2026-05-22**, partial discriminator outcome).
-- Started: 2026-05-22 (Hermes-supervised fresh bounded session; Claude Code worker autonomous run).
-- Closed: 2026-05-22 (this update + closure commit).
-- State: **CLOSED. Witness-only deployed and chainloaded on real Xbox 4× (plus 2 controls). Outcome shape D (not in cycle-25 design table): clean dashboard recovery in ~70 s with no observable orphan. Hypothesis #5 PARTIALLY INVALIDATED in the hard-hang sense (Xbox did not hang as in cycle 24). Cycle-22 leading hypothesis still WEAKENED — cycle-27 candidate redesign documented to break the stamp-vs-no-stamp ambiguity.**
-- Owner: Claude Code worker (fresh bounded session), launched 2026-05-22.
-- HEAD at start: post-cycle-25 closure commit on `apple-silicon-performance`.
-- Bounded goal: "Determine whether cycle 26 is feasible autonomously from this Mac right now; if feasible, run the canonical cycle-26 sequence, document outcome, update state."
-- Result: SLICE RAN; concrete partial-discriminator outcome documented with evidence; no source-code edits, no XBE rebuilds.
+- Cycle: 27 Path A.4 option (a) — `oracle-agent/controller.c::s_allocate_fresh` preserves an existing plausible `oracle_ctrl_buffer` witness header across agent restart instead of unconditionally `memset`-wiping it (**CLOSED — 2026-05-23**, XBE source slice green; cycle-28 real-Xbox deployment is Hermes's call).
+- Started: 2026-05-23 (Hermes-supervised fresh bounded session; Claude Code worker autonomous run).
+- Closed: 2026-05-23 (this update + closure commit).
+- State: **CLOSED. Option (a) implemented minimally; oracle-agent XBE rebuilt; Codex 3-round validation green (round 3 = LOOKS GOOD); canonical docs synced; orchestration-state quartet closure pass.**
+- Owner: Claude Code worker (fresh bounded session), launched 2026-05-23.
+- HEAD at start: post-cycle-26 closure commit `a31e061144` on `apple-silicon-performance`.
+- Bounded goal: "Implement cycle-27 option (a) only — preserve an existing oracle controller buffer witness stamp across agent restart by modifying `oracle-agent/controller.c::s_allocate_fresh`. Keep scope tight. No host source changes. No image-blit / witness-only / xbed_a4_witness changes."
+- Result: SHIPPED. Five source/doc files modified (controller.c, controller.h, commands.c, witness-only/README.md, witness-only/manifest.json) + 2 rebuilt binaries (bin/default.xbe + oracle-agent.iso). NO host source touched; NO image-blit / witness-only-source / lib/xbed_a4_witness touched.
 
 ## Plan summary (this session, executed in order)
 
-1. Read required docs/rules + orchestration-state files (handoff.md cycle-25/24/23 entries, orchestration-workflow.md, decision-log entries, current-cycle/claude-status/validation-status/handoff-summary).
-2. Confirmed Xbox @ 192.168.0.200 reachable: ICMP 0% loss, FTP/21 OPEN, agent/9001 CLOSED → dashboard state (Hermes had already power-cycled post cycle-24).
-3. Confirmed cycle-23 oracle-agent deployed (witness.scan verb registered, banner v0.4).
-4. Baseline witness.scan: count=1 buf phys=0x03eb3000 reserved[0]=0 mapped_pages_seen=419. **Precondition MET.**
-5. FTP-uploaded `scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe` (147 456 B) → `/E/Apps/witness-only/default.xbe`. FTP LIST confirms remote size match.
-6. Chainloaded witness-only 4× (incrementally tightening polling methodology because nc -z gave false-positive early ftp=Y readings). Definitive timing via `curl FTP LIST` poll (log 20-): **t+70.17 s dashboard fully ready**.
-7. Ran 2 controls to disambiguate timing:
-   - Invalid path chainload → t+20.67 s (matches agent's XLaunchXBE failure path: Sleep(500)+fail+Sleep(2000)+HalReturnToFirmware → BIOS POST).
-   - Known-good mirror XBE chainload → t≈36 s (clean Tier-1 diag chainload).
-8. Post-run witness.scan after each chainload: SAME count=1 phys=0x03eb3000 reserved[0]=0 mapped_pages_seen=419. **No orphan observed in any of 4 chainloads.**
-9. Recorded the outcome (Outcome D) in evidence summary; updated orchestration-state quartet for cycle-26 closure.
+1. Read required docs/rules + orchestration-state files (handoff.md cycle-26/25/24, orchestration-workflow.md, decision-log entries, current-cycle/claude-status/validation-status/handoff-summary, oracle-and-xbe rule snapshot, controller.{c,h}, lib/xbed_a4_witness.{c,h}, commands.c witness reader).
+2. Designed predicate + branch logic for `s_allocate_fresh` to mirror the cycle-23 lockstep plausibility filter (Codex round 1 tightened it to a strict subset of that filter — see exit criteria).
+3. Implemented `s_page_has_plausible_witness_header` static helper + two-branch preserve/legacy structure in `s_allocate_fresh`; added one `debugPrint` breadcrumb when preserve fires.
+4. Updated `controller.h` `oracle_ctrl_init` doc comment to reflect the cycle-27 refinement.
+5. Rebuilt oracle-agent XBE via `eval "$(nxdk/bin/activate -s)" && make`: bin/default.xbe = 417 792 B (size unchanged from cycle 26); oracle-agent.iso = 983 040 B. Benign `lld: warning: .edata=.rdata` repeats from prior cycles.
+6. Ran Codex validation round 1 (changes mode): MINOR ISSUES with 1 medium + 1 low finding. Both adopted in full.
+7. Re-ran Codex validation round 2: MINOR ISSUES (round-1 MEDIUM RESOLVED; round-1 LOW PARTIAL on one residual manifest field). Adopted.
+8. Re-ran Codex validation round 3: LOOKS GOOD (round-2 PARTIAL RESOLVED; round-1 MEDIUM still RESOLVED; no new round-3 findings). Validation marker written.
+9. Canonical docs synced: handoff.md cycle-27 entry on top (cycle-26 preserved unchanged), decision-log.md cycle-27 entry above cycle-26 (no supersession), orchestration-state quartet refreshed for closure.
 
 ## Exit criteria — final status
 
 1. [x] Required docs read; plan summarized to current-cycle.md (this file) + claude-status.md.
-2. [x] Xbox reachability verified; precondition (1 live buffer, reserved[0]==0) MET on baseline scan.
-3. [x] Witness-only XBE FTP-uploaded successfully (147 456 B, FTP LIST verified).
-4. [x] runxbe witness-only issued 4× (plus 2 controls); chainload→dashboard-ready timing measured with `curl FTP LIST` as ground truth (~70 s).
-5. [x] Post-run witness.scan after each chainload (consistent: no orphan, same phys, reserved[0]==0).
-6. [x] Evidence preserved at `benchmark-runs/cycle26-real-xbox-witness-only-20260523T041356Z/{00..20-*.log, SUMMARY.md}` (gitignored).
-7. [x] Canonical docs synced: handoff.md cycle-26 entry on top, decision-log.md cycle-26 entry above cycle-25, orchestration-state quartet (current-cycle.md = this file, claude-status.md, validation-status.md, handoff-summary.md) closure pass.
-8. [x] Closure commit pending (this commit on `apple-silicon-performance`).
+2. [x] `oracle-agent/controller.c::s_allocate_fresh` modified to preserve an existing plausible witness header; helper `s_page_has_plausible_witness_header` added; predicate accepts ONLY `(reserved0==0, reserved1==0)` OR `((reserved0>>24)==0xA4, 1<=reserved1<=4096)` (Codex round-1 medium adopted: strict subset of cycle-23 scan filter); branch clears only `port[]` in preserve case; cache_writeback_invalidate after either branch.
+3. [x] `controller.h` `oracle_ctrl_init` doc updated to reflect the cycle-27 refinement (minimal paired comment per Hermes pre-session "minimal paired comments/docs if needed").
+4. [x] `commands.c::cmd_witness_scan` body comment extended with "Cycle-27 additional success shape" block (Codex round-1 low adopted).
+5. [x] `witness-only/README.md` discriminator-semantics table updated to list both success shapes (orphan or live preserve) and clarify cycle-28 follow-on (Codex round-1 low adopted).
+6. [x] `witness-only/manifest.json` `artifacts.witness_readback.notes` + `expected_results.real-xbox/physical/cycle-26.notes` both extended to describe both shapes (Codex round-1 low + round-2 PARTIAL adopted).
+7. [x] oracle-agent XBE rebuilt cleanly via nxdk; size unchanged at 417 792 B; manifest.json still parses.
+8. [x] Codex validation 3 rounds, round 3 = LOOKS GOOD. Validation marker written at `.claude/state/codex-validate-last-run`.
+9. [x] Canonical docs synced: handoff.md cycle-27 entry, decision-log.md cycle-27 entry, orchestration-state quartet (current-cycle.md = this file, claude-status.md, validation-status.md, handoff-summary.md) closure pass.
+10. [x] Two pre-existing untracked prompt files (`.hermes_cycle22_path_a3_prompt.txt`, `.hermes_cycle23_docsync_prompt.txt`) preserved un-staged per Hermes pre-session instruction.
+11. [ ] Closure commit pending (this commit on `apple-silicon-performance`).
 
-## Out-of-scope (kept bounded for cycle 26)
+## Out-of-scope (kept bounded for cycle 27)
 
-- NO source/script code edits (cycle-23 lib + agent + image-blit + cycle-25 witness-only all UNTOUCHED).
-- NO XBE rebuilds.
-- NO xemu-fork host source touched.
-- NO retail-title, §G.5, RT-as-texture work.
+- NO xemu-fork host source touched (no `hw/`, `ui/`, `target/`, `include/`).
+- NO image-blit source touched.
+- NO witness-only source touched.
+- NO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 scan filter intentionally stays wider than the cycle-27 preserve gate — lockstep contract documented in three comment blocks).
+- NO XBE rebuilds beyond oracle-agent.
+- NO real-Xbox deployment — cycle 28 is Hermes's call.
+- NO retail-title / §G.5 / RT-as-texture / second-wave-XBE work.
 - NO flag default flips.
+- NO cycle-27 options (b)/(c)/(d) pursued; they remain on the table for cycle 29+ if cycle 28 does not resolve the ambiguity.
 
-## Outcome (cycle-26)
+## Outcome (cycle 27)
 
-**Outcome D** (not in cycle-25 design table): chainload→dashboard-ready in **~70 s**, NO orphan observed in post-run scan.
+**Option (a) shipped.** `oracle-agent` now preserves a plausible existing witness header across agent restart. Cycle 28 (Hermes-scheduled) can deploy the new oracle-agent + the unchanged cycle-25 witness-only XBE to discriminate the cycle-26 stamp-vs-no-stamp ambiguity via a new positive success shape `count=1 live=1 reserved0=0xA4xxxxxx` (preserve branch retained the live-buffer stamp) alongside the legacy orphan shape.
 
-Cycle-25 expected branches:
-- A: reboot ~5..15 s + orphan reserved[0]==0xA4000003 → witness IS real-Xbox-safe in this minimal XBE; cycle-22 leading hypothesis INVALIDATED.
-- B: identical hang to cycle 24 (>5 min silent) → witness mechanism real-Xbox-incompatible.
-- C: clean reboot + orphan reserved[0]==0xA4000001 → second fire hung.
+## What outcome resolves and what it leaves open
 
-Observed (D): clean dashboard recovery WITHOUT a power-cycle (rules out B in the hang sense) BUT ~70 s gap (longer than 22 s normal reboot, shorter than 928 s+ cycle-24 hang) AND no observable orphan (rules out raw A or C).
+**RESOLVED (this session):**
+- The cycle-26 design gap "kernel-pool reuse silently wipes the stamp" is now addressed. The relaunched agent's `s_allocate_fresh` detects a plausible witness header on the returned page and preserves it.
+- The cycle-26 documentation gap "what does a successful preserve-branch readback look like?" is closed across `commands.c::cmd_witness_scan` body comment, `witness-only/README.md`, and `witness-only/manifest.json`.
 
-## What outcome D resolves and what it leaves open
+**LEFT OPEN (cycle 28 scope):**
+- **Stamp-vs-no-stamp question still UNRESOLVED at the real-Xbox level** until cycle 28 actually runs. This session ships the discriminator-sharpening tool; cycle 28 runs it.
+- **Cycle-22 leading hypothesis status: still WEAKENED.** Will be resolved one way or the other by cycle 28's `witness.scan` readback after a `witness-only` chainload.
+- **The cycle-26 ~70 s recovery shape (slow kseg0 scan vs delayed-fault watchdog vs slow BIOS POST) is NOT addressed by the preserve branch.** Cycle 28 should still discriminate this — the preserve branch only sharpens the post-chainload readback, not the chainload-→dashboard-ready timing.
+- **§H.6 default-on shape decision REMAINS DEFERRED.**
 
-**RESOLVED:**
-- **Outcome B (cycle-24-like hard hang) RULED OUT.** The kseg0-scan witness mechanism from a non-agent process context, in this minimal XBE, does NOT hard-hang the Xbox. Hypothesis #5 PARTIALLY INVALIDATED in the catastrophic-hang sense.
-- Witness-only chainload is FUNDAMENTALLY DIFFERENT from invalid-path control (20.67 s vs 70.17 s) and from a clean known-good chainload like mirror (~36 s vs 70.17 s). Something in witness-only's execution delays recovery by ~30..50 s vs a known-good chainload.
+## Recommended cycle-28 scope (NOT executed this session)
 
-**LEFT OPEN:**
-- **Stamp-vs-no-stamp ambiguity.** No orphan observed → either (i) witness fire never landed a stamp, OR (ii) stamp landed but new agent's `s_allocate_fresh::memset(vp, 0, ...)` wiped it after the kernel pool deterministically returned the same phys=0x03eb3000 across 3 observed agent re-launches. Cannot discriminate from session-level evidence alone.
-- **Cycle-22 leading hypothesis status: still WEAKENED.** The 70 s gap is consistent with witness-only's main() running to HalReturnToFirmware but encountering a delayed kernel fault (watchdog recovery), AND consistent with witness-only never reaching main() (the linked xbed_a4_witness `.text` itself causing a slow pre-main fault). Cannot resolve from current evidence.
-- **§H.6 default-on shape decision REMAINS DEFERRED** — cycle-26 does not unblock §H.6 default-on; still blocked on definitively resolving the witness mechanism's real-Xbox viability.
-
-## Recommended cycle-27 candidate scope (NOT executed this session)
-
-To break the cycle-25/26 ambiguity. Pick ONE:
-- (a) Modify `oracle-agent/controller.c::s_allocate_fresh` to NOT `memset` when it finds an existing `XCTR + version==1` buffer at the returned phys (preserve any landed witness stamp).
-- (b) Add an agent verb that dumps the prior controller-buffer phys+reserved[] from a known file BEFORE chainload, then post-chainload reads from that exact phys.
-- (c) Use a fresh `MmAllocateContiguousMemoryEx` page from witness-only directly (separate magic tag) instead of stamping the agent's buffer.
-- (d) Add an on-screen visual breadcrumb captured via `oracle-orchestrator.py capture` mid-run.
-
-Cycle-27 should also discriminate the ~70 s delay: is it slow kseg0 scan on real Xbox vs a delayed-fault watchdog window?
+Deploy the cycle-27 `oracle-agent/bin/default.xbe` + unchanged cycle-25 `witness-only/bin/default.xbe`. Canonical sequence + the `curl FTP LIST` poll methodology that cycle 26 encoded. Expected positive shapes: A1 (`count=1 live=1 reserved0=0xA4000003`) — preserve branch retained the live-buffer stamp on the reused phys; A2 (`count>=2` with stamped orphan reserved0=0xA4000003) — legacy orphan shape if the kernel pool returned a different phys this time. Either A1 or A2 means cycle-22 leading hypothesis INVALIDATED. D-cycle-27 (`count=1 live=1 reserved0=0`) means the stamp never landed; cycle 29 promotes option (c) or (d). B (identical 928s+ hang) means hypothesis #5 promoted back; redesign required.
 
 §H.6 default-on / long-term-fix decision REMAINS DEFERRED.
-M15 overall still NOT MET pending §H.6 default-on shape (blocked on cycle-27 stamp-vs-no-stamp discriminator), §G.5, RT-as-texture.
+M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-28 real-Xbox discriminator run with cycle-27 oracle-agent), §G.5, RT-as-texture.

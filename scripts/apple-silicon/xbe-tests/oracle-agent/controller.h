@@ -168,9 +168,22 @@ struct oracle_ctrl_buffer *oracle_ctrl_get(void);
 
 /* Initialize the controller-state buffer:
  *   Allocate a fresh persistent contiguous page, write the persistence
- *   anchor, and zero the state. A previous opt-in cross-restart
+ *   anchor, and reset the port state. A previous opt-in cross-restart
  *   reattach build was removed because the anchor-recorded physical
- *   page was not a sufficient allocator-ownership proof for production. */
+ *   page was not a sufficient allocator-ownership proof for production.
+ *
+ *   Cycle 27 option (a) refinement: if the kernel pool returns a page
+ *   whose first 16 bytes already match a plausible `oracle_ctrl_buffer`
+ *   witness header (XCTR magic + version 1 + reserved[0] either 0 or
+ *   A.4-tagged + reserved[1] within the cycle-23 plausibility ceiling),
+ *   preserve the header fields (magic / version / reserved[0,1]) and
+ *   ONLY clear the `port[]` payload. Otherwise zero the full buffer and
+ *   re-stamp magic / version (legacy behavior). This keeps the witness
+ *   header that a chainloaded diagnostic XBE (cycle-25 `witness-only`,
+ *   future variants) may have landed on the same kernel-pool page
+ *   visible to a subsequent `witness.scan` after agent restart, which
+ *   is the cycle-25/26 stamp-vs-no-stamp discriminator that cycle 27
+ *   exists to break. */
 void oracle_ctrl_init(void);
 
 /* RPC handlers — same shape as cmd_*. */
