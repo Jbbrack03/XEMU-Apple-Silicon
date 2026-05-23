@@ -1,50 +1,55 @@
 # Claude Status
 
-- Objective: cycle 31 Path A.4 option (d) on-screen visual breadcrumb — ship the smallest credible witness-only change that answers the γ question at coarser granularity than cycle 30 ("did `main()` execute far enough to emit a synchronous visible breadcrumb on real hardware?"). Leave a precise runbook for the cycle-32 deployment slice.
-- Status: **CLOSED.** Implementation slice complete; XBE rebuilt; docs synced; Codex validation completed; closure commit `41f350c174` landed on `apple-silicon-performance`.
+- Objective: cycle 32 Path A.4 real-Xbox deployment of the cycle-31 visual-breadcrumb build vs the cycle-31 witness-only XBE — run the cycle-30 canonical sequence with the composite-capture leg ARMED + classify the outcome per the cycle-31 F1..F8 + F4' table.
+- Status: **CLOSED. OUTCOME F8 (cycle-32 procedural failure — MS2109 composite-capture leg recorded zero frames).** Xbox-side leg completed cleanly; capture failed at the hardware level (no live composite signal at the MS2109 input). Cycle-32 redo is Hermes's call after physical-side cable / capture-input verification.
 
-## Why cycle 31 ran this session
+## Why cycle 32 ran this session
 
-Hermes pre-session instruction explicitly assigned cycle 31 as the bounded slice. Cycle 30 (closure commit `dfe1480cba`) observed outcome E2 = `witness.scan = D-cycle-27` AND `witness.scan-self = count=0`; (γ) "main() never reaches the fire calls" is LEADING; the cycle-22 pre-main-crash hypothesis is re-strengthened toward leading but not fully corroborated. The cycle-29 closure's option-catalog promoted option (d) on-screen visual breadcrumb as the cycle-31 leading candidate (option (b) DEMOTED because α-vs-β is moot given γ leading). Cycle 31 implements option (d).
+Hermes pre-session instruction explicitly assigned cycle 32 as the bounded slice. Cycle 31 closure (commit `41f350c174`) shipped the option-(d) visual-breadcrumb infrastructure but explicitly left the real-Xbox deployment as Hermes's call. Cycle 32 is the highest-value next slice from canonical docs.
 
 ## What this session shipped
 
-1. **`witness-only/main.c` modified.** Cycle-31 head-comment addendum (~50 LOC) explaining the option-(d) design + ordering rationale + γ-discriminator scope. Two new static helpers — `xbed_breadcrumb_init` (idempotent `XVideoSetMode(640, 480, 32, REFRESH_DEFAULT)` + clear-to-black + `XVideoFlushFB`) and `xbed_breadcrumb_paint(stage)` (96-row band fill + `XVideoFlushFB`) — plus the 5-stripe color table (RED / ORANGE / YELLOW / GREEN / BLUE; ARGB8888). Five `xbed_breadcrumb_paint(N)` call sites: paint(0) BEFORE the cycle-25 host-log line; paint(1) after cycle-23 fire1 return; paint(2) after cycle-23 fire2 return; paint(3) after cycle-29 self-fire1 return; paint(4) after cycle-29 self-fire2 return. Pre-reboot Sleep extended from 500 ms to 2 000 ms with cycle-31 rationale comment block.
-2. **`witness-only/README.md` cycle-31 addendum.** 5-stripe color map; 8-row cycle-32 discriminator table (F1 = full success / F2 = stripes 0..2 only / F3 = stripe 0 only / F4 = no stripes / F5 = all stripes but WTNS count=0 / F6 = all stripes + A1/A2 + WTNS success / F7 = partial intermediate / F8 = no composite capture); cycle-32 deployment runbook (10-step sequence covering composite-capture arm + cycle-30 canonical sequence + analyze step); cycle-31 build artifact sizes; cross-references updated with cycle-30 SUMMARY + cycle-31 entries.
-3. **`witness-only/manifest.json` updated.** Title extended ("+ cycle-31 option (d) on-screen visual breadcrumb"); purpose paragraph extended with cycle-31 design summary; new `real-xbox/physical/cycle-32` expected_results section enumerating F1..F8 with shape notes.
-4. **XBE rebuilt.** `witness-only/bin/default.xbe` 155 648 B (+4 096 B from cycle 29's 151 552 B; new code fits in one nxdk XBE page boundary); `witness-only.iso` 720 896 B (unchanged — same ISO sector boundary as cycle 29). Build via `eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)" && make` in `scripts/apple-silicon/xbe-tests/witness-only/`. Benign `lld: warning: .edata=.rdata: already merged into .edataxb` repeats prior cycles.
-5. **Codex validation per rule #15.** Non-trivial diff (~250 lines across `witness-only/main.c` + paired docs); Codex validation conducted (verdict + adoptions recorded in `validation-status.md`).
-6. **Canonical docs synced.** `handoff.md` cycle-31 entry on top (cycle-30 preserved unchanged); `decision-log.md` cycle-31 entry on top (no supersession); orchestration-state quartet closure pass.
+1. **Cycle-31 binary deployed to real Xbox.** `--overwrite` FTP-upload of `scripts/apple-silicon/xbe-tests/witness-only/bin/default.xbe` (155 648 B; SHA-256 `c00c726c96f2172badbe0dcd20c111ab89eee95960b8ce43d03c472db4e09edb`) to `/E/Apps/witness-only/default.xbe`. Post-upload list confirms `155648 Dec 10 17:17` (mtime advanced from cycle-29 build's prior timestamp; size mismatch 151 552 → 155 648 B triggered overwrite without `--overwrite`, but the flag was passed explicitly for safety per cycle-30 methodology lesson).
+2. **Canonical cycle-30 sequence executed** with the cycle-32 composite-capture addition. Baseline → reboot → upload → relaunch agent → pre-run scans (preconditions still MET) → arm composite capture → runxbe → dashboard FTP poll → post-run scans → MS2109 standalone probe.
+3. **Outcome F8 classified.** Per the cycle-31 cycle-32 discriminator table, F8 = "no composite capture available → procedural failure, NOT a discriminator answer → cycle-32 redo with composite capture confirmed armed." Capture failure root cause diagnosed in-session: AVFoundation opens the MS2109 device cleanly but ffmpeg never receives a frame across 70 s of `-t` plus 20 s watchdog grace (rc=137 SIGKILL; stderr 0 bytes). A follow-up 4 s standalone ffmpeg probe reproduced the same silent-no-frames behavior across 60+ s — confirms hardware-side capture failure (no live composite signal at MS2109 input), not a procedural bug in `composite-record.sh`.
+4. **Post-run witness-side readback preserved** (high-value even without stripe data). `witness.scan = D-cycle-27 (count=1 phys=0x03eb3000 reserved0=0 reserved1=0)` AND `witness.scan-self = count=0` — functionally IDENTICAL to cycle 30's E2. F4' (graceful XVideoSetMode FALSE return) RULED OUT by the `count=0` readback; F2 / F3 / F4 / F5 remain consistent with the two-tuple but cannot be discriminated without the visible-stripe count.
+5. **Evidence preserved on disk.** `benchmark-runs/cycle32-real-xbox-witness-only-visual-20260523T135646Z/{00..12-*.log, SUMMARY.md, composite-cycle32/{capture-meta.json, capture-stderr.log}}` (gitignored per project convention).
+6. **Canonical docs synced.** `handoff.md` cycle-32 entry on top (cycle-31 + cycle-30 preserved unchanged); `decision-log.md` cycle-32 entry on top (cycle-31 preserved unchanged); orchestration-state quartet closure pass.
 
 ## Session progress
 
 - [x] Read required docs/state files.
-- [x] Decided implementation approach (modify witness-only in place; no sibling XBE; no shared-lib changes).
-- [x] Added cycle-31 head-comment addendum + 2 static helpers + 5-stripe color table.
-- [x] Inserted 5 `xbed_breadcrumb_paint(N)` call sites into `main()`.
-- [x] Extended pre-reboot Sleep 500 → 2 000 ms with cycle-31 rationale.
-- [x] Rebuilt witness-only XBE; verified +4 096 B delta.
-- [x] Updated paired docs: README + manifest.
-- [x] Codex validation per rule #15.
+- [x] Verified MS2109 visible to AVFoundation (`AV TO USB2.0` video=[0] audio=[3]).
+- [x] Verified Xbox reachable (ping=true, agent=true, cycle-29 agent resident from cycle 30).
+- [x] Baseline scans → preconditions MET.
+- [x] Reboot → dashboard FTP `226` at t+12 s.
+- [x] FTP-upload cycle-31 XBE (155 648 B; size + mtime verified post-upload).
+- [x] Relaunch agent + pre-run scans (preconditions still MET).
+- [x] Arm composite capture (`composite-record.sh --duration 70 --label cycle32-witness-only-screen`).
+- [x] runxbe + dashboard FTP poll (returned at t+30 s; 9 s faster than cycle 30; weak signal NOT load-bearing).
+- [x] Post-run scans (D-cycle-27 + count=0; functionally identical to cycle 30 E2).
+- [x] Diagnosed capture failure (4 s standalone MS2109 probe → silent-no-frames; hardware-side).
+- [x] SUMMARY.md written.
 - [x] Canonical docs synced.
-- [x] Closure commit landed as `41f350c174` on `apple-silicon-performance`.
+- [ ] Closure commit pending.
 
 ## Confidence + risk notes
 
-- **HIGH confidence in the implementation pattern.** `XVideoSetMode(640, 480, 32, REFRESH_DEFAULT)` is the same kernel-display call `lib/xbed_runtime.c:43-60`'s `xbed_init` already uses for every diag XBE that draws anything — well-trodden code path. The new helpers add only memory writes into the resulting linear framebuffer (PAGE_WRITECOMBINE) + sfences via `XVideoFlushFB`. No pbkit, no NV2A class objects, no file I/O.
-- **MEDIUM confidence in the cycle-32 outcome interpretation.** F1 (all 5 stripes + full witness success) and F4 (no stripes + count=0) are unambiguous endpoints. F3 (stripe 0 only) is the most informative middle outcome (cycle-23 mechanism failure isolated). F5 (all stripes + count=0) is exotic and points to cache-attribute divergence (β re-elevated). The 8-row table is representative not exhaustive — operators should classify novel readbacks by combining deepest-stripe count with the cycle-30 two-tuple.
-- **MEDIUM-LOW risk to the cycle-31 build itself.** If `XVideoSetMode` itself faults on real Xbox (γ.1), the discriminator answer is still informative (no stripes visible = pre-`XVideoSetMode` crash OR `XVideoSetMode`-internal crash OR graceful `XVideoSetMode` FALSE return — all three land at F4; the first two strengthen cycle-22 further than cycle 30 could). The init-failed state is LATCHED in `xbed_breadcrumb_init` (3-state machine: UNTRIED / OK / FAILED — Codex cycle-31 round-1 high finding adopted): a graceful FALSE return latches FAILED and `paint(1..4)` cannot re-enter `XVideoSetMode`. The risk surface is therefore strictly concentrated in the single `XVideoSetMode` call invoked from `paint(0)`. All other paint code is straightforward memory writes into a write-combined linear framebuffer. The 2 000 ms settle Sleep cannot itself trigger a new failure mode (passive Sleep on the same code path cycle 29 already exercises).
-- **LOW risk to existing invariants.** ZERO shared-lib changes (no edits to `lib/xbed_a4_witness.{c,h}` / `lib/xbed_self_witness.{c,h}` / `lib/lib.mk`); ZERO oracle-agent changes (cycle-27 preserve gate + cycle-29 witness.scan-self verb intact); ZERO image-blit changes (cycle-23 lockstep contract intact). Cycle-31 is strictly additive within `witness-only/main.c` only. The bit-identical-with-cycle-29 window now starts at the cycle-25 host-log line (one new `XVideoSetMode` + one paint(0) call precede it); from the host-log line through the second cycle-29 self-witness fire, cycle 31 = cycle 29 modulo the four interleaved `xbed_breadcrumb_paint(1..4)` memory-write calls.
+- **HIGH confidence in the F8 classification.** The cycle-31 cycle-32 discriminator table explicitly carves out F8 = "no composite capture available." Cycle-32's composite leg ran but produced zero frames; F8 is the canonical name for this shape. Classifying the slice as one of F2/F3/F4/F5 would over-claim — those four rows share the cycle-32 two-tuple `(D-cycle-27, count=0)` and are distinguishable ONLY by the visible-stripe count, which is missing.
+- **HIGH confidence in the witness-side readback.** Three independent scan triplets (baseline, pre-run, post-run) all returned identical `(D-cycle-27, count=0)`. Deterministic phys=0x03eb3000 reuse REPRODUCED for the ≥12th consecutive observation across cycles 26 / 28 / 30 / 32. `mapped_pages_seen=419` REPRODUCED for the 10th observation.
+- **HIGH confidence in the capture-failure root-cause diagnosis.** Two independent ffmpeg invocations against the same MS2109 device (the composite-record.sh launch and a follow-up minimal probe) both showed the canonical "device opens, no frames, no error" shape. Standalone probe ran with no audio mux and a minimal encoder choice to rule out a cycle-32 procedural bug in `composite-record.sh`.
+- **MEDIUM confidence in the F4' elimination.** The `witness.scan-self count=0` readback is incompatible with F4' (which requires count >= 1). However, this elimination assumes the cycle-31 XBE actually ran on the Xbox (which the timing observation supports: t+30 s dashboard recovery is consistent with the XBE chainloading and rebooting). If the chainload somehow failed before `XLaunchXBE` returned, F4' would technically still be a candidate for the cycle-32 redo; in practice this is unlikely given cycles 26 / 28 / 30 all observed clean chainload→dashboard timing.
+- **LOW risk to existing invariants.** ZERO source/script edits this cycle. ZERO XBE rebuilds. The cycle-31 binary deployed is bit-identical to the cycle-31 build that passed 3-round Codex green. The post-run readback shape matches cycle 30 exactly; no new failure mode introduced.
 
 ## What this session does NOT do
 
-- NO real-Xbox run (cycle 32 scope, Hermes's call).
-- NO shared-lib changes.
-- NO XBE rebuilds beyond `witness-only` itself.
+- NO XVideoSetMode FALSE / kernel-display-init investigation (cycle-32 data does not support starting that investigation — F4' was the relevant outcome and it was RULED OUT).
+- NO cycle-33 implementation (the cycle-32 outcome is F8 = "redo before progressing").
+- NO PushNotification — bounded blocker closeout, not a milestone.
 - NO retail-title / §G.5 / RT-as-texture work.
 - NO flag default flips.
-- NO PushNotification — bounded implementation slice, not blocker / milestone.
+- NO Codex validation (rule #15 doc-only / run-only carve-out applies; same path as cycles 26 / 28 / 30).
 
 ## Next proposed action
 
-Cycle 32 (Hermes's call): deploy the cycle-31 `witness-only/bin/default.xbe` (155 648 B) + run the cycle-30 canonical sequence WITH the composite-capture leg ARMED via `scripts/apple-silicon/composite-record.sh` (MS2109 USB stick + ffmpeg AVFoundation) BEFORE `runxbe`. Capture stops after dashboard FTP returns. Analyze recording with `scripts/apple-silicon/extract-keyframes.py` sampling frames near `t = runxbe_issued + 2s`; classify deepest visible stripe per cycle-31 stripe map; combine with `(witness.scan, witness.scan-self)` two-tuple per the 8-row F1..F8 table.
+Cycle 32 redo (Hermes's call): (1) Hardware-side verify composite cable seated + MS2109 input selector on composite; (2) Capture smoke test (`composite-record.sh --duration 4 --label smoke` → non-empty video.mp4; visually inspect first frame for Xbox-dashboard content); (3) OPTIONAL power-cycle Xbox; (4) Re-run the canonical cycle-32 sequence per `witness-only/README.md` cycle-31 addendum §"Cycle-32 deployment runbook" verbatim. The cycle-31 binary is already at `/E/Apps/witness-only/default.xbe`. F4' eliminated from candidate space; redo lands at one of F1 / F2 / F3 / F4 / F5 / F6 / F7.
