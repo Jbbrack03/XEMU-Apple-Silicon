@@ -1,5 +1,58 @@
 # Decision Log
 
+## 2026-05-23 (cycle 29 Path A.4 option (c) — self-allocated witness infrastructure SHIPPED on `apple-silicon-performance`): new shared diag-XBE lib `lib/xbed_self_witness.{c,h}` (`MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory` self-owned 'WTNS'-tagged page); new oracle-agent verb `witness.scan-self` (read-only kseg0 scanner for 'WTNS' pages); `witness-only/main.c` calls self-witness AFTER existing cycle-23 XCTR fires (Codex round-1 high finding #1 ordering); opt-in via `witness-only/Makefile` only, NOT in `lib.mk` default SRCS (Codex round-1 low finding #3); positioned narrowly as a (γ)-only discriminator — α+β remain live on a successful cycle-30 readback because cycle-29 stamps a self-owned page, not the agent's XCTR page (Codex round-1 high finding #2); Codex 4 rounds final round LOOKS GOOD; cycle-30 real-Xbox run is Hermes's call
+
+**Decision.** Adopt option (c) from the cycle-27 closure catalog as the cycle-29 bounded slice. Ship the self-allocated-witness infrastructure (new shared diag-XBE lib + new read-only agent verb + paired call sites in `witness-only/main.c` + paired doc updates) but DO NOT promote cycle 30's real-Xbox run into this session — that remains Hermes's call. The cycle-30 readback will discriminate cause (γ) "main() never reaches the fire calls" from causes (α)/(β); α-vs-β remains a cycle-31+ scope (option (b) — agent-side prior-phys dump + read-only kseg0 dump verb).
+
+**Why this slice (cycle-28 closure motivation).** Cycle 28 (commit `c77b509149`) ran the cycle-27 preserve-branch oracle-agent against the cycle-25 witness-only XBE on real Xbox; the post-run `witness.scan` showed `count=1 live=1 reserved0=0 reserved1=0`. The cycle-27 preserve gate's strict predicate would have detected and preserved any A.4-tagged stamp `xbed_a4_witness.c` writes (MAIN_ENTERED → 0xA4000001/1; POST_MARKER0 → 0xA4000003/2); the unambiguous `(0,0)` readback therefore means no A.4-tagged stamp existed on the kernel-pool page at agent re-allocation time. The cycle-26 ambiguity collapsed to "stamp never landed," leaving three live causes:
+- (α) `xbed_a4_witness::a4_candidate_ok` kseg0 scan from witness-only's non-agent process context doesn't find the agent's persistent XCTR buffer at all.
+- (β) Scan finds it but the resulting write faults silently (PAT/WC/WB attribute divergence, cache line never drains, or the persistent-tagged page's writes are evicted at the chainload boundary).
+- (γ) Witness-only's main() never reaches the fire calls (cycle-22 leading "pre-main crash" hypothesis re-strengthens).
+
+Cycle-28 closure recommended option (c) as the cheapest γ-discriminator. Option (c) was chosen over (b) because the agent's own kseg0 scanner is known-good at finding XCTR buffers (the agent allocates them, then reads them back); if the same scanner can find a foreign 'WTNS' page allocated by the diag XBE, the cycle-29 readback proves main() ran AND that the cycle-23 kseg0-scan-from-non-agent-context mechanism for SELF-OWNED pages is sound. Option (d) (on-screen breadcrumb) is deferred to cycle 31+ because it requires either pbkit init (which the cycle-25 design deliberately avoids to keep the binary minimal) or a minimal direct NV097 single-poke (which has its own risk surface).
+
+**What ran (Claude Code worker, autonomous session, HEAD `da9f53babf`).**
+
+1. Read required docs: `handoff.md` cycle-28 entry, `decision-log.md` cycle-28 entry, `orchestration-state/{current-cycle,claude-status,validation-status,handoff-summary}.md`, `orchestration-workflow.md`, `lib/xbed_a4_witness.{h,c}`, `oracle-agent/{controller.c, commands.c, commands.h, main.c}`, `witness-only/{main.c, Makefile, manifest.json, README.md}`, `lib/lib.mk`.
+2. Designed cycle-29 option (c): unique magic `'WTNS'` (0x534E5457) chosen for distinctness from `'XCTR'` (0x58435452); 16-byte header symmetric with `oracle_ctrl_buffer` (magic / version / reserved0 / reserved1) so the agent's existing reader pattern can be reused; 0xA4 tag byte in `reserved0`'s top byte mirrors the cycle-23 Path-A.4 convention; counter ceiling 4096 mirrors the cycle-23 plausibility filter.
+3. Implemented `lib/xbed_self_witness.{h,c}`. Allocator parameters bit-identical to `oracle-agent/controller.c::s_allocate_fresh`. Idempotent — first call allocates + initializes; subsequent calls stamp into the existing page. `wbinvd` after every stamp.
+4. Wired into `lib/lib.mk` (initially in default SRCS).
+5. Modified `witness-only/main.c`: initially added self-witness fires BEFORE the cycle-23 fires; head-comment + body comments wrote new cycle-29 addendum + ordering rationale.
+6. Added new agent verb `cmd_witness_scan_self` in `oracle-agent/commands.{c,h}` and registered in `oracle-agent/main.c::s_cmds[]`; `cmd_help` text updated.
+7. Updated paired docs: `witness-only/README.md` cycle-29 addendum + cycle-30 sequence + discriminator table; `witness-only/manifest.json` purpose + `artifacts.witness_readback.notes` + new `expected_results.real-xbox/physical/cycle-30` section.
+8. Rebuilt `oracle-agent/bin/default.xbe` (417 792 B) + `oracle-agent.iso` (983 040 B); rebuilt `witness-only/bin/default.xbe` (151 552 B, +4 096 B from cycle 25) + `witness-only.iso` (720 896 B).
+9. **Codex round 1 (changes mode) = MAJOR ISSUES** with 3 findings — full text in handoff.md; all 3 adopted: cycle-29 fires moved to AFTER cycle-23 fires; all five doc surfaces rewritten to position cycle 29 as a (γ)-only discriminator; `xbed_self_witness.c` moved out of `lib.mk` and opted in only by `witness-only/Makefile`.
+10. Rebuilt both XBEs after the round-1 adoption (same sizes).
+11. **Codex round 2 = MINOR ISSUES** with 2 LOW findings (round-1 HIGH #1 PARTIAL — header still said "strict superset"; new LOW — operator-facing tables missed partial-success shapes). Both adopted: header text harmonized; tables expanded to 7 rows (E1/E1'/E1''/E2/E3/E4/E5).
+12. **Codex round 3 = MINOR ISSUES** with 1 LOW (round-2 LOW PARTIAL — tolerated `reserved0=0xA4000003 reserved1=1` second-self-fire-only edge case still wasn't called out). Adopted: README + manifest now explicitly say the table is "representative not exhaustive" and document the reader's acceptance rule.
+13. **Codex round 4 = LOOKS GOOD.** Round-3 LOW RESOLVED. No new findings.
+14. Validation marker recorded at `.claude/state/codex-validate-last-run`.
+15. Canonical docs synced (this entry + handoff.md cycle-29 entry on top with cycle-28 preserved unchanged below; orchestration-state quartet closure pass).
+
+**What cycle 29 resolves.**
+
+- The cycle-28 closure's identified bounded next-action ("ship option (c)") is COMPLETE.
+- The cycle-30 readback is set up to break (γ) cleanly: a `witness.scan-self` hit invalidates γ; `count=0` keeps γ leading.
+- The cycle-29 ordering decision (self-witness AFTER cycle-23 fires) keeps the cycle-30 XCTR readback bit-comparable to cycle 28's D-cycle-27, so cycle 30 will also re-test the cycle-28 finding.
+- The opt-in linkage decision keeps the rest of the diag-XBE corpus unaffected.
+
+**What cycle 29 deliberately does NOT resolve.**
+
+- (α) vs (β) discrimination — the cycle-29 self-witness stamps a SELF-OWNED page; it does not exercise the failing write into the agent's XCTR page. A cycle-30 (E1) `WTNS count=1 0xA4000003/2` outcome would invalidate γ but leave α and β BOTH LIVE. Cycle 31 option (b) (agent-side prior-phys dump + read-only kseg0 dump verb) is the discrimination path.
+- (γ) "pre-main crash" — cycle 29 sets up the cycle-30 measurement; it does not RUN the measurement. Cycle 30 is Hermes's call.
+- The ~70 s recovery shape (slow kseg0 scan vs delayed-fault watchdog vs slow BIOS POST) observed in cycles 26 + 28 — cycle 29 may collapse this ambiguity as a side-effect if option (c)'s self-allocated-page approach shows BIOS-POST-like timing (~17 s) instead of 70 s, but it is not a primary cycle-29 design goal.
+- M15 §H.6 default-on shape — REMAINS DEFERRED; still blocked on the cycle-30 real-Xbox discriminator + downstream witness-mechanism viability work.
+
+**Cycle-30 candidate scope (NOT promoted by this session — Hermes's call).** FTP-deploy cycle-29 oracle-agent + cycle-29 witness-only. Canonical cycle-26-style sequence with `witness.scan-self` queries added at baseline + post-run. Hard preconditions: baseline `witness.scan count=1 live=1 reserved0=0` AND baseline `witness.scan-self count=0`. Expected outcomes E1/E1'/E1''/E2/E3/E4/E5 enumerated in `witness-only/README.md` cycle-30 discriminator table (representative, not exhaustive; reader's acceptance rule is `(reserved0>>24)==0xA4 AND 1<=reserved1<=4096` for tagged shapes plus `(0,0)` for fresh allocations). On E1 (full success): γ INVALIDATED → cycle 31 promotes option (b). On E2: γ LEADING → cycle 31+ promotes option (d). On E3: full re-validation. On E4 (hang): redesign. On E5 (accumulated orphans): power-cycle between attempts.
+
+**Out of scope (kept bounded for cycle 29).** ZERO xemu-fork host source touched. ZERO `lib/xbed_a4_witness.{c,h}` touched (cycle-23 lockstep contract intact across writer + cycle-23 reader + cycle-27 preserve gate). ZERO `oracle-agent/controller.c` touched (cycle-27 preserve gate intact; the new agent verb is a new function next to `cmd_witness_scan`, not a modification of it or the preserve gate). ZERO image-blit source touched. ZERO retail-title / §G.5 / RT-as-texture / second-wave-XBE work. ZERO flag default flips. ZERO real-Xbox deployment. Two pre-existing untracked `.hermes_cycle*.txt` prompt files at repo root preserved un-staged.
+
+**Files.** 5 M + 2 A under `scripts/apple-silicon/xbe-tests/` (full list in handoff.md cycle-29 entry). `lib/lib.mk` comment-only change documenting why `xbed_self_witness.c` is intentionally NOT in default SRCS. Two rebuilt XBE binaries + one ISO that changed in size.
+
+**Cycle-22 leading hypothesis status: still WEAKENED.** Cycle 29 ships the discriminator-sharpening tool; cycle 30 will run it. Hypothesis #5 status: still PARTIALLY INVALIDATED in the catastrophic-hang sense (cycle 29 does not run on real Xbox so cannot move it).
+
+`XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision REMAINS DEFERRED. M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-30 real-Xbox run + downstream α-vs-β cycle 31 work), §G.5, RT-as-texture.
+
 ## 2026-05-23 (cycle 28 Path A.4 real-Xbox deployment of cycle-27 preserve-branch oracle-agent): outcome D-cycle-27 — `count=1 live=1 reserved0=0` post-run readback after cycle-27 agent re-allocates the kernel-pool buffer; cycle-27 option (a) DEMONSTRATED INSUFFICIENT; stamp-never-landed conclusion now isolated from stamp-landed-then-wiped; cycle-22 leading hypothesis status UNCHANGED (still WEAKENED); 70 s chainload→dashboard-ready reproduced (matches cycle 26); kernel-pool deterministic phys=0x03eb3000 reuse reproduced (≥6 consecutive observations across cycles 26+28 in same power session); ZERO source/script code edits; ZERO XBE rebuilds; Codex skipped under rule #15 doc-only/run-only carve-out
 
 **Decision.** Deploy the cycle-27 `oracle-agent/bin/default.xbe` (preserve-branch `s_allocate_fresh`) to the real Xbox @ 192.168.0.200 and run the canonical cycle-26-style sequence with the unchanged cycle-25 `witness-only/bin/default.xbe` to discriminate the cycle-26 stamp-vs-no-stamp ambiguity. Treat the observed readback as authoritative for whether the cycle-26 ambiguity resolves to "stamp landed" (A1/A2) or "stamp never landed" (D-cycle-27) or "real-Xbox hang" (B). Adopt whichever cycle-29 candidate the outcome implies.

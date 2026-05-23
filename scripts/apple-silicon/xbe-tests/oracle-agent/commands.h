@@ -37,4 +37,14 @@ int cmd_help(struct netconn *c, const char *args);
  * cmd_witness_scan` body comment for full semantics. */
 int cmd_witness_scan(struct netconn *c, const char *args);
 
+/* Cycle 29 option (c): enumerate all `xbed_self_witness` buffers in
+ * kseg0 with their `reserved[0]/reserved[1]` values. Read-only
+ * mirror of `cmd_witness_scan` gated to a different magic
+ * ('WTNS' = 0x534E5457) — the diag XBE allocates its OWN persistent
+ * page (`lib/xbed_self_witness.{h,c}`) so the agent's XCTR-scan
+ * mechanism is not on the cycle-30 critical path. See
+ * `oracle-agent/commands.c::cmd_witness_scan_self` body comment for
+ * full semantics + cycle-30 discriminator table. */
+int cmd_witness_scan_self(struct netconn *c, const char *args);
+
 #endif /* ORACLE_COMMANDS_H */

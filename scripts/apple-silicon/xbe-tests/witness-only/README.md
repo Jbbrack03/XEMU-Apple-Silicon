@@ -209,11 +209,114 @@ baseline.
 - `bin/default.xbe` — built artifact (after `make`).
 - `witness-only.iso` — XISO image (after `make`).
 
+## Cycle-29 addendum (option (c), 2026-05-23)
+
+Cycle 28 closure (commit `c77b509149`) ran the cycle-27 preserve-branch
+oracle-agent against this cycle-25 witness-only XBE on real Xbox and
+observed `count=1 live=1 reserved0=0 reserved1=0` post-run — outcome
+**D-cycle-27**. The cycle-27 preserve gate is correctly wired (Codex
+3-round green) and a landed A.4 stamp would survive it; the unambiguous
+`(0,0)` readback therefore means **no A.4 stamp landed on the agent's
+XCTR buffer**. Three live causes per cycle-28 closure:
+
+- **(α)** `xbed_a4_witness::a4_candidate_ok` kseg0 scan from
+  witness-only's non-agent process context doesn't find the agent's
+  persistent XCTR buffer.
+- **(β)** Scan finds it but the write faults silently (PAT/WC/WB
+  attribute divergence, cache line never drains).
+- **(γ)** `main()` never reaches the fire calls (cycle-22 leading
+  "pre-main crash" hypothesis re-strengthens).
+
+Cycle 29 adopts **option (c)** from the cycle-27 closure catalog: the
+diag XBE allocates its OWN persistent contiguous page via
+`MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory`, stamps a
+unique `'WTNS'` magic + `reserved0=(0xA4<<24)|stage` + counter, and
+relies on the new oracle-agent `witness.scan-self` verb to enumerate
+the page after the chainload. The cycle-23 XCTR fires are preserved
+verbatim AND now execute BEFORE the cycle-29 self-witness fires
+(Codex round-1 high finding #1 adopted), so the cycle-23 path runs
+under conditions bit-identical to cycle 25 up to and including the
+second XCTR fire. Cycle 29 is therefore additive but NOT a strict
+superset of cycle 25 — the post-cycle-23-fires-to-reboot window gains
+new kernel-allocator activity. A single cycle-30 readback exercises
+BOTH mechanisms.
+
+**Discriminator scope (Codex round-1 high finding #2 adopted):** a
+cycle-30 `witness.scan-self` hit proves only that `main()` ran AND
+that writes to a self-owned persistent page survive the chainload.
+It does NOT exercise the failing write into the agent's XCTR page;
+cause (β) "scan finds the agent buffer but write faults silently"
+therefore REMAINS LIVE even on a successful cycle-29 readback. The
+cycle-29 readback is positioned narrowly as a **(γ)-only**
+discriminator. Breaking α-vs-β requires cycle 31+ option (b)
+(agent-side prior-phys dump + read-only kseg0 dump verb).
+
+**Cycle-30 discriminator (Hermes-scheduled — NOT this session):**
+
+| witness.scan | witness.scan-self | Interpretation | Next |
+|---|---|---|---|
+| D-cycle-27 (`count=1 live=1 reserved0=0 reserved1=0`) | `count=1 reserved0=0xA4000003 reserved1=2` | `main()` ran AND BOTH self-witness fires landed AND self-page is findable from non-agent context → **(γ) INVALIDATED.** (α) AND (β) both REMAIN LIVE — the cycle-29 readback does not exercise the cycle-23 scan-or-write path against the agent's XCTR page. | Cycle 31: option (b) (agent-side prior-phys dump + read-only kseg0 dump) to break α-vs-β. |
+| D-cycle-27 | `count=1 reserved0=0xA4000001 reserved1=1` | First self-witness fire landed but second did NOT — `main()` ran past the second cycle-23 fire AND past the inter-fire `Sleep(500)` AND reached the first `xbed_self_witness_fire(MAIN_ENTERED)` but stopped before the second one. (γ) INVALIDATED for the "self-fire-1 reached" sense; refinement: a soft watchdog reset fired between self-fire-1 and self-fire-2. | Same as full-success row — α-vs-β discrimination still requires cycle 31 option (b); refinement of the self-fire-1-to-self-fire-2 window is a cycle 31 side investigation. |
+| D-cycle-27 | `count=1 reserved0=0 reserved1=0` | Self-witness page was ALLOCATED + magic/version stamped, but neither fire wrote a stamp into `reserved0`. Should not occur because `xbed_self_witness_fire` writes the stamp in the same call that allocates the page (one statement after the magic/version init); reader tolerates the shape as a soft success because the predicate matches the canonical fresh-allocation header. If observed, the witness shim's stamp writes did not survive (cache flush dropped, page mapping aliased, or kernel post-allocation hooks cleared the writes). Less likely; worth surfacing. | Cycle 31 instrument the writer with a host-log line per write + a post-write read-back inside the shim to confirm the write landed before reboot. |
+| D-cycle-27 | `count=0` | No stamp landed anywhere → **(γ) leading**; cycle-22 pre-main-crash hypothesis re-strengthens (the cycle-29 self-witness fires run AFTER the cycle-23 XCTR fires, so this also rules out "main() reached cycle-23 fire #2 but crashed before the cycle-29 fires"). | Cycle 31+: option (d) (on-screen breadcrumb) for independent main()-runs verification. |
+| A1 or A2 success (cycle-27 preserve shape) | `count=1 reserved0=0xA4000003 reserved1=2` | Both mechanisms work; cycle-26/28 readbacks must have been observation-side artifacts. Full re-validation required. | Cycle 31: re-run cycle-28 sequence with the cycle-29 agent + verify reproducibility. |
+| (no readback because Xbox hangs) | (no readback) | The cycle-29 own-page allocation itself OR the new cycle-23-then-cycle-29-fires ordering is a new failure mode (cycle-24-style 928 s+ indefinite hang). | Cycle 31: redesign — EEPROM scratchpad, abandon in-XBE witness, or XBE-level static binary diff. |
+| D-cycle-27 | `count>=2` matching pattern | Multiple self-witness pages accumulated across repeated cycle-30 chainloads within the same physical power session (the persistent contiguous-memory pool kept the older page(s) alive). | Power-cycle the Xbox between cycle-30 attempts if precondition cleanliness is required. |
+
+**Table is representative, not exhaustive (Codex round-3 low finding adopted).** The agent reader `cmd_witness_scan_self` accepts any tagged WTNS page whose `reserved0` carries the 0xA4 tag byte AND whose `reserved1` is in `[1, 4096]`. Partial-success edge cases (e.g. `reserved0=0xA4000003 reserved1=1` — second self-fire stamped its stage but the first self-fire's counter increment did not propagate; or any `reserved0=0xA4xxxxxx` shape with a smaller-than-expected counter) are tolerated by the reader and should be interpreted as "self-fire writes partially landed; main() reached at least one fire site." The reader's two-tuple `(reserved0, reserved1)` is reported verbatim; operators reading the output should treat any tagged shape as a γ-invalidating signal and use the counter + stage byte to pinpoint how far through `main()` the XBE got.
+
+**Cycle-30 sequence (same canonical sequence cycle 26 + cycle 28 used,
+extended with witness.scan-self queries):**
+
+```sh
+# 1. Reachability + cycle-23 agent baseline.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self  # cycle 29
+
+# 2. Reboot to dashboard (clears any stale agent-process state).
+./scripts/apple-silicon/oracle-client.py raw reboot
+# wait for FTP/21 on the Xbox.
+
+# 3. FTP-upload cycle-29 oracle-agent + cycle-29 witness-only.
+# (Same FTP STOR pattern cycle 28 used.)
+
+# 4. Relaunch agent, query baseline both scans.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+
+# 5. Chainload witness-only.
+./scripts/apple-silicon/oracle-client.py runxbe 'E:\Apps\witness-only\default.xbe'
+
+# 6. Poll FTP/21 + agent/9001 + ICMP ping until dashboard FTP returns.
+#    Expect ~70 s on success (matches cycle 26 + cycle 28).
+
+# 7. On dashboard return: relaunch agent, query BOTH scans.
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self  # cycle 29
+```
+
+Hard preconditions for an unambiguous cycle-30 readback:
+
+1. Baseline `witness.scan-self count=0` BEFORE chainload. If the
+   self-witness page already exists from a prior cycle-30 attempt in
+   the same physical power session, Hermes must power-cycle the Xbox
+   (the persistent contiguous-memory page is `MmPersistContiguousMemory`-
+   tagged; it survives soft reset but NOT power-off — same property
+   the cycle-23 XCTR buffer relies on).
+2. Baseline `witness.scan` precondition unchanged from cycle 26/28:
+   exactly ONE live buffer with `reserved[0] == 0`.
+
 ## Cross-references
 
-- `lib/xbed_a4_witness.{h,c}` — the witness mechanism (cycle 23).
-- `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan` — the readback RPC (cycle 23).
+- `lib/xbed_a4_witness.{h,c}` — the cycle-23 XCTR-scan witness mechanism.
+- `lib/xbed_self_witness.{h,c}` — the cycle-29 option (c) self-allocated witness shim.
+- `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan` — cycle-23 XCTR readback RPC.
+- `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan_self` — cycle-29 WTNS readback RPC.
 - `scripts/apple-silicon/xbe-tests/image-blit/main.c:789,806` — the cycle-23 witness call sites this XBE deliberately mirrors.
-- `docs/apple-silicon/handoff.md` cycle-24 entry — failure-mode delta + cycle-25 recommendation.
-- `docs/apple-silicon/decision-log.md` cycle-24 entry — discriminator design + branch decision logic.
-- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log` — cycle-24 indefinite-hang evidence to compare cycle-26 polling against.
+- `docs/apple-silicon/handoff.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 entries — failure-mode delta + closure outcomes + cycle-29 design.
+- `docs/apple-silicon/decision-log.md` cycle-24 / cycle-26 / cycle-28 / cycle-29 entries — discriminator design + branch decision logic.
+- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log` — cycle-24 indefinite-hang evidence to compare cycle-30 polling against.
+- `benchmark-runs/cycle28-real-xbox-witness-only-preserve-20260523T084331Z/SUMMARY.md` — cycle-28 D-cycle-27 closure that motivated cycle 29.

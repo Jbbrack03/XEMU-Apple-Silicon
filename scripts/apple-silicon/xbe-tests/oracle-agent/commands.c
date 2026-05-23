@@ -557,6 +557,131 @@ int cmd_witness_scan(struct netconn *c, const char *args)
     return 0;
 }
 
+/* Cycle 29 option (c) — read-only enumerator for the self-allocated
+ * witness pages stamped by `lib/xbed_self_witness.c::xbed_self_witness_fire`.
+ *
+ * Why a separate verb (not folded into cmd_witness_scan):
+ * - The cycle-23 scan filter (`a4_reader_candidate_ok`) is keyed to
+ *   the agent's XCTR magic. Cycle-29 self-witness pages use the
+ *   distinct 'WTNS' magic so they neither inflate the XCTR count
+ *   (preserves cycle-26/28 readback semantics) nor get rejected by
+ *   the XCTR-only filter. Keeping the two verbs separate also lets
+ *   future diag XBEs share the self-witness shim without polluting
+ *   cycle-23 readback output.
+ * - Read-only by design — same safety profile as cmd_witness_scan
+ *   (MmGetPhysicalAddress gate per page, kseg0 scan range capped to
+ *   the agent's 64 MiB-RAM allocation window, no writes).
+ *
+ * Cycle-30 expected output shapes (run AFTER the cycle-29 witness-only
+ * chainload + relaunched cycle-27/29 oracle-agent):
+ *
+ *   count=1 reserved0=0xA4000003 reserved1=2
+ *       → witness-only's main() ran AND both self-witness fires
+ *         (MAIN_ENTERED stage=1 then POST_MARKER0 stage=3) landed
+ *         AND the self-allocated persistent page is findable from a
+ *         non-agent process context (the relaunched agent IS a new
+ *         process from witness-only's perspective).
+ *       → cause (γ) "witness-only never reaches main()" INVALIDATED.
+ *       → causes (α) "agent XCTR buffer not findable from non-agent
+ *         context" AND (β) "scan finds XCTR but write faults silently"
+ *         BOTH REMAIN LIVE. Cycle-29 stamps a SELF-OWNED page, not
+ *         the agent's XCTR page; the cycle-23 scan-from-non-agent-
+ *         context path that targets the agent's XCTR buffer is NOT
+ *         exercised by witness.scan-self, so this readback alone
+ *         cannot distinguish α from β. The narrower (correct) claim
+ *         is "main() reached the call sites." Codex round-1 high
+ *         finding #2 (adopted). Cycle 31+ should pursue option (b)
+ *         (agent-side prior-phys dump + read-only kseg0 dump verb)
+ *         to break α-vs-β.
+ *   count=1 reserved0=0xA4000001 reserved1=1
+ *       → only the first self-witness fire landed; second fire
+ *         perturbed CPU state or hung the box and a watchdog
+ *         soft-reset eventually fired. Less likely; worth
+ *         surfacing.
+ *   count=0
+ *       → No self-witness magic anywhere in kseg0.
+ *       → cause (γ) leading; cycle 31+ should pursue option (d)
+ *         (on-screen breadcrumb via debugPrint + pbkit-init OR
+ *         a minimal NV097 single-poke) for an independent
+ *         main()-runs verification.
+ *   count>=2
+ *       → Multiple self-witness pages accumulated across repeated
+ *         cycle-30 chainloads within the same physical power
+ *         session. The persistent contiguous-memory pool kept the
+ *         older page(s) alive (each diag-XBE run leaks one
+ *         persistent page until power-off, mirroring the agent's
+ *         own leak pattern). Hermes should power-cycle the Xbox
+ *         between cycle-30 attempts if precondition cleanliness
+ *         is required.
+ *
+ * Filter parity (lockstep with the cycle-29 writer
+ * `lib/xbed_self_witness.c`): magic == XBED_SELF_WITNESS_MAGIC,
+ * version == XBED_SELF_WITNESS_VERSION, reserved0 is either 0
+ * (allocated but not yet fired — should not occur because the
+ * writer always fires immediately after allocation, but tolerate
+ * it as a soft success) OR ((reserved0 >> 24) == 0xA4) AND
+ * reserved1 in [1, 4096]. Tightened (cycle-27-style) version of the
+ * cycle-23 filter, applied here because the writer is more
+ * restricted than xbed_a4_witness (which had to tolerate arbitrary
+ * pre-existing XCTR pages allocated by the agent). */
+#define SELF_WTNS_KSEG0_SCAN_START  0x80010000u
+#define SELF_WTNS_KSEG0_SCAN_END    0x84000000u
+#define SELF_WTNS_PAGE_STRIDE       0x1000u
+#define SELF_WTNS_MAGIC             0x534E5457u  /* 'WTNS' little-endian */
+#define SELF_WTNS_VERSION           1u
+#define SELF_WTNS_TAG               0xA4u
+#define SELF_WTNS_MAX_COUNTER       4096u
+
+static int self_wtns_reader_candidate_ok(uintptr_t va)
+{
+    if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) return 0;
+    volatile uint32_t *p = (volatile uint32_t *)va;
+    if (p[0] != SELF_WTNS_MAGIC) return 0;
+    if (p[1] != SELF_WTNS_VERSION) return 0;
+    uint32_t r0 = p[2];
+    uint32_t r1 = p[3];
+    if (r0 == 0u && r1 == 0u) return 1;                 /* freshly allocated */
+    if ((r0 >> 24) == SELF_WTNS_TAG &&
+        r1 >= 1u && r1 <= SELF_WTNS_MAX_COUNTER) {
+        return 1;                                       /* fired at least once */
+    }
+    return 0;
+}
+
+int cmd_witness_scan_self(struct netconn *c, const char *args)
+{
+    (void)args;
+    op_send_text_begin(c, 0);
+    int reported = 0;
+    uint32_t mapped_pages_seen = 0;
+    for (uintptr_t va = SELF_WTNS_KSEG0_SCAN_START;
+         va < SELF_WTNS_KSEG0_SCAN_END;
+         va += SELF_WTNS_PAGE_STRIDE) {
+        if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) continue;
+        mapped_pages_seen++;
+        if (!self_wtns_reader_candidate_ok(va)) continue;
+
+        volatile uint32_t *p = (volatile uint32_t *)va;
+        char buf[200];
+        uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
+        snprintf(buf, sizeof(buf),
+                 "buf.%d phys=0x%08lx virt=0x%08lx "
+                 "reserved0=0x%08lx reserved1=0x%08lx",
+                 reported, (unsigned long)phys, (unsigned long)va,
+                 (unsigned long)p[2], (unsigned long)p[3]);
+        op_send_line(c, buf);
+        reported++;
+        if (reported >= 256) break;
+    }
+    char summary[96];
+    snprintf(summary, sizeof(summary),
+             "count=%d mapped_pages_seen=%u",
+             reported, (unsigned)mapped_pages_seen);
+    op_send_line(c, summary);
+    op_send_text_end(c);
+    return 0;
+}
+
 int cmd_help(struct netconn *c, const char *args)
 {
     (void)args;
@@ -578,6 +703,7 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "controller.clear [port=N]             zero one or all ports");
     op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
     op_send_line(c, "witness.scan                          enumerate kseg0 oracle_ctrl_buffer instances + reserved[0,1] (cycle-23 A.4 readback)");
+    op_send_line(c, "witness.scan-self                     enumerate kseg0 xbed_self_witness 'WTNS' pages + reserved[0,1] (cycle-29 option (c) readback)");
     op_send_line(c, "tier2.preflight                       read-only Tier-2 hook slot check");
     op_send_line(c, "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)");
     op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");

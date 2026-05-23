@@ -25,6 +25,15 @@ SRCS += $(XBED_LIB_DIR)/xbed_runtime.c \
         $(XBED_LIB_DIR)/xbed_texture.c \
         $(XBED_LIB_DIR)/xbed_a4_witness.c
 
+# Cycle-29 option (c) self-allocated witness shim. INTENTIONALLY NOT
+# in the default SRCS list — only witness-only opts in via its own
+# Makefile (`SRCS += $(XBED_LIB_DIR)/xbed_self_witness.c`). Codex
+# round-1 low finding: linking it everywhere would widen the
+# binary/layout drift across the whole diag-XBE corpus and work
+# against the controlled-delta discipline cycle 25 / cycle 29 are
+# built around. Until another XBE actually needs the self-witness
+# shim, keep it opt-in.
+
 SHADER_OBJS += $(XBED_LIB_DIR)/vs.inl \
                $(XBED_LIB_DIR)/ps.inl \
                $(XBED_LIB_DIR)/xbed_tex_vs.inl \

@@ -103,6 +103,67 @@
  * image-blit). The linked-but-unused functions (xbed_init et al.)
  * only execute if called; their static .text cost is the controlled
  * invariant.
+ *
+ * Cycle-29 addendum (option (c), 2026-05-23)
+ * ------------------------------------------
+ * Cycle 28 closure (commit c77b509149) observed
+ * `count=1 live=1 reserved0=0 reserved1=0` after a cycle-25
+ * `witness-only` chainload + cycle-27 preserve-branch oracle-agent
+ * re-launch. The cycle-27 preserve gate is correctly wired (Codex
+ * 3-round green); a landed A.4 stamp would survive it. Therefore
+ * "no A.4 stamp landed on the agent's XCTR buffer." Three live
+ * causes (carried from cycle-28 closure):
+ *   (α) `xbed_a4_witness::a4_candidate_ok` kseg0 scan from this
+ *       non-agent process context does not find the agent's XCTR
+ *       buffer.
+ *   (β) Scan finds it but the write faults silently.
+ *   (γ) `main()` never reaches the fire calls (cycle-22 leading
+ *       hypothesis).
+ *
+ * Cycle 29 adopts option (c) from the cycle-27 closure catalog:
+ * `main()` additionally calls `xbed_self_witness_fire(stage)` (new
+ * shared lib `lib/xbed_self_witness.{c,h}`) which on its first call
+ * allocates the diag XBE's OWN persistent contiguous page via
+ * `MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory` and
+ * stamps a unique 'WTNS' magic + stage + counter at known offsets
+ * in that page. The relaunched agent's new `witness.scan-self`
+ * verb scans kseg0 for the 'WTNS' magic.
+ *
+ * Ordering decision (Codex round-1 high finding #1, adopted): the
+ * cycle-29 self-witness fires execute AFTER the cycle-23 XCTR
+ * fires. The cycle-23 path therefore executes under conditions
+ * bit-identical to cycle 25 (same instruction sequence + same
+ * kernel state on entry), so the cycle-30 XCTR readback is
+ * properly comparable to cycle 28's D-cycle-27 result. The
+ * cycle-29 binary is therefore NOT a strict superset of cycle 25
+ * for the post-cycle-23-fires-to-reboot window — that window
+ * gains new kernel-allocator activity — but IS bit-identical to
+ * cycle 25 up to and including the second cycle-23 fire.
+ *
+ * Discriminator semantics (Codex round-1 high finding #2,
+ * adopted): a cycle-30 `witness.scan-self` hit proves only that
+ * `main()` ran AND that writes to a SELF-OWNED persistent page
+ * survive the chainload. It does NOT exercise the failing write
+ * into the agent's XCTR page; cause (β) "scan finds the agent
+ * buffer but the write faults silently" therefore REMAINS LIVE
+ * even on a successful cycle-29 readback. A cycle-31+ option (b)
+ * (agent-side prior-phys dump + read-only kseg0 dump verb) is
+ * required to break α-vs-β. Cycle 29 is positioned narrowly as a
+ * γ-only discriminator:
+ *
+ *   - witness.scan-self finds a stamped page →
+ *     `main()` ran AND the self-allocated page is findable from
+ *     non-agent context → (γ) INVALIDATED. (α) and (β) BOTH
+ *     remain live (the cycle-23 scan-from-non-agent-context path
+ *     was not exercised by this witness — it stamped its own
+ *     page, not the agent's XCTR page — so α "scan can't find
+ *     XCTR" and β "scan finds XCTR but write faults" cannot be
+ *     distinguished from this readback alone).
+ *   - witness.scan-self finds nothing AND witness.scan still
+ *     shows `count=1 live=1 reserved0=0` → no stamp anywhere →
+ *     (γ) leading; cycle 31+ should pursue option (d)
+ *     (on-screen breadcrumb) for an independent main()-runs
+ *     verification.
  */
 #include <hal/debug.h>
 #include <hal/xbox.h>
@@ -112,6 +173,7 @@
 
 #include "xbed_a4_witness.h"
 #include "xbed_runtime.h"
+#include "xbed_self_witness.h"
 
 int main(void)
 {
@@ -119,7 +181,18 @@ int main(void)
      * Xbox and on stock xemu (the OUT to port 0xE9 is a silent
      * no-op without `XEMU_GUEST_LOG=1`). On xemu-Metal local
      * validation, this line + the witness "enter stage=*" lines + the
-     * tail "rebooting" line provide a complete control-flow trace. */
+     * tail "rebooting" line provide a complete control-flow trace.
+     *
+     * Cycle 29 option (c): the cycle-25 line is preserved verbatim.
+     * The cycle-29 self-witness fires execute AFTER the cycle-23
+     * XCTR fires (Codex round-1 high finding #1 adopted) so the
+     * cycle-23 path runs under conditions bit-identical to cycle 25.
+     * Cycle 29 is therefore additive but NOT a strict superset of
+     * cycle 25: the post-cycle-23-fires-to-reboot window gains new
+     * kernel-allocator activity (one MmAllocateContiguousMemoryEx
+     * + MmPersistContiguousMemory + page wipe + four 32-bit writes
+     * per fire). Up to and including the second cycle-23 fire,
+     * cycle 29 is bit-identical to cycle 25. */
     xbed_host_log_write("witness-only: main() entered (cycle 25)");
 
     /* Fire 1: MAIN_ENTERED.
@@ -161,6 +234,42 @@ int main(void)
     uintptr_t r2 = xbed_a4_witness_fire(XBED_A4_STAGE_POST_MARKER0);
     xbed_host_log_writef("witness-only: fire2 returned phys=0x%08lx",
                          (unsigned long)r2);
+
+    /* Cycle 29 option (c): self-allocated witness fires AFTER the
+     * cycle-23 XCTR fires.
+     *
+     * Ordering rationale (Codex round-1 high finding #1): if the
+     * cycle-29 self-witness allocation / cache flush / writes ran
+     * BEFORE the cycle-23 fires, any new failure mode in the
+     * cycle-23 path would be confounded with the new
+     * kernel-allocator activity. By running self-witness AFTER
+     * the cycle-23 fires, the cycle-23 XCTR-scan path executes
+     * under conditions bit-identical to cycle-25 (same instruction
+     * sequence, same kernel state on entry), so a cycle-30 `(D-cycle-27
+     * + WTNS success)` shape is properly comparable to cycle 28's
+     * D-cycle-27 result. The trade-off: a cycle-22-style pre-main
+     * crash that happens to fall BEFORE the cycle-23 fires would
+     * also fall BEFORE the cycle-29 fires (acceptable — γ would
+     * still surface as `WTNS count=0`); a crash specifically
+     * between the cycle-23 fires and the cycle-29 fires would yield
+     * `XCTR observation == cycle-25` AND `WTNS count=0`, which is a
+     * NEW shape this ordering can produce but cycle 25 could not
+     * (acceptable — informative about the cycle-23-fires-to-reboot
+     * window).
+     *
+     * Two fires mirror the cycle-23 pattern (MAIN_ENTERED then
+     * POST_MARKER0). First call allocates the persistent page;
+     * second call reuses it. After both, the self-witness page
+     * carries `reserved0 == 0xA4000003` (POST_MARKER0 = 3) and
+     * `reserved1 == 2` (counter ticked twice). The relaunched
+     * cycle-29 agent's `witness.scan-self` reports exactly that
+     * shape on a fully-successful run. */
+    uintptr_t rs1 = xbed_self_witness_fire(XBED_A4_STAGE_MAIN_ENTERED);
+    xbed_host_log_writef("witness-only: self-fire1 returned phys=0x%08lx",
+                         (unsigned long)rs1);
+    uintptr_t rs2 = xbed_self_witness_fire(XBED_A4_STAGE_POST_MARKER0);
+    xbed_host_log_writef("witness-only: self-fire2 returned phys=0x%08lx",
+                         (unsigned long)rs2);
 
     /* Settle period before reboot.
      *
