@@ -1,48 +1,46 @@
 # Validation Status
 
-- Active slice: cycle 23 Path A.4 — non-fopen kernel-pool controller-buffer witness for image-blit (XBE-only + oracle-agent RPC extension; no xemu-fork host source touched). Local xemu-Metal validation across 4 boots is green; Codex round-1 BLOCK with 4 findings → all adopted → round-2 PASS_WITH_FINDINGS → MINOR PARTIAL closed post-round-2.
-- Validation state: **CLOSED — implementation + local validation + Codex iteration complete; canonical docs synced; closure commit landed as `5fce3b14e4`.** Real-Xbox discriminator run is OUT OF SCOPE for cycle 23 per the bounded assignment.
+- Active slice: cycle 24 Path A.4 real-Xbox discriminator run for image-blit. Operationally a docs/evidence + binary-deploy slice (no xemu-fork host code edits, no XBE rebuilds — used cycle-23 binaries as-is).
+- Validation state: **CLOSED with a CONCRETE BLOCKER outcome.**
 
-## Gate status (cycle 23)
+## Gate status (cycle 24) — final
 
-- [x] Fresh worker receipt posted before deeper work (19:18 CDT).
-- [x] Design locked (19:24 CDT) — kseg0 scan + MmGetPhysicalAddress per-page gate + shared `reserved[0]/reserved[1]` filter set + HIGHEST-phys targeting + new `witness.scan` RPC on the agent. No fopen anywhere in the witness path.
-- [x] Implementation: `xbed_a4_witness.{h,c}` (~170 lines) + `lib.mk` SRCS add + image-blit/main.c call sites (+26 lines) + oracle-agent `cmd_witness_scan` RPC (+127 lines) + main.c registration (+1 line).
-- [x] Clean build of both XBEs (image-blit + oracle-agent); only nxdk-internal warnings, no warnings on cycle-23 code.
-- [x] Local xemu-Metal validation across 4 boots: witness fires on every boot (`xbed_a4_witness: enter stage=1` + `enter stage=3` lines), scan correctly reports "no XCTR buffer found" on standalone xemu (no agent), `mapped_pages_seen=378` cold-boot / 77 warm-reboot.
-- [x] Local xemu-Metal validation: image-blit's first-boot v0.4 pass=3/8 mask=0x31 tally UNCHANGED (no instrumentation regression).
-- [x] Codex round 1: BLOCK with 4 findings — 2 BLOCKING (agent reader needs `MmGetPhysicalAddress` gate + filter parity with writer), 1 MEDIUM (writer first-match attribution ambiguous), 1 MINOR (header doc drift).
-- [x] All round-1 findings adopted in full:
-  - BLOCKING #1: `cmd_witness_scan` gains `MmGetPhysicalAddress` per-page gate via new `a4_reader_candidate_ok` helper.
-  - BLOCKING #2: `cmd_witness_scan` applies same `reserved[0]/reserved[1]` filters as writer (lockstep documented in commands.c body comment + filter helpers extracted on both sides).
-  - MEDIUM #3: writer changed from first-match to HIGHEST-phys-match (most recent agent allocation; deterministic across repeated runs in one power session).
-  - MINOR #4: header `xbed_a4_witness.h` Safety notes rewritten + "first occurrence/first match" wording replaced with "HIGHEST-phys passing candidate" wording.
-- [x] Codex round 2: PASS_WITH_FINDINGS — all 3 BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL (residual header "first match" wording in 2 places).
-- [x] MINOR PARTIAL closed post-round-2 via direct comment sync.
-- [x] Validation marker written at `.claude/state/codex-validate-last-run`: `2026-05-23T01:02:05Z cycle 23 Path A.4 — codex-validate changes round 2 PASS_WITH_FINDINGS (all BLOCKING resolved, MEDIUM resolved, MINOR resolved via header comment sync after round 2)`.
-- [x] Canonical docs synced (`handoff.md` cycle-23 entry, `decision-log.md` cycle-23 entry, orchestration-state quartet).
-- [x] Commit covering code + docs + ISOs + validation marker landed as `5fce3b14e4` on `apple-silicon-performance`; hash recorded in `handoff-summary.md` and across the orchestration-state quartet.
+- [x] Fresh worker receipt posted before deeper work (21:30 CDT).
+- [x] Xbox reachable at session start (`ping 192.168.0.200` 0% loss / ~0.5 ms RTT; `nc -z 192.168.0.200 9001` → port open).
+- [x] Cycle-23 oracle-agent + image-blit binaries FTP-uploaded to `/E/Apps/oracle-agent/default.xbe` and `/E/Apps/image-blit/default.xbe` after rebooting Xbox to dashboard. Remote sizes confirmed via `LIST` (417 792 B + 159 744 B = local sizes).
+- [x] Agent re-launched via `oracle-orchestrator.py ensure-agent` (`SITE EXEC` → `200 EXEC command succeeded`); `witness.scan` verb registered (`help | grep witness` returns the cycle-23 description).
+- [x] Baseline `witness.scan` returned `count=1 mapped_pages_seen=419` with the single live buffer at phys=0x03eb3000 / virt=0x83eb3000 / reserved[0]=0 / reserved[1]=0 / magic XCTR / anchor_ok=1 — precondition MET; no power-cycle needed before chainload.
+- [x] Chainload `runxbe E:\Apps\image-blit\default.xbe` issued at 2026-05-23T02:34:34Z. Chainload epoch recorded.
+- [ ] **FTP-back / agent-restart NOT observed.** 928.3 s of continuous polling on FTP/21 + agent/9001 + ICMP ping — all silent. Measurement aborted at 2026-05-23T02:50:02Z. Cycle 19/20/21 reproducible 22.3..22.4 s chainload→FTP-back gap regressed to indefinite hang.
+- [ ] **Post-chainload `witness.scan` UNRECOVERABLE.** Cannot read the persistent kernel-pool buffer without network reachability. The `MmPersistContiguousMemory`-tagged witness buffer survives soft reset but NOT power-off; the only recovery path (physical power-cycle by Hermes) erases the witness state. Cycle-24 A.4 byte is unrecoverable from this run.
+- [x] Conservative interpretation recorded against cycle-23 semantics: cycle-22 leading hypothesis WEAKENED (not corroborated or invalidated); NEW hypothesis #5 (witness mechanism real-Xbox safety from non-agent process context) promoted as top-priority discriminator candidate for cycle 25.
+- [x] Canonical docs synced (handoff.md cycle-24 entry on top; decision-log.md cycle-24 entry above cycle-23; orchestration-state quartet closure pass).
+- [x] Evidence preserved on disk: `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/{01-deploy.log, 02-baseline-witness-scan.log, 03-chainload-image-blit.log}`.
 
 ## Codex validation decision
 
-**Rule #15 trigger #2 (non-trivial uncommitted code in xemu-fork/ apple-silicon scripts > 30 lines) MET.** Ran `/codex-validate changes`. Round 1 verdict: BLOCK with 4 findings. Round 2 verdict (after adopting all round-1 findings): PASS_WITH_FINDINGS. Round-2 MINOR PARTIAL closed post-round-2 via direct comment sync. Validation marker written.
+**Cycle 24 is a docs/evidence + binary-deploy slice. Skipped under rule #15's "doc-only changes" / "≤30-line uncommitted diff" carve-out.**
 
-The codex-validate workflow this cycle used the local Codex CLI in read-only sandbox mode (`-s read-only`) per skill conventions; preflight confirmed Codex was logged in via ChatGPT (not API key); no destructive operations. Round-1 prompt + diff payload at `/tmp/codex-cycle23-prompt-*.txt` + `/tmp/codex-cycle23-diff-*.txt`; round-1 output at `/tmp/codex-cycle23-output-*.txt`. Round-2 equivalents at `/tmp/codex-cycle23-r2-*`.
+**Skip justification (final).** Cycle 24 ships:
+1. Zero source/script code edits.
+2. Zero XBE rebuilds.
+3. Doc edits across `docs/apple-silicon/handoff.md`, `docs/apple-silicon/decision-log.md`, `docs/apple-silicon/orchestration-state/*`.
+4. Three new evidence log files under `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/`.
+5. Evidence-only operations on real Xbox: `reboot` (existing verb), FTP upload of cycle-23-built binaries (no rebuild), `ensure-agent` `SITE EXEC` (existing tool), `witness.scan` reads (read-only), `runxbe` chainload (existing verb), connectivity polling (`ping`, `nc -z`).
 
-## What stands from cycles 17 + 19 + 20 + 21 + 22
+Aggregate diff is markdown + evidence-log-only. Validation marker NOT written. If cycle 25 implements the witness-only XBE (the recommended follow-up), Codex validation becomes mandatory before deploying.
 
-- xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged. Cycle 23 does NOT regress the local xemu pass=3/8 mask=0x31 baseline.
+## What stands from cycles 17 + 19 + 20 + 21 + 22 + 23
+
+- xemu `pass=8/8 mask=0xff` on Metal (4 boots) and GL (15 boots) under `XEMU_DIAG_PGRAPH_STATUS_DRAIN=1` — unchanged.
 - §H.6 IMAGE_BLIT MET under the flag locally — unchanged.
 - Flag ships opt-in, default OFF — unchanged.
-- Cycle 20 + cycle 21 empirical observation that image-blit's `fopen`-based markers (D:\\ then E:\\) produce ZERO files on real Xbox under `runxbe` chainload, with consistent 22.4 s chainload→FTP-back gap across 4 reproductions — unchanged; A.4 is the discriminator that targets this opaque failure with a fopen-free mechanism.
-- Cycle 22 invalidation of cycle-19 hypothesis #1 (launch-path blocker) and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged; cycle 23 implements A.4 specifically because of those invalidations.
+- Cycle 19/20/21's 5× reproducible 22.4 s chainload→FTP-back gap for pre-witness image-blit binaries — UNCHANGED as a baseline. Cycle 24's regression vs that baseline is itself the central finding.
+- Cycle 22 invalidation of cycle-19 hypothesis #1 (launch-path blocker) and cycle-21 hypothesis #3 (FATX-driver/NT-mount state divergence for D:\\) — unchanged.
+- Cycle 23 closure (witness instrumentation Codex-validated round-2 PASS_WITH_FINDINGS + MINOR resolved post-round-2) — unchanged.
 
-## What changes (cycle 23)
+## What changes (cycle 24)
 
-- Cycle-22 leading hypothesis (image-blit dies before main()'s first instruction) becomes testable on real Xbox via the A.4 witness mechanism. Cycle 23 itself does NOT run the test — it ships the instrumentation. The discriminating real-Xbox run belongs to cycle 24.
-
-## Yes/no/inconclusive answer to the cycle-23 assignment question
-
-**Cycle 23 was "ADD the witness." Answer: YES — witness added, local-validated, Codex-validated, doc-synced; ready for cycle-24 real-Xbox discriminator run.**
-
-The discriminating result for cycle-22's leading hypothesis is PENDING cycle 24's real-Xbox run. Cycle 23's outcome shape was: ship the instrumentation + prove it works locally + Codex-validate before any real-Xbox run. All three are complete.
+- Cycle-22 leading hypothesis WEAKENED (not invalidated; not corroborated). New hypothesis #5 (witness mechanism real-Xbox safety from non-agent process context) added.
+- The 22.4 s chainload→FTP-back gap is no longer reproducible with the cycle-23 image-blit binary on this Xbox revision.
+- M15 default-on shape for §H.6 is now blocked on cycle-25 witness-mechanism viability discrimination (was blocked on cycle-24 A.4 result; cycle 24 did not deliver a result).

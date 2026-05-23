@@ -1,39 +1,55 @@
 # Handoff Summary
 
-- Cycle 17 closed the local renderer-agnostic milestone; cycle 18 packaged the state in a separate doc-only checkpoint.
-- Cycle 19 attempted a real-Xbox parity check via the cycle-15 v0.4 image-blit XBE; reproducibly produced zero `D:\image-blit-capture.bin` / `D:\image-blit-done.txt` across two runs; cycle-17's xemu-side `pass=8/8 mask=0xff` could not be cross-witnessed. `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision DEFERRED.
-- Cycle 20 took Path A (image-blit instrumentation). Added 13 staged marker calls writing to `D:\image-blit-marker-NN-STAGE.txt`. Local xemu validation showed all 13 markers fire via host-log channel; every `fopen("D:\\…","wb")` returns NULL on the ISO mount (CD-ROM, read-only). Two real-Xbox runs (pre-Codex labels, post-Codex shortened labels) BOTH produced zero marker files; chainload→FTP-back stable at 22.4 s. Conservative reading: D:\ write-back blocked under `runxbe` SITE-EXEC chainload (cycle-19 hypothesis #1 elevated to leading).
-- Cycle 21 took Path A.2: re-route the 13 markers from `D:\` to `E:\Apps\image-blit\…`. Local validation 4 boots OK; single real-Xbox run produced clean NEGATIVE — 4th independent 22.4 s reproduction, `verdict.json status: ok`, ZERO marker files. Cycle-19 hypothesis #1 demoted from "leading" to "insufficient as sole explanation."
-- Cycle 22 took Path A.3: provenance audit of `docs/apple-silicon/xbox-real-references/{pipeline-smoke,mirror,color-channel,depth-floor,controller-roundtrip}`. Doc/evidence-only audit; no code, no XBE rebuild, no real-Xbox runs. All five reference capture sets WERE produced through the same `XLaunchXBE`-based chainload mechanism the cycle-21 image-blit witness uses (HIGH confidence, per-set verdicts in handoff.md cycle-22 entry). Cycle-19 hypothesis #1 fully INVALIDATED via comparator evidence (five reference captures wrote D:\\<id>-capture.bin successfully via this path). Image-blit failure across cycle 19+20+21 conclusively re-classified as **image-blit-specific**, not a launch-path defect. Cycle-22 leading hypothesis: image-blit crashes BEFORE its main() body executes the first `image_blit_marker(0, "program_entered")` call.
-- **Cycle 23 took Path A.4 (the cycle-22-identified top-priority follow-up): add a non-fopen kernel-pool controller-buffer witness to image-blit so we can tell whether the XBE dies before main()'s first instruction (cycle-22 leading hypothesis) or reaches early runtime before file I/O (alternative framing).** XBE-only + oracle-agent RPC extension; no xemu-fork host source touched. **STATUS: CLOSED (code + docs + Codex validation + local xemu-Metal validation complete; closure commit landed as `5fce3b14e4`). Real-Xbox discriminator run deferred to cycle 24 per the bounded assignment scope.**
-- **Cycle 23 design (locked 2026-05-22 19:24 CDT).** Both writer (image-blit) and reader (agent `witness.scan`) scan kseg0 [0x80010000, 0x84000000] in 4 KiB strides using `MmGetPhysicalAddress` per-page safety gates (Codex round-1 BLOCKING #1: blind dereference faults on unmapped kseg0 pages — confirmed locally) plus a SHARED candidate filter set ('XCTR' magic + version 1 + `reserved[0]` either 0 or A.4-tagged + `reserved[1] < 4096`; Codex round-1 BLOCKING #2: magic+version-only matched false positives). Writer targets HIGHEST-phys passing candidate (Codex round-1 MEDIUM #3: targeting first/oldest match was attribution-ambiguous across repeated runs in one power session). Stamps `(0xA4 << 24) | stage` to `reserved[0]` + bumps `reserved[1]` counter; preserves magic + version so successive scans match the same buffer. Two image-blit call sites: `XBED_A4_STAGE_MAIN_ENTERED` (1) as the absolute first instruction of `main()`; `XBED_A4_STAGE_POST_MARKER0` (3) immediately AFTER `image_blit_marker(0, "program_entered")` returns. New oracle-agent RPC `witness.scan` enumerates ALL `oracle_ctrl_buffer` instances in kseg0 with their `reserved[0]/reserved[1]` values + a `live` flag indicating which buffer is the current agent allocation.
-- **Cycle 23 implementation.** Files:
-  - NEW: `scripts/apple-silicon/xbe-tests/lib/xbed_a4_witness.h` (113 lines).
-  - NEW: `scripts/apple-silicon/xbe-tests/lib/xbed_a4_witness.c` (159 lines).
-  - EDIT: `scripts/apple-silicon/xbe-tests/lib/lib.mk` (+1 line; SRCS add).
-  - EDIT: `scripts/apple-silicon/xbe-tests/image-blit/main.c` (+26 lines; 2 witness call sites + comments).
-  - EDIT: `scripts/apple-silicon/xbe-tests/image-blit/{bin/default.xbe, image-blit.iso}` (rebuilt).
-  - EDIT: `scripts/apple-silicon/xbe-tests/oracle-agent/commands.{h,c}` (+127 lines; cmd_witness_scan + a4_reader_candidate_ok helper + help entry).
-  - EDIT: `scripts/apple-silicon/xbe-tests/oracle-agent/main.c` (+1 line; register `"witness.scan"` verb).
-  - EDIT: `scripts/apple-silicon/xbe-tests/oracle-agent/{bin/default.xbe, oracle-agent.iso}` (rebuilt).
-  - EDIT: `docs/apple-silicon/handoff.md` (cycle-23 entry on top; cycle-17/19/20/21/22 preserved).
-  - EDIT: `docs/apple-silicon/decision-log.md` (cycle-23 entry above cycle-22; no supersession).
-  - EDIT: `docs/apple-silicon/orchestration-state/{current-cycle.md, claude-status.md, validation-status.md, handoff-summary.md}` (all four updated).
-  - NEW: `.claude/state/codex-validate-last-run` (marker).
-- **Cycle 23 local validation (xemu-Metal, 4 boots).** Witness call sites BOTH fire on every boot (`xbed_a4_witness: enter stage=1` + `xbed_a4_witness: enter stage=3` host-log lines). Standalone xemu has no agent running, so the scan correctly reports "no XCTR buffer found" with `mapped_pages_seen=378` (cold-boot) or `mapped_pages_seen=77` (warm reboot). Image-blit first-boot tally `pass=3/8 mask=0x31` UNCHANGED from cycle-21 baseline (no instrumentation regression). All cycle-20+21 markers 00..12 still fire to host-log channel.
-- **Cycle 23 Codex validation.** Round 1: BLOCK with 4 findings (2 BLOCKING, 1 MEDIUM, 1 MINOR). All 4 adopted in full. Round 2: PASS_WITH_FINDINGS — all 3 BLOCKING + MEDIUM RESOLVED, MINOR PARTIAL (header doc drift). MINOR PARTIAL closed post-round-2 via direct comment sync. Validation marker written at `.claude/state/codex-validate-last-run`.
-- **Cycle 23 discriminator semantics (for cycle 24's real-Xbox run).**
-  - Witness fires with orphan reserved[0] == 0xA4000003 (POST_MARKER0) → cycle-22 leading hypothesis (pre-main crash) INVALIDATED.
-  - Witness fires with orphan reserved[0] == 0xA4000001 (MAIN_ENTERED only) → main() entered but marker_00 helper itself crashed.
-  - Witness does NOT fire (orphan reserved[0] == 0) → cycle-22 leading hypothesis CORROBORATED.
-- **Cycle 23 scope discipline.**
-  - Cycle 23 does NOT include a real-Xbox run. The bounded assignment was "add the witness," not "run it on real Xbox and report results." The real-Xbox discriminating run belongs to cycle 24 (Hermes's call to schedule).
-  - Cycle 23 does NOT modify the existing E:\\ marker mechanism (cycles 20+21 instrumentation) — leave it in parallel so cycle 21's data is still produced and the witness is a strict ADD-ONLY discriminator.
-  - Cycle 23 does NOT touch xemu-fork host source — XBE + agent only.
-  - Cycle 23 does NOT flip `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on or any other flag.
-- `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision REMAINS DEFERRED. Cycle-17's xemu-side `8/8 mask=0xff` finding is NOT invalidated. The flag continues to ship opt-in, default OFF.
-- **Cycle 23 closure commit `5fce3b14e4` covers** the file list above (code + ISOs + docs + validation marker). No xemu-fork host source files touched; no flag default flips.
-- **Cycle 23 closure-doc sync follow-up `b614bdbc83`** (2026-05-22, doc-only) replaces the residual "commit pending / final remaining step / hash to be recorded later" wording across the orchestration-state quartet and `handoff.md` cycle-23 entry with the actual closure hash `5fce3b14e4`; no code, no XBE rebuilds, no real-Xbox runs, no flag flips.
-- **Next bounded slice (NOT promoted in this cycle):**
-  - **Cycle 24.** Real-Xbox run of the patched image-blit + oracle-agent. Hard precondition: baseline `witness.scan` before chainload must show exactly ONE live buffer with `reserved[0] == 0`; if multiple orphans pre-exist from a prior cycle-24 attempt in the same power session, Hermes must power-cycle the Xbox first. Then `runxbe E:\\Apps\\image-blit\\default.xbe`. Wait for FTP-back. Restart agent. Query `witness.scan` again. Interpretation per the discriminator semantics enumerated above.
-- All evidence and canonical-doc updates are on disk by cycle-23 closure; the next session can resume cold from files per the orchestration-workflow.md §7 model.
+- Cycle 17 closed the local renderer-agnostic milestone; cycle 18 packaged the state in a doc-only checkpoint.
+- Cycle 19 attempted a real-Xbox parity check via the cycle-15 v0.4 image-blit XBE; reproducibly produced zero `D:\image-blit-capture.bin` / `D:\image-blit-done.txt` across two runs. `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision DEFERRED.
+- Cycle 20 took Path A: 13 staged `D:\image-blit-marker-NN-STAGE.txt` markers; local xemu validation showed all 13 fire; every fopen returned NULL on the ISO mount; two real-Xbox runs BOTH produced zero marker files; chainload→FTP-back stable at 22.4 s.
+- Cycle 21 took Path A.2: re-route markers from `D:\` to `E:\Apps\image-blit\…`. Local validation 4 boots OK; single real-Xbox run produced clean NEGATIVE — 4th independent 22.4 s reproduction, `verdict.json status: ok`, ZERO marker files. Cycle-19 hypothesis #1 demoted from "leading" to "insufficient as sole explanation."
+- Cycle 22 took Path A.3: provenance audit of `docs/apple-silicon/xbox-real-references/*` captures. All five reference sets WERE produced through the same `XLaunchXBE` chainload mechanism (HIGH confidence). Cycle-19 hypothesis #1 fully INVALIDATED. Image-blit failure re-classified as **image-blit-specific**. Cycle-22 leading hypothesis: image-blit crashes BEFORE main()'s first instruction.
+- Cycle 23 took Path A.4: shipped non-fopen kernel-pool controller-buffer witness for image-blit + agent-side `witness.scan` RPC. Local xemu-Metal validation green (4 boots). Codex round-1 BLOCK → all 4 findings adopted → round-2 PASS_WITH_FINDINGS → MINOR PARTIAL closed post-round-2. Closure commit `5fce3b14e4`; doc-sync follow-up `b614bdbc83`.
+- **Cycle 24 ran the cycle-23 witness on real Xbox. CLOSED with a CONCRETE BLOCKER.** Cycle-23 binaries deployed via FTP (sizes confirmed). Baseline `witness.scan` precondition MET (1 live buffer at phys=0x03eb3000, reserved[0]=0, reserved[1]=0, magic XCTR). `runxbe E:\Apps\image-blit\default.xbe` issued at 2026-05-23T02:34:34Z. Xbox went fully silent (FTP/21 + agent/9001 + ICMP ping) and stayed silent for 928.3 s (≈15.5 min) before measurement was aborted at 2026-05-23T02:50:02Z. Post-chainload `witness.scan` is UNRECOVERABLE without a physical power-cycle that erases the persistent buffer. Cycle 19/20/21 reproducible 22.3..22.4 s chainload→FTP-back gap (5 attempts, max-min = 0.1 s) regressed to indefinite hang — first-of-its-kind divergence. The only change between cycle-21 image-blit and cycle-24 image-blit is ~196 LOC of cycle-23 witness instrumentation. Cycle-22 leading hypothesis ("pre-main crash") is WEAKENED but not corroborated or invalidated. NEW hypothesis #5: the kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context — promoted as top-priority discriminator candidate for cycle 25.
+
+## Cycle 24 design + outcome (locked at session close 2026-05-22 21:55 CDT)
+
+| Step | Action | Outcome |
+|---|---|---|
+| 1 | Reachability + agent build check | Xbox reachable; deployed agent was cycle-22 build (`witness.scan` not yet registered). |
+| 2 | Reboot Xbox → dashboard FTP | Dashboard FTP/21 back at +12 s (normal). |
+| 3 | FTP-upload cycle-23 oracle-agent + image-blit | Both uploaded; sizes confirmed via LIST (417 792 B + 159 744 B). |
+| 4 | Re-launch agent via `oracle-orchestrator.py ensure-agent` | `SITE EXEC` succeeded; agent ready; `witness.scan` verb recognized. |
+| 5 | Baseline `witness.scan` | 1 live buffer at phys=0x03eb3000 / virt=0x83eb3000 / reserved[0]=0 / reserved[1]=0; mapped_pages_seen=419; magic XCTR; anchor_ok=1. **Precondition MET; no power-cycle needed.** |
+| 6 | Chainload `runxbe E:\Apps\image-blit\default.xbe` (2026-05-23T02:34:34Z) | `launching` ack returned by agent. |
+| 7 | Wait for FTP-back / agent / ping (928.3 s) | **All channels silent. Measurement aborted at 2026-05-23T02:50:02Z. NO recovery.** |
+| 8 | Post-chainload `witness.scan` | **Not issued.** Network unreachable; persistent buffer cannot be read; the cycle-24 A.4 byte is unrecoverable. |
+
+## Cycle 24 scope discipline
+
+- ZERO source/script code edits.
+- ZERO XBE rebuilds.
+- ZERO flag default flips.
+- ZERO retail-title / §G.5 / RT-as-texture / second-wave XBE work.
+- ZERO cycle-25 implementation. Cycle 25 is Hermes's call.
+- Cycle 24 closes cleanly; canonical docs + orchestration-state quartet synced; evidence preserved on disk.
+
+## Recovery action required (Hermes-side)
+
+Physically power-cycle the Xbox before any next real-Xbox attempt. The witness state is erased on power-off; the cycle-24 byte is unrecoverable from this run.
+
+## Codex validation
+
+Skipped under rule #15's "doc-only / ≤30-line uncommitted diff" carve-out. Full justification in `validation-status.md`. Validation marker NOT written. If cycle 25 implements the witness-only XBE, Codex validation becomes mandatory before deploying.
+
+## Next bounded slice (cycle 25 — recommendation, NOT promoted in cycle 24)
+
+Build a minimal "witness-only" diag XBE under `scripts/apple-silicon/xbe-tests/witness-only/` that fires the witness twice (MAIN_ENTERED + POST_MARKER0) with sleep gaps, then `HalReturnToFirmware(HalRebootRoutine)`. No pbkit / no NV2A / no file I/O. Builds via `lib/lib.mk` so it links `xbed_a4_witness.c` exactly the way image-blit does. Cycle-25 real-Xbox run will discriminate the witness mechanism's real-Xbox safety:
+
+- Reboots cleanly + orphan `reserved[0] == 0xA4000003` → witness mechanism IS real-Xbox-safe; image-blit's hang is from code AFTER the witness call (cycle-22 leading hypothesis INVALIDATED). Cycle 26 can localize the failure point inside image-blit.
+- Hangs identically to cycle 24 → witness mechanism itself is real-Xbox-incompatible; redesign required (EEPROM scratchpad / non-MMIO-aliased RAM / abandon in-XBE witness).
+- Reboots but `reserved[0] == 0xA4000001` (MAIN_ENTERED only) → witness fires once but second fire hangs; less likely; worth surfacing.
+
+Full rationale + branch decision logic in handoff.md and decision-log cycle-24 entries.
+
+## Evidence on disk
+
+- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/01-deploy.log`
+- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/02-baseline-witness-scan.log`
+- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/03-chainload-image-blit.log`

@@ -1,5 +1,51 @@
 # Decision Log
 
+## 2026-05-22 (cycle 24 Path A.4 real-Xbox discriminator run): cycle-23 image-blit hard-hangs real Xbox; cycle-22 "pre-main crash" leading hypothesis WEAKENED but not corroborated or invalidated; witness state UNRECOVERABLE without power-cycle; cycle-25 minimal "witness-only" XBE recommended to discriminate the witness mechanism's real-Xbox safety before any further A.4 readback attempt; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision REMAINS DEFERRED
+
+**Decision.** Close cycle 24 with a CONCRETE BLOCKER outcome. Cycle 24's bounded scope was "run the cycle-23-shipped A.4 witness on real Xbox, interpret conservatively, sync docs, stop cleanly." Outcome: baseline `witness.scan` precondition MET (1 live `oracle_ctrl_buffer` at phys=0x03eb3000, reserved[0]=0, reserved[1]=0); `runxbe E:\Apps\image-blit\default.xbe` issued at 2026-05-23T02:34:34Z; Xbox went fully silent across all three reachability channels (FTP/21, agent/9001, ICMP ping) and stayed silent for 928.3 s (≈15.5 min) before measurement was aborted at 2026-05-23T02:50:02Z. The post-chainload `witness.scan` could not be issued; the witness state is `MmPersistContiguousMemory`-tagged, which survives soft reset but NOT power-off, so the only recovery path (Hermes physically power-cycles the Xbox) erases the witness state. The cycle-24 discriminator answer is UNRECOVERABLE from this run.
+
+**Conservative interpretation — what cycle 24 actually tells us.** Cycle 19/20/21 reproduced a stable 22.3..22.4 s chainload→FTP-back gap across 5 attempts (max-min = 0.1 s); cycle 24's gap is at least 928.3 s and still silent — first-of-its-kind divergence. The only change between cycle 21's image-blit binary and cycle 24's image-blit binary is ~196 LOC of cycle-23 witness instrumentation (`xbed_a4_witness.{h,c}` linked + 2 call sites in `main.c`). The simplest explanation for the 22.4 s → indefinite-hang regression is that something in cycle 23's instrumentation IS executing on real Xbox where cycle 21's binary did not execute it — meaning at least *some* of `main()` (or pre-main paths sensitive to the additional `.text`) is being reached. The cycle-22 leading hypothesis "image-blit dies BEFORE main()'s first instruction" is therefore WEAKENED rather than corroborated. It is NOT invalidated, because the additional linked code could hit before `main()` via XBE thunking / CRT init paths / DllCharacteristics shifts — these are subtle and were not enumerated. A second, mutually-non-exclusive hypothesis emerged: the witness mechanism's kseg0 scan, while safe from the agent's process context (cycle 24's baseline reading proved this), may be unsafe from image-blit's `main()` process context (different load address, different process, different RPC state). The `MmGetPhysicalAddress` per-page gate guards against page-fault on unmapped pages but does NOT guard against returning non-zero for a mapped-but-MMIO-aliased page whose read hangs the bus.
+
+**Rationale for STOP rather than retry.** Per the workspace `CLAUDE.md` rule #15 trigger #3 (3 failed attempts on same problem / 2 distinct failed hypotheses → stop and Codex-validate): cycle 24 has run exactly ONE chainload attempt and observed ONE failure (the indefinite hang). The cycle-23 docs explicitly require a clean baseline before each attempt; baseline now requires a physical power-cycle that erases the witness state. Retrying without changing the witness implementation would (a) again hang the box, (b) again erase the witness state on power-cycle, (c) burn the Xbox's NTC + capacitor cycles for no new information. Retrying with a different implementation is cycle 25's scope, not cycle 24's. The bounded assignment said "stop cleanly with a concrete blocker if applicable" — that's exactly the outcome here. Cycle 24 closes; cycle 25 is Hermes's call.
+
+**Recommended cycle-25 bounded slice (NOT promoted in cycle 24).** Build a minimal "witness-only" diag XBE under `scripts/apple-silicon/xbe-tests/witness-only/` that:
+
+1. `main()` body: `xbed_a4_witness_fire(XBED_A4_STAGE_MAIN_ENTERED)` → `Sleep(500)` → `xbed_a4_witness_fire(XBED_A4_STAGE_POST_MARKER0)` → `Sleep(500)` → `HalReturnToFirmware(HalRebootRoutine)`.
+2. NO `xbed_init`, NO pbkit, NO NV2A, NO `image_blit_marker_*`, NO file I/O.
+3. Built via `lib/lib.mk` so it links `xbed_a4_witness.c` exactly the way image-blit does.
+
+The cycle-25 real-Xbox run will discriminate:
+
+- Witness-only reboots in ~5..15 s + post-chainload `witness.scan` shows orphan with `reserved[0] == 0xA4000003` → the witness mechanism IS real-Xbox-safe; image-blit's hang is from code AFTER the witness call site (pbkit / NV2A / xbed_init / xbed_render_loop_then_capture); cycle-22's "pre-main crash" hypothesis is INVALIDATED. Cycle 26 can add finer-grained witness call sites inside image-blit to localize the failure point.
+- Witness-only hangs the Xbox identically to cycle 24 → the witness mechanism itself is real-Xbox-incompatible; redesign required. Options: (a) write to EEPROM scratchpad (survives power-cycle but unsafe.enable + careful timing required); (b) abandon in-XBE witness and pivot to XBE-level static analysis of cycle-23 vs cycle-21 binary deltas; (c) explore non-MMIO-aliased RAM regions for the buffer.
+- Witness-only reboots but orphan has `reserved[0] == 0xA4000001` (MAIN_ENTERED but NOT POST_MARKER0) → witness fires once but not twice (CPU state corruption between fires); less likely; worth surfacing.
+
+**Codex validation.** **Skipped under rule #15's "doc-only / ≤30-line uncommitted diff" carve-out.** Cycle 24 ships ZERO source/script code edits, ZERO XBE rebuilds; only doc + evidence-file edits. All real-Xbox operations were evidence-gathering using existing agent verbs + existing tooling (`oracle-client.py`, `oracle-orchestrator.py`, `curl --upload-file`, `nc`, `ping`). Aggregate diff: markdown-only across `docs/apple-silicon/handoff.md`, `docs/apple-silicon/decision-log.md`, `docs/apple-silicon/orchestration-state/*`, plus three new evidence log files under `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/`. Full justification recorded in `docs/apple-silicon/orchestration-state/validation-status.md`. Validation marker NOT written. If cycle 25 implements the witness-only XBE, Codex validation becomes mandatory before deploying.
+
+**Hypothesis status table (delta from cycle 23 closure).**
+
+| # | Hypothesis | Cycle-23 status | Cycle-24 status |
+|---|---|---|---|
+| 1 | D:\ remap mismatch under `runxbe` chainload | FULLY INVALIDATED | Unchanged |
+| 2 | NV2A class-object instantiation mismatch / `pb_agp_access` / generic early-init failure | STILL OPEN | STILL OPEN (cycle 24 doesn't directly discriminate) |
+| 3 | FATX-driver / NT-mount state divergence (D:\) | INVALIDATED for D:\ | Unchanged |
+| 4 | Cycle-22 leading: image-blit crashes before main()'s first instruction | STILL LEADING | **WEAKENED** (failure-mode delta suggests at least some of main() executes) |
+| 5 (NEW) | The kseg0-scan witness mechanism may be real-Xbox-unsafe from a non-agent process context | (did not exist) | **NEW; TOP-PRIORITY to discriminate via cycle-25 witness-only XBE** |
+
+**Bottom line.** Cycle 24 closes with no actionable A.4 readback but a meaningful failure-mode delta. The next bounded slice (cycle 25, Hermes-scheduled) should discriminate the witness mechanism's real-Xbox safety with a minimal witness-only XBE before any further attempt to read the A.4 byte from image-blit. `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on / long-term-fix decision REMAINS DEFERRED. Cycle-17's xemu-side `8/8 mask=0xff` finding is NOT invalidated; the flag continues to ship opt-in, default OFF. M15 overall still NOT MET pending §H.6 default-on shape (now blocked on cycle-25 witness-mechanism viability discrimination), §G.5, RT-as-texture.
+
+**Files referenced.**
+
+- `benchmark-runs/cycle24-real-xbox-image-blit-a4-witness-20260523T023225Z/{01-deploy.log, 02-baseline-witness-scan.log, 03-chainload-image-blit.log}`.
+- `scripts/apple-silicon/xbe-tests/lib/xbed_a4_witness.{h,c}` — unchanged from cycle 23.
+- `scripts/apple-silicon/xbe-tests/image-blit/main.c` — unchanged from cycle 23.
+- `scripts/apple-silicon/xbe-tests/oracle-agent/commands.{h,c}` — unchanged from cycle 23.
+- `docs/apple-silicon/handoff.md` cycle-24 entry — on top; cycle-23 entry preserved unchanged below.
+
+**No supersession of prior decision-log entries.** Cycle 23 + cycle 22 + cycle 21 + cycle 20 + cycle 19 + cycle 17 all stand exactly as written.
+
+---
+
 ## 2026-05-22 (cycle 23 Path A.4): non-fopen kernel-pool controller-buffer witness for image-blit SHIPPED — XBE-only + oracle-agent RPC extension; cycle-22 leading hypothesis ("image-blit crashes before main()'s first instruction") still LEADING; cycle-24 real-Xbox discriminator run pending; `XEMU_DIAG_PGRAPH_STATUS_DRAIN` default-on decision REMAINS DEFERRED
 
 **Decision.** Adopt the cycle-23 Path A.4 witness instrumentation as the cycle-22-identified discriminator implementation. The slice ships: (a) a new shared library helper `scripts/apple-silicon/xbe-tests/lib/xbed_a4_witness.{h,c}` that scans kseg0 [0x80010000, 0x84000000] in 4 KiB strides for the oracle-agent's persistent `oracle_ctrl_buffer` ('XCTR' magic + version 1) and stamps `(0xA4 << 24) | stage` into the buffer header's `reserved[0]` field (offset 8) plus increments `reserved[1]` (offset 12) as a call counter — NO `fopen` anywhere in the witness path; (b) two image-blit call sites in `scripts/apple-silicon/xbe-tests/image-blit/main.c`, the first as the absolute first instruction of `main()` (stage MAIN_ENTERED = 1) and the second immediately AFTER `image_blit_marker(0, "program_entered")` returns (stage POST_MARKER0 = 3) so we can also tell whether marker_00's helper itself crashed; (c) a new oracle-agent RPC `witness.scan` in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c` that enumerates ALL `oracle_ctrl_buffer` instances in kseg0 with their `(phys, virt, live, reserved[0], reserved[1])` values so the host side can read back the witness state across the chainload + agent-restart boundary. The cycle-20+21 fopen-based marker mechanism is LEFT IN PLACE so A.4 is a strict ADD-ONLY discriminator — both instrumentation paths fire in parallel in cycle 24.
