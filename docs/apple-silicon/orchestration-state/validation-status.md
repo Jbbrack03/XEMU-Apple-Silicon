@@ -27,7 +27,7 @@ Doc-only / run-only carve-out does NOT apply (this is a source-edit slice, disti
 - [x] `handoff.md` + `decision-log.md` cycle-35 entries on top.
 - [x] Orchestration-state quartet closure pass.
 - [x] Codex validation per rule #15 round-by-round disposition recorded.
-- [ ] Closure commit on `apple-silicon-performance` (pending at session end).
+- [x] Closure commit on `apple-silicon-performance` landed as `515e03f4e7`.
 
 ## Local validation evidence
 

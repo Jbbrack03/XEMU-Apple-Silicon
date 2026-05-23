@@ -1,8 +1,8 @@
 # Current Cycle
 
-- Cycle: 35 Path A.4 pre-main breadcrumb via `.CRT$X*` static-init slots — **CLOSED on `apple-silicon-performance`** (closure commit pending at session end). Bounded implementation slice: option (1) `.CRT$XXC` (stage=4) + `.CRT$XCU` (stage=5) function-pointer slots in `witness-only/main.c` that each fire `xbed_self_witness_fire` BEFORE `main()` enters. Adds the γ.0-vs-γ.1 discriminator that cycle 34's F4 outcome left ambiguous. ZERO shared-lib / oracle-agent / xbed_runtime / nxdk source touched. Local xemu smoke confirms both slots fire BEFORE `main()` with WTNS counter ticking to 2 before main entry; counter ticks to 4 by end of run (2 pre-main + 2 in-main WTNS fires).
+- Cycle: 35 Path A.4 pre-main breadcrumb via `.CRT$X*` static-init slots — **CLOSED on `apple-silicon-performance`** (closure commit `515e03f4e7`). Bounded implementation slice: option (1) `.CRT$XXC` (stage=4) + `.CRT$XCU` (stage=5) function-pointer slots in `witness-only/main.c` that each fire `xbed_self_witness_fire` BEFORE `main()` enters. Adds the γ.0-vs-γ.1 discriminator that cycle 34's F4 outcome left ambiguous. ZERO shared-lib / oracle-agent / xbed_runtime / nxdk source touched. Local xemu smoke confirms both slots fire BEFORE `main()` with WTNS counter ticking to 2 before main entry; counter ticks to 4 by end of run (2 pre-main + 2 in-main WTNS fires).
 - Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker run launched after cycle-34 closure commit `b5327d4d17`).
-- Closed: 2026-05-23 (implementation landed + local xemu smoke passed + canonical docs/state synced + Codex disposition recorded; closure commit pending at session end).
+- Closed: 2026-05-23 (implementation landed + local xemu smoke passed + canonical docs/state synced + Codex disposition recorded; closure commit landed as `515e03f4e7`).
 - State: **CLOSED.** Implementation-only slice; no real-Xbox run (Hermes's call for cycle 36).
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
 - HEAD at start: cycle-34 closure commit `b5327d4d17` on `apple-silicon-performance`.
@@ -23,7 +23,7 @@
 10. Updated `docs/apple-silicon/handoff.md` cycle-35 entry on top with full cycle-34 entry preserved unchanged below; `docs/apple-silicon/decision-log.md` cycle-35 entry above cycle-34.
 11. Updated orchestration-state quartet: this file + claude-status.md + validation-status.md + handoff-summary.md.
 12. Ran Codex validation per rule #15 (non-trivial diff ~200 lines C source + ~150 lines docs). Disposition recorded below + at `.claude/state/codex-validate-last-run` on LOOKS GOOD.
-13. Closure commit pending at session end.
+13. Closure commit landed as `515e03f4e7` on `apple-silicon-performance`.
 
 ## Exit criteria — final status
 
@@ -37,7 +37,7 @@
 8. [x] `handoff.md` + `decision-log.md` cycle-35 entries on top; cycle-34 entries preserved unchanged below.
 9. [x] Orchestration-state quartet closure pass (this file + claude-status.md + validation-status.md + handoff-summary.md).
 10. [x] Codex validation per rule #15 run; disposition recorded.
-11. [ ] Closure commit on `apple-silicon-performance` (pending at session end).
+11. [x] Closure commit on `apple-silicon-performance` landed as `515e03f4e7`.
 
 ## Out-of-scope (kept bounded for cycle 35)
 

@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 35 Path A.4 pre-main breadcrumb via `.CRT$X*` static-init slots — implement + locally smoke-validate + Codex-validate the cheapest mechanism that runs strictly BEFORE `main()` to distinguish γ.0 (`main()` never entered AT ALL) from γ.1 (`XVideoSetMode` itself faulted before returning) — the ambiguity left by cycle-34's F4 outcome.
-- Status: **CLOSED.** Implementation landed (option (1) `.CRT$X*` slot stamp chosen; options (2) custom XBE-header callback and (3) direct NV2A CRTC writes rejected with documented reasoning). Local xemu smoke PASSED: both `.CRT$XXC` (stage=4) and `.CRT$XCU` (stage=5) slots fire BEFORE `main()` enters, with the WTNS counter ticking 0 → 1 → 2 pre-main, then 2 → 3 → 4 across the in-`main()` cycle-29 self-witness fires. Codex 4 rounds: round 1 MAJOR ISSUES (3 findings all adopted — G2 over-claim softened, new G2' row added for cycle-32 F4'-analogue, canonical-state drift synced); round 2 MINOR ISSUES (2 findings all adopted — handoff-summary missed G2', handoff.md residual "will be written"); round 3 MINOR ISSUES (1 finding adopted — abbreviated G2'/G3 shorthand surfaces updated); round 4 LOOKS GOOD. Validation marker written. Closure commit pending at session end.
+- Status: **CLOSED.** Implementation landed (option (1) `.CRT$X*` slot stamp chosen; options (2) custom XBE-header callback and (3) direct NV2A CRTC writes rejected with documented reasoning). Local xemu smoke PASSED: both `.CRT$XXC` (stage=4) and `.CRT$XCU` (stage=5) slots fire BEFORE `main()` enters, with the WTNS counter ticking 0 → 1 → 2 pre-main, then 2 → 3 → 4 across the in-`main()` cycle-29 self-witness fires. Codex 4 rounds: round 1 MAJOR ISSUES (3 findings all adopted — G2 over-claim softened, new G2' row added for cycle-32 F4'-analogue, canonical-state drift synced); round 2 MINOR ISSUES (2 findings all adopted — handoff-summary missed G2', handoff.md residual "will be written"); round 3 MINOR ISSUES (1 finding adopted — abbreviated G2'/G3 shorthand surfaces updated); round 4 LOOKS GOOD. Validation marker written. Closure commit landed as `515e03f4e7` on `apple-silicon-performance`.
 
 ## Why cycle 35 ran this session
 
@@ -32,7 +32,7 @@ Cycle 34 closure (commit `b5327d4d17`) recorded OUTCOME F4 = zero stripes + `wit
 - [x] `handoff.md` + `decision-log.md` cycle-35 entries on top; cycle-34 entries preserved unchanged below.
 - [x] Orchestration-state quartet closure pass (this file + current-cycle.md + validation-status.md + handoff-summary.md).
 - [x] Codex validation per rule #15 round-by-round disposition recorded.
-- [ ] Closure commit on `apple-silicon-performance` (pending at session end).
+- [x] Closure commit on `apple-silicon-performance` landed as `515e03f4e7`.
 
 ## Confidence + risk notes
 
@@ -66,4 +66,4 @@ Cycle 34 closure (commit `b5327d4d17`) recorded OUTCOME F4 = zero stripes + `wit
 
 ## Next proposed action
 
-Closure commit pending at session end. The substantive next slice is cycle 36 (Hermes's call): FTP-deploy cycle-35 `witness-only/bin/default.xbe` (155 648 B; SAME path; use `--overwrite` because size matches cycle 31's exactly) + ARM composite-capture leg + runxbe + final `witness.scan-self` to read the `reserved1` counter for G-row classification. Secondary findings worth queuing for cycle 37+ are the same two cycle-34 findings still open (composite-preflight TCC asymmetry; xemu-capture PAL-default-on-NTSC silent-zero).
+Closure commit landed as `515e03f4e7` on `apple-silicon-performance`. The substantive next slice is cycle 36 (Hermes's call): FTP-deploy cycle-35 `witness-only/bin/default.xbe` (155 648 B; SAME path; use `--overwrite` because size matches cycle 31's exactly) + ARM composite-capture leg + runxbe + final `witness.scan-self` to read the `reserved1` counter for G-row classification. Secondary findings worth queuing for cycle 37+ are the same two cycle-34 findings still open (composite-preflight TCC asymmetry; xemu-capture PAL-default-on-NTSC silent-zero).
