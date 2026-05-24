@@ -143,6 +143,109 @@
  * new stage codes only requires updating xbed_a4_witness.h; this
  * shim treats the stage as an opaque 24-bit integer. */
 
+/* Cycle-39 EEPROM scratchpad discriminator (2026-05-24).
+ *
+ * Cycle 36 outcome G0 on real Xbox = (stripes=none, witness.scan-self
+ * count=0, witness.scan=D-cycle-27) → no WTNS page allocated, not even
+ * the `.CRT$XXC` slot ran. Cycle 38 lld link-map analysis (commit
+ * `1127cafa0d`) confirmed witness-only's static binary surface is
+ * structurally identical to the known-boot-functional `mirror` XBE
+ * modulo the two cycle-35 `.CRT$X*` slot entries — there is NO
+ * witness-only-unique pre-`.CRT$X*` code path. G0 therefore narrows to
+ * three live sub-cases:
+ *
+ *   (a) crash inside nxdk's pre-`.CRT$X*` startup (`_start` /
+ *       `__security_init_cookie` / TLS-size computation /
+ *       `_PDCLIB_xbox_libc_init`) — strictly earlier than any user-C.
+ *   (b) crash inside `_witness_only_pre_main_crt_xx`'s body BEFORE
+ *       `xbed_self_witness_fire` reaches the `MmAllocateContiguousMemoryEx`
+ *       call.
+ *   (c) `MmAllocateContiguousMemoryEx` returns NULL silently (or
+ *       crashes) from the `.CRT$XXC` slot.
+ *
+ * The static binary surface has been exhausted as a discriminator
+ * (cycle 37 + cycle 38). The cycle-38 recommendation was to add a
+ * dynamic durable breadcrumb inside `xbed_self_witness_fire` BEFORE
+ * `MmAllocateContiguousMemoryEx`. Cycle 39 implements that as a
+ * single-byte EEPROM scratchpad write at offset 0xFF — the highest
+ * EEPROM byte, which the 256-byte Xbox EEPROM layout reserves as
+ * unused/reserved (the documented user-settings region ends at 0x96
+ * and the factory-encrypted region ends at 0x5F; the 0xC0..0xFF tail
+ * is consistently zero on stock OEM consoles). Write endurance for the
+ * 24LC02-class EEPROM is ≥1 M cycles; a single byte write per
+ * cycle-39+ run is bounded even across hundreds of debugging sessions.
+ *
+ * The write fires AT MOST ONCE per process — gated by a separate
+ * `s_eeprom_scratch_attempted` sticky flag, NOT by the
+ * `s_witness_page == 0` check on the existing first-call branch.
+ * (Codex round-2 P1 finding 2026-05-24): if the allocation fails on
+ * the first call — the exact G0(c) sub-case this discriminator
+ * targets — `s_witness_page` stays NULL, so later `.CRT$XCU` and
+ * in-main fires would re-enter the first-call branch and overwrite
+ * the breadcrumb byte from 0xA4 (stage 4 = first fire) to 0xA5 /
+ * 0xA1 / 0xA3 (later stages), destroying the discriminator value.
+ * The sticky flag preserves the first-stage breadcrumb regardless
+ * of allocation outcome. The flag is set BEFORE the write attempt
+ * (rather than only on `NT_SUCCESS`) so that even a write failure
+ * does not cause a later fire to re-attempt the write — the
+ * failure host-log line is itself diagnostic (visible on xemu; on
+ * real Xbox the EEPROM byte stays unchanged from its pre-run
+ * baseline value).
+ *
+ * Position: AS THE LAST INSTRUCTION before
+ * `MmAllocateContiguousMemoryEx`. On real Xbox the first call is
+ * always the `.CRT$XXC` slot's stage=4 fire (cycle 35 ordering); a
+ * post-run EEPROM byte of 0xA4 therefore proves the function body
+ * reached the pre-allocation point.
+ *
+ * Discriminator semantics (cycle-40 real-Xbox readback table):
+ *
+ *   Post-run byte at 0xFF | witness.scan-self count | G-row     | Sub-case
+ *   ----------------------|-------------------------|-----------|-------------
+ *   0x00                  | 0                       | G0(a)+(b) | crash before EEPROM write — either pre-`.CRT$X*` startup OR helper body crashed before reaching `xbed_self_witness_fire`'s pre-allocation point
+ *   0xA4                  | 0                       | G0(c)     | EEPROM write landed → `MmAllocateContiguousMemoryEx` returned NULL silently OR crashed; sub-case (a) and (b) ELIMINATED
+ *   0xA4                  | 1+                      | G2..G4    | full pre-main path landed; same shapes as cycle-35 G2..G4
+ *
+ * The G0(c) vs G0(a)+(b) split is the cycle-39 value proposition.
+ *
+ * Reset semantics: the EEPROM byte is NOT auto-reset. Hermes must
+ * write 0x00 to offset 0xFF BEFORE the cycle-39 real-Xbox run to
+ * establish a known clean baseline. The companion oracle-agent verb
+ * `eeprom.scratch.reset` (gated by `unsafe.enable`) provides this.
+ * Read-back uses either the existing `cmd_eeprom` 256-byte dump
+ * (offset 0xFF) or the new `eeprom.scratch.read` convenience verb.
+ *
+ * Why a single byte, single offset (not a two-byte function-entry +
+ * pre-alloc encoding): the cycle-38 recommendation was singular —
+ * "write a durable breadcrumb inside `xbed_self_witness_fire` BEFORE
+ * `MmAllocateContiguousMemoryEx`". The cycle-39 value-add is solely
+ * the (a)+(b)-vs-(c) split. Further discriminating (a) vs (b) requires
+ * a pre-`.CRT$X*` callback (deferred to cycle-40+ if cycle-39 forces
+ * that branch by leaving the byte cleared).
+ *
+ * Why offset 0xFF (not 0x5F+, 0x96+, or one of the SMC scratch
+ * registers): offset 0xFF is the highest single byte of the 256-byte
+ * EEPROM image — easiest to identify in a hex dump, no risk of
+ * stepping on the factory/encrypted region (0x00..0x5F), the user
+ * settings region (0x60..0x96), or the user-settings-checksum region
+ * (0x96..0xBF). The 0xC0..0xFF tail is consistently zero on stock
+ * OEM consoles. SMC scratch registers were considered and rejected:
+ * the SMC has no documented RAM-backed scratch register that survives
+ * a reboot, and the agent's smc.* allowlist intentionally excludes
+ * write access to non-{0x05,0x06} registers. EEPROM is the only
+ * durable cross-reboot single-byte channel.
+ *
+ * Failure handling: the EEPROM write's NTSTATUS is checked and
+ * host-logged but does NOT short-circuit the function. The cycle-29
+ * self-witness allocation path continues to attempt
+ * `MmAllocateContiguousMemoryEx` regardless of EEPROM write outcome —
+ * the EEPROM byte is purely additive instrumentation; a hard-error
+ * fallback would defeat the discriminator semantics. */
+#define XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR    0xA8u    /* 24LC02 EEPROM SMBus address; same as oracle-agent/commands.c */
+#define XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF   0xFFu    /* last byte of 256-byte EEPROM image; reserved/unused on stock OEM consoles */
+#define XBED_SELF_WITNESS_EEPROM_TAG_NIB       0xA0u    /* high nibble = 0xA "Path-A.4 tag"; low nibble = (stage & 0x0F) */
+
+
 /* Initialize the self-witness if not already initialized, then stamp
  * the given `stage` into `reserved0` and increment `reserved1`.
  * Idempotent — repeated calls reuse the same allocated page; only

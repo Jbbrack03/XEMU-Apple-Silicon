@@ -17,6 +17,10 @@
  *   controller.set / controller.get / controller.button /
  *   controller.axis / controller.clear / controller.buffer-info
  *
+ * v0.5 eeprom.scratch.* commands (2026-05-24, cycle 39):
+ *   eeprom.scratch.read  — read EEPROM scratchpad byte at off=0xFF
+ *   eeprom.scratch.reset — clear scratchpad to 0x00 (gated by unsafe.enable)
+ *
  * v0.4 smc.* commands (2026-05-12):
  *   smc.read  — allowlisted SMC register read
  *   smc.write — allowlisted SMC register write (gated)
@@ -65,6 +69,8 @@ struct cmd_entry {
 static const struct cmd_entry s_cmds[] = {
     { "info",                    cmd_info                    },
     { "eeprom",                  cmd_eeprom                  },
+    { "eeprom.scratch.read",     cmd_eeprom_scratch_read     },
+    { "eeprom.scratch.reset",    cmd_eeprom_scratch_reset    },
     { "mem.read",                cmd_mem_read                },
     { "mem.write",               cmd_mem_write               },
     { "nv2a.read",               cmd_nv2a_read               },

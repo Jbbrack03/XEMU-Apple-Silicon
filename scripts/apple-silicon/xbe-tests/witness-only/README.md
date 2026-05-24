@@ -647,6 +647,124 @@ analyze step):
 # Combine deepest stripe + witness.scan-self counter per the G-row table.
 ```
 
+## Cycle-39 addendum (EEPROM scratchpad discriminator, 2026-05-24)
+
+Cycle 36 outcome **G0** on real Xbox = `(stripes=none, witness.scan-self count=0, witness.scan=D-cycle-27)`. Cycle 37 (static binary diff vs `mirror` + `pipeline-smoke`) and cycle 38 (lld link-map symbol resolution for the only structural drift, `.text 0x16720` = `_automount_d_drive` nxdk default) jointly exhausted the static surface as a discriminator — there is NO witness-only-unique pre-`.CRT$X*` code path. The G0 sub-cases that remain live (cycle 38 numbered list):
+
+1. **(a)** crash inside nxdk's pre-`.CRT$X*` startup (`_start` / `__security_init_cookie` / TLS-size computation / `_PDCLIB_xbox_libc_init`);
+2. **(b)** crash inside `_witness_only_pre_main_crt_xx`'s body BEFORE `xbed_self_witness_fire` reaches `MmAllocateContiguousMemoryEx`;
+3. **(c)** `MmAllocateContiguousMemoryEx` returns NULL silently (or crashes) from the `.CRT$XXC` slot.
+
+The next genuine information requires dynamic instrumentation. Cycle 39 ships the lowest-cost option: a single-byte EEPROM scratchpad write at offset `0xFF` inside `xbed_self_witness_fire` AS THE LAST INSTRUCTION before `MmAllocateContiguousMemoryEx`. The byte encodes `0xA0 | (stage & 0x0F)`. On real Xbox the first call into `xbed_self_witness_fire` is always the `.CRT$XXC` slot stage=4 fire (cycle 35 ordering), so the post-run byte is `0xA4` if the write executed.
+
+### Scratchpad contract
+
+| Aspect | Value |
+|---|---|
+| EEPROM offset | `0xFF` (last byte of 256-byte image; in the documented 0xC0..0xFF reserved/unused tail; consistently zero on stock OEM consoles) |
+| SMBus address | `0xA8` (same 24LC02 address `cmd_eeprom` uses for the 256-byte dump) |
+| Encoded byte | `(0xA0 \| (stage & 0x0F))` — first call's stage=4 → byte=`0xA4` |
+| Write call | `HalWriteSMBusValue(0xA8, 0xFF, FALSE /* byte mode */, encoded_byte)` |
+| Fire path | At most ONCE per process — gated by a separate sticky `s_eeprom_scratch_attempted` flag (NOT `s_witness_page == 0`, which would re-fire on G0(c) and overwrite the breadcrumb; Codex round-2 P1 finding 2026-05-24 adopted). Positioned AS THE LAST INSTRUCTION before `MmAllocateContiguousMemoryEx` inside the existing first-call branch. |
+| Failure handling | NTSTATUS host-logged but does NOT short-circuit — allocation attempt proceeds regardless |
+| Reset | `eeprom.scratch.reset` agent verb writes `0x00` (gated by `unsafe.enable`); Hermes calls this BEFORE each cycle-39+ run to establish baseline |
+| Read | `eeprom.scratch.read` agent verb returns the byte + decoded tag/stage nibble + sub-case interpretation. Full `eeprom` dump (offset 0xFF) also works |
+| Write endurance budget | 24LC02 ≥1 M cycles; one byte/run is bounded across hundreds of debugging sessions |
+
+### Cycle-40 discriminator table (extends cycle-35 G-rows)
+
+Reads as `(EEPROM byte at 0xFF, witness.scan-self count, witness.scan-self reserved1, witness.scan shape)`:
+
+| EEPROM 0xFF | scan-self count | scan-self reserved1 | scan shape | G-row | Interpretation | Next |
+|---|---|---|---|---|---|---|
+| `0x00` | 0 | n/a | `D-cycle-27` | **G0(a)+(b)** | EEPROM write never executed. Crash before `xbed_self_witness_fire` reached its pre-`MmAlloc` point. Two sub-cases share this shape and cycle-39 evidence CANNOT distinguish them: (a) crash strictly before `.CRT$XXC` slot fired OR (b) `_witness_only_pre_main_crt_xx`'s body crashed before calling `xbed_self_witness_fire` (OR within `xbed_self_witness_fire` before the EEPROM-write instruction). | Cycle 40: custom XBE-header callback that runs BEFORE nxdk's `_start` (high scope — requires `nxdk/tools/cxbe/` modification). Only fund if cycle 39 forces this branch. |
+| `0xA4` | 0 | n/a | `D-cycle-27` | **G0(c)** | EEPROM write landed → `xbed_self_witness_fire`'s body reached the pre-`MmAlloc` point. WTNS page was NOT allocated → `MmAllocateContiguousMemoryEx` returned NULL silently OR crashed. Sub-cases (a) and (b) **ELIMINATED**. | Cycle 40: `MmAllocateContiguousMemoryEx` allocation-flag variations (cache policy `PAGE_WRITECOMBINE` vs `PAGE_NOCACHE`; tighter or looser address-floor; alignment changes). |
+| `0xA4` | ≥1 | 1..4 | `D-cycle-27` or `A1/A2` | **G1..G4** | EEPROM write landed AND WTNS page allocated. Reverts to the cycle-35 G1..G4 interpretations on the WTNS path — G0 is fully eliminated. | Cycle 40: apply the cycle-35 G-row table for the surviving G1..G4 shape. |
+| any other | n/a | n/a | n/a | indeterminate | Unexpected pre-existing EEPROM byte value, OR multiple distinct stages reached the pre-MmAlloc instruction across separate fires (shouldn't happen on a clean cycle-39 baseline). | Re-run with explicit `eeprom.scratch.reset` BEFORE chainload; if reproducible, investigate concurrent EEPROM access from another XBE in the same power session. |
+
+The G0(c) vs G0(a)+(b) split is the cycle-39 value proposition. Cycle-39 evidence alone is the binary "did the write reach 0xFF or not" — the deeper (a)-vs-(b) split is deferred to cycle 40+ via a pre-`.CRT$X*` callback if forced.
+
+### Cycle-39 build artifacts
+
+- `bin/default.xbe` — 155 648 B (unchanged size from cycle 35; the new SMBus-write code + 3 host-log lines fit within the existing nxdk XBE page boundary). SHA-256 differs from cycle-35 (`ab52df8d…`) since the static `.text` now contains the `HalWriteSMBusValue` call plus its argument-marshalling and the cycle-39 host-log format strings; cycle-39 SHA-256 to be recorded at closure.
+- `witness-only.iso` — 720 896 B (unchanged — same ISO sector boundary).
+- `oracle-agent/bin/default.xbe` — rebuilt with the new `eeprom.scratch.read` + `eeprom.scratch.reset` verbs (v0.5 string in `cmd_info` banner). SHA-256 to be recorded at closure.
+
+### Cycle-40 deployment runbook (Hermes's call, NOT this session)
+
+Strict superset of the cycle-36 runbook with two new steps (3a `eeprom.scratch.reset` to clear the baseline; 11 `eeprom.scratch.read` to recover the breadcrumb) bracketing the existing chainload window. The XBE upload step MUST still pass `--overwrite` because the cycle-39 XBE size matches cycle 35's exactly.
+
+```bash
+# 0. Reachability probe + ensure cycle-39 oracle-agent resident.
+./scripts/apple-silicon/oracle-orchestrator.py status
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+
+# 1. Baseline both scans (cycle-36 preconditions).
+./scripts/apple-silicon/oracle-client.py raw witness.scan
+./scripts/apple-silicon/oracle-client.py raw witness.scan-self
+# Expect (count=1, reserved0=0, reserved1=0) AND (count=0); power-cycle if not.
+
+# 2. Reboot to dashboard.
+./scripts/apple-silicon/oracle-client.py raw reboot
+
+# 3. FTP-upload cycle-39 oracle-agent + cycle-39 witness-only.
+# (oracle-agent: gain access to eeprom.scratch.read + eeprom.scratch.reset.)
+./scripts/apple-silicon/oracle-orchestrator.py ensure-agent
+
+# 3a. *** ARM EEPROM SCRATCHPAD BASELINE ***
+./scripts/apple-silicon/oracle-client.py raw 'unsafe.enable'
+./scripts/apple-silicon/oracle-client.py raw 'eeprom.scratch.reset'
+# Verify the reset landed.
+./scripts/apple-silicon/oracle-client.py raw 'eeprom.scratch.read'
+# Expect: off=0xFF byte=0x00 ... interp="cleared (cycle-39 baseline; sub-case (a)+(b) if this is a POST-run reading)"
+
+# 4. FTP-upload cycle-39 witness-only WITH --overwrite (size matches cycle 35).
+
+# 5. Re-ensure agent + recheck preconditions (both scans).
+
+# 6. *** ARM COMPOSITE CAPTURE *** (cycle 36 sequence preserved).
+
+# 7. Chainload witness-only.
+
+# 8. Poll FTP/21 (authenticated) + agent/9001 + ICMP until dashboard FTP returns.
+
+# 9. *** STOP COMPOSITE CAPTURE ***.
+
+# 10. Post-run: re-ensure agent + final both scans.
+
+# 11. *** READ EEPROM SCRATCHPAD ***
+./scripts/apple-silicon/oracle-client.py raw 'eeprom.scratch.read'
+# Cross-check with the full eeprom dump (offset 0xFF):
+./scripts/apple-silicon/oracle-client.py raw 'eeprom' | head -9 | tail -1 | cut -c63-64
+# Combine with witness.scan-self + composite stripes per the cycle-40 G-row table.
+```
+
+### Why cycle 39 picked this design
+
+The cycle-38 closeout enumerated and ranked the cycle-39 candidates:
+
+| Candidate | Verdict | Reasoning |
+|---|---|---|
+| EEPROM scratchpad write before `MmAllocateContiguousMemoryEx` | **CHOSEN** | Uniquely discriminates G0(c) from G0(a)+(b). Single SMBus write; one new shared-lib instruction sequence inside `xbed_self_witness_fire`'s existing first-call branch; two new agent verbs; ZERO nxdk / cycle-23 / cycle-29-shim / cycle-31-paint / cycle-35-slot changes. EEPROM endurance is non-issue (1M cycles vs ~1 write/cycle-39+ run). |
+| `out 0xe9` host-log breadcrumb inside `_witness_only_pre_main_crt_xx` | REJECTED | `out 0xe9` is xemu-only (the cycle-15 `XEMU_GUEST_LOG=1` channel). Provides ZERO real-Xbox visibility. The cycle-36 G0 outcome already shows the cycle-29 shim's host-log lines don't reach real-Xbox readback. |
+| `.CRT$XCV` slot between `.CRT$XCU` and `main()` | REJECTED | Adds no new information beyond cycle-35's stage-4 fire — cycle 36 G0 outcome already shows the earlier `.CRT$XXC` slot didn't fire (the `.CRT$XCV` slot would be strictly later). |
+| Custom XBE-header callback that runs before nxdk's `_start` | DEFERRED to cycle 40+ | High scope (requires modifying `nxdk/tools/cxbe/`). Only fund if cycle 39's outcome is G0(a)+(b) (EEPROM byte = `0x00`), forcing the (a)-vs-(b) split. |
+
+### Cycle-39 source impact
+
+- `lib/xbed_self_witness.c` — 1 new code block (~40 LOC including comments) inside the existing first-call branch (`if (s_witness_page == 0)`), AS THE LAST instruction sequence before `MmAllocateContiguousMemoryEx`. ZERO change to the existing allocation path, the cycle-29 stamping path, the wbinvd flush path, or the second-call no-op path. ZERO change to the public API (`uintptr_t xbed_self_witness_fire(uint32_t stage)` signature unchanged).
+- `lib/xbed_self_witness.h` — 3 new `#define`s (`XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR`, `XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF`, `XBED_SELF_WITNESS_EEPROM_TAG_NIB`) + cycle-39 head-comment addendum explaining the scratchpad contract.
+- `oracle-agent/commands.c` — 2 new command implementations (`cmd_eeprom_scratch_read` + `cmd_eeprom_scratch_reset`) + 2 new help-text lines + 2 new `#define`s. Read uses the existing `HalReadSMBusValue` + plausibility-decode-and-format pattern. Reset uses `HalWriteSMBusValue` + the existing `s_unsafe_writes_enabled` gate. ZERO change to existing verbs.
+- `oracle-agent/commands.h` — 2 new function-declaration lines.
+- `oracle-agent/main.c` — 2 new lines in the `s_cmds[]` dispatch table + 1 new banner-comment addendum (`v0.5 eeprom.scratch.*`).
+- `witness-only/main.c` — UNCHANGED (the cycle-29 shim picks up the new EEPROM-write code automatically since `main.c` already calls `xbed_self_witness_fire` from cycle-35's `.CRT$XXC` + `.CRT$XCU` slots and cycle-29's in-`main()` fires).
+- `witness-only/Makefile` — UNCHANGED.
+- `witness-only/manifest.json` — title extended; `real-xbox/physical/cycle-40` expected_results section added enumerating the cycle-40 G-rows.
+
+### Cycle-39 local validation
+
+Build success via `eval "$(nxdk/bin/activate -s)" && make` in both `witness-only/` and `oracle-agent/`: same benign `lld: warning: .edata=.rdata: already merged into .edataxb`; ZERO new warnings. Local xemu smoke runs witness-only with `XEMU_GUEST_LOG=1`; the new cycle-39 host-log line `xbed_self_witness: cycle-39 EEPROM scratchpad byte=0x... written at off=0xFF (pre-MmAlloc breadcrumb)` confirms the SMBus write completed without crashing (xemu's QEMU `smbus-eeprom` device implements both `eeprom_receive_byte` and `eeprom_write_data` per `hw/i2c/smbus_eeprom.c` — the write is honored in emulation but does not exercise the real-Xbox MMIO-aliasing failure modes; the smoke value is solely the no-crash guarantee + ordering proof, NOT a discriminator answer). The real discriminator answer lives in cycle 40 (real-Xbox run + post-run `eeprom.scratch.read`).
+
 ## Cross-references
 
 - `lib/xbed_a4_witness.{h,c}` — the cycle-23 XCTR-scan witness mechanism.

@@ -110,6 +110,105 @@ int cmd_unsafe_enable(struct netconn *c, const char *args)
     return 0;
 }
 
+/* Cycle 39 EEPROM scratchpad (2026-05-24).
+ *
+ * Companion read/reset surface for the cycle-39 self-witness
+ * pre-allocation breadcrumb. See
+ * `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.h` cycle-39
+ * addendum for the full scratchpad contract.
+ *
+ * Offset 0xFF is the highest byte of the 256-byte Xbox EEPROM image
+ * and is documented as part of the 0xC0..0xFF reserved/unused tail
+ * (consistently zero on stock OEM consoles). The cycle-39
+ * self-witness shim writes a single byte = 0xA0 | (stage & 0x0F)
+ * there ONLY on the first call of `xbed_self_witness_fire`, AS THE
+ * LAST INSTRUCTION before `MmAllocateContiguousMemoryEx`.
+ *
+ * Read-back: returns the single byte at offset 0xFF along with the
+ * decoded stage nibble + the cycle-39 G-row sub-case interpretation.
+ *
+ * Reset: writes 0x00 to offset 0xFF (gated by `unsafe.enable`).
+ * Hermes calls this BEFORE the cycle-39 real-Xbox run to establish
+ * a known clean baseline.
+ *
+ * Why a dedicated verb when `cmd_eeprom` already dumps all 256 bytes:
+ * (1) compact + scriptable single-byte readout (no hex-row parsing);
+ * (2) explicit tag/sub-case interpretation in the agent response
+ * line so Hermes does not have to duplicate the decode logic.
+ * The full `eeprom` dump remains the authoritative reference (e.g.
+ * for cross-checking that no other EEPROM byte mutated). */
+#define EEPROM_SCRATCH_OFF       0xFFu
+#define EEPROM_SCRATCH_TAG_NIB   0xA0u
+
+int cmd_eeprom_scratch_read(struct netconn *c, const char *args)
+{
+    (void)args;
+    ULONG val = 0;
+    NTSTATUS s = HalReadSMBusValue(EEPROM_SMBUS_ADDR, EEPROM_SCRATCH_OFF,
+                                   FALSE, &val);
+    if (!NT_SUCCESS(s)) {
+        op_send_errf(c, "HalReadSMBusValue failed status=0x%08lx",
+                     (unsigned long)s);
+        return 0;
+    }
+    unsigned byte = (unsigned)(val & 0xFFu);
+    const char *interp;
+    /* Sub-case interpretation matches xbed_self_witness.h cycle-39
+     * discriminator table + witness-only/README.md cycle-39 addendum
+     * G-row table. Stage nibble is the low 4 bits of the cycle-29
+     * self-witness stage code passed to the first
+     * `xbed_self_witness_fire` call this XBE made; on real-Xbox
+     * witness-only the first call is the .CRT$XXC slot stage=4 fire
+     * → byte=0xA4 is the ONLY value that maps to a defined G-row in
+     * the cycle-40 readback. Other 0xA? values (0xA1/0xA3/0xA5 etc.)
+     * are TAG-shaped but stage-nibble-mismatched — per the cycle-39
+     * G-row table's "any other" row they are indeterminate and
+     * should force a rerun with an explicit eeprom.scratch.reset
+     * baseline. The readback verb must NOT alias them onto
+     * sub-case (c). */
+    if (byte == 0x00u) {
+        interp = "cleared (cycle-39 baseline; sub-case (a)+(b) if "
+                 "this is a POST-run reading)";
+    } else if (byte == 0xA4u) {
+        interp = "cycle-39 self-witness pre-MmAlloc breadcrumb "
+                 "(sub-case (c) if WTNS count=0; G1..G4 if WTNS count>=1)";
+    } else if ((byte & 0xF0u) == EEPROM_SCRATCH_TAG_NIB) {
+        interp = "indeterminate (TAG nibble matches but stage_nib != 4; "
+                 "rerun with eeprom.scratch.reset baseline)";
+    } else {
+        interp = "indeterminate (not a cycle-39 breadcrumb; possibly "
+                 "stale pre-baseline value or foreign write — rerun with "
+                 "eeprom.scratch.reset baseline)";
+    }
+    op_send_okf(c, "off=0x%02X byte=0x%02X tag=0x%01X stage_nib=0x%01X "
+                   "interp=\"%s\"",
+                (unsigned)EEPROM_SCRATCH_OFF,
+                byte,
+                (unsigned)((byte & 0xF0u) >> 4),
+                (unsigned)(byte & 0x0Fu),
+                interp);
+    return 0;
+}
+
+int cmd_eeprom_scratch_reset(struct netconn *c, const char *args)
+{
+    (void)args;
+    if (!s_unsafe_writes_enabled) {
+        op_send_errf(c, "writes disabled — call unsafe.enable first");
+        return 0;
+    }
+    NTSTATUS s = HalWriteSMBusValue(EEPROM_SMBUS_ADDR, EEPROM_SCRATCH_OFF,
+                                    FALSE, 0x00u);
+    if (!NT_SUCCESS(s)) {
+        op_send_errf(c, "HalWriteSMBusValue failed status=0x%08lx",
+                     (unsigned long)s);
+        return 0;
+    }
+    op_send_okf(c, "off=0x%02X byte=0x00 (cycle-39 scratchpad cleared)",
+                (unsigned)EEPROM_SCRATCH_OFF);
+    return 0;
+}
+
 /* mem.read addr=0xHHHH len=N
  *   Reads up to len bytes from one of the four Xbox RAM aliases
  *   (low alias / kseg0 / kseg1 / VRAM aperture). Replies with a
@@ -688,6 +787,8 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_text_begin(c, 0);
     op_send_line(c, "info                                  agent + console info");
     op_send_line(c, "eeprom                                256-byte EEPROM hex dump");
+    op_send_line(c, "eeprom.scratch.read                   read cycle-39 EEPROM scratchpad byte at off=0xFF + sub-case interp");
+    op_send_line(c, "eeprom.scratch.reset                  clear cycle-39 EEPROM scratchpad (needs unsafe.enable; writes 0x00 at off=0xFF)");
     op_send_line(c, "mem.read addr=0xHEX len=N             binary read of memory");
     op_send_line(c, "mem.write addr=0xHEX data=<hex>       binary write (needs unsafe.enable)");
     op_send_line(c, "nv2a.read off=0xHEX                   read NV2A BAR0 register");

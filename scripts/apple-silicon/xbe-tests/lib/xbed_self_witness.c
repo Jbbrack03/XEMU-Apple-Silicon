@@ -17,6 +17,21 @@
 static volatile uint32_t *s_witness_page = 0;
 static uintptr_t          s_witness_phys = 0;
 
+/* Cycle-39 EEPROM scratchpad write — fired AT MOST ONCE per process,
+ * regardless of MmAllocateContiguousMemoryEx outcome. Separate from
+ * `s_witness_page` because the cycle-39 G0(c) sub-case is exactly the
+ * branch where the allocation fails (so `s_witness_page` stays NULL);
+ * if the EEPROM write were re-gated on `s_witness_page == 0`, later
+ * `.CRT$XCU` and in-main fires would re-enter the EEPROM-write block
+ * and OVERWRITE the breadcrumb byte from 0xA4 (stage 4 = first fire)
+ * to 0xA5 / 0xA1 / 0xA3 (later stages), destroying the cycle-39
+ * discriminator value. The sticky flag preserves the first-stage
+ * breadcrumb regardless of allocation outcome. Set to 1 the FIRST
+ * time `xbed_self_witness_fire` enters the first-call branch — both
+ * on success (NTSTATUS NT_SUCCESS) AND on failure paths — so we
+ * never re-attempt the EEPROM write either. */
+static int                s_eeprom_scratch_attempted = 0;
+
 /* `wbinvd` (Write-Back + Invalidate cache) — same primitive
  * `oracle-agent/controller.c::cache_writeback_invalidate` and
  * `lib/xbed_a4_witness.c::cache_writeback_invalidate` use. OG Xbox
@@ -38,6 +53,70 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
                          (unsigned)stage);
 
     if (s_witness_page == 0) {
+        /* CYCLE-39 EEPROM SCRATCHPAD WRITE — durable real-Xbox
+         * breadcrumb that proves the `.CRT$XXC` slot's first call
+         * reached the pre-allocation point. Fires AT MOST ONCE per
+         * process, regardless of MmAllocateContiguousMemoryEx
+         * outcome. The `s_eeprom_scratch_attempted` sticky flag is
+         * checked BEFORE entering the write block — without it, a
+         * cycle-39 G0(c) outcome (allocation returns NULL on first
+         * call → `s_witness_page` stays 0 → later .CRT$XCU and
+         * in-main fires re-enter this first-call branch) would
+         * OVERWRITE the cycle-39 first-fire breadcrumb byte from
+         * 0xA4 (stage 4 = .CRT$XXC) to 0xA5 (stage 5 = .CRT$XCU) or
+         * 0xA1/0xA3 (in-main MAIN_ENTERED/POST_MARKER0 if main()
+         * ran), destroying the cycle-39 discriminator value (Codex
+         * round-2 P1 finding adopted). Position: AS THE LAST
+         * INSTRUCTION before `MmAllocateContiguousMemoryEx`. See
+         * `xbed_self_witness.h` cycle-39 addendum for the full
+         * scratchpad contract + discriminator table.
+         *
+         * Encoding: byte = 0xA0 | (stage & 0x0F). Real-Xbox first
+         * call is the `.CRT$XXC` slot stage=4 fire → byte=0xA4.
+         * Post-run readback via the agent's `eeprom.scratch.read`
+         * (or full `eeprom` dump, offset 0xFF):
+         *   - byte=0x00 + WTNS count=0 → sub-case (a) or (b) (crash
+         *     before this write executed)
+         *   - byte=0xA4 + WTNS count=0 → sub-case (c) (write landed
+         *     but allocation returned NULL silently or crashed)
+         *   - byte=0xA4 + WTNS count>=1 → full pre-main path landed
+         *
+         * NTSTATUS is checked + host-logged but does NOT short-
+         * circuit the function. The allocation attempt below
+         * proceeds regardless — the EEPROM byte is purely additive
+         * instrumentation. The sticky flag is set BEFORE the write
+         * (rather than only on NT_SUCCESS) so that even a write
+         * failure does not cause a later fire to re-attempt the
+         * write — the failure host-log line is itself diagnostic
+         * (visible on xemu; on real Xbox the EEPROM byte stays
+         * unchanged from its pre-run baseline value). */
+        if (!s_eeprom_scratch_attempted) {
+            s_eeprom_scratch_attempted = 1;
+            UCHAR scratch_byte = (UCHAR)(
+                XBED_SELF_WITNESS_EEPROM_TAG_NIB |
+                (UCHAR)(stage & 0x0Fu));
+            NTSTATUS eep_s = HalWriteSMBusValue(
+                XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+                XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF,
+                FALSE,                  /* byte mode (1 byte payload) */
+                (ULONG)scratch_byte);
+            if (NT_SUCCESS(eep_s)) {
+                xbed_host_log_writef(
+                    "xbed_self_witness: cycle-39 EEPROM scratchpad "
+                    "byte=0x%02X written at off=0x%02X (pre-MmAlloc "
+                    "breadcrumb; sticky, at-most-once per process)",
+                    (unsigned)scratch_byte,
+                    (unsigned)XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF);
+            } else {
+                xbed_host_log_writef(
+                    "xbed_self_witness: cycle-39 EEPROM scratchpad "
+                    "HalWriteSMBusValue failed status=0x%08lx "
+                    "(continuing to MmAllocateContiguousMemoryEx; "
+                    "write will NOT be re-attempted)",
+                    (unsigned long)eep_s);
+            }
+        }
+
         /* First call this process — allocate + init.
          *
          * Match the agent's allocation pattern exactly

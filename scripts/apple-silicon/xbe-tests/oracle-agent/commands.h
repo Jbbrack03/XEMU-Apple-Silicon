@@ -16,6 +16,13 @@
 
 int cmd_info(struct netconn *c, const char *args);
 int cmd_eeprom(struct netconn *c, const char *args);
+/* Cycle 39 EEPROM scratchpad — companion read + reset for the
+ * cycle-39 self-witness pre-allocation breadcrumb at offset 0xFF.
+ * See `xbed_self_witness.h` cycle-39 addendum + commands.c
+ * `cmd_eeprom_scratch_read` body comment for the full scratchpad
+ * contract + sub-case interpretation. */
+int cmd_eeprom_scratch_read(struct netconn *c, const char *args);
+int cmd_eeprom_scratch_reset(struct netconn *c, const char *args);
 int cmd_mem_read(struct netconn *c, const char *args);
 int cmd_mem_write(struct netconn *c, const char *args);
 int cmd_nv2a_read(struct netconn *c, const char *args);
