@@ -52,7 +52,7 @@ Cycle 41d closure pre-recorded the cycle-41e candidate explicitly: "non-`-Ex` fa
 - [x] Updated handoff.md cycle-41e entry on top above cycle-41d.
 - [x] Updated decision-log.md cycle-41e entry above cycle-41d.
 - [x] Updated orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md).
-- [ ] Slice closure commit to land on `apple-silicon-performance` as the cycle-41e non-`-Ex` fallback variation closure.
+- [x] Slice closure commit landed on `apple-silicon-performance` as `deb2206491` (cycle-41e non-`-Ex` fallback variation closure).
 
 ## Confidence + risk notes
 

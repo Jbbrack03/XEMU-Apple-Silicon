@@ -86,4 +86,4 @@ Reproducibility shape continues:
 - [x] G0(c) PERSISTS classification confirmed via three primary signals + full EEPROM hex dump cross-check.
 - [x] Evidence directory written with SUMMARY.md + 21 step-numbered logs + 4× Codex prompts + 4× Codex outputs.
 - [x] handoff.md / decision-log.md / orchestration-state quartet updated; prior cycles preserved unchanged below.
-- [ ] Closure commit to land on `apple-silicon-performance` as the cycle-41e non-`-Ex` fallback variation closure (this commit).
+- [x] Closure commit landed on `apple-silicon-performance` as `deb2206491` (cycle-41e non-`-Ex` fallback variation closure).

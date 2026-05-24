@@ -48,7 +48,7 @@
 6. [x] Real-Xbox deployment executed; cycle-41e outcome (G0(c) PERSISTS) collected and classified against the cycle-40 G-row table.
 7. [x] Compact evidence directory `benchmark-runs/cycle41e-nonex-20260524T070700Z/` with SUMMARY.md + 21 step-numbered logs + 4× codex prompts + 4× codex outputs (gitignored per project convention).
 8. [x] Canonical docs/state updated: handoff.md + decision-log.md + orchestration-state quartet.
-9. [ ] Closure commit lands on `apple-silicon-performance` (cycle-41e non-`-Ex` fallback variation closure). Bounded closeout-sync follow-up commit may follow if the quartet needs to reference the landed hash (same pattern as cycle 39+41d closeout-sync).
+9. [x] Closure commit landed on `apple-silicon-performance` as `deb2206491` (cycle-41e non-`-Ex` fallback variation closure). Bounded closeout-sync follow-up commit on top syncs the orchestration-state quartet to reference the landed hash (same pattern as cycle 39+41d closeout-sync).
 
 ## What this session does NOT do
 
