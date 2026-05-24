@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: cycle 42E real-Xbox deployment of cycle-42D R4-GREEN stage-6 marker-bypass XBE — bounded run-only + doc-only closeout slice deploying `witness-only-cycle42d-r4-green.xbe` (SHA `d69f23fae70bacf26c82c7e2e96e9a08a7175de9950142a2321f91ef713a3093`, 155 648 B) to the real Xbox at 192.168.0.200 and classifying the post-run signals via the cycle-42D milestone marker matrix.
-- Status: **EXECUTED + DOCS SYNCED; closure commit pending.** Outcome = NEW SIGNAL CLASS `(eeprom.scratch.read=0xBA, witness.scan-self count=0)` — calling-context PARTIALLY CONFIRMED on the bypass-body axis; cycle-22 hypothesis (a) "pre-allocator vsnprintf-pre-libc fault" RULED OUT. ZERO source code touched. ZERO Codex pass (rule #15 doc-only carve-out — the cycle-42D R4-GREEN build deployed here was Codex-R4-GREEN at cycle-42D closure). Doc-only edits: handoff.md + decision-log.md cycle-42E entries prepended; orchestration-state quartet updated; cycle-42E SUMMARY.md written to gitignored run dir.
+- Status: **EXECUTED + DOCS SYNCED + CLOSED.** Closure commit `a6266d5967d153fa44a2fd959ee672673f14e7c9` landed on `apple-silicon-performance` on top of cycle-42D closure `4ec7775c2efc4674c9deafabbedb50a97a747875`. Outcome = NEW SIGNAL CLASS `(eeprom.scratch.read=0xBA, witness.scan-self count=0)` — calling-context PARTIALLY CONFIRMED on the bypass-body axis; cycle-22 hypothesis (a) "pre-allocator vsnprintf-pre-libc fault" RULED OUT. ZERO source code touched. ZERO Codex pass (rule #15 doc-only carve-out — the cycle-42D R4-GREEN build deployed here was Codex-R4-GREEN at cycle-42D closure). Doc-only edits: handoff.md + decision-log.md cycle-42E entries prepended; orchestration-state quartet updated; cycle-42E SUMMARY.md written to gitignored run dir.
 
 ## Why cycle 42E ran this session
 
@@ -12,7 +12,7 @@ Cycle 42D closed with implementation+build+Codex deploy-ready but explicitly DEF
 1. **Real-Xbox deployment of cycle-42D R4-GREEN XBE.** 18-step sequence executed identically to cycle 42C with the cycle-42D interpretation matrix substituted. Run dir `benchmark-runs/cycle42e-realxbox-20260524T143801Z/` (gitignored) with: `00-baseline-status.txt`, `00-run-meta.txt`, `01a/01b/01c-pre-baseline-*.txt`, `02-reboot-1-ts.txt`, `03-poll-recovery.txt`, `04-cycle42d-r4-green-sha.txt`, `05-ftp-upload.txt`, `06-ensure-agent.txt`, `07-unsafe-enable.txt`, `08-eeprom-scratch-reset.txt`, `09-eeprom-scratch-read-baseline.txt`, `10-witness-scan-self-baseline.txt`, `11-witness-scan-baseline.txt`, `12-runxbe-ts.txt`, `13-poll-recovery.txt`, `14-post-ensure-agent.txt`, `15-final-witness-scan.txt`, `16-final-witness-scan-self.txt`, `17-final-eeprom-scratch-read.txt`, `18-final-eeprom.bin`, `18-final-eeprom-tail.txt`, `SUMMARY.md` (full classification + cycle-42D matrix application + four HIGH-confidence proofs + recommended cycle-42F options).
 2. **Canonical docs synced.** handoff.md cycle-42E entry prepended above cycle-42D; decision-log.md cycle-42E entry prepended above cycle-42D.
 3. **Orchestration-state quartet updated.** This file + current-cycle.md + validation-status.md + handoff-summary.md.
-4. **Bounded slice commit on `apple-silicon-performance`** (pending; final action of session).
+4. **Bounded slice commit on `apple-silicon-performance`** — LANDED as `a6266d5967d153fa44a2fd959ee672673f14e7c9`.
 
 ## Session progress
 
@@ -30,7 +30,7 @@ Cycle 42D closed with implementation+build+Codex deploy-ready but explicitly DEF
 - [x] Updated handoff.md (cycle-42E entry above cycle-42D).
 - [x] Updated decision-log.md (cycle-42E entry above cycle-42D).
 - [x] Updated orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md).
-- [ ] Slice closure commit on `apple-silicon-performance`.
+- [x] Slice closure commit on `apple-silicon-performance` — `a6266d5967d153fa44a2fd959ee672673f14e7c9`.
 
 ## Confidence + risk notes
 
