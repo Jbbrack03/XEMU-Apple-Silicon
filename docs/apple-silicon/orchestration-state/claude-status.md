@@ -50,7 +50,7 @@ Cycle 41e closure pre-recorded the cycle-42 candidate-A path explicitly: "(A) mu
 - [x] Updated handoff.md cycle-42A entry on top above cycle-41d.
 - [x] Updated decision-log.md cycle-42A entry above cycle-41e.
 - [x] Updated orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md).
-- [ ] Slice closure commit landing on `apple-silicon-performance` — final step.
+- [x] Slice closure commit landed on `apple-silicon-performance` as `aa2981ee3ab1a52434d7a147826230417d11a723`. Bounded closeout-sync follow-up commit on top syncs orchestration-state quartet to reference the landed hash.
 
 ## Confidence + risk notes
 

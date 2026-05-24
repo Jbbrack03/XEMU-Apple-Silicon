@@ -84,4 +84,4 @@ Reproducibility shape continues:
 - [x] G0(c) PERSISTS classification confirmed via three primary signals + full EEPROM hex dump cross-check.
 - [x] Evidence directory written with SUMMARY.md + 17 step-numbered logs + 4× Codex prompts + 4× Codex outputs.
 - [x] handoff.md / decision-log.md / orchestration-state quartet updated; prior cycles preserved unchanged below.
-- [ ] Closure commit landing on `apple-silicon-performance` — final step.
+- [x] Closure commit landed on `apple-silicon-performance` as `aa2981ee3ab1a52434d7a147826230417d11a723`. Bounded closeout-sync follow-up commit on top syncs orchestration-state quartet to reference the landed hash.
