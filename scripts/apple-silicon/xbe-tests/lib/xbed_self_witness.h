@@ -210,8 +210,16 @@
  * Cycle 42 candidate A redesigns the allocation as MULTI-PAGE.
  * The producer now requests `0x2000` bytes (= 2 pages, 8 KiB)
  * instead of cycle-41e's `0x1000` (1 page). `MmPersistContiguous-
- * Memory` is called with the matching `0x2000` size so both
- * pages survive the chainload. The page-wipe loop also covers
+ * Memory` is called with the matching `0x2000` size — INTENT
+ * (cycle 23 design): both pages SHOULD survive the chainload.
+ * Whether `MmPersistContiguousMemory` actually retains the
+ * allocation across the chainload on THIS BIOS revision is NOT
+ * formally measured on this hardware (cycle-42E's `(0xBA, count=0)`
+ * outcome's (α) reading is consistent with "persist was applied
+ * but the page was nevertheless not findable by scan-self post-
+ * chainload"; cycle-42F Codex R2 MED adopted 2026-05-24 narrows
+ * the earlier "so both pages survive the chainload" wording to the
+ * INTENT framing). The page-wipe loop also covers
  * `0x2000` bytes so neither page accidentally matches the WTNS
  * magic predicate at the consumer's next 0x1000-stride read.
  * The WTNS magic + version + reserved0 + reserved1 header still
@@ -500,6 +508,17 @@
  *        | expected in the cycle-42B sequence since the thunk fires
  *        | stage=6 exactly once — defensive; would only fire if
  *        | xbed_self_witness_fire(6) is somehow called twice)
+ *   0xBC | cycle-42F post-stamp in-process readback discriminator —
+ *        | written ONLY after the 0xBA full-completion marker AND
+ *        | only if a volatile read of `vp_c42d[0]` through the
+ *        | kseg0 cached-mirror alias observes XBED_SELF_WITNESS_MAGIC
+ *        | post-wbinvd. See the "Cycle-42F" Safety-notes subsection
+ *        | above for the full semantics, the post-run interpretation
+ *        | matrix delta, and the Honest framing on what 0xBC does
+ *        | (RULES OUT cycle-42E (β) "silent marker-write inflation
+ *        | past the WTNS stamp") and does NOT (does NOT prove post-
+ *        | chainload survival nor in-window scan-self visibility)
+ *        | prove.
  *
  * Cycle-42D post-run EEPROM-byte interpretation table (combined
  * with `witness.scan-self count` and the cycle-42B joint
@@ -713,7 +732,238 @@
  *     bypass is never entered for any reason, the EEPROM byte
  *     stays at 0xA6 — same INCONCLUSIVE shape as cycle 42C, but
  *     now distinguishable from cycle-42A (0xA4) and from cycle-
- *     42D-success (0xBA) signals. */
+ *     42D-success (0xBA) signals.
+ *
+ * Cycle-42F (post-stamp in-process WTNS-magic readback discriminator,
+ * 2026-05-24)
+ * -------------------------------------------------------------
+ * Cycle 42E real-Xbox deployment of the cycle-42D R4-GREEN XBE
+ * produced the NEW SIGNAL CLASS `(eeprom.scratch.read=0xBA,
+ * witness.scan-self count=0)` — not directly enumerated in the
+ * cycle-42D matrix. Under the cycle-42D R1 Honest-framing lower-
+ * bound semantics it collapses to TWO mutually-exclusive
+ * possibilities:
+ *
+ *   (α) The bypass body executed end-to-end through all 11
+ *       milestones (0xB0..0xBA) AND the WTNS page is no longer
+ *       discoverable from the agent's `witness.scan-self` scan
+ *       window post-chainload (likely a `MmPersistContiguousMemory`
+ *       persistence-semantics or scan-range-coverage gap, NOT a
+ *       calling-context gap).
+ *   (β) Silent marker-write inflation: the 0xBA SMBus write
+ *       SUCCEEDED on a later milestone-index value while a strictly-
+ *       earlier body step (most plausibly the WTNS magic stamp at
+ *       milestone 9 or the reserved0/reserved1 stamp at milestone
+ *       10) actually faulted silently. Vanishingly unlikely on a
+ *       stable post-cold-boot 24LC02 EEPROM + SMBus controller, but
+ *       not formally RULED OUT by EEPROM-byte evidence alone.
+ *
+ * Cycle 42F adds ONE additional milestone marker — 0xBC = `(0xB0 |
+ * XBED_SELF_WITNESS_C42D_M_POST_READBACK)` — that fires ONLY after:
+ *
+ *   1. The cycle-42D 0xBA full-completion marker write has been
+ *      attempted (its NTSTATUS is still discarded per cycle-42D R1
+ *      Honest-framing; whether the 0xBA SMBus write actually landed
+ *      is not knowable from in-process state).
+ *   2. The shim re-reads `vp_c42d[0]` through the kseg0 cached-
+ *      mirror alias (`(volatile uint32_t *)(phys | 0x80000000u)`)
+ *      and observes the readback value equals
+ *      `XBED_SELF_WITNESS_MAGIC` (= 0x534E5457).
+ *
+ * The readback executes AFTER the `wbinvd` flush at milestone 10's
+ * body. Per Intel SDM Vol. 3A §2.8.6 / §14, `wbinvd` writes back +
+ * invalidates the local (and shared) caches; on uniprocessor OG Xbox
+ * it returns the cache hierarchy to a coherent state with main
+ * memory before the next load issues. Because `vp_c42d` is declared
+ * `volatile uint32_t *`, the compiler MUST emit a load instruction
+ * (no constant-folding from the prior store at milestone 9). What
+ * the wbinvd-then-volatile-load pair establishes is the narrower
+ * claim that the same-core same-virtual-address read sees the
+ * value the producer just stored to `vp_c42d[0]` via the SAME kseg0
+ * cached-mirror alias the agent's downstream `witness.scan-self`
+ * reader would later walk — i.e. immediate in-process observability
+ * of the stamp on that cache-policy path post-flush. It is NOT a
+ * formal proof that the value reached DRAM in a way that survives
+ * tear-down (chainload, persist-flag retention, post-process page
+ * reclamation); those are independent properties and require their
+ * own evidence (Codex round-1 MED adopted 2026-05-24). The choice
+ * of the cached alias here is deliberate: the agent-side scan also
+ * walks `(phys | 0x80000000u)` aliases for the same magic, so
+ * reading back on the cached path matches the consumer's eventual
+ * read path. A read through the uncached alias (`phys | 0xB0000000u`
+ * — note this codebase documents the uncached RAM mirror as
+ * `0xB0000000`, not `0xA0000000`; see
+ * `scripts/apple-silicon/xbe-tests/oracle-agent/protocol.c:177`)
+ * would be a DIFFERENT experiment (does the value reach the
+ * uncached aperture under wbinvd's invalidate semantics?), not a
+ * cleaner version of this one.
+ *
+ * What 0xBC PROVES (Codex R1 MED adopted — wording narrowed to the
+ * IN-PROCESS OBSERVABILITY claim, NOT a DRAM-commit / persistence
+ * claim; the broader memory-commit framing the cycle-42F draft
+ * initially used over-shot what wbinvd-then-load formally guarantees):
+ *
+ *   - The same-core same-virtual-address volatile readback through
+ *     the kseg0 cached-mirror alias (`(phys | 0x80000000u)`) observes
+ *     `XBED_SELF_WITNESS_MAGIC` AT the moment of the readback (i.e.
+ *     nanoseconds after the stamp + wbinvd), at the very same alias
+ *     the `witness.scan-self` consumer would later walk.
+ *   - Under cycle-42E's (α) reading: the body progressed past the
+ *     WTNS stamp at milestone 9 AND the reserved0/reserved1 stamp at
+ *     milestone 10 AND the marker helper's HalWriteSMBusValue path
+ *     for milestone 10 SUCCEEDED (otherwise the post-run byte would
+ *     be at most 0xB9 and never reach 0xBC because each marker call
+ *     overwrites the previous byte with strictly increasing values).
+ *     Therefore observing 0xBC AT MINIMUM RULES OUT (β) "the WTNS
+ *     stamp silently failed but a later marker SMBus write inflated
+ *     the byte past it" — the magic readback proves the stamp was
+ *     observable on the cached kseg0 path post-write. The narrower
+ *     scope here is intentional: in-process visibility on the same
+ *     cache-policy path the consumer scans is exactly what would
+ *     have to be true for (α) to be possible AND what would have
+ *     to be false for (β)-via-unfired-stamp to be possible — the
+ *     stronger DRAM-commit / post-chainload-survival framing is
+ *     NOT needed to RULE OUT (β) on this axis.
+ *   - Combined with the EXISTING cycle-22 axis evidence from cycle
+ *     42E (entry-point override + thunk fired + 0xBA marker landed +
+ *     no .CRT$XXC fire overwrote the byte with 0xA4): cycle-22 axis
+ *     ADVANCES from "PARTIALLY CONFIRMED on the bypass-body axis"
+ *     (cycle 42E) → **CONFIRMED on the bypass-body + stamp-observability
+ *     axis** (cycle 42F under 0xBC outcome). The remaining post-
+ *     chainload discoverability gap is now strictly a post-XBE-exit
+ *     story (`MmPersistContiguousMemory` persistence semantics OR
+ *     scan-self phys-range coverage), NOT an in-XBE story.
+ *
+ * What 0xBC does NOT PROVE (Honest framing carried over from
+ * cycle 42D R1.HIGH):
+ *
+ *   - It does NOT prove the WTNS page will SURVIVE the post-XBE
+ *     chainload return to the dashboard. `MmPersistContiguousMemory`
+ *     is supposed to pin allocations across the chainload, but its
+ *     exact retention semantics on THIS BIOS revision for an
+ *     allocation requested from PRE-WinMainCRT context (i.e. before
+ *     the C runtime's standard process-init handshakes have run)
+ *     are not measured. The page may be torn down by the dashboard's
+ *     process tearer regardless of the persist-flag bit. Direct
+ *     evidence for post-chainload survival requires either (i)
+ *     scan-self finding the page (which is what cycle 42E's `count=0`
+ *     observation explicitly did NOT do, and which cycle 42F does
+ *     NOT change) OR (ii) a future cycle that broadens scan-self's
+ *     phys-range enumeration.
+ *   - It does NOT prove the WTNS page's PHYS lands inside the
+ *     agent-side `witness.scan-self` kseg0 enumeration window. The
+ *     in-process readback walks the SAME phys page the producer
+ *     allocated; the agent-side scan walks every page in
+ *     `[0x80010000, 0x84000000]` looking for the magic. If the
+ *     producer's phys is INSIDE that window, both readers agree on
+ *     visibility post-chainload; if the producer's phys is OUTSIDE
+ *     that window, the in-process readback succeeds but post-
+ *     chainload `scan-self` still reports count=0. Disambiguating
+ *     in-window-but-torn-down vs out-of-window-but-surviving still
+ *     requires the cycle-42F alternative slice (broaden the agent
+ *     scan).
+ *   - The 0xBC SMBus write is STILL best-effort per cycle-42D R1
+ *     Honest-framing: its NTSTATUS is discarded. If the readback
+ *     observed the magic but the 0xBC HalWriteSMBusValue itself
+ *     failed silently, the post-run byte stays at 0xBA and (α) vs
+ *     (β) disambiguation collapses BACK to the cycle-42E shape.
+ *     0xBA is therefore the LOWER BOUND on what cycle 42F can
+ *     prove on a single run; only 0xBC observed post-run carries
+ *     the new information.
+ *   - It does NOT prove the body executed past milestone 10 to any
+ *     hypothetical milestone 11 or beyond — the bypass returns
+ *     IMMEDIATELY after the 0xBC marker write (or after the 0xBA
+ *     marker write if the readback fails), so no further body code
+ *     exists for cycle 42F to instrument.
+ *   - It does NOT change the cycle-42D `(0xBn, count=0)` rows for
+ *     n < 10 — those collapse to the same set of (i)/(ii)/(iii)
+ *     meanings the cycle-42D matrix already enumerated. Cycle 42F
+ *     only introduces a NEW row 0xBC for the post-milestone-10 +
+ *     readback-confirmed case.
+ *
+ * Post-run interpretation matrix delta vs cycle 42D:
+ *
+ *   EEPROM | count | possible meanings (cycle-42F delta only — see
+ *          |       | cycle-42D matrix above for rows 0xA4/0xA6/0xB0..0xBA)
+ *   -------|-------|---------------------------------------------
+ *   0xBA   | 0     | NEW after cycle 42F: STILL the cycle-42E shape's
+ *          |       | (α) vs (β) collapse — the body executed AT LEAST
+ *          |       | through milestone 10's marker write (LOWER BOUND
+ *          |       | per cycle-42D R1.HIGH) BUT either (a) the readback
+ *          |       | observed a value other than `XBED_SELF_WITNESS_MAGIC`
+ *          |       | (which would empirically support (β) — the stamp
+ *          |       | itself failed silently — and which is the
+ *          |       | strongest single signal for that hypothesis), or
+ *          |       | (b) the readback observed the magic and the 0xBC
+ *          |       | SMBus write itself failed silently. (a) vs (b) is
+ *          |       | NOT disambiguatable from EEPROM alone on a single
+ *          |       | run; the asymmetry between observed-0xBA-after-42F
+ *          |       | and observed-0xBC-after-42F is what carries the
+ *          |       | new disambiguation power.
+ *   0xBC   | 0     | NEW after cycle 42F: in-process readback observed
+ *          |       | the WTNS magic AT the kseg0 cached-mirror alias
+ *          |       | (`(phys | 0x80000000u)`) immediately after the
+ *          |       | wbinvd flush AT milestone 10. STRONG evidence for
+ *          |       | cycle-42E (α) "body completed end-to-end and the
+ *          |       | post-chainload count=0 reflects a discoverability
+ *          |       | gap, NOT a calling-context or body-step gap."
+ *          |       | (β) "silent marker-write inflation past the WTNS
+ *          |       | stamp" is RULED OUT (the readback proves the
+ *          |       | stamp was observable post-write). The residual
+ *          |       | live disambiguation is in-window-torn-down vs
+ *          |       | out-of-window-surviving, which 0xBC does NOT
+ *          |       | discriminate — that requires the cycle-42F
+ *          |       | alternative slice (broaden the agent-side
+ *          |       | witness.scan-self phys-range enumeration).
+ *   0xBC   | 1+    | NOT expected from the cycle-42E (0xBA, count=0)
+ *          |       | baseline (would require BOTH the in-process
+ *          |       | readback + 0xBC write SUCCEEDED AND the post-
+ *          |       | chainload WTNS page IS visible to the existing
+ *          |       | scan-self scan — i.e. the discoverability gap
+ *          |       | spontaneously closed). If observed, would imply
+ *          |       | the post-chainload visibility differs run-to-run
+ *          |       | on this hardware (non-deterministic
+ *          |       | `MmPersistContiguousMemory` retention OR
+ *          |       | scan-self enumeration timing). Reproducibility
+ *          |       | check: re-run; if the second observation also
+ *          |       | shows count>=1, cycle-22 axis is FULLY CONFIRMED
+ *          |       | and the cycle-42E "discoverability gap" framing
+ *          |       | reduces to "intermittent visibility, not absent."
+ *
+ * Why a readback discriminator (not just adding more body steps):
+ * cycles 41a..42E have systematically narrowed the live cycle-22
+ * hypothesis space; the cycle-42E collapse to {(α), (β)} is the
+ * smallest remaining ambiguity. (α) and (β) differ in WHERE the body
+ * actually stopped (after milestone 10 vs at some milestone <=9),
+ * which is observable from in-process state with NO additional
+ * kernel calls. The readback is bit-cheaper than adding an oracle-
+ * agent verb (option 1 in the cycle-42F slice menu) and strictly
+ * smaller in blast radius than removing the cycle-42D sticky-flag
+ * pre-set (option 3 — would re-enable cycle-39 EEPROM writes on
+ * later fires, changing the meaning of post-run byte values across
+ * the cycle-42D matrix). Option 2 (this cycle) is the cleanest
+ * cycle-42F slice per the cycle-42E SUMMARY's "recommended next
+ * slice" framing.
+ *
+ * Preservation contract (cycle 42F delta):
+ *   - cycle-23 lockstep (`lib/xbed_a4_witness.{c,h}`): UNTOUCHED.
+ *   - cycle-29 stages-!=6 path: UNTOUCHED (no readback there; the
+ *     fall-through path's stamp + wbinvd sequence is bit-identical
+ *     to cycle 42E).
+ *   - cycle-39 sticky-flag semantics for stages !=6: PRESERVED.
+ *   - cycle-41c/41d guards: REPLICATED inside the stage==6 bypass
+ *     unchanged (cycle-42F adds NOTHING before these guards).
+ *   - cycle-42A multi-page allocation: PRESERVED unchanged.
+ *   - cycle-42B pre-WinMainCRT thunk: UNTOUCHED.
+ *   - cycle-42D 11-marker sequence (0xB0..0xBA + 0xBB): PRESERVED
+ *     unchanged. The 0xBC marker is APPENDED after 0xBA and IS NOT
+ *     a renumbering of any existing milestone. The reuse-path 0xBB
+ *     is UNTOUCHED — it stays at the reuse-completion semantic and
+ *     does NOT gain a readback step (defensive: the reuse path is
+ *     "not expected" per the cycle-42D contract; adding a readback
+ *     there would broaden the diff without information gain since
+ *     a reuse-path execution would be reading a magic stamped by a
+ *     PRIOR fire, not by the current one). */
 #define XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR    0xA8u    /* 24LC02 EEPROM SMBus address; same as oracle-agent/commands.c */
 #define XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF   0xFFu    /* last byte of 256-byte EEPROM image; reserved/unused on stock OEM consoles */
 #define XBED_SELF_WITNESS_EEPROM_TAG_NIB       0xA0u    /* high nibble = 0xA "Path-A.4 tag"; low nibble = (stage & 0x0F) */
@@ -754,6 +1004,18 @@
 #define XBED_SELF_WITNESS_C42D_M_POST_WTNS_STAMP      0x9u
 #define XBED_SELF_WITNESS_C42D_M_FULL_COMPLETION      0xAu
 #define XBED_SELF_WITNESS_C42D_M_REUSE_COMPLETION     0xBu
+/* Cycle-42F (2026-05-24): post-stamp in-process WTNS-magic readback
+ * discriminator, written ONLY after the cycle-42D 0xBA full-completion
+ * marker AND only if a volatile read of `vp_c42d[0]` through the kseg0
+ * cached-mirror alias observes `XBED_SELF_WITNESS_MAGIC`. Yields the
+ * post-run EEPROM byte 0xBC. Disambiguates the cycle-42E `(0xBA,
+ * count=0)` outcome's (α) "body completed end-to-end + WTNS page not
+ * discoverable post-chainload" vs (β) "silent marker-write inflation"
+ * collapse without an oracle-agent rebuild. See the "Cycle-42F"
+ * Safety-notes subsection above for the full semantics + the readback
+ * row of the post-run interpretation matrix + the Honest framing on
+ * what 0xBC does and does NOT prove. */
+#define XBED_SELF_WITNESS_C42D_M_POST_READBACK        0xCu
 
 
 /* Initialize the self-witness if not already initialized, then stamp
@@ -763,9 +1025,10 @@
  * MmPersistContiguousMemory + memset (full allocation) + first-page
  * magic/version init`.
  *
- * Current live behavior (CYCLE-42D stage-6 milestone marker bypass
- * layered on top of CYCLE-42A multi-page redesign; supersedes the
- * cycles-29..42C single-path behavior described in the Safety-notes
+ * Current live behavior (CYCLE-42F post-stamp readback discriminator
+ * layered on top of CYCLE-42D stage-6 milestone marker bypass layered
+ * on top of CYCLE-42A multi-page redesign; supersedes the
+ * cycles-29..42E single-path behavior described in the Safety-notes
  * blocks above):
  *
  *   - If `stage == XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT` (= 6),
@@ -780,8 +1043,13 @@
  *     `MmPersistContiguousMemory` + page wipe + WTNS magic stamp
  *     + reserved0/reserved1 stamp + wbinvd sequence, emitting an
  *     EEPROM milestone marker (0xB1..0xBA) after each major step;
- *     return early so control does NOT fall through to the
- *     existing stages-!=6 host-log tail.
+ *     **cycle-42F addendum**: after the 0xBA full-completion marker
+ *     write, perform a volatile readback of `vp_c42d[0]` through
+ *     the kseg0 cached-mirror alias; if the readback observes
+ *     `XBED_SELF_WITNESS_MAGIC`, write the additional 0xBC marker
+ *     (post-stamp readback discriminator). Return early so control
+ *     does NOT fall through to the existing stages-!=6 host-log
+ *     tail.
  *   - Otherwise (stages 1, 3, 4, 5 — the cycle-29 .CRT$XXC,
  *     .CRT$XCU, in-main WTNS1/WTNS2 fires), run the unchanged
  *     cycle-42A code path. The first call allocates a 2-page
@@ -804,9 +1072,13 @@
  * to the non-`-Ex` variant at 0x1000 size; cycle 42A bumped size
  * to 0x2000 while keeping the non-`-Ex` ABI; cycle 42D added the
  * stage-6 milestone marker bypass without changing the underlying
- * allocator call sequence). The most recent authoritative
- * descriptions are the "Cycle-42D" subsection above + the
- * "Cycle-42A" subsection above + this paragraph.
+ * allocator call sequence; cycle 42F added the post-stamp in-process
+ * WTNS-magic readback marker 0xBC AFTER the cycle-42D 0xBA full-
+ * completion marker without changing any earlier milestone semantics
+ * — the readback is a strict APPEND to the cycle-42D 11-marker
+ * sequence). The most recent authoritative descriptions are the
+ * "Cycle-42F" subsection above + the "Cycle-42D" subsection above
+ * + the "Cycle-42A" subsection above + this paragraph.
  *
  * Returns the physical address of the first page of the self-
  * witness allocation on success, or 0 on hard failure (allocation
