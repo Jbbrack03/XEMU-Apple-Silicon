@@ -2,7 +2,7 @@
 
 - Cycle: 39 EEPROM scratchpad pre-`MmAllocateContiguousMemoryEx` discriminator — **CLOSED on `apple-silicon-performance`**. Bounded implementation slice executing the cycle-38 closeout's recommended Option C: add a single-byte EEPROM scratchpad write at offset `0xFF` inside `xbed_self_witness_fire` AS THE LAST INSTRUCTION before `MmAllocateContiguousMemoryEx` (gated AT MOST ONCE per process via a NEW sticky `s_eeprom_scratch_attempted` flag — Codex round-2 P1 finding adopted). Paired with two new oracle-agent verbs `eeprom.scratch.read` + `eeprom.scratch.reset` (reset gated by existing `unsafe.enable`; reader uses a 4-branch decode that explicitly classifies non-`0xA4` `0xA?` values as "indeterminate" rather than aliasing onto sub-case (c) — Codex round-1 P2 finding adopted). Cycle-40 real-Xbox deployment is NOT in this slice.
 - Started: 2026-05-23 (Hermes-supervised bounded session; Claude Code worker run launched after cycle-38 closure commit `1127cafa0d`).
-- Closed: 2026-05-23 (implementation + 2 builds + Codex 3 rounds + canonical-doc sync + orchestration-state quartet refresh; closing commit pending as last action this session).
+- Closed: 2026-05-23 (implementation + 2 builds + Codex 3 rounds + canonical-doc sync + orchestration-state quartet refresh; closure commit `33fb5b7e34` landed on `apple-silicon-performance`). Cycle-39 closeout-sync follow-up commit (this slice) on top is doc-only / state-only — updates this file + `claude-status.md` + `validation-status.md` + `handoff-summary.md` to reflect the landed closure hash; ZERO source/script touched; rule #15 doc-only / state-only carve-out applies — no Codex required for the closeout-sync slice itself.
 - State: **CLOSED — implementation + Codex-validated**. Both rounds of Codex source-side findings (R1 P2 reader 4-branch decode; R2 P1 sticky-flag gate) adopted; R3 returned no new cycle-39 issues (the round-3 P1 was about pre-existing tracked drift in `retail-*.py` importing the preserved-untracked `composite_preflight.py` — explicitly out of cycle-39 scope per the rolling cycle-34+ Hermes-supervision guardrail; deflected with documented reason). Codex marker written to `.claude/state/codex-validate-last-run` at the round-3 fingerprint. Cycle-29 shim allocation/stamp/wbinvd path, cycle-23 lockstep contract, cycle-31 paint sequence, cycle-35 `.CRT$X*` slot mechanism all preserved.
 - Owner: Claude Code worker (Hermes-supervised bounded session), launched 2026-05-23.
 - HEAD at start: cycle-38 closure commit `1127cafa0d` on `apple-silicon-performance`.
@@ -25,7 +25,8 @@
 12. Codex round 3: P1 finding about pre-existing tracked drift in `retail-*.py` importing untracked `composite_preflight.py`. DEFLECTED: explicit out-of-scope per the cycle-34..38 Hermes-supervision guardrail; the cycle-39 closing commit does NOT stage those files. Cycle-39 source surface itself had no findings in round 3.
 13. Wrote `.claude/state/codex-validate-last-run` marker with round-3 fingerprint.
 14. Updated canonical docs/state: `handoff.md` cycle-39 entry on top above cycle-38; `decision-log.md` cycle-39 entry above cycle-38; orchestration-state quartet (this file + `claude-status.md` + `validation-status.md` + `handoff-summary.md`) closure pass.
-15. (Pending — final action) Closure commit on `apple-silicon-performance`.
+15. Closure commit landed on `apple-silicon-performance` as `33fb5b7e34`.
+16. Bounded doc-only / state-only closeout-sync follow-up commit (this slice) on top updates the orchestration-state quartet to reference the landed closure hash.
 
 ## Exit criteria — final status
 
@@ -37,7 +38,7 @@
 6. [x] Codex validation completed (3 rounds; 2 source-side findings adopted with rebuilds; 1 out-of-scope finding deflected with documented reason); marker written at `.claude/state/codex-validate-last-run`.
 7. [x] Canonical docs/state updated with the implementation details, validation status, and the cycle-40 recommendation.
 8. [x] `git status` clean except intended cycle-39 changes + known pre-existing drift / untracked files.
-9. [ ] Closure commit on `apple-silicon-performance` (pending — committed last in this session before exit).
+9. [x] Closure commit on `apple-silicon-performance` landed as `33fb5b7e34`; bounded doc-only / state-only closeout-sync follow-up commit (this slice) on top updates the orchestration-state quartet to reference the landed hash.
 10. [-] Local xemu cold-boot smoke did NOT reach the XBE within the bounded slice's wait budget (cold boot through BIOS to DVD load exceeds ~120 s without a snapshot path); structural correctness coverage rests on clean link + cycle-29 shim's existing Codex-validated path + xemu's QEMU smbus-eeprom device + Codex source review. Documented transparently in handoff.md + decision-log.md.
 
 ## Out-of-scope (kept bounded for cycle 39)

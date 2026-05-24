@@ -35,7 +35,7 @@ Cycle 38 closure (commit `1127cafa0d`) exhausted the static binary surface as a 
 - [x] handoff.md cycle-39 entry on top above cycle-38.
 - [x] decision-log.md cycle-39 entry on top above cycle-38.
 - [x] Orchestration-state quartet closure pass.
-- [ ] Closure commit on `apple-silicon-performance` (pending — last action this session).
+- [x] Closure commit on `apple-silicon-performance` landed as `33fb5b7e34`; bounded doc-only / state-only closeout-sync follow-up commit (this slice) on top updates the orchestration-state quartet to reference the landed hash.
 
 ## Confidence + risk notes
 

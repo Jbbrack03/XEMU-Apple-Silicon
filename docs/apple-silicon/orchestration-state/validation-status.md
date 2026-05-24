@@ -53,7 +53,7 @@ The real discriminator answer lives in cycle 40 (real-Xbox run + post-run `eepro
 - [x] handoff.md + decision-log.md cycle-39 entries on top above cycle-38 (cycle-38 + cycle-37 + cycle-36 + cycle-35 preserved unchanged below).
 - [x] Orchestration-state quartet (this file + current-cycle.md + claude-status.md + handoff-summary.md) closure pass.
 - [-] Local cold-boot xemu smoke ATTEMPTED but did NOT reach the XBE within the bounded slice's wait budget; documented transparently with the structural-correctness coverage substitute above.
-- [ ] Closure commit on `apple-silicon-performance` (pending — final action this session).
+- [x] Closure commit on `apple-silicon-performance` landed as `33fb5b7e34`; bounded doc-only / state-only closeout-sync follow-up commit (this slice) on top updates the orchestration-state quartet to reference the landed hash.
 
 ## Discriminator semantics — cycle-40 readback table
 
