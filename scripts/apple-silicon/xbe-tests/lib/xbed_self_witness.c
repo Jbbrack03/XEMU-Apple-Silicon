@@ -122,6 +122,109 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
 
         /* First call this process — allocate + init.
          *
+         * CYCLE-42A BOUNDED VARIATION (multi-page redesign — branch
+         * (c) discriminator). After cycle-41 scope was exhausted
+         * (G0(c) PERSISTS across cache-policy 40+41a+41b, address-
+         * range 41c, alignment 41d, and `-Ex`-vs-non-`-Ex` 41e), the
+         * remaining live cycle-22 candidate is branch (c) "a
+         * `size=0x1000`-specific interaction" — the ONE axis the
+         * cycle-41 series could not vary inside the cycle-29 single-
+         * page WTNS layout contract. Cycle 42 candidate A redesigns
+         * the cycle-29 self-witness as a MULTI-PAGE allocation: this
+         * call site now requests `0x2000u` bytes (= 2 pages, 8 KiB)
+         * instead of cycle-41e's `0x1000u` (1 page). All other
+         * cycle-41e invariants are preserved: non-`-Ex` ABI; cycle-39
+         * EEPROM scratchpad sticky-flag breadcrumb; cycle-41c
+         * symmetric phys-range guards; cycle-41d page-alignment
+         * guard; `MmPersistContiguousMemory` + `wbinvd` stamp +
+         * `phys | 0x80000000` cached-mirror alias. The WTNS magic +
+         * version + reserved0 + reserved1 header still lives at
+         * offset 0 of the FIRST page of the allocation; the second
+         * page is zero-filled. The cycle-29 consumer
+         * (`oracle-agent/commands.c::cmd_witness_scan_self`) scans
+         * every 0x1000 page in the kseg0 window
+         * `[0x80010000, 0x84000000]` for the WTNS magic — since only
+         * the first page carries the magic, the consumer still
+         * reports `count=1` per cycle-42A allocation (unchanged
+         * count semantics vs cycles 29..41e); no consumer code
+         * change is required.
+         *
+         * Why 0x2000u (NOT 0x4000u, NOT 0x8000u): smallest multi-
+         * page size that actually tests branch (c). Larger sizes
+         * would (i) increase the contiguous-RAM pressure on the
+         * real-Xbox kernel allocator and risk a NEW failure mode
+         * (allocator-pool exhaustion) confounding the size-axis
+         * signal, and (ii) widen the blast radius of any future
+         * recovery work without adding information. 0x2000u is the
+         * minimal increment that genuinely varies the size axis
+         * while keeping every other cycle-41e invariant intact.
+         *
+         * Discriminator semantics (cycle-42A real-Xbox readback):
+         *   - EEPROM byte=0xA4 + `witness.scan-self count >= 1`
+         *     with `(reserved0 >> 24) == 0xA4` and `reserved1 >= 1`
+         *     → multi-page allocation succeeded → STRONG evidence
+         *     FOR branch (c) being the failing constraint (single-
+         *     page allocation from this calling context is rejected
+         *     by the kernel; multi-page is accepted). Cycle-22
+         *     leading hypothesis is FURTHER NARROWED toward branch
+         *     (c). Not conclusive on its own: the kernel allocator
+         *     may route single-page and multi-page contiguous
+         *     requests through DIFFERENT internal code paths (e.g.
+         *     size-bucketed free lists, separate pool arenas, or
+         *     distinct minimum-size policies for contiguous-memory
+         *     allocations from a pre-`main()` calling context). A
+         *     2-page success could therefore reflect that internal
+         *     code-path divergence rather than a real
+         *     "kernel-validation rejects size=0x1000 specifically"
+         *     rule. Codex round-2 finding adopted; the prior
+         *     "2-page free run when no 1-page hole was available"
+         *     example was logically impossible (any free
+         *     2-page contiguous run trivially contains a free
+         *     1-page hole), and the replacement covers the
+         *     internally-distinct-code-path failure mode that the
+         *     fragmentation example tried to gesture at.
+         *   - EEPROM byte=0xA4 + `witness.scan-self count=0` →
+         *     G0(c) PERSISTS at 0x2000u as well → STRONG evidence
+         *     AGAINST size being the failing axis at the smallest
+         *     multi-page step. The cycle-22 candidate set then
+         *     forces a move to candidate B (custom XBE-header
+         *     callback before `_start`) for the calling-context
+         *     axis, since size has been varied as far as the
+         *     cycle-29 layout reasonably permits without
+         *     introducing confounds.
+         *   - EEPROM byte=0x00 + count=0 → cycle-39 G0(a)+(b)
+         *     regression (sticky-flag did not preserve byte) — NOT
+         *     expected from cycle-42A's bounded diff; would
+         *     indicate a build artifact problem, NOT a cycle-42A
+         *     signal. Re-baseline EEPROM and re-run.
+         *
+         * Honest framing carried over from cycle-41e: cycle-42A is
+         * NOT a pure single-axis discriminator either. Bumping
+         * `size` from `0x1000u` to `0x2000u` while continuing to
+         * call the non-`-Ex` ABI means the kernel still picks
+         * Protect / placement / Alignment internally; the new
+         * 2-page request may interact differently with the kernel's
+         * pool-search policy (it has to find 2 contiguous physical
+         * pages) and that interaction is itself uncharacterized on
+         * this hardware. The cycle-42A SUCCESS interpretation is
+         * therefore "STRONG-but-not-conclusive evidence FOR branch
+         * (c)"; the FAILURE interpretation is "STRONG evidence
+         * AGAINST size being the operative axis at the smallest
+         * multi-page step." Neither outcome closes branch (c)
+         * formally on its own — that would require sweeping size
+         * across multiple multi-page steps OR cross-validating with
+         * candidate B. Same envelope structure as cycle 41e's
+         * Honest-framing paragraph below.
+         *
+         * The cycle-41E historical comment block is preserved
+         * verbatim below for the cycle-29..41e history. The
+         * load-bearing source delta for cycle-42A is the size
+         * literal here (and at the matching `MmPersistContiguousMemory`
+         * + page-wipe-loop sites below). Failure log line + persist
+         * size + wipe-loop bound are updated to match.
+         *
+         * --- cycle-41e historical comment block (preserved) ---
+         *
          * CYCLE-41E BOUNDED VARIATION (non-`-Ex` fallback): replace
          * the cycle-29..41d `MmAllocateContiguousMemoryEx(size,
          * lowest, highest, alignment, protect)` 5-arg call with the
@@ -260,12 +363,12 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
          * readback path is unchanged — both the stamp below and
          * `witness.scan-self` still use the `phys | 0x80000000`
          * cached-RAM mirror. */
-        PVOID p = MmAllocateContiguousMemory(0x1000u);
+        PVOID p = MmAllocateContiguousMemory(0x2000u);
         if (!p) {
             xbed_host_log_write(
                 "xbed_self_witness: MmAllocateContiguousMemory "
-                "(non-Ex; cycle-41e) failed; cycle-29 option (c) "
-                "page not allocated");
+                "(non-Ex; cycle-42A 0x2000 multi-page) failed; "
+                "cycle-29 option (c) page not allocated");
             return 0;
         }
 
@@ -367,10 +470,13 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         if (phys < 0x00010000u) {
             xbed_host_log_writef(
                 "xbed_self_witness: MmGetPhysicalAddress returned "
-                "phys=0x%08lx < 0x00010000; cycle-41e phys is below "
+                "phys=0x%08lx < 0x00010000; cycle-42A phys is below "
                 "the agent reader's kseg0 scan window "
-                "[0x80010000..0x84000000]; freeing self-witness page "
-                "(defensive — symmetric lower-bound guard)",
+                "[0x80010000..0x84000000]; freeing self-witness "
+                "allocation (defensive — symmetric lower-bound guard; "
+                "guards the FIRST page of the 0x2000 multi-page "
+                "allocation — the only page that carries the WTNS "
+                "magic)",
                 (unsigned long)phys);
             MmFreeContiguousMemory(p);
             return 0;
@@ -378,11 +484,15 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         if (phys >= 0x04000000u) {
             xbed_host_log_writef(
                 "xbed_self_witness: MmGetPhysicalAddress returned "
-                "phys=0x%08lx >= 0x04000000; cycle-41e phys is above "
+                "phys=0x%08lx >= 0x04000000; cycle-42A phys is above "
                 "the agent reader's kseg0 scan window "
-                "[0x80010000..0x84000000]; freeing self-witness page "
-                "(defensive — symmetric upper-bound guard; should not "
-                "fire on retail 64 MiB hardware)",
+                "[0x80010000..0x84000000]; freeing self-witness "
+                "allocation (defensive — symmetric upper-bound guard; "
+                "should not fire on retail 64 MiB hardware; checks "
+                "FIRST-page start phys only because the WTNS magic "
+                "lives at offset 0 of the first page, so first-page "
+                "visibility is sufficient for consumer scan-self to "
+                "find the stamp)",
                 (unsigned long)phys);
             MmFreeContiguousMemory(p);
             return 0;
@@ -414,22 +524,30 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         if ((phys & 0xFFFu) != 0u) {
             xbed_host_log_writef(
                 "xbed_self_witness: MmGetPhysicalAddress returned "
-                "phys=0x%08lx not 0x1000-aligned; cycle-41e phys "
+                "phys=0x%08lx not 0x1000-aligned; cycle-42A phys "
                 "would be invisible to the agent reader's 0x1000-stride "
-                "scan; freeing self-witness page (defensive — "
+                "scan; freeing self-witness allocation (defensive — "
                 "alignment guard; non-`-Ex` API has no documented "
                 "returned-alignment guarantee; guard closes the "
-                "consumer-stride blind spot regardless)",
+                "consumer-stride blind spot for the FIRST page of "
+                "the 0x2000 multi-page allocation regardless)",
                 (unsigned long)phys);
             MmFreeContiguousMemory(p);
             return 0;
         }
 
-        /* Mark persistent so the page survives this XBE's
+        /* Mark persistent so the allocation survives this XBE's
          * `HalReturnToFirmware(HalRebootRoutine)` exit + the
          * dashboard chainload + the relaunched agent process death
-         * boundary. Same flag the agent uses to keep XCTR alive. */
-        MmPersistContiguousMemory(p, 0x1000u, TRUE);
+         * boundary. Same flag the agent uses to keep XCTR alive.
+         * Cycle-42A: persist size matches the 0x2000u multi-page
+         * allocation above so BOTH pages survive the reboot; the
+         * cycle-29 consumer only reads the first page (where the
+         * WTNS magic + header live), but persisting the full
+         * allocation matches the kernel's expectation that
+         * MmFreeContiguousMemory will eventually release the same
+         * range MmPersistContiguousMemory pinned. */
+        MmPersistContiguousMemory(p, 0x2000u, TRUE);
 
         /* Canonicalize the virtual alias to kseg0 (virt = phys |
          * 0x80000000) so the agent's downstream reader and any
@@ -442,13 +560,22 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         volatile uint32_t *vp =
             (volatile uint32_t *)(phys | 0x80000000u);
 
-        /* Zero the full page then stamp the 16-byte header. We
-         * deliberately do NOT preserve any pre-existing contents on
-         * the returned phys: the cycle-29 discriminator wants an
-         * unambiguous "this XBE allocated this page" signal, and
-         * the agent's preserve-branch concerns (cycle 27) don't
-         * apply here because no one else is sharing this magic. */
-        for (uint32_t i = 0; i < 0x1000u / sizeof(uint32_t); i++) {
+        /* Zero the full allocation then stamp the 16-byte header
+         * at the first page's offset 0. We deliberately do NOT
+         * preserve any pre-existing contents on the returned phys:
+         * the cycle-29 discriminator wants an unambiguous "this XBE
+         * allocated this page" signal, and the agent's preserve-
+         * branch concerns (cycle 27) don't apply here because no
+         * one else is sharing this magic. Cycle-42A: wipe spans
+         * BOTH pages (0x2000 bytes total) so the second page's
+         * contents do not accidentally match the WTNS magic
+         * predicate at the consumer's next 0x1000-stride read; the
+         * first page receives the magic + version + reserved0 +
+         * reserved1 stamp below. The consumer reports `count=1`
+         * per cycle-42A allocation (single magic match per
+         * allocation; second page is solid zero and fails the
+         * `p[0] != SELF_WTNS_MAGIC` predicate). */
+        for (uint32_t i = 0; i < 0x2000u / sizeof(uint32_t); i++) {
             vp[i] = 0;
         }
         vp[0] = XBED_SELF_WITNESS_MAGIC;

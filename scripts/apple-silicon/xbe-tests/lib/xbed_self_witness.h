@@ -27,11 +27,18 @@
  * Option (c) breaks the (α) vs (γ) ambiguity. Instead of writing into
  * the agent's persistent buffer (which requires the kseg0 scan to
  * find it), the diag XBE allocates ITS OWN persistent contiguous
- * page via `MmAllocateContiguousMemoryEx` + `MmPersistContiguousMemory`,
- * stamps a unique magic tag + the witness stage + a counter into
- * known offsets within that page, and reboots. After the chainload,
- * the relaunched agent runs the new `witness.scan-self` verb, which
- * scans kseg0 for the unique 'WTNS' magic and reports every match.
+ * region (cycle-29 original design used `MmAllocateContiguousMemoryEx`
+ * for a one-page allocation; current cycle-42A live behavior uses
+ * the non-`-Ex` `MmAllocateContiguousMemory` for a two-page
+ * allocation — see the "Cycle-42A" subsection at the end of the
+ * Safety notes block below for the authoritative current-behavior
+ * description) via `MmPersistContiguousMemory`, stamps a unique
+ * magic tag + the witness stage + a counter into known offsets
+ * within that region (specifically: offset 0 of the FIRST page in
+ * the current multi-page layout), and reboots. After the
+ * chainload, the relaunched agent runs the new `witness.scan-self`
+ * verb, which scans kseg0 for the unique 'WTNS' magic and reports
+ * every match.
  *
  * Discriminator semantics (cycle-30 real-Xbox readback, NOT this
  * cycle). Cycle 29 is positioned narrowly as a **(γ)-only**
@@ -101,7 +108,10 @@
  * Safety notes
  * ------------
  * - Allocation uses `MmAllocateContiguousMemory` (non-`-Ex` variant;
- *   cycle-41e bounded variation) with size = 0x1000 (one page).
+ *   cycle-41e bounded variation) with size = `0x2000` (two pages,
+ *   8 KiB; cycle-42A bounded variation — see cycle-42A section at
+ *   the end of this Safety-notes block for the rationale + the
+ *   discriminator semantics + the consumer-side impact).
  *   The 1-arg call is the canonical kernel prototype declared at
  *   `nxdk/lib/xboxkrnl/xboxkrnl.h:3473-3476` and exported as
  *   `MmAllocateContiguousMemory@4` (`xboxkrnl.exe.def:172`); the
@@ -185,6 +195,111 @@
  *   No fallback path — option (c)'s entire value proposition is that
  *   it allocates its own page; a fallback would defeat the
  *   discriminator semantics.
+ *
+ * Cycle-42A (multi-page redesign — branch (c) discriminator,
+ * 2026-05-24)
+ * -------------------------------------------------------------
+ * Cycle-41 scope is now EXHAUSTED. G0(c) PERSISTED across cycles
+ * 40+41a+41b (cache-policy variations under `-Ex`), 41c (matched-
+ * tuple address range under `-Ex`), 41d (alignment-drop under
+ * `-Ex`), and 41e (non-`-Ex` ABI fallback). The remaining live
+ * cycle-22 candidate is branch (c) "a `size=0x1000`-specific
+ * interaction" — the ONE axis the cycle-41 series could not vary
+ * inside the cycle-29 single-page WTNS layout contract.
+ *
+ * Cycle 42 candidate A redesigns the allocation as MULTI-PAGE.
+ * The producer now requests `0x2000` bytes (= 2 pages, 8 KiB)
+ * instead of cycle-41e's `0x1000` (1 page). `MmPersistContiguous-
+ * Memory` is called with the matching `0x2000` size so both
+ * pages survive the chainload. The page-wipe loop also covers
+ * `0x2000` bytes so neither page accidentally matches the WTNS
+ * magic predicate at the consumer's next 0x1000-stride read.
+ * The WTNS magic + version + reserved0 + reserved1 header still
+ * lives at offset 0 of the FIRST page of the allocation; the
+ * second page is solid zero.
+ *
+ * Why `0x2000` and not `0x4000` / `0x8000`: smallest multi-page
+ * size that actually tests branch (c). Larger sizes would
+ * (i) increase contiguous-RAM pressure on the real-Xbox kernel
+ * allocator and risk a NEW failure mode (allocator-pool
+ * exhaustion) confounding the size-axis signal, and (ii) widen
+ * blast radius without adding information. `0x2000` is the
+ * minimal increment that genuinely varies the size axis while
+ * keeping every other cycle-41e invariant intact.
+ *
+ * Consumer impact: the cycle-29 consumer at
+ * `oracle-agent/commands.c::cmd_witness_scan_self` scans every
+ * 0x1000 page in the kseg0 window `[0x80010000, 0x84000000]`
+ * for the WTNS magic. Since only the first page of a cycle-42A
+ * allocation carries the magic, the consumer still reports
+ * `count=1` per cycle-42A allocation — same count semantics as
+ * cycles 29..41e. NO consumer code change is required; only a
+ * documentation note in the `cmd_witness_scan_self` comment
+ * block flagging that the producer now allocates multi-page.
+ *
+ * Guard adjustment (cycle-41c phys-range + cycle-41d page-
+ * alignment): the existing guards check the FIRST page of the
+ * allocation (which carries the WTNS magic and is the only page
+ * the consumer scan needs to be visible). This is sufficient
+ * because the magic stamp + header live exclusively on the first
+ * page; whether the second page falls inside or outside the
+ * consumer scan window is irrelevant — it's zero-filled and
+ * would fail the magic predicate even if scanned. On retail
+ * 64 MiB hardware the upper guard never fires regardless; on the
+ * theoretical 128 MiB debug-Xbox case, a multi-page allocation
+ * straddling the upper end would still have its first page
+ * visible to the consumer as long as the first page's phys is
+ * in `[0x00010000, 0x04000000)`. Both guards are preserved
+ * unchanged in the conditional; only the relevant log strings
+ * are relabeled cycle-41e → cycle-42A and updated to note the
+ * first-page-only nature of the check.
+ *
+ * Discriminator semantics (cycle-42A real-Xbox readback):
+ *   - EEPROM byte=0xA4 + `witness.scan-self count >= 1` with
+ *     `(reserved0 >> 24) == 0xA4` and `reserved1 >= 1`
+ *     → multi-page allocation succeeded → STRONG evidence FOR
+ *     branch (c) being the failing constraint. Not conclusive
+ *     on its own: the kernel allocator may route single-page
+ *     and multi-page contiguous requests through DIFFERENT
+ *     internal code paths (e.g. size-bucketed free lists,
+ *     separate pool arenas, or distinct minimum-size policies
+ *     for contiguous-memory allocations from a pre-`main()`
+ *     calling context). A 2-page success could reflect that
+ *     internal code-path divergence rather than a real
+ *     "kernel-validation rejects size=0x1000 specifically"
+ *     rule. (Codex round-2 finding adopted; the earlier
+ *     "2-page free run without a free 1-page hole" example was
+ *     logically impossible — any free 2-page run trivially
+ *     contains a free 1-page hole; the replacement covers the
+ *     distinct-internal-code-path mode the prior example tried
+ *     to gesture at.)
+ *   - EEPROM byte=0xA4 + `witness.scan-self count=0` → G0(c)
+ *     PERSISTS at 0x2000u → STRONG evidence AGAINST size being
+ *     the failing axis at the smallest multi-page step. The
+ *     cycle-22 candidate set then forces a move to cycle 42
+ *     candidate B (custom XBE-header callback before `_start`
+ *     via `nxdk/tools/cxbe/` modifications) for the calling-
+ *     context axis.
+ *   - EEPROM byte=0x00 + count=0 → cycle-39 G0(a)+(b)
+ *     regression. NOT expected from cycle-42A's bounded diff;
+ *     would indicate a build artifact problem, NOT a cycle-42A
+ *     signal. Re-baseline EEPROM and re-run.
+ *
+ * Honest framing carried over from cycle-41e: cycle-42A is NOT a
+ * pure single-axis discriminator either. Bumping `size` from
+ * `0x1000` to `0x2000` while continuing to call the non-`-Ex`
+ * ABI means the kernel still picks Protect / placement /
+ * Alignment internally; the new 2-page request may interact
+ * differently with the kernel's pool-search policy (it has to
+ * find 2 contiguous physical pages) and that interaction is
+ * itself uncharacterized on this hardware. Cycle-42A SUCCESS
+ * is therefore "STRONG-but-not-conclusive evidence FOR branch
+ * (c)"; FAILURE is "STRONG evidence AGAINST size being the
+ * operative axis at the smallest multi-page step." Neither
+ * outcome closes branch (c) formally on its own — that would
+ * require sweeping size across multiple multi-page steps OR
+ * cross-validating with candidate B. Same envelope structure
+ * as cycle 41e's Honest-framing paragraph in the .c file.
  */
 #ifndef XBED_SELF_WITNESS_H
 #define XBED_SELF_WITNESS_H
@@ -312,15 +427,34 @@
 
 /* Initialize the self-witness if not already initialized, then stamp
  * the given `stage` into `reserved0` and increment `reserved1`.
- * Idempotent — repeated calls reuse the same allocated page; only
- * the first call performs `MmAllocateContiguousMemoryEx +
- * MmPersistContiguousMemory + memset + magic/version init`.
+ * Idempotent — repeated calls reuse the same allocated region; only
+ * the first call performs `MmAllocateContiguousMemory +
+ * MmPersistContiguousMemory + memset (full allocation) + first-page
+ * magic/version init`.
  *
- * Returns the physical address of the self-witness page on success,
- * or 0 on hard failure (allocation failed; no fallback). Caller
- * (e.g. `witness-only/main.c`) is expected to host-log the result
- * via `xbed_host_log_writef` for visibility under
- * `XEMU_GUEST_LOG=1`.
+ * Current live behavior (CYCLE-42A multi-page redesign; supersedes
+ * the cycles-29..41e single-page behavior described in the Safety-
+ * notes block above): the first call allocates a 2-page (0x2000 B,
+ * 8 KiB) contiguous region via the non-`-Ex` 1-arg
+ * `MmAllocateContiguousMemory`, persists the full 0x2000 range via
+ * `MmPersistContiguousMemory`, zeroes the full 0x2000 range via the
+ * page-wipe loop, then stamps the WTNS magic + version + reserved0
+ * + reserved1 header at offset 0 of the FIRST page. Subsequent
+ * `xbed_self_witness_fire` calls reuse the same first-page header.
+ * Historical references to `MmAllocateContiguousMemoryEx` or to
+ * "one page" elsewhere in this header are preserved as cycle-history
+ * context (cycles 29..41d used the `-Ex` variant; cycle 41e moved
+ * to the non-`-Ex` variant at 0x1000 size; cycle 42A bumped size
+ * to 0x2000 while keeping the non-`-Ex` ABI). The most recent
+ * authoritative description is the "Cycle-42A" subsection in the
+ * Safety-notes block above and this paragraph.
+ *
+ * Returns the physical address of the first page of the self-
+ * witness allocation on success, or 0 on hard failure (allocation
+ * failed OR phys-range guard fired OR alignment guard fired; no
+ * fallback). Caller (e.g. `witness-only/main.c`) is expected to
+ * host-log the result via `xbed_host_log_writef` for visibility
+ * under `XEMU_GUEST_LOG=1`.
  *
  * Safe to call before any other init — uses only one kernel
  * allocation per process plus straight-line writes; no fopen, no

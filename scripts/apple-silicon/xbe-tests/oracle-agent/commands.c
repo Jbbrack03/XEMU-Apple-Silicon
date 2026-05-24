@@ -704,14 +704,29 @@ int cmd_witness_scan(struct netconn *c, const char *args)
  *         a minimal NV097 single-poke) for an independent
  *         main()-runs verification.
  *   count>=2
- *       → Multiple self-witness pages accumulated across repeated
- *         cycle-30 chainloads within the same physical power
- *         session. The persistent contiguous-memory pool kept the
- *         older page(s) alive (each diag-XBE run leaks one
- *         persistent page until power-off, mirroring the agent's
- *         own leak pattern). Hermes should power-cycle the Xbox
- *         between cycle-30 attempts if precondition cleanliness
- *         is required.
+ *       → Multiple self-witness allocations accumulated across
+ *         repeated cycle-30+ chainloads within the same physical
+ *         power session. The persistent contiguous-memory pool kept
+ *         the older allocation(s) alive (each diag-XBE run leaks
+ *         ONE persistent allocation until power-off, mirroring the
+ *         agent's own leak pattern). Cycle-42A note: each
+ *         allocation is now 2 pages (0x2000 B) instead of cycle-29..
+ *         41e's 1 page (0x1000 B); `count` reported here still grows
+ *         by exactly 1 per cycle-42A allocation (only the first page
+ *         of each allocation carries the WTNS magic; the second
+ *         page is zero-filled and fails the magic predicate at the
+ *         consumer's next 0x1000-stride read). `mapped_pages_seen`
+ *         in the summary line is a separate survey counter — it
+ *         counts every kseg0 page in `[0x80010000, 0x84000000]` for
+ *         which `MmGetPhysicalAddress` returns non-zero, NOT the
+ *         number of WTNS allocations; on retail Original Xbox the
+ *         kseg0 identity mapping for physical RAM is generally
+ *         persistent across reboots, so `mapped_pages_seen` is
+ *         typically stable across runs (cycles 41a..41e all reported
+ *         419) and is not a load-bearing signal for the cycle-42A
+ *         allocation-shape interpretation. Hermes should
+ *         power-cycle the Xbox between attempts if precondition
+ *         cleanliness is required.
  *
  * Filter parity (lockstep with the cycle-29 writer
  * `lib/xbed_self_witness.c`): magic == XBED_SELF_WITNESS_MAGIC,
@@ -722,7 +737,29 @@ int cmd_witness_scan(struct netconn *c, const char *args)
  * reserved1 in [1, 4096]. Tightened (cycle-27-style) version of the
  * cycle-23 filter, applied here because the writer is more
  * restricted than xbed_a4_witness (which had to tolerate arbitrary
- * pre-existing XCTR pages allocated by the agent). */
+ * pre-existing XCTR pages allocated by the agent).
+ *
+ * Cycle-42A producer-side change (2026-05-24; consumer note only,
+ * NO code change required): the cycle-42A producer
+ * (`lib/xbed_self_witness.c`) now requests a 0x2000-byte (two-page)
+ * contiguous allocation instead of cycle-41e's 0x1000-byte (one-
+ * page) request, as the branch-(c) "`size=0x1000`-specific
+ * interaction" discriminator under the post-cycle-41 hypothesis-
+ * narrowing ledger. The WTNS magic + version + reserved0 +
+ * reserved1 header still lives ONLY at offset 0 of the FIRST page
+ * of the multi-page allocation; the second page is zero-filled by
+ * the producer (page-wipe loop now covers the full 0x2000 bytes).
+ * This consumer's per-page 0x1000-stride scan therefore matches
+ * the WTNS magic predicate on the first page only and reports
+ * `count=1` per cycle-42A allocation — same count semantics as
+ * cycles 29..41e. NO consumer code change is required. The
+ * `SELF_WTNS_PAGE_STRIDE` (0x1000) is unchanged because the
+ * producer's first-page placement is page-aligned and the
+ * cycle-29 layout contract for stamp visibility is preserved.
+ * Multiple cycle-42A allocations across re-runs within the same
+ * physical power session would accumulate as multiple count-1
+ * matches (one per allocation) — same accumulation pattern as
+ * cycles 29..41e. */
 #define SELF_WTNS_KSEG0_SCAN_START  0x80010000u
 #define SELF_WTNS_KSEG0_SCAN_END    0x84000000u
 #define SELF_WTNS_PAGE_STRIDE       0x1000u
