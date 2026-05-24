@@ -760,13 +760,245 @@ int cmd_witness_scan(struct netconn *c, const char *args)
  * physical power session would accumulate as multiple count-1
  * matches (one per allocation) — same accumulation pattern as
  * cycles 29..41e. */
-#define SELF_WTNS_KSEG0_SCAN_START  0x80010000u
+/* Cycle-42H phys-range widening (2026-05-24; oracle-agent source
+ * change; rule #15 re-triggers a full Codex pass).
+ *
+ * Motivation (direct response to cycle-42G real-Xbox outcome
+ * `(eeprom.scratch.read=0xBC, witness.scan-self count=0,
+ * mapped_pages_seen=419)`): the cycle-42F in-process readback at
+ * milestone 10 observed the WTNS magic on the cached kseg0 alias
+ * `(phys | 0x80000000u)` post-`wbinvd` and the subsequent 0xBC SMBus
+ * marker write succeeded, BUT the agent's post-chainload
+ * `witness.scan-self` still reports `count=0`. Cycle 42G PROVES the
+ * bypass body + stamp-observability axis but leaves a residual
+ * discoverability gap with three live sub-causes:
+ *
+ *   (1) The WTNS page lands at a physical address whose cached kseg0
+ *       alias falls outside the cycle-29..42G scan window
+ *       `[0x80010000, 0x84000000)`. The original lower bound
+ *       `0x80010000` was a defensive skip of the bottom 64 KiB
+ *       (rationale: kernel-pool allocations were not expected at
+ *       phys < 0x10000); the upper bound `0x84000000` was a defensive
+ *       skip of phys >= 64 MiB which the Original Xbox does not
+ *       address. Variant (1) is unlikely for a normal
+ *       `MmAllocateContiguousMemory(0x2000)` return (kernel pools grow
+ *       downward from the top of RAM; cycle-23 reported phys=0x03eb3000
+ *       D-cycle-28 for 30+ consecutive observations cycles 26..42G —
+ *       well inside the existing window), but cycle 42H still drops
+ *       the lower bound to `0x80000000` so [0, 0x10000) becomes
+ *       observable rather than silently skipped. This is a tooling
+ *       hardening, not a hypothesis-driven probe.
+ *
+ *   (2) The page lives inside the cached kseg0 window during the
+ *       in-process readback but is torn down by the BIOS / kernel
+ *       between the post-`runxbe` chainload return to dashboard and
+ *       the agent's post-chainload `witness.scan-self` invocation.
+ *       This is the leading sub-hypothesis under the cycle-42E
+ *       discoverability framing — `MmPersistContiguousMemory`
+ *       retention semantics for a pre-WinMain allocation may not
+ *       extend across a chainload return on this iND-BiOS revision.
+ *       Cycle-42H cannot prove this alone in a single subsequent
+ *       real-Xbox run, but the per-window breakdown emitted by this
+ *       widened verb lets the next slice's outcome shape distinguish
+ *       (2) from (3) — see "Interpretation table" below.
+ *
+ *   (3) The page survives but is reachable only through the uncached
+ *       kseg1 alias `(phys | 0xA0000000u)`, not through the cached
+ *       kseg0 alias `(phys | 0x80000000u)`. The Original Xbox MIPS-
+ *       style memory map exposes RAM through both aliases; the
+ *       producer (`lib/xbed_self_witness.c`) intentionally writes
+ *       through the cached kseg0 alias because it's the same alias a
+ *       consumer would later walk for the typical "find a tagged
+ *       page" flow. If for any reason this BIOS revision's
+ *       `MmAllocateContiguousMemory(0x2000)` path leaves a survivor
+ *       only at the uncached alias (e.g. via a write-combined buffer
+ *       commit path that pins the uncached mirror but lets the cache
+ *       line drop), the cycle-29..42G cached-only scan would miss it.
+ *       Cycle 42H adds the symmetric kseg1 window
+ *       `[0xA0000000, 0xA4000000)` so (3) becomes observable.
+ *
+ * Width contract (preserves cycle-22 lockout):
+ *
+ *   - kseg0 cached window:   [0x80000000, 0x84000000)  (lower bound
+ *                            dropped from cycle-29..42G's 0x80010000
+ *                            to expose the bottom 64 KiB)
+ *   - kseg1 uncached window: [0xA0000000, 0xA4000000)  (NEW; same
+ *                            64 MiB Original Xbox RAM range, uncached
+ *                            mirror)
+ *   - Stride unchanged:      0x1000 (page-aligned, matches producer's
+ *                            page-aligned 0x2000 allocation; the WTNS
+ *                            magic + version + reserved0 + reserved1
+ *                            header lives at offset 0 of the FIRST
+ *                            page only — cycle-42A producer-side
+ *                            shape, unchanged)
+ *   - Filter unchanged:      `self_wtns_reader_candidate_ok` —
+ *                            cycle-23-style tight filter (magic +
+ *                            version + reserved0 either 0 or A.4-
+ *                            tagged + reserved1 in [1, 4096]). Both
+ *                            windows apply the SAME filter so a
+ *                            cache-line stale read at the kseg0 alias
+ *                            wouldn't accidentally promote noise into
+ *                            a false match.
+ *   - Reporting cap:         total reported entries capped at 256
+ *                            across BOTH windows, same as cycle-29..
+ *                            42G. The first window scanned is kseg0
+ *                            (the producer's canonical alias);
+ *                            kseg1 is scanned second so a kseg0 match
+ *                            is reported first when both aliases hit
+ *                            for the same physical page (which is the
+ *                            normal expected pattern if the page
+ *                            survives at all).
+ *
+ * Interpretation table (cycle 42I or later — the next real-Xbox
+ * slice that runs this widened agent post-chainload):
+ *
+ *   count=0 kseg0_count=0 kseg1_count=0
+ *       → Sub-cause (2) "page torn down between chainload return
+ *         and agent scan" is the leading remaining hypothesis on the
+ *         discoverability axis. Variants (1) and (3) are RULED OUT
+ *         on this run. Next: pursue option 3 of the cycle-42E menu
+ *         (a marker emitted by xbed_self_witness immediately before
+ *         and after the chainload syscall to bracket the teardown
+ *         window) OR the cycle-42F alternative "EEPROM-stamped
+ *         pre-teardown phys" so the agent has a phys to dereference
+ *         instead of enumerate.
+ *   count=N kseg0_count=N kseg1_count=0
+ *       → Page survives + is reachable through the cached kseg0
+ *         alias. If `N=1` with `reserved0=0xA4xxxxxx reserved1=1`,
+ *         the cycle-42D bypass body's WTNS stamp survived the
+ *         chainload AND the cycle-39 sticky-flag setter did NOT fire
+ *         on a later stages-!=6 fire (consistent with the cycle-42D
+ *         sticky-flag-first invariant). Cycle-22 axis fully
+ *         CONFIRMED on the discoverability sub-axis; the cycle-29..
+ *         42G "page not discoverable" framing was a phys-range
+ *         enumeration gap, not a true survival gap.
+ *   count=N kseg0_count=0 kseg1_count=N
+ *       → Sub-cause (3) "page survives only at the uncached kseg1
+ *         alias" CONFIRMED. The producer's cached-alias-only write
+ *         visibility model needs a cycle-43x adjustment OR the
+ *         agent's downstream readers need a kseg1 fallback. Less
+ *         likely on a stable BIOS, but the per-window breakdown is
+ *         what lets us see it.
+ *   count=N kseg0_count=K0 kseg1_count=K1 with K0>0 AND K1>0
+ *       → Page is mapped through BOTH aliases (the normal MIPS-
+ *         style identity-mapped RAM case). Stamp survived; (3)
+ *         RULED OUT; cycle-22 axis fully CONFIRMED. By construction
+ *         `N == K0 + K1` (the reporter increments `reported` for
+ *         every emitted hit on either alias, so the leading
+ *         `count=` integer is the exact sum of the two per-window
+ *         counts modulo the cap-hit case described under
+ *         "Cap-truncation observability" below). The number of
+ *         *distinct physical survivors* visible through the dual-
+ *         alias scan can be smaller than `K0 + K1` because the
+ *         reporter does NOT deduplicate by phys — the same
+ *         physical page matched at both aliases counts twice
+ *         (once per alias). That's deliberate so the operator sees
+ *         the raw dual-alias visibility shape; the per-buf
+ *         `phys=0x...` field is the disambiguator. Per-buf lines
+ *         are emitted in scan order (kseg0 first, then kseg1).
+ *
+ * Cap-truncation observability:
+ *
+ *   The 256-entry global report cap (`SELF_WTNS_REPORT_CAP`) is
+ *   shared across both windows so the response message stays
+ *   bounded in the cycle-23 lwIP-netconn-on-coroutine context. If
+ *   the kseg0 pass alone fills the cap, the kseg1 window is NOT
+ *   scanned (a cap-overflow in kseg0 is itself a strong anomaly
+ *   signal: cycle-29..42G observed at most `count=1` across many
+ *   runs, so a kseg0 256-match flood is more interesting than a
+ *   second window's noise). If the cap is reached during the
+ *   kseg1 pass instead, that pass returns early with whatever it
+ *   has accumulated so far. To prevent silent conflation of
+ *   "no kseg1 evidence", "kseg1 was never scanned", and "kseg1
+ *   was scanned but the cap was reached before the window
+ *   completed", the summary line APPENDS:
+ *
+ *     truncated_at_cap=<0|1>   1 iff the global 256-entry cap was
+ *                              reached during the kseg0 pass OR
+ *                              the kseg1 pass (Codex cycle-42H R2
+ *                              finding adopted — was previously
+ *                              kseg0-only). Acts as a true global
+ *                              truncation signal.
+ *     kseg1_scanned=<0|1>      1 iff the kseg1 pass was executed;
+ *                              0 iff the kseg1 pass was skipped
+ *                              because the kseg0 pass exhausted
+ *                              the cap. Combined with
+ *                              `truncated_at_cap=`, the operator
+ *                              can pinpoint which window saw the
+ *                              truncation: kseg0 truncation maps
+ *                              to (truncated_at_cap=1,
+ *                              kseg1_scanned=0); kseg1 truncation
+ *                              maps to (truncated_at_cap=1,
+ *                              kseg1_scanned=1); no truncation
+ *                              maps to (truncated_at_cap=0,
+ *                              kseg1_scanned=1). The fourth shape
+ *                              (truncated_at_cap=0,
+ *                              kseg1_scanned=0) is unreachable by
+ *                              construction.
+ *
+ *   These two booleans together exhaust the cap-truncation
+ *   disambiguation space. Under normal operation (cycle-29..42G
+ *   has only ever observed `count=0` or `count=1`)
+ *   `truncated_at_cap=0 kseg1_scanned=1` is the expected shape and
+ *   the existing `count=N` field is sufficient on its own.
+ *
+ * Scope-preservation contract:
+ *
+ *   - ZERO change to the cycle-23 `cmd_witness_scan` verb (XCTR
+ *     scanner; cycle-23 lockstep contract intact).
+ *   - ZERO change to the cycle-29 `self_wtns_reader_candidate_ok`
+ *     filter (the producer's stamp shape and the consumer's match
+ *     predicate stay in lockstep).
+ *   - ZERO change to host xemu source, `lib/xbed_self_witness.{c,h}`,
+ *     `lib/xbed_a4_witness.{c,h}`, `witness-only/`, or any nxdk
+ *     source. Only `oracle-agent/commands.c` `cmd_witness_scan_self`
+ *     enumeration body + its documentation block.
+ *   - The existing `count=N mapped_pages_seen=M` summary contract is
+ *     PRESERVED: the leading `count=` integer is the total reported
+ *     across both windows (parsers keying on the first token stay
+ *     happy); `mapped_pages_seen=` is the sum of kseg0 and kseg1
+ *     mapped-page counts (an aggregate survey counter — same role as
+ *     cycle-29..42G but now reflects both aliases). The new fields
+ *     `kseg0_count=`, `kseg1_count=`, `kseg0_mapped=`,
+ *     `kseg1_mapped=`, `truncated_at_cap=`, `kseg1_scanned=` are
+ *     APPENDED to the same line so the runbook's `grep '^count='`
+ *     invocations stay compatible. The cap-handling booleans
+ *     `truncated_at_cap=` + `kseg1_scanned=` were added in response
+ *     to Codex 2026-05-24 cycle-42H R1 medium finding (silent cap-
+ *     truncation of kseg1 evidence would otherwise conflate "no
+ *     kseg1 evidence" with "kseg1 was never scanned").
+ *
+ * Honest-framing what cycle-42H does NOT prove (per project rule #1
+ * + #3):
+ *
+ *   - It does NOT itself run anything on real hardware. It only
+ *     widens the observation aperture. The next bounded slice (cycle
+ *     42I; Hermes's call) must deploy the widened agent + re-run the
+ *     cycle-42G 18-step runbook to actually classify the
+ *     discoverability question.
+ *   - The kseg1 uncached read goes around the L1 + L2 caches; on
+ *     consumer-style hardware this can be slower than a cached read,
+ *     but the agent is not on a tight loop and the 4 KiB stride is
+ *     identical to the existing cached scan. No performance
+ *     regression expected; if the post-deployment readback adds
+ *     measurable wall time, the cycle-42I runbook will report it.
+ *   - The cycle-42H reporter does NOT deduplicate by phys (see
+ *     "Interpretation table" K0>0 AND K1>0 row). An operator reading
+ *     `count=2` with two `buf.*` lines that report the same
+ *     `phys=0x...` field at different `alias=` values is looking at
+ *     the SAME physical survivor seen through two aliases, not two
+ *     distinct allocations. Cycle-22 lockout interpretation must
+ *     account for this. */
+#define SELF_WTNS_KSEG0_SCAN_START  0x80000000u
 #define SELF_WTNS_KSEG0_SCAN_END    0x84000000u
+#define SELF_WTNS_KSEG1_SCAN_START  0xA0000000u
+#define SELF_WTNS_KSEG1_SCAN_END    0xA4000000u
 #define SELF_WTNS_PAGE_STRIDE       0x1000u
 #define SELF_WTNS_MAGIC             0x534E5457u  /* 'WTNS' little-endian */
 #define SELF_WTNS_VERSION           1u
 #define SELF_WTNS_TAG               0xA4u
 #define SELF_WTNS_MAX_COUNTER       4096u
+#define SELF_WTNS_REPORT_CAP        256
 
 static int self_wtns_reader_candidate_ok(uintptr_t va)
 {
@@ -784,35 +1016,109 @@ static int self_wtns_reader_candidate_ok(uintptr_t va)
     return 0;
 }
 
+/* Cycle-42H helper — scan one alias window, append matches to the
+ * netconn output, accumulate per-window counters. Caller owns the
+ * running `reported` total (used for the 256-match global cap and
+ * the `buf.<idx>` line-prefix index) so kseg0 and kseg1 share a
+ * single reporter sequence. Returns 1 if the global cap was hit (so
+ * the caller should NOT scan the next window), 0 otherwise. */
+static int self_wtns_scan_window(struct netconn *c,
+                                 uintptr_t va_start,
+                                 uintptr_t va_end,
+                                 const char *alias_tag,
+                                 int *reported,
+                                 int *window_count,
+                                 uint32_t *window_mapped)
+{
+    *window_count = 0;
+    *window_mapped = 0;
+    for (uintptr_t va = va_start; va < va_end; va += SELF_WTNS_PAGE_STRIDE) {
+        if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) continue;
+        (*window_mapped)++;
+        if (!self_wtns_reader_candidate_ok(va)) continue;
+
+        volatile uint32_t *p = (volatile uint32_t *)va;
+        char buf[224];
+        uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
+        snprintf(buf, sizeof(buf),
+                 "buf.%d alias=%s phys=0x%08lx virt=0x%08lx "
+                 "reserved0=0x%08lx reserved1=0x%08lx",
+                 *reported, alias_tag,
+                 (unsigned long)phys, (unsigned long)va,
+                 (unsigned long)p[2], (unsigned long)p[3]);
+        op_send_line(c, buf);
+        (*reported)++;
+        (*window_count)++;
+        if (*reported >= SELF_WTNS_REPORT_CAP) return 1;
+    }
+    return 0;
+}
+
 int cmd_witness_scan_self(struct netconn *c, const char *args)
 {
     (void)args;
     op_send_text_begin(c, 0);
     int reported = 0;
-    uint32_t mapped_pages_seen = 0;
-    for (uintptr_t va = SELF_WTNS_KSEG0_SCAN_START;
-         va < SELF_WTNS_KSEG0_SCAN_END;
-         va += SELF_WTNS_PAGE_STRIDE) {
-        if ((uintptr_t)MmGetPhysicalAddress((PVOID)va) == 0u) continue;
-        mapped_pages_seen++;
-        if (!self_wtns_reader_candidate_ok(va)) continue;
+    int kseg0_count = 0;
+    int kseg1_count = 0;
+    uint32_t kseg0_mapped = 0;
+    uint32_t kseg1_mapped = 0;
+    int kseg1_scanned = 0;
 
-        volatile uint32_t *p = (volatile uint32_t *)va;
-        char buf[200];
-        uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
-        snprintf(buf, sizeof(buf),
-                 "buf.%d phys=0x%08lx virt=0x%08lx "
-                 "reserved0=0x%08lx reserved1=0x%08lx",
-                 reported, (unsigned long)phys, (unsigned long)va,
-                 (unsigned long)p[2], (unsigned long)p[3]);
-        op_send_line(c, buf);
-        reported++;
-        if (reported >= 256) break;
+    /* Cached kseg0 first — producer's canonical alias. */
+    int cap_hit = self_wtns_scan_window(c,
+                                        SELF_WTNS_KSEG0_SCAN_START,
+                                        SELF_WTNS_KSEG0_SCAN_END,
+                                        "kseg0",
+                                        &reported,
+                                        &kseg0_count,
+                                        &kseg0_mapped);
+    /* Uncached kseg1 second — cycle-42H phys-range widening. Only
+     * scan if the global 256-entry report cap has not yet been hit
+     * during the kseg0 pass; otherwise we'd silently truncate the
+     * kseg1 evidence without a chance to count its mapped pages. The
+     * cap is generous (cycle-29..42G observed at most count=1 across
+     * many runs); a kseg0-overflow into the cap is itself a strong
+     * anomaly signal worth surfacing without a second window's
+     * noise. The `truncated_at_cap=` / `kseg1_scanned=` fields in
+     * the summary line below disambiguate the "no kseg1 evidence"
+     * shape from the "kseg1 not scanned because cap-truncated"
+     * shape (Codex 2026-05-24 cycle-42H R1 finding adopted).
+     *
+     * The `truncated_at_cap=` flag below is set iff EITHER window
+     * hit the global cap during its pass — that's a true global
+     * truncation signal (Codex cycle-42H R2 finding adopted). The
+     * companion `kseg1_scanned=` boolean then tells the operator
+     * which window the truncation occurred in: kseg0 truncation
+     * implies kseg1 was not scanned at all (`kseg1_scanned=0`),
+     * while a kseg1 truncation means kseg1 WAS scanned but the
+     * 256-entry cap was reached before its window completed
+     * (`kseg1_scanned=1`). Both cases together exhaust the "cap
+     * was hit" disambiguation space. */
+    int kseg1_cap_hit = 0;
+    if (!cap_hit) {
+        kseg1_cap_hit = self_wtns_scan_window(c,
+                                              SELF_WTNS_KSEG1_SCAN_START,
+                                              SELF_WTNS_KSEG1_SCAN_END,
+                                              "kseg1",
+                                              &reported,
+                                              &kseg1_count,
+                                              &kseg1_mapped);
+        kseg1_scanned = 1;
     }
-    char summary[96];
+
+    int truncated_at_cap = (cap_hit || kseg1_cap_hit) ? 1 : 0;
+    uint32_t mapped_pages_seen = kseg0_mapped + kseg1_mapped;
+    char summary[256];
     snprintf(summary, sizeof(summary),
-             "count=%d mapped_pages_seen=%u",
-             reported, (unsigned)mapped_pages_seen);
+             "count=%d mapped_pages_seen=%u "
+             "kseg0_count=%d kseg1_count=%d "
+             "kseg0_mapped=%u kseg1_mapped=%u "
+             "truncated_at_cap=%d kseg1_scanned=%d",
+             reported, (unsigned)mapped_pages_seen,
+             kseg0_count, kseg1_count,
+             (unsigned)kseg0_mapped, (unsigned)kseg1_mapped,
+             truncated_at_cap, kseg1_scanned);
     op_send_line(c, summary);
     op_send_text_end(c);
     return 0;
@@ -841,7 +1147,7 @@ int cmd_help(struct netconn *c, const char *args)
     op_send_line(c, "controller.clear [port=N]             zero one or all ports");
     op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
     op_send_line(c, "witness.scan                          enumerate kseg0 oracle_ctrl_buffer instances + reserved[0,1] (cycle-23 A.4 readback)");
-    op_send_line(c, "witness.scan-self                     enumerate kseg0 xbed_self_witness 'WTNS' pages + reserved[0,1] (cycle-29 option (c) readback)");
+    op_send_line(c, "witness.scan-self                     enumerate kseg0+kseg1 xbed_self_witness 'WTNS' pages + reserved[0,1] (cycle-29 option (c) readback; cycle-42H phys-range widening — emits per-buf alias=kseg0|kseg1 + kseg0_count/kseg1_count/kseg0_mapped/kseg1_mapped/truncated_at_cap/kseg1_scanned summary fields)");
     op_send_line(c, "tier2.preflight                       read-only Tier-2 hook slot check");
     op_send_line(c, "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)");
     op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");
