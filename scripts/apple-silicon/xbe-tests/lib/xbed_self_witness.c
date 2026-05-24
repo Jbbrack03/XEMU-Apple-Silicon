@@ -125,17 +125,37 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
          *   - 0x00010000 lowest acceptable phys (skip very-low pages)
          *   - 0x03ffffff highest (top of 64 MiB RAM)
          *   - 0x1000 page alignment
-         *   - PAGE_READWRITE protection
-         * The relaunched agent's `witness.scan-self` reader walks
-         * the SAME kseg0 [0x80010000, 0x84000000] range the agent
-         * itself searches for XCTR buffers; this allocation pattern
-         * is known-safe and known-findable in that range. */
+         *   - PAGE_READWRITE | PAGE_NOCACHE protection (cycle-41a:
+         *     cache policy variation #1; was bare PAGE_READWRITE in
+         *     cycles 29..40). Cycle-40 outcome G0(c) confirmed the
+         *     EEPROM-write breadcrumb landed but the bare-RW
+         *     `MmAllocateContiguousMemoryEx` call did not yield a
+         *     usable allocation on real-Xbox kernel. Cycle-41a
+         *     adopts the lowest-scope cycle-39-closeout candidate:
+         *     pair PAGE_READWRITE with PAGE_NOCACHE (0x200, defined
+         *     in nxdk's `xboxkrnl.h`). Precedent: nxdk's own
+         *     `libusbohci_xbox/usbh_xbox.c:41` uses
+         *     `PAGE_READWRITE | PAGE_NOCACHE` against
+         *     `MmAllocateContiguousMemoryEx` for the USB OHCI
+         *     controller's DMA-coherent ring buffers — known-good
+         *     pattern on this kernel. Scope of this variation:
+         *     ALLOCATOR-ACCEPTANCE triage only. The producer/consumer
+         *     readback path is unchanged — both the stamp below and
+         *     `witness.scan-self` still use the `phys | 0x80000000`
+         *     cached-RAM mirror (Codex 2026-05-24 P1 finding adopted
+         *     in spirit: the cycle-41a goal is to discriminate
+         *     "kernel rejects bare-RW protect" from "kernel rejects
+         *     this allocation tuple regardless of protect"; an
+         *     end-to-end "uncached-alias visibility" experiment via
+         *     `phys | 0xB0000000` is intentionally deferred to a
+         *     later bounded slice if cycle-41a flips the regression
+         *     gate). */
         PVOID p = MmAllocateContiguousMemoryEx(
             0x1000u,             /* size: 1 page */
             0x00010000u,         /* lowest phys: skip low pages */
             0x03ffffffu,         /* highest phys: top of 64 MiB RAM */
             0x1000u,             /* alignment: page */
-            PAGE_READWRITE);
+            PAGE_READWRITE | PAGE_NOCACHE);
         if (!p) {
             xbed_host_log_write(
                 "xbed_self_witness: MmAllocateContiguousMemoryEx "

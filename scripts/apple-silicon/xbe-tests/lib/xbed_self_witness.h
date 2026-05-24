@@ -100,14 +100,23 @@
  *
  * Safety notes
  * ------------
- * - Allocation uses the SAME `MmAllocateContiguousMemoryEx` floor
- *   (0x00010000) / ceiling (0x03ffffff) / page alignment / RW
- *   protection the agent uses (`oracle-agent/controller.c:217-226`).
- *   `MmPersistContiguousMemory` is then applied. This is bit-for-bit
- *   the same allocation pattern that survives an XLaunchXBE chainload
- *   on real Xbox (cycle 23 designed it; cycle 24 confirmed survival
- *   for the agent's buffer; cycle 28 reconfirmed deterministic phys
- *   reuse across re-launches).
+ * - Allocation uses the same `MmAllocateContiguousMemoryEx` floor
+ *   (0x00010000) / ceiling (0x03ffffff) / page alignment the agent
+ *   uses (`oracle-agent/controller.c:217-226`), with one deliberate
+ *   cycle-41a divergence: `Protect = PAGE_READWRITE | PAGE_NOCACHE`
+ *   rather than the agent's plain `PAGE_READWRITE`. Cycle 40 outcome
+ *   G0(c) showed the bare-RW call returned NULL silently OR crashed
+ *   inside on this real-Xbox kernel for the exact tuple; cycle 41a
+ *   tries the lowest-scope cycle-39-closeout candidate (cache-policy
+ *   variation) before broadening to range / alignment / non-`-Ex`
+ *   variants. Precedent: nxdk's OHCI DMA ring uses the same
+ *   `PAGE_READWRITE | PAGE_NOCACHE` against `MmAllocateContiguousMemoryEx`
+ *   (`nxdk/lib/usb/libusbohci_xbox/usbh_xbox.c:35-41`), so the
+ *   protect bit is real and accepted on stock kernels.
+ *   `MmPersistContiguousMemory` is then applied. Cycle 23 designed
+ *   the chainload-survival pattern; cycle 24 confirmed survival for
+ *   the agent's buffer; cycle 28 reconfirmed deterministic phys
+ *   reuse across re-launches.
  * - The shim writes ONLY to its own allocated page. No kseg0 sweep.
  *   No MMIO touch. No write to the agent's XCTR page. The cycle-24
  *   "kseg0-scan-from-non-agent-context hangs the bus" hypothesis #5
