@@ -43,8 +43,301 @@ static inline void self_witness_wbinvd(void)
     __asm__ __volatile__("wbinvd" ::: "memory");
 }
 
-uintptr_t xbed_self_witness_fire(uint32_t stage)
+/* CYCLE-42D milestone marker writer — direct, host-log-free,
+ * single-byte EEPROM write via `HalWriteSMBusValue` to the
+ * cycle-39 scratch offset (0xFF). Used ONLY by the stage==6
+ * bypass below. Encoding: high nibble = 0xB0 (cycle-42D tag,
+ * distinct from cycle-39 0xA0..0xAF stage byte namespace); low
+ * nibble = milestone index 0..0xB. See `xbed_self_witness.h`
+ * "Cycle-42D" subsection for the full milestone table.
+ *
+ * NTSTATUS is deliberately discarded — there is no host-log path
+ * safe to call from pre-WinMainCRT context, and an error-return
+ * path that itself depends on additional kernel-export calls
+ * would just re-introduce the fault surface this bypass was built
+ * to escape. CONSEQUENCE (Codex round-1 R1.HIGH adopted
+ * 2026-05-24): the post-run EEPROM byte is a LOWER BOUND on
+ * milestones reached, NOT an exact "execution died here"
+ * boundary. If any later marker write fails silently (kernel
+ * pathological state, SMBus arbitration loss, retry exhaustion
+ * inside HalWriteSMBusValue), the byte stays at the previous
+ * successful marker even when the body code continued executing
+ * past it. The cycle-42D real-Xbox interpretation must therefore
+ * enumerate ALL the possibilities each (byte, count) shape
+ * collapses to and use the witness.scan-self (reserved0,
+ * reserved1) joint readback as the disambiguator where possible.
+ * See `xbed_self_witness.h` "Cycle-42D" Honest framing subsection
+ * for the full interpretation matrix.
+ *
+ * `__attribute__((no_stack_protector))` matches the cycle-42B
+ * thunk's attribute on `witness_only_pre_winmain_crt_startup` for
+ * the same reason — `__security_init_cookie` has not run yet when
+ * this helper is called from the stage==6 bypass, so the
+ * compiler-inserted cookie check must not fire. Inlining is also
+ * fine for cookie correctness (no separate frame), but the
+ * attribute guards against future changes where the compiler
+ * chooses to spill or out-of-line. */
+static inline __attribute__((no_stack_protector))
+void self_witness_cycle42d_marker(uint8_t milestone)
 {
+    (void)HalWriteSMBusValue(
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF,
+        FALSE,
+        (ULONG)((UCHAR)(XBED_SELF_WITNESS_EEPROM_CYCLE42D_TAG_NIB |
+                        (milestone & 0x0Fu))));
+}
+
+uintptr_t __attribute__((no_stack_protector))
+xbed_self_witness_fire(uint32_t stage)
+{
+    /* CYCLE-42D STAGE-6 PRE-LIBC-SAFE MILESTONE MARKER BYPASS
+     * (2026-05-24). See `xbed_self_witness.h` "Cycle-42D" Safety-
+     * notes subsection for the full rationale + marker table +
+     * post-run interpretation matrix.
+     *
+     * Cycle 42C real-Xbox run produced the INCONCLUSIVE signal
+     * `(eeprom.scratch.read=0xA6, witness.scan-self count=0)`.
+     * The byte-stayed-at-0xA6 evidence RULED OUT hypothesis (b)
+     * "allocator-then-post-guard rejection" (the cycle-41c/d
+     * guards preserve the cycle-39 sticky-flag setter, which
+     * would have flipped EEPROM to 0xA4 from at least one of the
+     * five WTNS-shim fires; the byte staying at 0xA6 means no
+     * fire reached the sticky-flag setter line). The remaining
+     * live cycle-42B failure modes narrow from {a, b, c} to {a,
+     * "post-cycle-39-write-site fault that prevents the sticky
+     * flag from being set on entry"}, dominated by leading
+     * hypothesis (a) **pre-allocator fault inside the shim's
+     * pre-libc context — most likely
+     * `xbed_host_log_writef → vsnprintf`** at the function's
+     * first host-log line (which assumes
+     * `_PDCLIB_xbox_libc_init` has run, but the cycle-42B thunk
+     * fires before WinMainCRTStartup runs libc init).
+     *
+     * Cycle 42D adds this stage==6 fast path BEFORE the existing
+     * `xbed_host_log_writef("enter stage=%u", ...)` call. The
+     * bypass:
+     *   - sets `s_eeprom_scratch_attempted = 1` FIRST (1-instruction
+     *     mov to a static int; commits us to the cycle-42D marker
+     *     scheme by locking out the cycle-39 EEPROM write block in
+     *     any subsequent stages-!=6 fire — otherwise a later
+     *     .CRT$XXC stage=4 fire would overwrite our 0xBn marker
+     *     with 0xA4);
+     *   - writes EEPROM marker 0xB0 to confirm the bypass was
+     *     entered (no later fire can overwrite this byte because
+     *     of the sticky-flag set above);
+     *   - skips every `xbed_host_log_writef` / `xbed_host_log_write`
+     *     call (the suspected fault site);
+     *   - replicates the cycle-42A 2-page allocation contract +
+     *     cycle-41c symmetric phys-range guards + cycle-41d
+     *     alignment guard + cycle-29 WTNS layout (magic + version +
+     *     reserved0 + reserved1 at offset 0 of the FIRST page) +
+     *     the existing stage-stamp + wbinvd sequence;
+     *   - emits an EEPROM milestone marker after each major step
+     *     (0xB1 = pre-alloc, 0xB2 = post-alloc, 0xB3 = post-phys,
+     *     0xB4 = post-lower-guard, 0xB5 = post-upper-guard, 0xB6 =
+     *     post-align-guard, 0xB7 = post-persist, 0xB8 = post-wipe,
+     *     0xB9 = post-WTNS-stamp, 0xBA = full-completion plus 0xBB
+     *     for the not-expected idempotent-reuse case);
+     *   - returns early so control does NOT fall through to the
+     *     existing stages-!=6 host-log tail.
+     *
+     * Stages != 6 (cycle-29 .CRT$XXC stage=4, .CRT$XCU stage=5,
+     * in-main WTNS1 stage=1, WTNS2 stage=3 — and cycle-23 stages
+     * are an unrelated shim, not this file) continue to execute
+     * the unchanged cycle-42A code path BELOW. Their call sites
+     * are all AFTER `WinMainCRTStartup → _PDCLIB_xbox_libc_init`,
+     * so vsnprintf via `xbed_host_log_writef` is safe.
+     *
+     * The cycle-42B thunk's defensive pre-write of 0xA6 still
+     * runs FIRST (before this function is called from the thunk).
+     * The cycle-42D 0xB0 marker overwrites that 0xA6 on bypass
+     * entry. If the bypass is never entered for any reason, the
+     * EEPROM byte stays at 0xA6 — same INCONCLUSIVE shape as
+     * cycle 42C, but distinguishable from cycle-42A (0xA4) and
+     * from cycle-42D-success (0xBA) shapes.
+     *
+     * `__attribute__((no_stack_protector))` on this function: the
+     * stage==6 dispatch may run before `__security_init_cookie`
+     * (when called from the cycle-42B thunk in the cycle-42B+
+     * build); the standard compiler-inserted stack-cookie check
+     * would compare against `__security_cookie` which still holds
+     * its linker-initialized value at that point. Mirrors the
+     * cycle-42B thunk's attribute on
+     * `witness_only_pre_winmain_crt_startup` for the same reason. */
+    if (stage == XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT) {
+        /* Lock out the cycle-39 EEPROM-write block for any
+         * subsequent stages-!=6 fire. Single i386 mov to a static
+         * int — atomic on uniprocessor OG Xbox, no observable
+         * failure mode. Ordering: set the sticky flag BEFORE any
+         * HalWriteSMBusValue so even if the very first marker
+         * write fails, no later .CRT$XXC fire can overwrite the
+         * cycle-42B thunk's 0xA6 pre-write with 0xA4 (which would
+         * collapse the cycle-42D signal to a cycle-42A-shaped
+         * INCONCLUSIVE outcome). */
+        s_eeprom_scratch_attempted = 1;
+
+        /* Marker 0xB0 — bypass entered. From here the post-run
+         * EEPROM byte identifies the highest milestone whose marker
+         * write SUCCEEDED — a LOWER BOUND on body progress (per
+         * Codex R1.HIGH and R2.MED — silent failure of any later
+         * 0xB? marker write leaves the byte at the previous
+         * successful marker even if execution continued past it;
+         * see `self_witness_cycle42d_marker` docstring above and
+         * `xbed_self_witness.h` "Cycle-42D" Honest-framing
+         * subsection). */
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_ENTRY);
+
+        if (s_witness_page != 0) {
+            /* Idempotent reuse path — not expected in the cycle-
+             * 42B sequence (the thunk fires stage=6 exactly once
+             * before WinMainCRTStartup; later .CRT$XXC/.CRT$XCU/
+             * in-main fires use stages 4/5/1/3, not 6). Kept
+             * defensive so a future caller that legitimately
+             * fires stage=6 twice does not silently bypass the
+             * stamp tick. */
+            volatile uint32_t *vp_r = s_witness_page;
+            uint32_t prev_counter_r = vp_r[3];
+            vp_r[2] = ((uint32_t)XBED_SELF_WITNESS_TAG << 24) |
+                      (stage & 0x00FFFFFFu);
+            vp_r[3] = prev_counter_r + 1u;
+            self_witness_wbinvd();
+            self_witness_cycle42d_marker(
+                XBED_SELF_WITNESS_C42D_M_REUSE_COMPLETION);
+            return s_witness_phys;
+        }
+
+        /* First-call path — equivalent to the cycle-42A
+         * stages-!=6 first-call block below but with all
+         * `xbed_host_log_writef` calls REMOVED and EEPROM
+         * milestone markers INSERTED after each major step.
+         * Numeric thresholds (allocation size 0x2000, lower
+         * phys-range 0x00010000, upper phys-range 0x04000000,
+         * page-alignment mask 0xFFF, persist size 0x2000, page-
+         * wipe span 0x2000) are bit-identical to the cycle-42A
+         * stages-!=6 path. */
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_PRE_ALLOC);
+
+        PVOID p_c42d = MmAllocateContiguousMemory(0x2000u);
+        if (!p_c42d) {
+            /* Alloc returned NULL. EEPROM is AT MOST 0xB1 (it
+             * holds whatever the highest-numbered successful
+             * marker write left there; could be 0xA6 if the 0xB0
+             * write itself returned non-success). Per Codex R1
+             * HIGH adopted, the EEPROM byte is a LOWER BOUND on
+             * milestones reached, NOT an exact step boundary.
+             * The shape `EEPROM in {0xA6, 0xB0, 0xB1} + count=0`
+             * narrows the failure mode to "stage=6 calling
+             * context reached at most the allocator call AND the
+             * allocator rejected the request" — the cycle-22
+             * hypothesis (c) "true allocator rejection" failing
+             * AT the call site rather than mid-call. */
+            return 0;
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_ALLOC);
+
+        uintptr_t phys_c42d = (uintptr_t)MmGetPhysicalAddress(p_c42d);
+        if (phys_c42d == 0) {
+            MmFreeContiguousMemory(p_c42d);
+            return 0;  /* EEPROM AT MOST 0xB2 (lower bound) */
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_PHYS);
+
+        /* Cycle-41c symmetric lower phys-range guard — replicated
+         * inline. Phys outside [0x00010000, 0x04000000) would be
+         * invisible to the cycle-29 consumer scan in
+         * `oracle-agent/commands.c::cmd_witness_scan_self`. */
+        if (phys_c42d < 0x00010000u) {
+            MmFreeContiguousMemory(p_c42d);
+            return 0;  /* EEPROM AT MOST 0xB3 (lower bound) */
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_LOWER_GUARD);
+
+        /* Cycle-41c symmetric upper phys-range guard. On retail
+         * 64 MiB hardware this branch is a no-op (kernel cannot
+         * return phys it does not have); preserved for symmetry
+         * with the stages-!=6 path. */
+        if (phys_c42d >= 0x04000000u) {
+            MmFreeContiguousMemory(p_c42d);
+            return 0;  /* EEPROM AT MOST 0xB4 (lower bound) */
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_UPPER_GUARD);
+
+        /* Cycle-41d page-alignment guard. The non-`-Ex` ABI
+         * documents no alignment guarantee; the cycle-29 consumer
+         * scans on a fixed 0x1000 stride, so a sub-page-aligned
+         * phys would be invisible. Replicated inline. */
+        if ((phys_c42d & 0xFFFu) != 0u) {
+            MmFreeContiguousMemory(p_c42d);
+            return 0;  /* EEPROM AT MOST 0xB5 (lower bound) */
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_ALIGN_GUARD);
+
+        /* Mark persistent so the allocation survives this XBE's
+         * `HalReturnToFirmware(HalRebootRoutine)` exit + dashboard
+         * chainload + relaunched agent process death. Persist size
+         * matches the 0x2000u multi-page allocation above
+         * (cycle-42A invariant). */
+        MmPersistContiguousMemory(p_c42d, 0x2000u, TRUE);
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_PERSIST);
+
+        /* Canonicalize the virtual alias to kseg0 (virt = phys |
+         * 0x80000000) — same pattern as the stages-!=6 path and
+         * `oracle-agent/controller.c::s_allocate_fresh`. */
+        volatile uint32_t *vp_c42d =
+            (volatile uint32_t *)(phys_c42d | 0x80000000u);
+
+        /* Zero the full 0x2000 allocation so the second page does
+         * not accidentally match the WTNS magic predicate at the
+         * consumer's next 0x1000-stride read (cycle-42A invariant). */
+        for (uint32_t i = 0; i < 0x2000u / sizeof(uint32_t); i++) {
+            vp_c42d[i] = 0;
+        }
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_WIPE);
+
+        /* Stamp the cycle-29 WTNS header at offset 0 of the FIRST
+         * page (cycle-42A invariant: magic + version only — the
+         * reserved0/reserved1 stamp follows below). */
+        vp_c42d[0] = XBED_SELF_WITNESS_MAGIC;
+        vp_c42d[1] = XBED_SELF_WITNESS_VERSION;
+        /* vp_c42d[2] (reserved0) and vp_c42d[3] (reserved1)
+         * already zero from the page wipe above; the stamp below
+         * sets them. */
+
+        s_witness_page = vp_c42d;
+        s_witness_phys = phys_c42d;
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_POST_WTNS_STAMP);
+
+        /* Stamp `stage` into `reserved0` (with the 0xA4 tag byte)
+         * and tick `reserved1` from 0 to 1 — bit-identical to the
+         * fall-through stamp at the bottom of the stages-!=6
+         * path. Stage is masked to 24 bits so the tag byte is
+         * always 0xA4. The wbinvd flush guarantees visibility to
+         * the relaunched agent's `witness.scan-self` reader
+         * across the chainload. */
+        uint32_t prev_counter_c42d = vp_c42d[3];
+        vp_c42d[2] = ((uint32_t)XBED_SELF_WITNESS_TAG << 24) |
+                     (stage & 0x00FFFFFFu);
+        vp_c42d[3] = prev_counter_c42d + 1u;
+        self_witness_wbinvd();
+        self_witness_cycle42d_marker(
+            XBED_SELF_WITNESS_C42D_M_FULL_COMPLETION);
+
+        return s_witness_phys;
+    }
+    /* END CYCLE-42D STAGE-6 BYPASS — control falls through to the
+     * unchanged cycle-42A stages-!=6 path below. */
+
     /* Emit ENTRY breadcrumb FIRST so the host-log channel reflects
      * that this call site executed even if the allocation below
      * trips on some unanticipated kernel-state interaction (same

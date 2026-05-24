@@ -419,10 +419,341 @@
  * self-witness allocation path continues to attempt
  * `MmAllocateContiguousMemoryEx` regardless of EEPROM write outcome —
  * the EEPROM byte is purely additive instrumentation; a hard-error
- * fallback would defeat the discriminator semantics. */
+ * fallback would defeat the discriminator semantics.
+ *
+ * Cycle-42D (stage-6 pre-libc-safe milestone marker bypass,
+ * 2026-05-24)
+ * -------------------------------------------------------------
+ * Cycle 42C real-Xbox deployment of the cycle-42B pre-WinMainCRT
+ * thunk produced the INCONCLUSIVE shape `(eeprom.scratch.read=0xA6,
+ * witness.scan-self count=0)` — see cycle-42C SUMMARY.md, cycle-42C
+ * handoff entry, decision-log cycle-42C entry. The byte-stayed-at-0xA6
+ * evidence RULED OUT hypothesis (b) "allocator-then-post-guard
+ * rejection" (the cycle-41c/d post-allocation guards preserve the
+ * cycle-39 sticky-flag setter sequence, which would have flipped
+ * EEPROM to 0xA4 from at least one of the five WTNS-shim fires; the
+ * fact that no fire flipped the byte means none reached the sticky-
+ * flag setter line). The live cycle-42B failure modes narrowed from
+ * {a, b, c} to {a, "post-cycle-39-write-site fault that prevents the
+ * sticky flag from being set on entry"}, dominated by leading
+ * hypothesis (a) **pre-allocator fault inside the shim's pre-libc
+ * context — most likely `xbed_host_log_writef → vsnprintf`** (the
+ * shim's `xbed_host_log_writef("xbed_self_witness: enter stage=%u",
+ * ...)` at function head invokes vsnprintf which assumes
+ * `_PDCLIB_xbox_libc_init` has run; from the pre-WinMain calling
+ * context introduced by the cycle-42B thunk, libc init has NOT run
+ * yet, so vsnprintf can fault).
+ *
+ * Cycle 42D adds a stage==6 conditional fast path at the top of
+ * `xbed_self_witness_fire` that:
+ *
+ *   1. Sets `s_eeprom_scratch_attempted = 1` as the FIRST shim
+ *      action (lock-out of the cycle-39 EEPROM-write block so any
+ *      later .CRT$XXC stage=4 fire does NOT overwrite our markers
+ *      with 0xA4);
+ *   2. Skips every `xbed_host_log_writef` / `xbed_host_log_write`
+ *      call (the suspected fault site);
+ *   3. Emits distinct EEPROM marker bytes via direct
+ *      `HalWriteSMBusValue` at each shim-internal milestone (entry /
+ *      pre-alloc / post-alloc / post-phys / post-lower-guard /
+ *      post-upper-guard / post-align-guard / post-persist /
+ *      post-wipe / post-WTNS-stamp / full-completion plus 0xBB for
+ *      the not-expected idempotent-reuse case);
+ *   4. Preserves the cycle-42A 2-page allocation contract, the
+ *      cycle-41c symmetric phys-range guards, the cycle-41d page-
+ *      alignment guard, the cycle-29 WTNS layout (magic + version +
+ *      reserved0 + reserved1 at offset 0 of the first page), and
+ *      the existing stage-stamp + wbinvd sequence;
+ *   5. Returns early so it does NOT fall through to the existing
+ *      `xbed_host_log_writef("fired stage=...")` tail.
+ *
+ * Stages != 6 (i.e. cycle-23 in-main XCTR-shim stages 1+3 are
+ * untouched by this file; cycle-29 .CRT$XXC stage=4, .CRT$XCU stage
+ * =5, in-main WTNS1 stage=1, WTNS2 stage=3) continue to execute the
+ * cycle-42A unchanged code path — those calls run AFTER
+ * `WinMainCRTStartup → _PDCLIB_xbox_libc_init`, so `vsnprintf` is
+ * safe at their call sites.
+ *
+ * Marker encoding: high-nibble = `XBED_SELF_WITNESS_EEPROM_CYCLE42D_TAG_NIB`
+ * (= 0xB0), distinct from cycle-39 stage byte 0xA0..0xAF; low-nibble
+ * = milestone index 0..0xB. Each marker overwrites the previous, so
+ * the post-run EEPROM byte identifies the highest milestone whose
+ * marker write SUCCEEDED — a LOWER BOUND on body progress, NOT an
+ * exact "execution died here" boundary (see Honest framing below).
+ *
+ *   Byte | Milestone (stage==6 fast path)
+ *   -----|--------------------------------------------------------
+ *   0xB0 | shim entered from stage=6 (sticky flag set, marker
+ *        | written; cycle-42D bypass committed)
+ *   0xB1 | about to call MmAllocateContiguousMemory(0x2000)
+ *   0xB2 | MmAllocateContiguousMemory returned non-NULL
+ *   0xB3 | MmGetPhysicalAddress returned non-zero
+ *   0xB4 | passed lower phys-range guard (phys >= 0x00010000)
+ *   0xB5 | passed upper phys-range guard (phys < 0x04000000)
+ *   0xB6 | passed page-alignment guard ((phys & 0xFFF) == 0)
+ *   0xB7 | MmPersistContiguousMemory returned
+ *   0xB8 | page wipe loop complete (0x2000 bytes zeroed via kseg0)
+ *   0xB9 | WTNS magic + version stamped; s_witness_page registered
+ *   0xBA | reserved0/reserved1 stamped + wbinvd done (full first-
+ *        | call completion for stage=6 — best success signal)
+ *   0xBB | idempotent reuse path (s_witness_page != 0 on entry; not
+ *        | expected in the cycle-42B sequence since the thunk fires
+ *        | stage=6 exactly once — defensive; would only fire if
+ *        | xbed_self_witness_fire(6) is somehow called twice)
+ *
+ * Cycle-42D post-run EEPROM-byte interpretation table (combined
+ * with `witness.scan-self count` and the cycle-42B joint
+ * `(reserved0_last_stage, reserved1)` table).
+ *
+ * **Honest framing (Codex R1 HIGH adopted 2026-05-24):** every
+ * `self_witness_cycle42d_marker` call discards `HalWriteSMBusValue`'s
+ * `NTSTATUS` (there is no host-log path safe to call from pre-libc
+ * context, and an error-return path that itself depends on
+ * additional kernel-export calls would just re-introduce the fault
+ * surface this bypass was built to escape). That means the EEPROM
+ * byte observed post-run is the highest milestone whose SMBus write
+ * SUCCEEDED — it is a LOWER BOUND on milestones reached, NOT an
+ * exact "execution died here" boundary. Concretely, if any later
+ * marker write fails silently (kernel pathological state, SMBus
+ * arbitration loss, retry exhaustion inside `HalWriteSMBusValue`),
+ * the byte stays at the previous successful marker even when the
+ * body code continued executing past it. The table below therefore
+ * lists the JOINT possible meanings for each (byte, count) shape;
+ * the cycle-42D real-Xbox interpretation must enumerate ALL the
+ * possibilities a given shape collapses to, then use additional
+ * signals (witness.scan-self `reserved0` low byte, `reserved1`,
+ * future cycle markers) to disambiguate. Single-byte uniqueness was
+ * an over-claim; the bypass's true value is that the byte STRICTLY
+ * INCREASES across cycle 42C's signal (0xA6) so any observed
+ * `0xBn` proves that at LEAST `n+1` milestones executed, even if
+ * we cannot exactly localize the failure within the post-`n`
+ * remainder.
+ *
+ *   EEPROM | count | possible meanings (all must be enumerated)
+ *   -------|-------|---------------------------------------------
+ *   0xA6   | 0     | bypass NEVER landed marker 0xB0 — could be
+ *          |       | (i) xbed_self_witness_fire(6) was never
+ *          |       | called (thunk → shim call site faulted),
+ *          |       | (ii) the function prologue / stage==6
+ *          |       | dispatch / `s_eeprom_scratch_attempted = 1`
+ *          |       | sequence faulted before the first
+ *          |       | HalWriteSMBusValue (very unlikely — bare
+ *          |       | i386 mov/cmp/jne/mov), (iii) the marker
+ *          |       | helper at `xbed_self_witness.c:`
+ *          |       | `self_witness_cycle42d_marker` was entered
+ *          |       | but the SMBus write itself returned a
+ *          |       | non-success NTSTATUS or hardware-NAK and the
+ *          |       | EEPROM byte stayed at the cycle-42B thunk's
+ *          |       | defensive 0xA6 pre-write, OR (iv) the marker
+ *          |       | write SUCCEEDED but execution continued past
+ *          |       | it and the NEXT marker write (or any later
+ *          |       | marker write whose value falls in 0xB1..0xBA)
+ *          |       | ALSO failed in a way that ended up restoring
+ *          |       | the byte to 0xA6 — not possible with a single
+ *          |       | marker call per milestone (each call writes a
+ *          |       | strictly increasing low-nibble value, so the
+ *          |       | byte never decreases) so this collapses to
+ *          |       | (iii) for the post-0xB0 path. Sticky-flag
+ *          |       | armed-ness is INDETERMINATE from this shape
+ *          |       | alone (the sticky-flag set happens BEFORE the
+ *          |       | marker write, so the flag may be set even
+ *          |       | with EEPROM still at 0xA6). The fact that no
+ *          |       | later .CRT$XXC fire wrote 0xA4 to EEPROM is
+ *          |       | consistent with either (sticky-flag set,
+ *          |       | later fires short-circuit) or (sticky-flag
+ *          |       | not set AND .CRT$XXC fire itself never
+ *          |       | reached the cycle-39 EEPROM write site — same
+ *          |       | cycle-42C explanation). SAME INCONCLUSIVE
+ *          |       | shape as cycle 42C, narrower residual
+ *          |       | hypothesis set but not RULE-OUT.
+ *   0xA4   | 0..1+ | bypass was NOT effective: sticky flag never
+ *          |       | got set AND a later .CRT$XXC stage=4 fire
+ *          |       | reached the cycle-39 EEPROM write site. Would
+ *          |       | imply the stage==6 dispatch check faulted OR
+ *          |       | the `s_eeprom_scratch_attempted = 1` mov
+ *          |       | instruction faulted — both near-impossibilities
+ *          |       | given the thunk's successful execution of the
+ *          |       | preceding i386 instructions. NOT expected.
+ *          |       | If observed, re-validate the build artifact +
+ *          |       | PE entry-point disassembly.
+ *   0xBn   | 0     | (where n in 0..8) AT LEAST milestone n
+ *   for    |       | landed its SMBus write successfully; the body
+ *   n=0..8 |       | continued executing UP TO AT LEAST that
+ *          |       | point. Possible meanings: (i) execution died
+ *          |       | between milestone n's body-after-marker
+ *          |       | instruction and milestone n+1's body-before-
+ *          |       | marker instruction (the "exact-step-boundary"
+ *          |       | reading); (ii) execution continued past
+ *          |       | milestone n+1's body-before-marker but the
+ *          |       | marker write for n+1 returned a non-success
+ *          |       | NTSTATUS (and zero or more later milestones
+ *          |       | also fell to the same failure mode); (iii)
+ *          |       | the body ran to a milestone in (n+1)..9 but
+ *          |       | every subsequent marker write returned
+ *          |       | non-success. To rule out (ii)+(iii) we would
+ *          |       | need EITHER a fresh `witness.scan-self` read
+ *          |       | confirming `count==0` AND `reserved0==0` AND
+ *          |       | `reserved1==0` (which rules out reaching the
+ *          |       | WTNS-stamp body at milestone 9 only — see
+ *          |       | 0xB9 row below for the count=1 ambiguity), OR
+ *          |       | a future cycle that adds a non-EEPROM
+ *          |       | side-channel for milestone confirmation. For
+ *          |       | the cycle-42D first run the conservative
+ *          |       | reading is "AT LEAST milestone n's marker
+ *          |       | write succeeded; the body executed AT LEAST
+ *          |       | the pre-n-marker instructions; nothing past
+ *          |       | that is proved by EEPROM alone." See the
+ *          |       | per-milestone semantic notes in the milestone
+ *          |       | byte table above for what each marker N
+ *          |       | brackets.
+ *   0xB9   | 1     | AT LEAST milestone 9 (WTNS magic stamped,
+ *          |       | s_witness_page registered) landed its SMBus
+ *          |       | write successfully — the WTNS page is visible
+ *          |       | to the consumer scan (count=1). Possible
+ *          |       | refinements: (i) execution died between
+ *          |       | milestone 9's body-after-marker and the
+ *          |       | reserved0/reserved1 stamp at milestone 10's
+ *          |       | body-before-marker, AND `reserved0`,
+ *          |       | `reserved1` stay 0 from the page wipe
+ *          |       | (matches the D-cycle-27 reserved-zero shape
+ *          |       | but on a SELF-allocated page, not the agent's
+ *          |       | XCTR page); (ii) the reserved0/reserved1
+ *          |       | stamp + wbinvd actually ran to completion AND
+ *          |       | the milestone 10 (0xBA) marker write failed
+ *          |       | — in which case `reserved0` shows the stage
+ *          |       | byte of the most recent successful fire and
+ *          |       | `reserved1` shows the count of fires reached
+ *          |       | (including any later stages-!=6 reuse fires);
+ *          |       | (iii) milestone 10 (0xBA) succeeded BUT a
+ *          |       | hardware-level EEPROM corruption demoted the
+ *          |       | byte back to 0xB9 — vanishingly unlikely on
+ *          |       | the 24LC02. Disambiguating (i) vs (ii) needs
+ *          |       | the `reserved0`,`reserved1` joint readback
+ *          |       | from `witness.scan-self`: `(0, 0)` ⇒ (i);
+ *          |       | non-zero ⇒ (ii). Either way the WTNS-stamp
+ *          |       | body landed and the cycle-22 calling-context
+ *          |       | hypothesis is STRONGLY supported.
+ *   0xBA   | 1+    | full first-call completion for stage=6 —
+ *          |       | best success signal. If subsequent
+ *          |       | .CRT$XXC + .CRT$XCU + in-main WTNS1 + WTNS2
+ *          |       | fires also reach the shim, count stays 1
+ *          |       | (single allocation, reused page), reserved0
+ *          |       | tracks the last fire's stage byte (e.g.
+ *          |       | 0xA4000003 if stage=3 was last), and reserved1
+ *          |       | counts total fires (5 if all reached). The
+ *          |       | cycle-42B joint (reserved0_last_stage,
+ *          |       | reserved1) table applies for k=1 (pre-WinMain
+ *          |       | was the first successful allocator). STRONG
+ *          |       | cycle-22 calling-context-CONFIRMED signal.
+ *          |       | Cannot RULE OUT a later marker-write failure
+ *          |       | path scenario (since 0xBA is the LAST marker
+ *          |       | the bypass writes) but the bypass also
+ *          |       | returns immediately after the 0xBA marker, so
+ *          |       | once the byte reaches 0xBA there is no
+ *          |       | further body code that could fail silently;
+ *          |       | the 0xBA + count>=1 shape is unambiguous.
+ *   0xBB   | 1+    | NOT expected (would only fire if
+ *          |       | xbed_self_witness_fire(6) was called twice).
+ *          |       | If observed, indicates a logic error in the
+ *          |       | thunk or the bypass path; investigate.
+ *
+ * Why high-nibble 0xB0 (not extending 0xA0..0xAF): the cycle-39
+ * stage byte uses high-nibble 0xA with low-nibble = stage code. We
+ * already use stages 1, 3, 4, 5, 6 (and the cycle-42B thunk uses 6
+ * as 0xA6). To avoid colliding with the stage-encoding namespace,
+ * the cycle-42D milestone marker uses a distinct high-nibble. 0xB
+ * is the next adjacent nibble; reserves room for future cycle-42E+
+ * markers (0xC0..0xFF) without colliding.
+ *
+ * Why NOT a new EEPROM offset: offset 0xFF is the single byte the
+ * agent's `eeprom.scratch.read` verb is wired to (cycle-39 design);
+ * adding a new offset would require oracle-agent verb changes. The
+ * 1-byte resolution is sufficient for the 12-milestone marker set.
+ *
+ * Why NOT add a host-log channel that doesn't depend on vsnprintf:
+ * the cycle-15 `xbed_host_log_write` (non-formatting) already exists
+ * and DOES NOT call vsnprintf — it just does `outb` of each byte to
+ * port 0xE9. We could call that instead of skipping host-log
+ * entirely. We chose to skip ALL host-log calls in cycle 42D for
+ * three reasons: (i) the host-log channel only surfaces on xemu
+ * (not real Xbox); cycle-42D's target is the real-Xbox calling-
+ * context discriminator, and EEPROM markers ARE durable across the
+ * chainload; (ii) calling outb from pre-libc context is plausibly
+ * safe but unverified on this hardware, and EEPROM via
+ * HalWriteSMBusValue has been EMPIRICALLY validated to work from
+ * pre-WinMain context (cycle-42C thunk pre-write landed and
+ * persisted); (iii) keeping the bypass minimal (zero non-kernel-
+ * export calls) reduces the surface area where a pre-libc fault
+ * could mask the diagnostic signal. The cycle-29 stages-!=6 path
+ * still emits the existing host-log lines for xemu-side debugging.
+ *
+ * Preservation contract:
+ *   - cycle-23 lockstep (`lib/xbed_a4_witness.{c,h}`): UNTOUCHED.
+ *   - cycle-29 stages !=6 path: UNTOUCHED (same code emits same
+ *     host-log lines + same allocator call + same guards + same
+ *     stamp).
+ *   - cycle-39 sticky-flag semantics for stages !=6: PRESERVED
+ *     (the unchanged path still checks `!s_eeprom_scratch_attempted`
+ *     before its EEPROM write; cycle-42D pre-sets the flag for
+ *     stages !=6 ONLY when stage==6 ran first, which suppresses
+ *     the cycle-39 EEPROM write — by design, since cycle-42D
+ *     markers replace the cycle-39 signal when stage==6 runs).
+ *   - cycle-41c/41d guards: REPLICATED inside the stage==6 bypass
+ *     (same numeric thresholds; same MmFreeContiguousMemory + return
+ *     0 on guard fire) AND PRESERVED unchanged in the stages-!=6
+ *     path.
+ *   - cycle-42A multi-page (0x2000) allocation: REPLICATED inside
+ *     the stage==6 bypass AND PRESERVED unchanged in the stages-
+ *     !=6 path.
+ *   - cycle-42B pre-WinMainCRT thunk
+ *     (`witness-only/witness_only_crt0.c`): UNTOUCHED. The thunk's
+ *     defensive 0xA6 pre-write still runs FIRST (before
+ *     xbed_self_witness_fire is called); cycle-42D's 0xB0 marker
+ *     overwrites that pre-write on entry to the bypass. If the
+ *     bypass is never entered for any reason, the EEPROM byte
+ *     stays at 0xA6 — same INCONCLUSIVE shape as cycle 42C, but
+ *     now distinguishable from cycle-42A (0xA4) and from cycle-
+ *     42D-success (0xBA) signals. */
 #define XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR    0xA8u    /* 24LC02 EEPROM SMBus address; same as oracle-agent/commands.c */
 #define XBED_SELF_WITNESS_EEPROM_SCRATCH_OFF   0xFFu    /* last byte of 256-byte EEPROM image; reserved/unused on stock OEM consoles */
 #define XBED_SELF_WITNESS_EEPROM_TAG_NIB       0xA0u    /* high nibble = 0xA "Path-A.4 tag"; low nibble = (stage & 0x0F) */
+
+/* Cycle-42D stage-6 milestone marker tag (high nibble = 0xB,
+ * distinct from cycle-39 0xA stage byte namespace; low nibble =
+ * milestone index 0..B per the table above). Written ONLY by the
+ * stage==6 fast path in `xbed_self_witness_fire`. */
+#define XBED_SELF_WITNESS_EEPROM_CYCLE42D_TAG_NIB  0xB0u
+
+/* Cycle-42D stage-6 fast-path stage code. Must match
+ * `witness_only/witness_only_crt0.c::WITNESS_ONLY_STAGE_PRE_WINMAIN_CRT`
+ * (= 6). Defined here so the shim's dispatch check at the top of
+ * `xbed_self_witness_fire` does not depend on a magic literal. */
+#define XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT   6u
+
+/* Cycle-42D milestone indices (low nibble of the marker byte). The
+ * comments alongside the assignments inside `xbed_self_witness.c`'s
+ * stage-6 bypass are the authoritative semantics; these defines
+ * exist so the source uses named constants instead of magic 0..0xB
+ * integers. Numbered in execution order, so the highest marker
+ * observed post-run is the highest milestone whose marker write
+ * SUCCEEDED — a LOWER BOUND on body progress, NOT an exact
+ * "execution died here" boundary (per Codex R1.HIGH and R2.MED and
+ * R3.MED — silent failure of any later 0xB? marker write leaves the
+ * byte at the previous successful marker even when the body code
+ * continued executing past it; see the "Cycle-42D" Honest-framing
+ * subsection above for the full interpretation matrix). */
+#define XBED_SELF_WITNESS_C42D_M_ENTRY                0x0u
+#define XBED_SELF_WITNESS_C42D_M_PRE_ALLOC            0x1u
+#define XBED_SELF_WITNESS_C42D_M_POST_ALLOC           0x2u
+#define XBED_SELF_WITNESS_C42D_M_POST_PHYS            0x3u
+#define XBED_SELF_WITNESS_C42D_M_POST_LOWER_GUARD     0x4u
+#define XBED_SELF_WITNESS_C42D_M_POST_UPPER_GUARD     0x5u
+#define XBED_SELF_WITNESS_C42D_M_POST_ALIGN_GUARD     0x6u
+#define XBED_SELF_WITNESS_C42D_M_POST_PERSIST         0x7u
+#define XBED_SELF_WITNESS_C42D_M_POST_WIPE            0x8u
+#define XBED_SELF_WITNESS_C42D_M_POST_WTNS_STAMP      0x9u
+#define XBED_SELF_WITNESS_C42D_M_FULL_COMPLETION      0xAu
+#define XBED_SELF_WITNESS_C42D_M_REUSE_COMPLETION     0xBu
 
 
 /* Initialize the self-witness if not already initialized, then stamp
@@ -432,22 +763,50 @@
  * MmPersistContiguousMemory + memset (full allocation) + first-page
  * magic/version init`.
  *
- * Current live behavior (CYCLE-42A multi-page redesign; supersedes
- * the cycles-29..41e single-page behavior described in the Safety-
- * notes block above): the first call allocates a 2-page (0x2000 B,
- * 8 KiB) contiguous region via the non-`-Ex` 1-arg
- * `MmAllocateContiguousMemory`, persists the full 0x2000 range via
- * `MmPersistContiguousMemory`, zeroes the full 0x2000 range via the
- * page-wipe loop, then stamps the WTNS magic + version + reserved0
- * + reserved1 header at offset 0 of the FIRST page. Subsequent
- * `xbed_self_witness_fire` calls reuse the same first-page header.
+ * Current live behavior (CYCLE-42D stage-6 milestone marker bypass
+ * layered on top of CYCLE-42A multi-page redesign; supersedes the
+ * cycles-29..42C single-path behavior described in the Safety-notes
+ * blocks above):
+ *
+ *   - If `stage == XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT` (= 6),
+ *     run the cycle-42D pre-libc-safe milestone marker bypass: set
+ *     `s_eeprom_scratch_attempted = 1` as the first action (lock
+ *     out the cycle-39 EEPROM write for any subsequent fire);
+ *     write EEPROM marker 0xB0 (entry); skip every
+ *     `xbed_host_log_writef` / `xbed_host_log_write` call (the
+ *     suspected vsnprintf-pre-libc fault site identified by cycle
+ *     42C); execute the same cycle-42A 2-page allocation + cycle-
+ *     41c phys-range guards + cycle-41d alignment guard +
+ *     `MmPersistContiguousMemory` + page wipe + WTNS magic stamp
+ *     + reserved0/reserved1 stamp + wbinvd sequence, emitting an
+ *     EEPROM milestone marker (0xB1..0xBA) after each major step;
+ *     return early so control does NOT fall through to the
+ *     existing stages-!=6 host-log tail.
+ *   - Otherwise (stages 1, 3, 4, 5 — the cycle-29 .CRT$XXC,
+ *     .CRT$XCU, in-main WTNS1/WTNS2 fires), run the unchanged
+ *     cycle-42A code path. The first call allocates a 2-page
+ *     (0x2000 B, 8 KiB) contiguous region via the non-`-Ex` 1-arg
+ *     `MmAllocateContiguousMemory`, persists the full 0x2000 range
+ *     via `MmPersistContiguousMemory`, zeroes the full 0x2000
+ *     range via the page-wipe loop, then stamps the WTNS magic +
+ *     version + reserved0 + reserved1 header at offset 0 of the
+ *     FIRST page. Subsequent stages-!=6 calls reuse the same
+ *     first-page header. The cycle-39 EEPROM sticky-flag block
+ *     still gates a 1-byte 0xA4 write at the pre-allocation point
+ *     of the FIRST stages-!=6 call IF the cycle-42D stage-6
+ *     bypass did NOT pre-set the sticky flag (i.e. the cycle-42B
+ *     thunk was not in play, or the stage-6 bypass was never
+ *     entered).
+ *
  * Historical references to `MmAllocateContiguousMemoryEx` or to
  * "one page" elsewhere in this header are preserved as cycle-history
  * context (cycles 29..41d used the `-Ex` variant; cycle 41e moved
  * to the non-`-Ex` variant at 0x1000 size; cycle 42A bumped size
- * to 0x2000 while keeping the non-`-Ex` ABI). The most recent
- * authoritative description is the "Cycle-42A" subsection in the
- * Safety-notes block above and this paragraph.
+ * to 0x2000 while keeping the non-`-Ex` ABI; cycle 42D added the
+ * stage-6 milestone marker bypass without changing the underlying
+ * allocator call sequence). The most recent authoritative
+ * descriptions are the "Cycle-42D" subsection above + the
+ * "Cycle-42A" subsection above + this paragraph.
  *
  * Returns the physical address of the first page of the self-
  * witness allocation on success, or 0 on hard failure (allocation
