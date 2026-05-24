@@ -1,6 +1,6 @@
 # Validation Status
 
-- Supervisor note: **Cycle 42H is now IMPLEMENTATION+BUILD+CODEX COMPLETE; real-Xbox deployment DEFERRED to next bounded slice; CLOSEOUT pending closure commit.** This slice IS an oracle-agent source change, so **rule #15 RE-TRIGGERED and SATISFIED via a full 3-round Codex pass to GREEN**, not via the doc-only carve-out.
+- Supervisor note: **Cycle 42H is now CLOSED at `934e9273ef`** (implementation+build+Codex complete; real-Xbox deployment DEFERRED to next bounded slice). This slice IS an oracle-agent source change, so **rule #15 RE-TRIGGERED and SATISFIED via a full 3-round Codex pass to GREEN**, not via the doc-only carve-out.
 
 - Active slice: cycle 42H broaden `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c::cmd_witness_scan_self` phys-range enumeration. ONE file changed (`commands.c`; +321 / -13 LOC; ~50 LOC new C body + ~270 LOC new in-source documentation). No host xemu source touched; no producer side touched (cycle-42F R5-GREEN deployed bit-identically); no cycle-23 / cycle-39 / cycle-42B / cycle-42D mechanisms touched.
 

@@ -1,7 +1,7 @@
 # Claude Status
 
 - Objective: 42H broaden oracle-agent `cmd_witness_scan_self` phys-range enumeration.
-- Status: **IMPLEMENTATION+BUILD+CODEX COMPLETE; real-Xbox deployment DEFERRED to next bounded slice; closeout pending closure commit.**
+- Status: **CLOSED at `934e9273ef`** (implementation+build+Codex complete; real-Xbox deployment DEFERRED to next bounded slice).
 - Strategic checkpoint decision: **shift toward tooling/observability** — TARGETED THIS CYCLE.
 - Bounded objective: ACHIEVED. Widened `oracle-agent/commands.c::cmd_witness_scan_self` (dropped cached kseg0 lower bound `0x80010000 → 0x80000000`; added symmetric uncached kseg1 window `[0xA0000000, 0xA4000000)`; per-buf `alias=` field; six new summary-line fields).
 - Codex pass: 3 rounds, R1 MED+LOW → R2 LOW → R3 GREEN at 2026-05-24T17:51:44Z. Marker refreshed.

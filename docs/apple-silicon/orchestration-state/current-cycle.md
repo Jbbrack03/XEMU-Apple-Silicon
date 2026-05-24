@@ -1,6 +1,6 @@
 # Current Cycle
 
-- Cycle: 42H broaden oracle-agent `cmd_witness_scan_self` phys-range enumeration — **IMPLEMENTATION+BUILD+CODEX COMPLETE; real-Xbox deployment DEFERRED to next bounded slice; CLOSEOUT pending closure commit** on `apple-silicon-performance`.
+- Cycle: 42H broaden oracle-agent `cmd_witness_scan_self` phys-range enumeration — **CLOSED at `934e9273ef`** on `apple-silicon-performance`. Implementation+build+Codex complete; real-Xbox deployment DEFERRED to next bounded slice (cycle 42I; Hermes's call).
 - Started: 2026-05-24T17:29:06Z.
 - Worker receipt posted: 2026-05-24T17:33:04Z.
 - Codex R3 GREEN at: 2026-05-24T17:51:44Z.
@@ -58,7 +58,7 @@
 3. Implement bounded `cmd_witness_scan_self` enumeration widening — DONE.
 4. Run validation + full Codex pass — DONE; R3 GREEN.
 5. Sync canonical docs/state truthfully — IN PROGRESS via this update + handoff.md + decision-log.md + SUMMARY.md + handoff-summary.md + claude-status.md + validation-status.md.
-6. Commit clean cycle-42H slice on `apple-silicon-performance` — PENDING this final state-sync save.
+6. Commit clean cycle-42H slice on `apple-silicon-performance` — DONE at `934e9273ef`; closeout-state sync follow-up commit pending after this update.
 
 ## Repo guardrails
 
