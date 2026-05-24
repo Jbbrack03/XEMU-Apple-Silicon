@@ -44,7 +44,7 @@ Cycle 41c closure pre-recorded the cycle-41d candidate explicitly: "alignment-dr
 - [x] Updated handoff.md cycle-41d entry on top above cycle-41c.
 - [x] Updated decision-log.md cycle-41d entry above cycle-41c.
 - [x] Updated orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md).
-- [ ] Commit slice changes on `apple-silicon-performance` (next step in this session).
+- [x] Slice closure commit landed on `apple-silicon-performance` as `aed6f423e2` (cycle-41d alignment-drop variation — bounded implementation+run slice). This closeout-sync follow-up commit on top updates the orchestration-state quartet to reference the landed hash (same pattern as cycle 39 closeout-sync).
 
 ## Confidence + risk notes
 

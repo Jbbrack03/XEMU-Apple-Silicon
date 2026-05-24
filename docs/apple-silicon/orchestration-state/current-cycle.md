@@ -45,7 +45,7 @@
 6. [x] Real-Xbox deployment executed; cycle-41d outcome (G0(c) PERSISTS) collected and classified against the cycle-40 G-row table.
 7. [x] Compact evidence directory `benchmark-runs/cycle41d-alignment-20260524T054838Z/` with SUMMARY.md + 18 step-numbered logs + 3× codex prompts + 3× codex outputs (gitignored per project convention).
 8. [x] Canonical docs/state updated: handoff.md + decision-log.md + orchestration-state quartet.
-9. [ ] Closure commit lands on `apple-silicon-performance` (next step in this session).
+9. [x] Closure commit landed on `apple-silicon-performance` as `aed6f423e2` (cycle-41d alignment-drop variation closure). Bounded closeout-sync follow-up commit on top syncs the orchestration-state quartet to reference the landed hash.
 
 ## What this session does NOT do
 
