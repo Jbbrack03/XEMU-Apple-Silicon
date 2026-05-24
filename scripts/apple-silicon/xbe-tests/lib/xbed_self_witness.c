@@ -119,65 +119,103 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
 
         /* First call this process — allocate + init.
          *
-         * CYCLE-41C BOUNDED VARIATION (combined address-range): the
-         * allocation tuple now matches nxdk's framebuffer allocator
-         * (`nxdk/lib/hal/video.c:363-367`) BYTE-FOR-BYTE modulo `size`:
-         *   - 0x1000 size (one page; nxdk's framebuffer is `screenSize`)
-         *   - 0x00000000 lowest phys (cycle-41c: WAS 0x00010000 in
-         *     cycles 29..41b; matches nxdk's allocator floor exactly)
-         *   - 0x7FFFFFFF highest phys (cycle-41c: WAS 0x03ffffff in
-         *     cycles 29..41b; matches nxdk's allocator ceiling exactly)
-         *   - 0x1000 page alignment (unchanged; matches nxdk's
-         *     allocator alignment exactly)
-         *   - PAGE_READWRITE | PAGE_WRITECOMBINE protection (unchanged
-         *     from cycle-41b; matches nxdk's allocator Protect
-         *     argument exactly)
+         * CYCLE-41D BOUNDED VARIATION (alignment-drop): drop the
+         * `alignment` argument from `0x1000u` (cycles 29..41c) to
+         * `0u` so the kernel picks its own alignment. All other
+         * cycle-41c arguments (matched-tuple address range +
+         * `PAGE_READWRITE | PAGE_WRITECOMBINE` protect bits) are
+         * preserved:
+         *   - 0x1000 size (one page; unchanged from cycles 29..41c)
+         *   - 0x00000000 lowest phys (cycle-41c matched-tuple; unchanged)
+         *   - 0x7FFFFFFF highest phys (cycle-41c matched-tuple; unchanged)
+         *   - 0u alignment (cycle-41d: WAS 0x1000u in cycles 29..41c;
+         *     `0u` is in-tree usage precedent against
+         *     `MmAllocateContiguousMemoryEx` — call sites that pass
+         *     `0u`: `nxdk/lib/hal/video.c:363` does NOT (it pins
+         *     `0x1000` for the framebuffer ABI), but
+         *     `nxdk/lib/pbkit/pbkit.c:2297`,
+         *     `nxdk/samples/{triangle,mesh,xaudio}/main.c`, and
+         *     `xbe-tests/flat-tri-depth/main.c:77` all do. The nxdk
+         *     header at `nxdk/lib/xboxkrnl/xboxkrnl.h:3464` is a bare
+         *     prototype with no `Alignment=0` doc text. What these
+         *     sites prove is that the API accepts `0u`; they do NOT
+         *     prove what alignment the kernel returns — Codex
+         *     round-1 + round-2 P2 findings adopted; the page-alignment
+         *     guard added below is the defense-in-depth that closes
+         *     the consumer-side stride blind spot regardless)
+         *   - PAGE_READWRITE | PAGE_WRITECOMBINE protect (unchanged
+         *     from cycles 41b..41c)
          *
-         * Rationale: cycle 40 (bare RW) + cycle 41a (NC) + cycle 41b
-         * (WC) all produced G0(c) — EEPROM byte=0xA4 landed but
-         * `MmAllocateContiguousMemoryEx` STILL did not yield a usable
-         * allocation. Cache-policy variations are EXHAUSTED. The
-         * remaining cycle-22 candidate constraints are (i)
-         * address-range floor, (ii) address-range ceiling, (iii)
-         * alignment, (iv) the `-Ex` variant itself. Cycle 41c folds
-         * the two address-range degrees of freedom into ONE bounded
-         * variation by matching the nxdk-side known-good framebuffer
-         * allocator call (`nxdk/lib/hal/video.c:363-367`) exactly
-         * modulo `size`. If this matched-tuple call still returns
-         * NULL or crashes, the "kernel demands a specific
-         * non-cycle-29-tuple address range" sub-hypothesis is
-         * eliminated (the matched-tuple is known-good against the
-         * same `-Ex` entry point on this kernel for the framebuffer
-         * allocator), narrowing the cycle-22 constraint search to
-         * alignment-drop (cycle 41d) and non-`-Ex` fallback (cycle
-         * 41e). Cycle-41c does NOT eliminate "address range" as a
-         * whole — the consumer-side scan window
-         * [0x80010000..0x84000000] is unchanged, and the cycle-41c
-         * defensive guards below reject any returned phys outside
-         * [0x00010000, 0x04000000) before it is stamped. On retail
-         * 64 MiB hardware the upper guard cannot fire and the lower
-         * guard fires only on a sub-64 KiB return (vanishingly
-         * unlikely for a contiguous-memory allocation), so a
-         * `witness.scan-self count=0` post-run on cycle-41c is
-         * STRONGLY suggestive of "allocation failed (NULL or crash)"
-         * — but NOT unambiguous, because either guard firing also
-         * yields `count=0` (with the page allocated, freed by the
-         * guard, and never stamped). The full real-Xbox
-         * interpretation lives in the guard-block comment below.
-         * Within these guards the cycle-41c claim is narrow but
-         * well-defined.
+         * Rationale: cycles 40 + 41a + 41b exhausted cache-policy
+         * (bare RW / NOCACHE / WRITECOMBINE all G0(c)); cycle 41c
+         * eliminated the "kernel demands a specific non-cycle-29-tuple
+         * address range" sub-hypothesis (matched-tuple to nxdk's
+         * framebuffer allocator at `nxdk/lib/hal/video.c:363-367`
+         * also G0(c) — kernel rejects the request even with the
+         * exact known-good address range). The cycle-22 leading
+         * hypothesis is now narrowed to {(a) alignment requirement
+         * `0x1000`, (b) the `-Ex` variant itself, (c) a `size=0x1000`-
+         * specific interaction}. Cycle 41d is the cheapest
+         * discriminator for branch (a): a single-literal drop of the
+         * alignment argument to `0u`. If the kernel rejects the
+         * cycle-29 call solely because it cannot or will not honor
+         * the requested 0x1000 alignment for a single-page allocation
+         * inside the matched-tuple address range, cycle 41d should
+         * advance the outcome past G0(c) (i.e. `witness.scan-self
+         * count >= 1` with `(reserved0 >> 24) == 0xA4`). If cycle
+         * 41d still yields G0(c), branch (a) is ELIMINATED and only
+         * non-`-Ex` fallback to plain `MmAllocateContiguousMemory`
+         * (cycle 41e) remains in cycle-41 scope before forcing a
+         * fundamentally new approach (custom XBE-header callback
+         * before `_start` — high scope; requires `nxdk/tools/cxbe/`
+         * changes) or a redesign of the cycle-29 self-witness
+         * as multi-page (high scope; would change the WTNS layout
+         * contract).
          *
-         * Precedent strength: this is the strongest possible nxdk-side
-         * precedent. The framebuffer allocator runs successfully on
-         * every nxdk-built XBE that draws anything (cycle-31 paint
-         * helpers + every `xbed_init`-using diag XBE go through it).
-         * If the kernel rejects the cycle-41c tuple, it cannot be
-         * rejecting it on address-range grounds alone — the rejection
-         * must involve size (0x1000 vs framebuffer's screenSize),
-         * alignment, or the call itself.
+         * Precedent strength: dropping `alignment` to `0u` against
+         * `MmAllocateContiguousMemoryEx` is an in-tree usage pattern
+         * — `nxdk/lib/hal/video.c:363` pins `0x1000` but a number of
+         * other call sites pass `0u` (see the citation list below).
+         * The nxdk header at `xboxkrnl.h:3464` is a bare prototype
+         * with no `Alignment=0` doc, so we cannot point to a
+         * documented "kernel picks natural page alignment" guarantee;
+         * what the in-tree calls demonstrate is only that the API
+         * accepts `0u` as an argument, not what alignment the kernel
+         * returns. The framebuffer's `0x1000` is an ABI requirement
+         * on the consumer side (framebuffer scanout), not a
+         * kernel-acceptance signal — so a successful framebuffer
+         * call with `0x1000` does not prove the kernel demands
+         * `0x1000`, and a hypothetical `0u` framebuffer call would
+         * not prove the kernel returns page-aligned phys. The
+         * `oracle-agent/controller.c:217-226` agent buffer also
+         * uses `0x1000` — but the agent allocation actually
+         * SUCCEEDS, so it does not constrain what alignment values
+         * the kernel rejects. Cycle 41d is therefore not testing
+         * "the kernel hates 0x1000 alignment" (the agent disproves
+         * that) but "the kernel hates 0x1000 alignment specifically
+         * for the cycle-29 tuple inside the matched-tuple address
+         * range" — a much narrower claim that the cycle-29-vs-agent
+         * delta (size, persistence flag, calling context) leaves
+         * open.
+         *
+         * Defensive phys-range guards (cycle-41c Codex-R1+R2 P1)
+         * are PRESERVED unchanged at xbed_self_witness.c:254-273.
+         * They reject any returned `phys` outside the cycle-29
+         * consumer's scan window `[0x00010000, 0x04000000)` so a
+         * `witness.scan-self count=0` post-run remains STRONGLY
+         * suggestive of allocation failure — but NOT unambiguous,
+         * because either guard firing also yields `count=0` (with
+         * the page allocated, freed by the guard, and never stamped).
+         * The full real-Xbox interpretation lives in the guard-block
+         * comment below. Within these guards the cycle-41d claim is
+         * narrow but well-defined: a cycle-41d outcome of `count>=1`
+         * (with the cycle-39 EEPROM byte at `0xA4`) would invalidate
+         * branch (a) only with respect to `0u`-vs-`0x1000` alignment;
+         * a cycle-41d outcome of `count=0` further narrows toward
+         * branches (b) and (c).
          *
          * Scope of this variation: ALLOCATOR-ACCEPTANCE triage only,
-         * identical to cycle-41a/b. The producer/consumer readback
+         * identical to cycles 41a/b/c. The producer/consumer readback
          * path is unchanged — both the stamp below and
          * `witness.scan-self` still use the `phys | 0x80000000`
          * cached-RAM mirror. */
@@ -185,7 +223,7 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
             0x1000u,             /* size: 1 page */
             0x00000000u,         /* lowest phys: match nxdk fb (cycle-41c) */
             0x7FFFFFFFu,         /* highest phys: match nxdk fb (cycle-41c) */
-            0x1000u,             /* alignment: page */
+            0u,                  /* alignment: kernel-picked (cycle-41d) */
             PAGE_READWRITE | PAGE_WRITECOMBINE);
         if (!p) {
             xbed_host_log_write(
@@ -204,7 +242,12 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         }
 
         /* CYCLE-41C DEFENSIVE PHYS-RANGE GUARDS (Codex round-1 P1 +
-         * round-2 P1 adopted; symmetric pair).
+         * round-2 P1 adopted; symmetric pair). PRESERVED unchanged
+         * in cycle-41d — alignment-drop does not affect the consumer
+         * scan-window contract; the matched-tuple address range
+         * (`lowest=0x00000000, highest=0x7FFFFFFF`) is also preserved
+         * from cycle-41c, so the guards remain load-bearing for the
+         * cycle-41d real-Xbox interpretation.
          *
          * The cycle-29 consumer at
          * `oracle-agent/commands.c::cmd_witness_scan_self` only scans
@@ -215,7 +258,7 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
          * guaranteed to be in [0x00010000, 0x04000000) — fully visible
          * to the consumer.
          *
-         * Cycle 41c widens BOTH ends of the address range to match
+         * Cycle 41c widened BOTH ends of the address range to match
          * nxdk's framebuffer allocator (`lowest=0x00000000,
          * highest=0x7FFFFFFF`). The kernel could now in principle
          * return any `phys` in [0x00000000, 0x80000000). Any phys
@@ -224,7 +267,9 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
          * `witness.scan-self count=0` post-run, which would be
          * indistinguishable from the cycle-40 G0(c) "allocation
          * returned NULL or crashed" shape and would BREAK the
-         * cycle-40 G-row discriminator.
+         * cycle-40 G-row discriminator. Cycle 41d preserves the same
+         * widened address range, so the same blind spot exists; the
+         * symmetric guards continue to close it.
          *
          * Two defensive guards close the interpretation gap so a
          * `count=0` observation can only mean "allocation failed":
@@ -260,7 +305,7 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         if (phys < 0x00010000u) {
             xbed_host_log_writef(
                 "xbed_self_witness: MmGetPhysicalAddress returned "
-                "phys=0x%08lx < 0x00010000; cycle-41c phys is below "
+                "phys=0x%08lx < 0x00010000; cycle-41d phys is below "
                 "the agent reader's kseg0 scan window "
                 "[0x80010000..0x84000000]; freeing self-witness page "
                 "(defensive — symmetric lower-bound guard)",
@@ -271,11 +316,52 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
         if (phys >= 0x04000000u) {
             xbed_host_log_writef(
                 "xbed_self_witness: MmGetPhysicalAddress returned "
-                "phys=0x%08lx >= 0x04000000; cycle-41c phys is above "
+                "phys=0x%08lx >= 0x04000000; cycle-41d phys is above "
                 "the agent reader's kseg0 scan window "
                 "[0x80010000..0x84000000]; freeing self-witness page "
                 "(defensive — symmetric upper-bound guard; should not "
                 "fire on retail 64 MiB hardware)",
+                (unsigned long)phys);
+            MmFreeContiguousMemory(p);
+            return 0;
+        }
+
+        /* CYCLE-41D PAGE-ALIGNMENT GUARD (Codex round-1 P2 adopted).
+         *
+         * Cycle 41d drops `alignment` to `0u` (let the kernel pick).
+         * The cycle-29 consumer at
+         * `oracle-agent/commands.c:cmd_witness_scan_self` scans on a
+         * fixed `0x1000` page stride starting from `0x80010000`, so a
+         * returned `phys` that is not 0x1000-aligned would be stamped
+         * by the producer but invisible to the consumer's stride —
+         * yielding `witness.scan-self count=0` post-run,
+         * indistinguishable from G0(c) "allocation failed (NULL or
+         * crash)". The cited in-tree `Alignment=0` call sites
+         * (`nxdk/lib/hal/video.c:363`, `pbkit/pbkit.c:2297`,
+         * `samples/{triangle,mesh,xaudio}`, `flat-tri-depth/main.c:77`)
+         * are usage precedent only — they prove the API accepts
+         * `0u`, NOT that the kernel returns page-aligned phys; we
+         * have not measured returned alignment from any of those
+         * sites. This guard is the cycle-41d defense-in-depth: it
+         * closes the consumer-stride blind spot specifically. It
+         * does NOT make `count=0` uniquely imply allocation failure
+         * — any of the three guards firing (lower phys-range, upper
+         * phys-range, this alignment guard) also yields `count=0`
+         * with the page allocated then freed pre-stamp. The full
+         * real-Xbox interpretation lives in the surrounding
+         * cycle-41d comment block; the value of this guard is solely
+         * that it removes "sub-page-aligned allocation hides from
+         * the consumer" from the list of post-run ambiguities. */
+        if ((phys & 0xFFFu) != 0u) {
+            xbed_host_log_writef(
+                "xbed_self_witness: MmGetPhysicalAddress returned "
+                "phys=0x%08lx not 0x1000-aligned; cycle-41d phys "
+                "would be invisible to the agent reader's 0x1000-stride "
+                "scan; freeing self-witness page (defensive — "
+                "alignment guard; in-tree precedent only proves the "
+                "API accepts Alignment=0, NOT that returned phys is "
+                "page-aligned; guard closes the consumer-stride blind "
+                "spot regardless)",
                 (unsigned long)phys);
             MmFreeContiguousMemory(p);
             return 0;
