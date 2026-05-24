@@ -100,20 +100,36 @@
  *
  * Safety notes
  * ------------
- * - Allocation uses the same `MmAllocateContiguousMemoryEx` floor
- *   (0x00010000) / ceiling (0x03ffffff) / page alignment the agent
- *   uses (`oracle-agent/controller.c:217-226`), with one deliberate
- *   cycle-41b divergence: `Protect = PAGE_READWRITE | PAGE_WRITECOMBINE`
- *   rather than the agent's plain `PAGE_READWRITE` (cycle 29..40)
- *   or cycle-41a's `PAGE_READWRITE | PAGE_NOCACHE`. Cycle 40 outcome
- *   G0(c) showed the bare-RW call returned NULL silently OR crashed
- *   inside on this real-Xbox kernel for the exact tuple; cycle 41a
- *   tried `PAGE_NOCACHE` and G0(c) PERSISTED; cycle 41b tries the
- *   symmetric `PAGE_WRITECOMBINE` cache-policy bit before broadening
- *   to range / alignment / non-`-Ex` variants. Precedent: nxdk's
- *   framebuffer-allocation path uses `PAGE_READWRITE | PAGE_WRITECOMBINE`
- *   against `MmAllocateContiguousMemoryEx` (`nxdk/lib/hal/video.c`),
- *   so the protect bit is real and accepted on stock kernels.
+ * - Allocation uses `MmAllocateContiguousMemoryEx` with the
+ *   cycle-41c combined-address-range variation: floor `0x00000000`
+ *   (was `0x00010000` in cycles 29..41b — matched the agent's
+ *   `oracle-agent/controller.c:217-226` tuple), ceiling `0x7FFFFFFF`
+ *   (was `0x03ffffff` in cycles 29..41b), page alignment `0x1000`
+ *   (unchanged), `Protect = PAGE_READWRITE | PAGE_WRITECOMBINE`
+ *   (unchanged from cycle 41b). The full call tuple now matches
+ *   nxdk's framebuffer allocator at `nxdk/lib/hal/video.c:363-367`
+ *   BYTE-FOR-BYTE modulo `size` — the strongest possible nxdk-side
+ *   precedent because the framebuffer allocator runs successfully on
+ *   every nxdk-built XBE that draws anything. Cycle 40 (bare RW) +
+ *   cycle 41a (NC) + cycle 41b (WC) all produced G0(c) — EEPROM
+ *   byte = 0xA4 landed but `MmAllocateContiguousMemoryEx` STILL
+ *   did not yield a usable allocation. Cache-policy variations are
+ *   EXHAUSTED. Cycle 41c folds the two address-range degrees of
+ *   freedom into one variation by mirroring the known-good
+ *   framebuffer allocator call. If cycle 41c still fails G0(c),
+ *   the "kernel demands a specific non-cycle-29-tuple address range"
+ *   sub-hypothesis is eliminated (the matched-tuple is known-good
+ *   against the same `-Ex` entry point on this kernel for the
+ *   framebuffer allocator), narrowing the cycle-22 constraint
+ *   search to alignment-drop (cycle 41d) and non-`-Ex` fallback
+ *   (cycle 41e). Cycle 41c's symmetric defensive phys-range guards
+ *   at the `MmGetPhysicalAddress` site reject any returned phys
+ *   outside [0x00010000, 0x04000000) (Codex round-1 P1 + round-2
+ *   P1 adopted) to keep the cycle-29 consumer's scan-window
+ *   contract intact; on retail Xbox the kernel can only return
+ *   phys within physical RAM (≤ 64 MiB), so the upper guard is a
+ *   no-op on target hardware and the lower guard fires only on
+ *   the (vanishingly unlikely) sub-64 KiB return.
  *   `MmPersistContiguousMemory` is then applied. Cycle 23 designed
  *   the chainload-survival pattern; cycle 24 confirmed survival for
  *   the agent's buffer; cycle 28 reconfirmed deterministic phys

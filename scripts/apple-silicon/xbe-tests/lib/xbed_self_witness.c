@@ -119,40 +119,72 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
 
         /* First call this process — allocate + init.
          *
-         * Match the agent's allocation pattern exactly
-         * (`oracle-agent/controller.c::s_allocate_fresh`):
-         *   - 1 page (0x1000) size
-         *   - 0x00010000 lowest acceptable phys (skip very-low pages)
-         *   - 0x03ffffff highest (top of 64 MiB RAM)
-         *   - 0x1000 page alignment
-         *   - PAGE_READWRITE | PAGE_WRITECOMBINE protection
-         *     (cycle-41b: cache-policy variation #2; was
-         *     PAGE_READWRITE | PAGE_NOCACHE in cycle-41a, bare
-         *     PAGE_READWRITE in cycles 29..40). Cycle-41a outcome
-         *     G0(c) PERSISTED — EEPROM byte=0xA4 landed but
-         *     `MmAllocateContiguousMemoryEx` STILL did not yield a
-         *     usable allocation with `PAGE_NOCACHE`. Cycle-41b
-         *     adopts the symmetric sibling cache-policy bit
-         *     `PAGE_WRITECOMBINE` (0x400, defined in nxdk's
-         *     `xboxkrnl.h`). Precedent: the very XVideoSetMode
-         *     kernel path the cycle-31 paint helper depends on
-         *     uses `MmAllocateContiguousMemoryEx(...,
-         *     PAGE_READWRITE | PAGE_WRITECOMBINE)` for the
-         *     framebuffer — see `nxdk/lib/hal/video.c` AvSetSavedDataAddress
-         *     and the cycle-31 paint contract — so the bit is real
-         *     and known-good against `-Ex` on stock kernels. Scope
-         *     of this variation: ALLOCATOR-ACCEPTANCE triage only,
-         *     identical to cycle-41a. The producer/consumer
-         *     readback path is unchanged — both the stamp below
-         *     and `witness.scan-self` still use the `phys |
-         *     0x80000000` cached-RAM mirror. If cycle-41b also
-         *     fails G0(c), cache-policy variations are exhausted
-         *     and cycle 41c broadens to address-range / alignment /
-         *     non-`-Ex` fallback. */
+         * CYCLE-41C BOUNDED VARIATION (combined address-range): the
+         * allocation tuple now matches nxdk's framebuffer allocator
+         * (`nxdk/lib/hal/video.c:363-367`) BYTE-FOR-BYTE modulo `size`:
+         *   - 0x1000 size (one page; nxdk's framebuffer is `screenSize`)
+         *   - 0x00000000 lowest phys (cycle-41c: WAS 0x00010000 in
+         *     cycles 29..41b; matches nxdk's allocator floor exactly)
+         *   - 0x7FFFFFFF highest phys (cycle-41c: WAS 0x03ffffff in
+         *     cycles 29..41b; matches nxdk's allocator ceiling exactly)
+         *   - 0x1000 page alignment (unchanged; matches nxdk's
+         *     allocator alignment exactly)
+         *   - PAGE_READWRITE | PAGE_WRITECOMBINE protection (unchanged
+         *     from cycle-41b; matches nxdk's allocator Protect
+         *     argument exactly)
+         *
+         * Rationale: cycle 40 (bare RW) + cycle 41a (NC) + cycle 41b
+         * (WC) all produced G0(c) — EEPROM byte=0xA4 landed but
+         * `MmAllocateContiguousMemoryEx` STILL did not yield a usable
+         * allocation. Cache-policy variations are EXHAUSTED. The
+         * remaining cycle-22 candidate constraints are (i)
+         * address-range floor, (ii) address-range ceiling, (iii)
+         * alignment, (iv) the `-Ex` variant itself. Cycle 41c folds
+         * the two address-range degrees of freedom into ONE bounded
+         * variation by matching the nxdk-side known-good framebuffer
+         * allocator call (`nxdk/lib/hal/video.c:363-367`) exactly
+         * modulo `size`. If this matched-tuple call still returns
+         * NULL or crashes, the "kernel demands a specific
+         * non-cycle-29-tuple address range" sub-hypothesis is
+         * eliminated (the matched-tuple is known-good against the
+         * same `-Ex` entry point on this kernel for the framebuffer
+         * allocator), narrowing the cycle-22 constraint search to
+         * alignment-drop (cycle 41d) and non-`-Ex` fallback (cycle
+         * 41e). Cycle-41c does NOT eliminate "address range" as a
+         * whole — the consumer-side scan window
+         * [0x80010000..0x84000000] is unchanged, and the cycle-41c
+         * defensive guards below reject any returned phys outside
+         * [0x00010000, 0x04000000) before it is stamped. On retail
+         * 64 MiB hardware the upper guard cannot fire and the lower
+         * guard fires only on a sub-64 KiB return (vanishingly
+         * unlikely for a contiguous-memory allocation), so a
+         * `witness.scan-self count=0` post-run on cycle-41c is
+         * STRONGLY suggestive of "allocation failed (NULL or crash)"
+         * — but NOT unambiguous, because either guard firing also
+         * yields `count=0` (with the page allocated, freed by the
+         * guard, and never stamped). The full real-Xbox
+         * interpretation lives in the guard-block comment below.
+         * Within these guards the cycle-41c claim is narrow but
+         * well-defined.
+         *
+         * Precedent strength: this is the strongest possible nxdk-side
+         * precedent. The framebuffer allocator runs successfully on
+         * every nxdk-built XBE that draws anything (cycle-31 paint
+         * helpers + every `xbed_init`-using diag XBE go through it).
+         * If the kernel rejects the cycle-41c tuple, it cannot be
+         * rejecting it on address-range grounds alone — the rejection
+         * must involve size (0x1000 vs framebuffer's screenSize),
+         * alignment, or the call itself.
+         *
+         * Scope of this variation: ALLOCATOR-ACCEPTANCE triage only,
+         * identical to cycle-41a/b. The producer/consumer readback
+         * path is unchanged — both the stamp below and
+         * `witness.scan-self` still use the `phys | 0x80000000`
+         * cached-RAM mirror. */
         PVOID p = MmAllocateContiguousMemoryEx(
             0x1000u,             /* size: 1 page */
-            0x00010000u,         /* lowest phys: skip low pages */
-            0x03ffffffu,         /* highest phys: top of 64 MiB RAM */
+            0x00000000u,         /* lowest phys: match nxdk fb (cycle-41c) */
+            0x7FFFFFFFu,         /* highest phys: match nxdk fb (cycle-41c) */
             0x1000u,             /* alignment: page */
             PAGE_READWRITE | PAGE_WRITECOMBINE);
         if (!p) {
@@ -167,6 +199,84 @@ uintptr_t xbed_self_witness_fire(uint32_t stage)
             xbed_host_log_write(
                 "xbed_self_witness: MmGetPhysicalAddress returned 0; "
                 "freeing self-witness page");
+            MmFreeContiguousMemory(p);
+            return 0;
+        }
+
+        /* CYCLE-41C DEFENSIVE PHYS-RANGE GUARDS (Codex round-1 P1 +
+         * round-2 P1 adopted; symmetric pair).
+         *
+         * The cycle-29 consumer at
+         * `oracle-agent/commands.c::cmd_witness_scan_self` only scans
+         * the kseg0 window [0x80010000, 0x84000000] and reconstructs
+         * phys as `va & 0x03FFFFFF`. In cycles 29..41b the producer's
+         * allocation tuple (`lowest=0x00010000, highest=0x03FFFFFF`)
+         * matched that window exactly, so any returned `phys` was
+         * guaranteed to be in [0x00010000, 0x04000000) — fully visible
+         * to the consumer.
+         *
+         * Cycle 41c widens BOTH ends of the address range to match
+         * nxdk's framebuffer allocator (`lowest=0x00000000,
+         * highest=0x7FFFFFFF`). The kernel could now in principle
+         * return any `phys` in [0x00000000, 0x80000000). Any phys
+         * outside [0x00010000, 0x04000000) would be stamped by the
+         * producer but INVISIBLE to the consumer's scan — yielding
+         * `witness.scan-self count=0` post-run, which would be
+         * indistinguishable from the cycle-40 G0(c) "allocation
+         * returned NULL or crashed" shape and would BREAK the
+         * cycle-40 G-row discriminator.
+         *
+         * Two defensive guards close the interpretation gap so a
+         * `count=0` observation can only mean "allocation failed":
+         *
+         *   (i)  phys < 0x00010000  — symmetric lower-bound guard;
+         *        cycle-29 reader scan window starts at 0x80010000
+         *        (i.e. phys-floor 0x00010000). Subsumes the
+         *        `phys == 0` invalid-sentinel check above (kept for
+         *        defense in depth as the canonical "MmGetPhysicalAddress
+         *        failed" signal — different host-log line).
+         *   (ii) phys >= 0x04000000 — symmetric upper-bound guard;
+         *        cycle-29 reader scan window ends at 0x84000000
+         *        (i.e. phys-ceiling 0x04000000). On retail Original
+         *        Xbox (64 MiB physical RAM) the kernel cannot return
+         *        a phys it does not have, so this branch is a no-op
+         *        on target hardware; guard exists for defense in
+         *        depth (debug-Xbox 128 MiB) and to formally close the
+         *        Codex round-1 finding.
+         *
+         * Both branches free the still-unpersisted page (no
+         * `MmPersistContiguousMemory` has run yet at this point) and
+         * return 0. The EEPROM byte stays at 0xA4 (already stamped
+         * pre-MmAlloc), so the OBSERVABLE shape on real Xbox is
+         * still `byte=0xA4 + count=0` — IDENTICAL to G0(c). The
+         * guards do not give us a real-Xbox-distinguishable signal;
+         * they ensure that the cycle-41c interpretation "address
+         * range is eliminated as failing constraint (within retail
+         * 64 MiB scope)" is only claimable when the kernel DEMONSTRABLY
+         * cannot return an in-range phys. If retail hardware ever did
+         * return phys in [0x00010000, 0x04000000), the unguarded
+         * cycle-29 path runs and yields a normal cycle-29/30 readback
+         * shape — no behavioral change vs cycles 29..41b. */
+        if (phys < 0x00010000u) {
+            xbed_host_log_writef(
+                "xbed_self_witness: MmGetPhysicalAddress returned "
+                "phys=0x%08lx < 0x00010000; cycle-41c phys is below "
+                "the agent reader's kseg0 scan window "
+                "[0x80010000..0x84000000]; freeing self-witness page "
+                "(defensive — symmetric lower-bound guard)",
+                (unsigned long)phys);
+            MmFreeContiguousMemory(p);
+            return 0;
+        }
+        if (phys >= 0x04000000u) {
+            xbed_host_log_writef(
+                "xbed_self_witness: MmGetPhysicalAddress returned "
+                "phys=0x%08lx >= 0x04000000; cycle-41c phys is above "
+                "the agent reader's kseg0 scan window "
+                "[0x80010000..0x84000000]; freeing self-witness page "
+                "(defensive — symmetric upper-bound guard; should not "
+                "fire on retail 64 MiB hardware)",
+                (unsigned long)phys);
             MmFreeContiguousMemory(p);
             return 0;
         }
