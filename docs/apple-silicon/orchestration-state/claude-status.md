@@ -1,62 +1,60 @@
 # Claude Status
 
-- Objective: cycle 42D stage-6 pre-libc-safe milestone marker bypass — bounded implementation+build+Codex slice in `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.{c,h}` that adds a `stage == 6` conditional fast path at the top of `xbed_self_witness_fire` skipping the suspected `xbed_host_log_writef → vsnprintf` pre-libc fault site (identified as the leading hypothesis by cycle 42C's INCONCLUSIVE outcome) and emitting distinct EEPROM marker bytes (high-nibble 0xB, low-nibble milestone index 0..0xB) at every shim-internal milestone so the next real-Xbox run can identify exactly how far the pre-WinMain fire progressed.
-- Status: **IMPLEMENTATION+BUILD+CODEX COMPLETE; real-Xbox deployment DEFERRED to next bounded slice.** Source change ~+584 / -14 across 2 files (`xbed_self_witness.c` + `xbed_self_witness.h`); ZERO host xemu source touched; ZERO `lib/xbed_a4_witness.{c,h}` touched; ZERO `oracle-agent/*` touched; ZERO `witness-only/*` touched; ZERO `nxdk/` source touched. Codex 3 rounds done + R4 in flight at write time (R1 HIGH "EEPROM table over-claims one-byte uniqueness" → R2 MED "two summary lines still reintroduce exact-boundary semantics" → R3 MED "third summary line still reintroduces exact-boundary semantics" → R4 launched to confirm GREEN; all hard findings adopted via documentation-only edits, ZERO C source body changes between rounds). Build verified via `make` + `llvm-readobj` + `llvm-objdump` of the stage==6 fast path against the expected i386 sequence. Final cycle-42D deployed-build SHA will match the post-R4 rebuild (latest archived: `00a8f249716968da574aa186864683383bd6b8a6ca3457a2056aad27d27bd3cf` post-R2; R3 edit was documentation-only — no rebuild required for behavioral correctness but we will rebuild before commit to match the rolling pattern).
+- Objective: cycle 42E real-Xbox deployment of cycle-42D R4-GREEN stage-6 marker-bypass XBE — bounded run-only + doc-only closeout slice deploying `witness-only-cycle42d-r4-green.xbe` (SHA `d69f23fae70bacf26c82c7e2e96e9a08a7175de9950142a2321f91ef713a3093`, 155 648 B) to the real Xbox at 192.168.0.200 and classifying the post-run signals via the cycle-42D milestone marker matrix.
+- Status: **EXECUTED + DOCS SYNCED; closure commit pending.** Outcome = NEW SIGNAL CLASS `(eeprom.scratch.read=0xBA, witness.scan-self count=0)` — calling-context PARTIALLY CONFIRMED on the bypass-body axis; cycle-22 hypothesis (a) "pre-allocator vsnprintf-pre-libc fault" RULED OUT. ZERO source code touched. ZERO Codex pass (rule #15 doc-only carve-out — the cycle-42D R4-GREEN build deployed here was Codex-R4-GREEN at cycle-42D closure). Doc-only edits: handoff.md + decision-log.md cycle-42E entries prepended; orchestration-state quartet updated; cycle-42E SUMMARY.md written to gitignored run dir.
 
-## Why cycle 42D ran this session
+## Why cycle 42E ran this session
 
-Cycle 42C closed with INCONCLUSIVE outcome `(eeprom.scratch.read=0xA6, witness.scan-self count=0)` and pre-recorded "stage-6-specific shim bypass + EEPROM marker bytes at each shim-internal decision point" as the recommended next bounded slice (Hermes's call). The prompt for this session explicitly mandated implementing that slice end-to-end: adding the bypass to `xbed_self_witness.c`, preserving all cycle-23/29/39/41c/41d/42A/42B invariants, rebuilding the witness-only XBE, running mandatory Codex validation, adopting findings, and syncing canonical docs + orchestration-state. This session executed exactly that scope without drifting into real-Xbox deployment work (deferred to cycle 42E).
+Cycle 42D closed with implementation+build+Codex deploy-ready but explicitly DEFERRED real-Xbox deployment to the next bounded slice (Hermes's call). Cycle 42E is exactly that deployment. The cycle-42D matrix was designed to be self-classifying: the post-run EEPROM byte (a LOWER BOUND on milestones reached per Codex R1.HIGH adoption) tells how far the bypass body progressed; the joint `witness.scan-self (count, reserved0, reserved1)` either confirms full success or disambiguates the residual ambiguity at the highest reached milestone.
 
 ## What this session shipped
 
-1. **Source change at `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.c`** (+~280 LOC of which ~210 LOC is in-source documentation per Codex 3-round adoption): added `self_witness_cycle42d_marker(uint8_t milestone)` static-inline `__attribute__((no_stack_protector))` helper that calls `HalWriteSMBusValue(0xA8, 0xFF, FALSE, 0xB0 | (milestone & 0x0F))` and discards NTSTATUS; added `__attribute__((no_stack_protector))` to `xbed_self_witness_fire` declaration; added `stage == XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT` conditional fast path at top of function that sets the sticky flag first, writes marker 0xB0 (entry), runs the cycle-42A allocator/guard/persist/wipe/stamp/wbinvd sequence with markers 0xB1..0xBA bracketing each major step, and returns early.
-2. **Header change at `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.h`** (+~330 LOC): new `XBED_SELF_WITNESS_EEPROM_CYCLE42D_TAG_NIB` (=0xB0), `XBED_SELF_WITNESS_STAGE_PRE_WINMAIN_CRT` (=6), 12× `XBED_SELF_WITNESS_C42D_M_*` milestone-index defines; new "Cycle-42D" Safety-notes subsection enumerating the milestone table + the Honest-framing lower-bound interpretation matrix + per-(byte, count) shape semantics + Preservation contract; updated function-contract docstring distinguishing the stage==6 bypass from the stages-!=6 cycle-42A unchanged path.
-3. **Cycle-42D run directory** `benchmark-runs/cycle42d-stage6-marker-bypass-20260524T130903Z/` (gitignored per project convention) with: `SUMMARY.md` (full implementation rationale + Codex round narrative + binary-level verification + recommended real-Xbox runbook delta vs cycle 42C), `witness-only-cycle42d.xbe` + `witness-only-cycle42d-r1-adopted.xbe` + `witness-only-cycle42d-r2-adopted.xbe` (rebuild artifacts), `file-headers.txt` + `objdump-self-witness-fire-and-thunk.txt` (binary-level verification), `codex-r1..r4-prompt.md` + `codex-r1..r4-output.md`.
-4. **Canonical docs synced.** handoff.md cycle-42D entry prepended above cycle-42C; orchestration-state quartet (this file + `current-cycle.md` + `validation-status.md` + `handoff-summary.md`) updated; decision-log.md cycle-42D entry pending (final action before closure commit).
-5. **Bounded slice commit** on `apple-silicon-performance` (final action of session; pending R4 GREEN).
+1. **Real-Xbox deployment of cycle-42D R4-GREEN XBE.** 18-step sequence executed identically to cycle 42C with the cycle-42D interpretation matrix substituted. Run dir `benchmark-runs/cycle42e-realxbox-20260524T143801Z/` (gitignored) with: `00-baseline-status.txt`, `00-run-meta.txt`, `01a/01b/01c-pre-baseline-*.txt`, `02-reboot-1-ts.txt`, `03-poll-recovery.txt`, `04-cycle42d-r4-green-sha.txt`, `05-ftp-upload.txt`, `06-ensure-agent.txt`, `07-unsafe-enable.txt`, `08-eeprom-scratch-reset.txt`, `09-eeprom-scratch-read-baseline.txt`, `10-witness-scan-self-baseline.txt`, `11-witness-scan-baseline.txt`, `12-runxbe-ts.txt`, `13-poll-recovery.txt`, `14-post-ensure-agent.txt`, `15-final-witness-scan.txt`, `16-final-witness-scan-self.txt`, `17-final-eeprom-scratch-read.txt`, `18-final-eeprom.bin`, `18-final-eeprom-tail.txt`, `SUMMARY.md` (full classification + cycle-42D matrix application + four HIGH-confidence proofs + recommended cycle-42F options).
+2. **Canonical docs synced.** handoff.md cycle-42E entry prepended above cycle-42D; decision-log.md cycle-42E entry prepended above cycle-42D.
+3. **Orchestration-state quartet updated.** This file + current-cycle.md + validation-status.md + handoff-summary.md.
+4. **Bounded slice commit on `apple-silicon-performance`** (pending; final action of session).
 
 ## Session progress
 
-- [x] Read required docs/state.
-- [x] Inspected `git status --short` + recent commits — HEAD at cycle-42C closure `e9200d8378`; pre-existing tracked drift in 4 `scripts/apple-silicon/*.{sh,py}` + 2 `lib/*.inl` + 25+ untracked `.hermes_*` preserved unstaged.
-- [x] Designed cycle-42D marker scheme (high-nibble 0xB + low-nibble milestone index; 11 milestones in execution order + 0xBB reuse-completion sentinel).
-- [x] Edited `xbed_self_witness.h` (new constants + Cycle-42D Safety-notes subsection + updated function-contract docstring).
-- [x] Edited `xbed_self_witness.c` (new marker helper + stage==6 conditional fast path at top of `xbed_self_witness_fire`).
-- [x] First clean rebuild succeeded; SHA + artifact archived.
-- [x] `llvm-readobj` + `llvm-objdump` verification of the new fast path.
-- [x] Codex R1 — HIGH adopted via documentation-only edits.
-- [x] Rebuild after R1 + archive artifact.
-- [x] Codex R2 — MED adopted via documentation-only edits.
-- [x] Rebuild after R2 + archive artifact.
-- [x] Codex R3 — residual MED adopted via documentation-only edit.
-- [x] Codex R4 launched to confirm GREEN (in flight at write time).
+- [x] Read required docs/state (handoff.md cycle-42D + cycle-42C entries; decision-log.md cycle-42D entry; orchestration-state quartet; cycle-42D SUMMARY.md including runbook delta vs cycle 42C and interpretation matrix).
+- [x] Inspected `git status --short` + `git log -1 --oneline` — HEAD at cycle-42D closure `4ec7775c2e`; pre-existing tracked drift in 4 `scripts/apple-silicon/*.{sh,py}` + 2 `lib/*.inl` + 25+ untracked `.hermes_*` preserved unstaged.
+- [x] Created run dir `benchmark-runs/cycle42e-realxbox-20260524T143801Z/`.
+- [x] Captured 00-baseline-status + 01a/01b/01c pre-baseline witness.scan + witness.scan-self + eeprom.scratch.read.
+- [x] 02 reboot → 03 poll FTP recovery (t+8s).
+- [x] 04 SHA recap; 05 FTP-upload `--overwrite` (uploaded=1); 06 ensure-agent.
+- [x] 07 unsafe.enable; 08 eeprom.scratch.reset → 0x00; 09/10/11 post-reset baselines.
+- [x] 12 runxbe at 2026-05-24T14:39:34Z; 13 poll FTP recovery (t+26s); 14 post-chainload ensure-agent.
+- [x] 15/16/17/18 final signals (witness.scan D-cycle-28 + witness.scan-self count=0 + eeprom.scratch.read **0xBA** + full EEPROM dump last byte = ba).
+- [x] Classified outcome — `(0xBA, count=0)` is NEW signal class collapsing to (α) body-completed-but-WTNS-not-discoverable vs (β) silent-marker-write-inflation; (α) strongly preferred; cycle-22 hypothesis (a) RULED OUT.
 - [x] Wrote SUMMARY.md to run dir.
-- [x] Updated handoff.md (cycle-42D entry above cycle-42C).
+- [x] Updated handoff.md (cycle-42E entry above cycle-42D).
+- [x] Updated decision-log.md (cycle-42E entry above cycle-42D).
 - [x] Updated orchestration-state quartet (this file + current-cycle.md + validation-status.md + handoff-summary.md).
-- [ ] Updated decision-log.md (cycle-42D entry pending).
-- [ ] Final rebuild after R3 documentation-only edit (no behavioral change — done for SHA recap).
-- [ ] Slice closure commit on `apple-silicon-performance` after R4 GREEN.
+- [ ] Slice closure commit on `apple-silicon-performance`.
 
 ## Confidence + risk notes
 
-- **HIGH confidence in implementation correctness.** Binary-level `llvm-objdump` of the stage==6 fast path against the expected i386 sequence (sticky-flag mov; 11 marker calls at expected sequential offsets; marker helper encoding `0xB0 | milestone`; cycle-42A allocator/guard/persist/wipe/stamp/wbinvd numerics) matches the source line-for-line.
-- **HIGH confidence in preservation of prior-cycle invariants.** cycle-23 lockstep + cycle-29 stages-!=6 path + cycle-31 paint + cycle-35 `.CRT$X*` slots + cycle-39 sticky-flag semantics for stages !=6 + cycle-41a..41e historical comment blocks + cycle-41c symmetric phys-range guards + cycle-41d page-alignment guard + cycle-42A multi-page redesign + cycle-42B pre-WinMain thunk: ALL preserved unchanged. `git diff` shows only added lines + one wrapping change to `xbed_self_witness_fire`'s declaration for `__attribute__((no_stack_protector))`; ZERO modifications to the existing stages-!=6 body.
-- **HIGH confidence in Codex adoption coherence.** All three Codex findings (R1.HIGH + R2.MED + R3.MED) were the same conceptual issue (EEPROM-byte uniqueness over-claim → lower-bound semantics) surfacing in three different source/header locations; the adoption pattern is consistent across all three.
-- **MEDIUM-HIGH confidence in the cycle-42D bypass safety from pre-WinMain context.** The only kernel calls in the stage==6 fast path are `HalWriteSMBusValue` (cycle-42C proved safe from pre-WinMain context via the thunk's defensive pre-write), `MmAllocateContiguousMemory`, `MmGetPhysicalAddress`, `MmFreeContiguousMemory`, `MmPersistContiguousMemory`, and the `wbinvd` inline asm — none of these depend on libc init in any non-obvious way that Codex flagged. The `no_stack_protector` attribute on both the marker helper and `xbed_self_witness_fire` itself guards against future compiler changes that might insert a cookie check before `__security_init_cookie` has run.
-- **LOW risk to all prior-cycle invariants.** ZERO changes to cycle-23, cycle-29 stages-!=6, cycle-31, cycle-35, cycle-39 stages-!=6, cycle-41a..41e, cycle-42A stages-!=6, cycle-42B thunk source. Cycle-39 sticky-flag for stages !=6 is preserved AND extended (cycle-42D pre-sets the flag from stage=6 ONLY when stage==6 ran first, which suppresses the cycle-39 EEPROM write — by design, since cycle-42D markers replace the cycle-39 signal when stage==6 runs).
-- **No new MED/HIGH issues observed in Codex R2 or R3 beyond residual documentation-consistency findings on the same conceptual issue.** R4 expected to confirm GREEN; if not, the residual finding will be adopted within this session before the closure commit.
-- **Cycle-22 hypothesis state NOT advanced** by cycle 42D (this is implementation-only; the calling-context axis advances during cycle-42E real-Xbox deployment when the post-run EEPROM marker byte + `witness.scan-self` (count, reserved0, reserved1) shape is classified).
+- **HIGH confidence in deployment correctness.** Cycle 42E reused the cycle-42C 18-step runbook with the cycle-42D R4-GREEN XBE as the deployed artifact and the cycle-42D matrix as the interpretation rule. SHA recap (step 04) confirmed the deployed binary matches the cycle-42D R4-GREEN artifact bit-identically.
+- **HIGH confidence in the cycle-22 advancement framing.** The 0xBA marker sits AFTER every body step in the cycle-42A redesign sequence. Under (α), reaching 0xBA proves the bypass executed `MmAllocateContiguousMemory(0x2000)` + both phys-range guards + the page-alignment guard + `MmPersistContiguousMemory` + the 0x800-word page wipe + the WTNS magic stamp + `s_witness_page` registration + reserved0/1 stamp + `wbinvd` — all from strict pre-WinMain context. This rules out cycle-22 hypotheses (a), (b), and (c) on the bypass-body axis.
+- **MEDIUM-HIGH confidence that (α) is the correct reading vs (β).** The SMBus controller and 24LC02 EEPROM are stable hardware on a post-cold-boot console; (β) requires "SMBus drops earlier writes but accepts later ones" which is vanishingly unlikely without concrete pathological state. The reboot-1 cycle returned the EEPROM to 0x00 cleanly via `eeprom.scratch.reset`, demonstrating SMBus health on this console at this moment. Disambiguation between (α) and (β) is the recommended cycle-42F scope.
+- **HIGH confidence in preservation of prior-cycle invariants.** ZERO source touched — cycle-23 lockstep + cycle-29 stages-!=6 path + cycle-31 paint + cycle-35 `.CRT$X*` slots + cycle-39 sticky-flag semantics + cycle-41a..41e historical comment blocks + cycle-41c symmetric phys-range guards + cycle-41d page-alignment guard + cycle-42A multi-page redesign + cycle-42B pre-WinMain thunk + cycle-42D stage-6 fast path: ALL preserved bit-identically. The cycle-42D R4-GREEN XBE was deployed without modification.
+- **LOW risk to all prior-cycle invariants.** Pure run-only + doc-only closeout.
+- **Cycle-22 hypothesis state ADVANCES.** From "NOT advanced" (cycle 42C closure state) → "PARTIALLY CONFIRMED on the bypass-body axis" (cycle 42E). The residual `count=0` observation is a discoverability gap, not a calling-context gap.
 
 ## What this session does NOT do
 
-- NO real-Xbox deployment (deferred to cycle 42E).
-- NO host xemu source edits.
-- NO `lib/xbed_a4_witness.{c,h}` / `lib/lib.mk` / `oracle-agent/*` / `xbed_runtime.{c,h}` / `witness-only/*` / `nxdk/` / `tools/xemu-capture/` / `composite-record.sh` / `composite-preflight.sh` edits.
-- NO composite capture.
-- NO PushNotification.
+- NO source-code changes (host xemu / nxdk / xbe-tests / oracle-agent / witness-only — all untouched).
+- NO Codex pass (rule #15 doc-only carve-out).
+- NO composite capture (cycle-34..42D silent-stall rationale).
+- NO oracle-agent rebuild (broadening `witness.scan-self` phys-range enumeration is one of three mutually-exclusive cycle-42F slice candidates).
+- NO PushNotification (informative-NEW-SIGNAL-CLASS outcome with no user decision required to proceed).
 - NO cleanup of pre-existing tracked drift in 4 `scripts/apple-silicon/*.{sh,py}` + 2 `lib/*.inl` or 25+ untracked `.hermes_*` files.
-- NO scope-expansion into cycle-42E real-Xbox deployment (kept strictly bounded per the prompt).
+- NO scope-expansion into cycle-42F implementation (kept strictly bounded per the prompt).
 
 ## Next proposed action
 
-Cycle 42D closes with implementation deploy-ready (pending R4 GREEN). The substantive next slice (Hermes's call) is cycle 42E: real-Xbox deployment of the cycle-42D witness-only XBE per the runbook documented in `benchmark-runs/cycle42d-stage6-marker-bypass-20260524T130903Z/SUMMARY.md` (identical to cycle 42C with two interpretation changes — expected post-run EEPROM byte values widen from {0x00, 0xA4, 0xA6} to {0x00, 0xA4, 0xA6, 0xB0..0xBA, 0xBB}, and the `(0xB9, 1)` shape requires the joint `(reserved0, reserved1)` readback as disambiguator). Cycle 42E classifies per the cycle-42D interpretation matrix in `xbed_self_witness.h` "Cycle-42D" Safety-notes subsection. Cleanest "calling-context CONFIRMED" signal = `(0xBA, count=1, reserved0 low byte = 0xA3, reserved1 = 5)`; strongest "calling-context REJECTED at allocator" signal = `(0xB1, count=0)`.
+Cycle 42E closes with the cycle-22 axis advanced to "PARTIALLY CONFIRMED on the bypass-body axis" + cycle-22 hypothesis (a) RULED OUT. The substantive next slice (Hermes's call) is cycle 42F — pick exactly one of three mutually-exclusive disambiguators:
+
+1. **Broaden `oracle-agent/commands.c::cmd_witness_scan_self` phys-address enumeration** (Codex-mandatory; oracle-agent source change; promotes cycle-22 to FULLY CONFIRMED if count→1+).
+2. **Add post-stamp readback EEPROM marker 0xBC** to the cycle-42D stage==6 fast path (in-XBE-only; one Codex pass; cleanest next slice — disambiguates (α) vs (β) without oracle-agent rebuild and preserves cycle-22 lockout property).
+3. **Remove cycle-42D sticky-flag pre-set** so the cycle-39 EEPROM write CAN fire on later stages-!=6 fires (discriminator for whether `WinMainCRTStartup` returned).
