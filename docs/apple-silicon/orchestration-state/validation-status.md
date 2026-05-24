@@ -1,102 +1,96 @@
 # Validation Status
 
-- Active slice: cycle 39 EEPROM scratchpad pre-`MmAllocateContiguousMemoryEx` discriminator — bounded implementation slice (lib/ + agent + paired docs). Adds one EEPROM-byte write at offset `0xFF` inside `xbed_self_witness_fire`'s existing first-call branch AS THE LAST INSTRUCTION before `MmAllocateContiguousMemoryEx`, gated AT MOST ONCE per process via a new sticky `s_eeprom_scratch_attempted` flag. Paired with two new oracle-agent verbs `eeprom.scratch.read` (4-branch decode) + `eeprom.scratch.reset` (gated by existing `unsafe.enable`).
-- Validation state: **Rule #15 Codex 3 rounds: R1 P2 + R2 P1 both ADOPTED with rebuilds; R3 P1 DEFLECTED (out-of-scope, pre-existing tracked drift).** Cycle-39 source surface (`lib/`, `oracle-agent/`, `witness-only/`) has no remaining Codex findings as of round 3. Marker written at `.claude/state/codex-validate-last-run` with the round-3 fingerprint. **Local xemu cold-boot smoke did NOT reach the XBE within the bounded slice's wait budget** — cold boot through BIOS to DVD load via the .app wrapper exceeds ~120 s without a pre-warmed snapshot path; structural correctness coverage rests on clean nxdk lld link + cycle-29 shim's existing Codex-validated first-call branch (where the new code is additive and gated by a NEW sticky flag) + xemu's QEMU smbus-eeprom device implementing both `eeprom_receive_byte` and `eeprom_write_data` per `hw/i2c/smbus_eeprom.c:52-83` (the SMBus write IS honored in emulation when reached) + Codex 3-round source review.
+- Active slice: cycle 40 real-Xbox EEPROM scratchpad discriminator run — bounded run-only slice executing the cycle-39 11-step runbook on the physical Xbox. Deploys cycle-39 oracle-agent v0.5 + witness-only XBE; arms EEPROM scratchpad baseline; chainloads witness-only; recovers post-run `eeprom.scratch.read` + `witness.scan-self` + `witness.scan` evidence; classifies against cycle-40 G-row table.
+- Validation state: **Rule #15 SKIPPED — run-only / doc-only carve-out applies.** ZERO source / script / nxdk / host xemu / lib edits this cycle. The deployed XBE binaries (witness-only SHA `7528bb5bf4c9cc8f00c934c38e015166de7a6f89236ddc8e2ad2195a47ce4e0d`, oracle-agent SHA `d419b452f127e5a065a51b2d5bba49b6f2ec1f1826cdec57845793c34440cb53`) are exactly the cycle-39 builds that passed Codex 3-round review at closure commit `33fb5b7e34`. The cycle-39 marker at `.claude/state/codex-validate-last-run` remains the relevant marker for the deployed artifacts. **OUTCOME: G0(c)** per the cycle-40 G-row discriminator table.
 
-## Rule #15 applicability (cycle 39)
+## Rule #15 applicability (cycle 40)
 
-Cycle 39 is NON-TRIVIAL CODE (rule #15 trigger #2 fires — aggregate diff in cycle-39-scope files ~975 lines including ~85 LOC lib/ source + ~90 LOC agent source + ~118 LOC README + ~6 LOC manifest + ~120 LOC headers/comments; well above the 30-line trivial-work carve-out threshold).
+Cycle 40 is RUN-ONLY / DOC-ONLY (rule #15 trigger #2 does NOT fire — ZERO uncommitted code diff in xemu-fork/ scope this cycle; only doc/state updates to `docs/apple-silicon/handoff.md` + `decision-log.md` + orchestration-state quartet).
 
-- ~50 LOC new code block in `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.c` inside the existing first-call branch.
-- ~85 LOC cycle-39 head-comment addendum + 3 new `#define`s in `scripts/apple-silicon/xbe-tests/lib/xbed_self_witness.h`.
-- ~90 LOC new code in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c` (`cmd_eeprom_scratch_read` 4-branch decode + `cmd_eeprom_scratch_reset` + help-text + paired comments).
-- ~7 LOC new declarations + comments in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.h`.
-- ~6 LOC new dispatch-table entries + banner-comment addendum in `scripts/apple-silicon/xbe-tests/oracle-agent/main.c`.
-- ~118 LOC cycle-39 README addendum + 1-row table edit in `scripts/apple-silicon/xbe-tests/witness-only/README.md`.
-- ~6 LOC changed in `scripts/apple-silicon/xbe-tests/witness-only/manifest.json` (title extension + cycle-40 expected_results section).
+- ZERO LOC of new source code, script, or build-system change in `xemu-fork/` apple-silicon scripts.
+- ZERO XBE rebuilds.
+- ZERO host xemu source touched.
+- ZERO `nxdk/` source touched.
+- Doc-only updates to canonical project docs (handoff.md + decision-log.md + orchestration-state quartet) explicitly within the rule #15 trivial-work carve-out (`Trivial work skips automatically (≤30-line uncommitted diff, doc-only changes, single-line fixes).`).
+- Compact evidence directory `benchmark-runs/cycle40-real-xbox-eeprom-discriminator-20260524T021727Z/` is gitignored per project convention (matches the `benchmark-runs/cycleNN-*/` pattern used across cycles 36 / 37 / 38).
 
-Codex validation REQUIRED per rule #15 and EXECUTED (3 rounds; 2 source-side findings adopted with rebuilds; 1 out-of-scope finding deflected with documented reason).
+Codex validation NOT REQUIRED per rule #15 trivial-work / run-only / doc-only carve-out. The deployed binaries are unchanged from cycle 39 closure.
 
-## Codex 3-round summary
-
-- **Round 1 (`codex review --uncommitted`) = MAJOR ISSUES (1 P2)**. `cmd_eeprom_scratch_read` aliased all `0xA?` values onto sub-case (c), but the cycle-40 G-row table classifies non-`0xA4` TAG-nibble values as "indeterminate" → would mislead operators or scripts into taking the wrong G-row branch. ADOPTED: split middle branch into `byte == 0xA4` (sub-case (c)) vs other-`0xA?` (indeterminate TAG-nibble match) vs else (indeterminate foreign write). Rebuilt oracle-agent.
-- **Round 2 = MAJOR ISSUES (1 P1)**. EEPROM write was gated on existing `s_witness_page == 0` first-call branch; in the exact G0(c) sub-case this discriminator targets, allocation fails on the first call → `s_witness_page` stays NULL → later `.CRT$XCU` and in-main fires re-enter the block and OVERWRITE the breadcrumb byte from `0xA4` to `0xA5`/`0xA1`/`0xA3`, destroying the cycle-39 discriminator value. ADOPTED: new sticky `s_eeprom_scratch_attempted` static flag set BEFORE the write (so failure also does not cause re-attempt); flag preserves the first-stage breadcrumb regardless of allocation outcome. Updated `xbed_self_witness.h` cycle-39 head-comment + `witness-only/README.md` scratchpad-contract table row to document the at-most-once semantics. Rebuilt witness-only.
-- **Round 3 = MAJOR ISSUES (1 P1 DEFLECTED — out of cycle-39 scope)**. Codex flagged `retail-gameplay-oracle.py:49` (and 2 sibling `retail-*.py` files) import `composite_preflight` which is currently only present as an UNTRACKED file at `scripts/apple-silicon/composite_preflight.py`. Finding correct on its merits BUT is about pre-existing tracked drift that the cycle-34..38 prompts explicitly told me to PRESERVE unstaged per the rolling Hermes-supervision guardrail. The cycle-39 closing commit does NOT stage either the 4 tracked `retail-*` / `capture-composite-reference.sh` drift files OR the untracked `composite_preflight.py` file. The cycle-39 source surface itself (`lib/`, `oracle-agent/`, `witness-only/`) has no findings in round 3. DEFLECTED with documented reason; responsibility for resolving the tracked-drift dependency belongs to whichever future cycle commits those 4 files.
-
-## Local validation envelope note
-
-Cold-boot xemu smoke (`dist/xemu.app/Contents/MacOS/xemu -config_path <tmp> -display none -nographic` against `witness-only.iso` with `XEMU_GUEST_LOG=1` + 120 s timeout) did NOT reach the witness-only XBE host-log lines — xemu booted cleanly through MCPX + BIOS init + Metal renderer + smbus-eeprom device init, but did not progress past BIOS-to-DVD launch within the 120 s envelope. The cycle-35 closure's claimed "12 s spawn" almost certainly depended on a pre-warmed snapshot mechanism (xemu's `-loadvm` path or similar) that was NOT available in this bounded session — the cycle-39 prompt explicitly says "Prefer a bounded implementation + local validation slice; do not perform the real-Xbox deployment in this session unless the canonical docs already make it clearly in-scope". Investing further session time in restoring a snapshot harness would exceed the bounded slice envelope.
-
-Structural correctness coverage for the cycle-39 EEPROM-write addition therefore rests on:
-
-1. **Clean nxdk lld link of both XBEs with ZERO new warnings.** Build succeeded against the existing nxdk toolchain (`eval "$(/Users/jbbrack03/XEMU_MacOS/nxdk/bin/activate -s)" && make` in both `witness-only/` and `oracle-agent/`).
-2. **Cycle-29 shim's existing Codex-validated first-call branch.** The new EEPROM write is inserted AS A NEW STICKY-FLAG-GATED INSTRUCTION SEQUENCE inside the existing first-call branch (`if (s_witness_page == 0)`) that was previously Codex-validated at cycle-29 closure. The existing allocation, `MmGetPhysicalAddress`, `MmPersistContiguousMemory`, page-wipe, magic/version-stamp, and `wbinvd` paths are structurally unchanged. The new code is positioned BEFORE `MmAllocateContiguousMemoryEx` and is gated by `!s_eeprom_scratch_attempted` so it fires AT MOST ONCE per process — the existing first-call branch's "called multiple times before allocation succeeds" semantics are preserved on the cycle-29 path (the EEPROM write is purely additive instrumentation).
-3. **xemu's QEMU smbus-eeprom device implementation.** `hw/i2c/smbus_eeprom.c:52-83` implements both `eeprom_receive_byte` and `eeprom_write_data` (lines 66+). The SMBus write call IS honored in emulation when reached, ruling out a "broken in xemu" failure mode for the new code path — were the XBE to reach `xbed_self_witness_fire` under xemu, the `HalWriteSMBusValue(0xA8, 0xFF, FALSE, byte)` call would persist the byte in the emulated EEPROM image at `/Users/jbbrack03/Library/Application Support/xemu/xemu/eeprom.bin`.
-4. **Codex 3-round source review** (2 source-side findings adopted with rebuilds; 1 out-of-scope finding deflected). Both R1 P2 and R2 P1 are exactly the classes of issue that local runtime smoke would also have caught — but the source review caught them earlier in the cycle without requiring a full real-Xbox run.
-
-The real discriminator answer lives in cycle 40 (real-Xbox run + post-run `eeprom.scratch.read` per the cycle-40 G-row table in `witness-only/README.md` cycle-39 addendum).
-
-## Gate status (cycle 39)
-
-- [x] Required docs read.
-- [x] Repo/git state confirmed; pre-existing tracked drift + untracked `.hermes_*` + `composite_preflight.py` preserved un-staged per cycle-34+ prompt guardrail (carried forward through cycles 35 / 36 / 37 / 38 / 39).
-- [x] EEPROM scratchpad contract designed (offset 0xFF; encoded byte `0xA0 | stage_nib`; sub-case (c) discriminator only; at-most-once per process).
-- [x] `lib/xbed_self_witness.{c,h}` implementation landed (sticky flag + new code block + 3 #defines + 85-line cycle-39 head comment).
-- [x] `oracle-agent/{commands,main}.{c,h}` agent surface landed (2 new verbs + 4-branch decode reader + reset gated by unsafe.enable + dispatch entries + help-text + banner addendum).
-- [x] `witness-only/README.md` cycle-39 addendum + `manifest.json` cycle-40 expected_results section landed.
-- [x] witness-only rebuilt cleanly; SHA-256 = `7528bb5bf4c9cc8f00c934c38e015166de7a6f89236ddc8e2ad2195a47ce4e0d`.
-- [x] oracle-agent rebuilt cleanly; SHA-256 = `d419b452f127e5a065a51b2d5bba49b6f2ec1f1826cdec57845793c34440cb53`.
-- [x] Codex round 1 (P2 reader decode) adopted + oracle-agent rebuilt.
-- [x] Codex round 2 (P1 sticky-flag gate) adopted + witness-only rebuilt.
-- [x] Codex round 3 (P1 pre-existing drift) deflected with documented reason.
-- [x] `.claude/state/codex-validate-last-run` marker written with round-3 fingerprint.
-- [x] handoff.md + decision-log.md cycle-39 entries on top above cycle-38 (cycle-38 + cycle-37 + cycle-36 + cycle-35 preserved unchanged below).
-- [x] Orchestration-state quartet (this file + current-cycle.md + claude-status.md + handoff-summary.md) closure pass.
-- [-] Local cold-boot xemu smoke ATTEMPTED but did NOT reach the XBE within the bounded slice's wait budget; documented transparently with the structural-correctness coverage substitute above.
-- [x] Closure commit on `apple-silicon-performance` landed as `33fb5b7e34`; bounded doc-only / state-only closeout-sync follow-up commit (this slice) on top updates the orchestration-state quartet to reference the landed hash.
-
-## Discriminator semantics — cycle-40 readback table
+## Cycle-40 outcome — G0(c)
 
 Reads as `(EEPROM byte at 0xFF, witness.scan-self count, witness.scan-self reserved1, witness.scan shape)`:
 
+| Signal | Observed | Expected for G0(c) |
+|---|---|---|
+| `eeprom.scratch.read` byte at 0xFF | `0xA4` (tag=0xA, stage_nib=0x4) | `0xA4` ✓ |
+| `witness.scan-self` count | `0` | `0` ✓ |
+| `witness.scan-self` reserved1 | n/a (count=0) | n/a ✓ |
+| `witness.scan` shape | D-cycle-27 (count=1 phys=0x03eb3000 reserved=0) | D-cycle-27 ✓ |
+| Dashboard FTP recovery | t+6s | (no specific expectation in the cycle-40 G-row table; anomalously fast vs cycle-36 t+38s; consistent with kernel-detected allocation crash → watchdog hardware reset) |
+
+**G0(c) is uniquely selected.** Sub-cases G0(a) "pre-`.CRT$X*` startup crash" and G0(b) "helper body crash before pre-MmAlloc instruction" are ELIMINATED by the EEPROM byte landing at `0xA4` (both (a) and (b) would have left byte = `0x00`, the cycle-39 reset baseline). G1..G4 are excluded by count=0 (all G1..G4 rows require count >= 1). Indeterminate is excluded by the explicit `0xA4` (cycle-39 valid breadcrumb) classification of the 4-branch decoder.
+
+## Cycle-40 readback table (reference, from cycle-39 closure)
+
 | EEPROM 0xFF | scan-self count | scan-self reserved1 | scan shape | G-row | Interpretation | Next |
 |---|---|---|---|---|---|---|
-| `0x00` | 0 | n/a | `D-cycle-27` | **G0(a)+(b)** | EEPROM write never executed. Cannot distinguish (a) pre-`.CRT$X*` startup crash from (b) helper-body crash before reaching the EEPROM-write instruction. | Cycle 41: custom XBE-header callback (high scope; modifies `nxdk/tools/cxbe/`). Only fund if forced. |
-| `0xA4` | 0 | n/a | `D-cycle-27` | **G0(c)** | EEPROM write landed → `MmAllocateContiguousMemoryEx` returned NULL silently OR crashed. Sub-cases (a)+(b) ELIMINATED. | Cycle 41: allocation-flag variations (`PAGE_WRITECOMBINE` vs `PAGE_NOCACHE`; tighter / looser address floor; alignment). |
-| `0xA4` | ≥1 | 1..4 | `D-cycle-27` or `A1/A2` | **G1..G4** | Reverts to the cycle-35 G1..G4 interpretations on the WTNS path. | Apply cycle-35 G-row table for the surviving shape. |
-| any other | n/a | n/a | n/a | indeterminate | Re-run with explicit `eeprom.scratch.reset`. | If reproducible, investigate concurrent EEPROM access from another XBE in the same power session. |
+| `0x00` | 0 | n/a | `D-cycle-27` | G0(a)+(b) | EEPROM write never executed. Cannot distinguish (a) pre-`.CRT$X*` startup crash from (b) helper-body crash before reaching the EEPROM-write instruction. | Cycle 41: custom XBE-header callback (high scope). |
+| **`0xA4`** | **0** | **n/a** | **`D-cycle-27`** | **G0(c) ← THIS CYCLE** | EEPROM write landed → `MmAllocateContiguousMemoryEx` returned NULL silently OR crashed. Sub-cases (a)+(b) ELIMINATED. | Cycle 41: allocation-flag variations. |
+| `0xA4` | ≥1 | 1..4 | `D-cycle-27` or `A1/A2` | G1..G4 | Reverts to cycle-35 G1..G4 interpretations on the WTNS path. | Apply cycle-35 G-row table for the surviving shape. |
+| any other | n/a | n/a | n/a | indeterminate | Re-run with explicit `eeprom.scratch.reset`. | If reproducible, investigate concurrent EEPROM access. |
 
-## Hypothesis state after cycle 39
+## Hypothesis state after cycle 40
 
-- γ.0 ("execution never entered `main()` AT ALL") — unchanged from cycle 38 closure; cycle 39 ships the instrumentation that splits G0(c) from G0(a)+(b) on a future real-Xbox run, but does NOT update the hypothesis state itself.
-- Three live G0 sub-cases remain (carried over from cycle 38, instrumentation now in place to discriminate (c) from (a)+(b)):
-  - (a) crash inside nxdk's pre-`.CRT$X*` startup;
-  - (b) crash inside `_witness_only_pre_main_crt_xx`'s body BEFORE `xbed_self_witness_fire` reaches its pre-MmAlloc instruction;
-  - (c) `MmAllocateContiguousMemoryEx` returns NULL silently (or crashes).
-- Cycle-22 pre-main-crash hypothesis — unchanged FULLY CORROBORATED.
-- γ.1 ("`XVideoSetMode` itself faulted before returning") — unchanged INVALIDATED (cycle 36 G0 outcome already showed `main()` never entered).
+- γ.0 ("execution never entered `main()` AT ALL") — UNCHANGED FULLY CORROBORATED. Cycle 40 narrows the underlying mechanism within γ.0 from "pre-main crash, anywhere" to specifically "`MmAllocateContiguousMemoryEx` returns NULL silently or crashes inside, blocking the cycle-29 first-call branch from completing."
+- Three live G0 sub-cases entering cycle 40 → ONE live G0 sub-case after cycle 40:
+  - (a) crash inside nxdk's pre-`.CRT$X*` startup — **ELIMINATED by cycle 40** (EEPROM write executed after `_PDCLIB_xbox_run_pre_initializers` walked `.CRT$XXA..XXZ` and invoked `_witness_only_pre_main_crt_xx`).
+  - (b) crash inside `_witness_only_pre_main_crt_xx`'s body BEFORE `xbed_self_witness_fire` reaches its pre-MmAlloc instruction — **ELIMINATED by cycle 40** (EEPROM write is positioned AS THE LAST INSTRUCTION before `MmAllocateContiguousMemoryEx`; its execution proves `_witness_only_pre_main_crt_xx` → `xbed_self_witness_fire` → first-call branch all completed up to the EEPROM-write instruction).
+  - (c) `MmAllocateContiguousMemoryEx` returns NULL silently (or crashes) — **CONFIRMED by cycle 40**.
+- Cycle-22 pre-main-crash hypothesis — UNCHANGED FULLY CORROBORATED, NARROWED to (c) only.
+- γ.1 ("`XVideoSetMode` itself faulted before returning") — UNCHANGED INVALIDATED.
+
+## Reproducibility shape continuation
+
+- `phys=0x03eb3000` deterministic kernel-pool reuse REPRODUCED across 4 readbacks this session (baseline + post-deploy + post-witness-upload + post-chainload) and 20+ consecutive observations across cycles 26..40.
+- `mapped_pages_seen=419` REPRODUCED at every readback this cycle.
+- `witness.scan-self count=0` REPRODUCED across cycle-40 baseline + post-chainload (matching cycle 36 G0 evidence + cycle 26..36 consistent pattern).
+- EEPROM non-volatility across two soft reboots within this session CONFIRMED (baseline byte `0x00` survived reboot 2; post-chainload byte `0xA4` survived chainload-induced reset).
+
+## Gate status (cycle 40)
+
+- [x] Required docs read.
+- [x] Repo/git state confirmed; pre-existing tracked drift + untracked `.hermes_*` + `composite_preflight.py` preserved un-staged per cycle-34+ guardrail (carried forward through cycles 35 / 36 / 37 / 38 / 39 / 40).
+- [x] Real-Xbox reachability confirmed (ping=true, agent=true v0.4 resident, baseline scans MET).
+- [x] Cycle-39 oracle-agent v0.5 deployed via FTP `--overwrite` + ensure-agent (banner cosmetic-only "v0.4"; new verbs `eeprom.scratch.*` confirmed working).
+- [x] EEPROM scratchpad baseline armed: `unsafe.enable` + `eeprom.scratch.reset` → byte 0x00 confirmed.
+- [x] Cycle-39 witness-only XBE deployed via FTP `--overwrite` after 2nd reboot.
+- [x] Preconditions re-verified post-deploy: EEPROM 0xFF still 0x00; witness.scan D-cycle-27; witness.scan-self count=0.
+- [x] Composite capture SKIPPED with documented rationale (cycle-34+36 reproduced ffmpeg silent-stall; primary signal agent-side).
+- [x] Chainloaded witness-only via `runxbe path=E:\Apps\witness-only\default.xbe`.
+- [x] Dashboard FTP recovery polled — back at t+6s; auth OK.
+- [x] Final scans + EEPROM read recovered: byte=`0xA4`, count=0, scan D-cycle-27.
+- [x] Cross-checked via full `eeprom` hex dump — last byte at offset 0xFF = `A4`.
+- [x] Classified as G0(c) per cycle-40 G-row table.
+- [x] SUMMARY.md + 14 step-numbered evidence logs written under `benchmark-runs/cycle40-real-xbox-eeprom-discriminator-20260524T021727Z/`.
+- [x] handoff.md + decision-log.md cycle-40 entries on top above cycle-39.
+- [x] Orchestration-state quartet (this file + current-cycle.md + claude-status.md + handoff-summary.md) closure pass.
+- [x] Codex SKIPPED — run-only / doc-only carve-out; cycle-39 marker remains valid for deployed binaries.
+- [ ] Closure commit on `apple-silicon-performance` (next step).
 
 ## Why this is not a regression of any prior cycle's validation guarantees
 
-Cycle 23 / 25 / 27 / 29 / 31 / 33 / 35 each Codex-validated their own implementation slices. Cycle 39 does not touch any of those slices' code in a way that would invalidate prior validation: `lib/xbed_a4_witness.{c,h}` intact (cycle 23), `lib/xbed_self_witness.c`'s existing allocation/stamp/wbinvd flush path intact (the new code is ADDITIVE and inserted BEFORE the allocation, gated by a NEW sticky flag), `oracle-agent/{controller,smc,tier2,protocol}.{c,h}` intact (the new agent verbs are ADDITIVE), `lib/lib.mk` intact, `lib/xbed_runtime.{c,h}` intact, image-blit / pipeline-smoke / mirror / other diag XBE source intact, `witness-only/main.c` intact (the new EEPROM-write is picked up automatically via the cycle-35 `.CRT$X*` slot path), `witness-only/Makefile` intact, `nxdk/` intact, `tools/xemu-capture/` intact, `scripts/apple-silicon/composite-record.sh` + `composite-preflight.sh` intact. Cycle 39 also does not change any flag default, M15 visual-gate prerequisite, or other shipping behavior.
-
-## Evidence integrity
-
-- Source diff is the evidence; the cycle-39 build artifacts replace the cycle-35 deployed binaries in the working tree (will be committed as part of the closure commit).
-- Codex round-1 + round-2 + round-3 transcripts captured at `/tmp/cycle39-codex-output{,-r2,-r3}.log` (ephemeral; the substantive findings + adoption/deflection decisions are recorded in handoff.md + decision-log.md + this file).
-- `.claude/state/codex-validate-last-run` marker written with the round-3 fingerprint that covers the cycle-39 source diff.
+Cycle 23 / 25 / 27 / 29 / 31 / 33 / 35 / 39 each Codex-validated their own implementation slices. Cycle 40 touches ZERO code or scripts — the deployed binaries are exactly the cycle-39 Codex-validated builds. The only changes in cycle 40 are doc/state updates explicitly within the rule #15 trivial-work carve-out. M15 unchanged; no flag-default change; no shipping behavior change.
 
 ## Out of scope for this cycle (validation perspective)
 
-- No xemu-fork host source touched; no new flag plumbing inside xemu.
-- No `lib/xbed_a4_witness.{c,h}` / `lib/lib.mk` / `lib/xbed_runtime.{c,h}` edits.
-- No `oracle-agent/{controller,smc,tier2,protocol}.{c,h}` edits.
-- No `witness-only/main.c` / Makefile edits (the new code is picked up automatically via the cycle-35 `.CRT$X*` slot path).
-- No image-blit / pipeline-smoke / mirror / other diag XBE source edits.
-- No nxdk source edits.
-- No `tools/xemu-capture/` source edits.
-- No `composite-record.sh` / `composite-preflight.sh` source edits.
+- No source code, script, nxdk, or host xemu edits.
+- No XBE rebuilds.
+- No flag-default change.
 - No retail-title / §G.5 / RT-as-texture work.
-- No real-Xbox run (cycle 40 is Hermes's call).
-- No PushNotification — bounded implementation slice; cycle-40 outcome may warrant one if it lands a clean G0(c) vs G0(a)+(b) split.
-- No cleanup of pre-existing untracked `.hermes_*` files or pre-existing tracked drift in `capture-composite-reference.sh` / `retail-*.py` scripts (preserved per cycle-34+ prompt guardrail).
+- No PushNotification (run-only slice; cycle 41 may warrant one if a successful allocation-flag variation lands).
+- No cleanup of pre-existing untracked `.hermes_*` files or pre-existing tracked drift in `capture-composite-reference.sh` / `retail-*.py` scripts (preserved per cycle-34+ guardrail).
+- No re-validation of the eight default-on Apple Silicon flags (rule #11; not applicable to this slice anyway).
+
+## Next-cycle Codex applicability projection (cycle 41 — Hermes's call)
+
+Per cycle-39 closure's binding contingent path for G0(c), cycle 41 explores `MmAllocateContiguousMemoryEx` allocation-flag variations in `lib/xbed_self_witness.c:133-138`. A single variation is a ~5-LOC source change → ≤30 LOC aggregate uncommitted diff → MAY qualify for the rule #15 trivial-work carve-out (single-line / small-fix territory). If cycle 41 tries multiple variations in one pass, the aggregate diff likely exceeds 30 LOC → Codex validation REQUIRED. The cycle-39 Codex-validated sticky-flag gate must be preserved across any cycle-41 changes (it is what guarantees the cycle-40 G0(c) evidence is reproducible in subsequent cycles).
