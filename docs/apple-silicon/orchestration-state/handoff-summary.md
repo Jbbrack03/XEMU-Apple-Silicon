@@ -2,10 +2,10 @@
 
 ## Structured summary
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 45F closed after Hermes reconciled the stale ACTIVE state, accepted the Codex fallback result artifact, and landed the reusable witness-only post-JSON helper plus canonical workflow update.
+- Latest completed slice: cycle 45F closed after Codex fallback finished the reusable witness-only post-JSON helper and canonical workflow doc update.
 - Active worker: none.
-- Next bounded slice: none selected yet; the next witness-only post-JSON hardware rerun should launch from the landed helper or the `cycle45f-witness-postjson-helper` successor packet rather than from ad-hoc prose.
-- Biggest caution: Claude auth drift is still unresolved for Claude-lane work, and Qwen already failed twice on this exact bounded objective before the Codex fallback finished it, so do not route this slice family back onto Qwen by default.
+- Next bounded slice: none.
+- Biggest caution: the fresh-session control-plane now has dedicated rules/helper support for remote tmux launches and remote-path inspection, but future passes must still reconcile fast result-artifact completions out of ACTIVE in the same pass.
 - Last truth update: 2026-05-26.
 ## Update contract
 

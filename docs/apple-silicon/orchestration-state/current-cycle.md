@@ -3,12 +3,12 @@
 ## Structured summary
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 45F witness-only post-JSON helper packaging closed after the Codex fallback result artifact was reconciled, the bounded helper/doc diff passed supervisor-owned validation, and the reusable launch packet stayed available under `docs/apple-silicon/orchestration-state/successor-packets/cycle45f-witness-postjson-helper.md`.
+- Last completed cycle: 45F witness-only post-JSON helper packaging closed after a Codex fallback finished the bounded helper/doc slice and wrote the required final result artifact in the preserved 45F worktree.
 - Branch: apple-silicon-performance.
-- Commit truth: root HEAD now contains the bounded cycle 45F closeout commit that lands the witness-only post-JSON helper packaging slice.
+- Commit truth: root HEAD now contains the bounded cycle 45F closeout commit named cycle 45F witness-only post-JSON helper packaging closeout — bounded helper+workflow promotion and state closure.
 - Live worker: none.
-- Validation truth: cycle 45F is a tooling/doc closure only; 45E remains the latest green real-Xbox hardware truth, and 45F added a reusable helper plus canonical workflow entry without changing that hardware conclusion.
-- Next bounded slice: none selected yet; if another witness-only post-JSON hardware pass is needed, launch from `docs/apple-silicon/orchestration-state/successor-packets/cycle45f-witness-postjson-helper.md` instead of reconstructing the recipe from prose.
+- Validation truth: 45E remains the last green hardware truth; 45F added a reusable helper plus canonical workflow documentation for that already-proven witness-only post-JSON recipe.
+- Next bounded slice: none.
 - Last truth update: 2026-05-26.
 ## Update contract
 

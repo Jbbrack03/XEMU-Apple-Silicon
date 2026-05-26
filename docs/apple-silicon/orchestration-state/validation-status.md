@@ -3,10 +3,10 @@
 ## Structured summary
 - State: CLOSED_45F.
 - Slice under validation: cycle 45F witness-only post-JSON helper packaging.
-- Last green validation: Hermes reran `bash -n scripts/apple-silicon/oracle-witness-postjson.sh`, reran a true `--dry-run --out /tmp/cycle45f-closeout-dry-run` helper pass, and confirmed the helper/doc diff still encodes the repaired 45E witness-only post-JSON command shape and artifact expectations.
-- Codex status: fallback implementation/result artifact completed after two Qwen receipt-only exits on the same bounded objective; supervisor diff review accepted the bounded helper/doc landing for closure.
-- Hardware gate status: unchanged from 45E; 45F packaged the reusable host-side invocation path but did not reopen or change the real-Xbox conclusion.
-- Required before next promotion/closure: none for 45F; future witness-only post-JSON reruns should start from the landed helper and successor packet instead of reconstructing the recipe manually.
+- Last green validation: supervisor-owned `bash -n` plus bounded dry-run/static review confirmed `scripts/apple-silicon/oracle-witness-postjson.sh` matches the 45E-proven witness-only post-JSON recipe and `docs/apple-silicon/oracle-workflow.md` now documents one canonical invocation path.
+- Codex status: completed; Codex fallback finished the bounded helper/doc slice and wrote `.claude/state/cycle45f-codex-fallback-result.md`.
+- Hardware gate status: unchanged from 45E; 45F is a tooling/documentation closure slice, not a new hardware-conclusion slice.
+- Required before next promotion/closure: none.
 - Last truth update: 2026-05-26.
 ## Update contract
 
