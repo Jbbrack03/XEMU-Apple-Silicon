@@ -21,6 +21,7 @@ via the shell, so this module is Python-only.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -234,3 +235,155 @@ def preflight_blocking_reason(result: dict[str, Any]) -> str:
             f"elapsed={elapsed:.3f}s"
         )
     return f"composite-preflight {status} rc={rc} detector={detector}"
+
+
+# ---------------------------------------------------------------------------
+# CLI entry-point (cycle 44B: opt-in JSON diagnostic output)
+# ---------------------------------------------------------------------------
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    """Return the standalone CLI parser for host-side preflight diagnostics."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the host-side composite preflight and optionally emit the "
+            "result as structured JSON."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--device",
+        default="USB2",
+        help="MS2109 device name (default: USB2).",
+    )
+    parser.add_argument(
+        "--audio-device",
+        default="USB2",
+        help="MS2109 audio device name (default: USB2).",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=720,
+        help="Capture width (default: 720).",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=480,
+        help="Capture height (default: 480).",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=30,
+        help="Capture FPS (default: 30).",
+    )
+    parser.add_argument(
+        "--pixel-format",
+        default="uyvy422",
+        help="Pixel format (default: uyvy422).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=env_int("COMPOSITE_PREFLIGHT_TIMEOUT", 8),
+        help="Preflight timeout in seconds (default: 8 / env).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "xemu-capture", "ffmpeg"),
+        default=env_str(
+            "COMPOSITE_PREFLIGHT_MODE",
+            "auto",
+            choices=("auto", "xemu-capture", "ffmpeg"),
+        ),
+        help="Detector mode (default: auto / env).",
+    )
+    parser.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Skip audio device probe.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("preflight-output"),
+        help="Output directory (default: ./preflight-output).",
+    )
+    parser.add_argument(
+        "--preflight-bin",
+        type=Path,
+        default=None,
+        help="Path to composite-preflight.sh (default: auto-detect).",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help=(
+            "Emit the preflight result as structured JSON to stdout instead "
+            "of human-readable text. Exit code is preserved."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Return a synthetic host-side preflight result without invoking "
+            "composite-preflight.sh. Safe for smoke tests."
+        ),
+    )
+    return parser
+
+
+def _dry_run_result() -> dict[str, Any]:
+    """Return a synthetic result for bounded host-side smoke tests."""
+    return {
+        "ok": True,
+        "exit_code": 0,
+        "status": "ok",
+        "detector": "dry-run",
+        "elapsed_s": 0.0,
+        "detail": "dry-run: synthetic ok result (cycle 44B)",
+        "meta_path": None,
+        "meta": None,
+        "cmd": ["composite-preflight", "--dry-run"],
+        "wrapper_elapsed_s": 0.0,
+        "stdout_tail": [],
+        "stderr_tail": [],
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the standalone composite-preflight CLI."""
+    parser = _build_cli_parser()
+    args = parser.parse_args(argv)
+
+    result = _dry_run_result() if args.dry_run else run_preflight(
+        args.out_dir,
+        device=args.device,
+        audio_device=args.audio_device,
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
+        pixel_format=args.pixel_format,
+        timeout=args.timeout,
+        mode=args.mode,
+        no_audio=args.no_audio,
+        preflight_bin=args.preflight_bin,
+    )
+
+    if args.json_output:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("ok") else int(result.get("exit_code") or 1)
+
+    reason = preflight_blocking_reason(result)
+    if result.get("ok"):
+        print(f"composite-preflight ok: {reason}")
+    else:
+        print(f"composite-preflight {result['status']}: {reason}", flush=True)
+    return 0 if result.get("ok") else int(result.get("exit_code") or 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

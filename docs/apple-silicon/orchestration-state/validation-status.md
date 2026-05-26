@@ -2,12 +2,12 @@
 
 ## Structured summary
 
-- State: CLOSED_43A_COMPOSITE_PREFLIGHT_HARDENING.
-- Slice under validation: 43A host-side composite-preflight hardening across the bounded wrapper/script family.
-- Last green validation: on 2026-05-26, `python3 -m py_compile` passed for `composite_preflight.py`, `retail-gameplay-oracle.py`, `retail-oracle-workflow.py`, and `retail-title-automation-proof.py`; `bash -n` passed for `capture-composite-reference.sh`; `capture-composite-reference.sh --help` plus the three Python wrapper `--help` checks passed; `git diff --check` passed.
-- Codex status: `.claude/state/cycle43a-codex-result.md` and `.claude/state/cycle43a-codex-reviewfix2-result.md` were reread during closeout, the five-file cycle-43A diff was accepted as coherent, and no source widening beyond that family was introduced in closure.
-- Hardware gate status: no live Xbox, capture-hardware, or end-to-end retail workflow execution was rerun in closeout; residual risk remains limited to live host/capture behavior outside syntax/help/diff validation.
-- Required before next promotion/closure: none for cycle 43A; any future live regression or contract change should reopen as a new bounded slice instead of extending this closeout.
+- State: CLOSED_44B_COMPOSITE_PREFLIGHT_JSON.
+- Slice under validation: cycle 44B bounded composite-preflight JSON diagnostic extension.
+- Last green validation: on 2026-05-26, the root repo passed supervisor-owned `python3 -m py_compile`, `bash -n`, `python3 scripts/apple-silicon/composite_preflight.py --help`, `--json --dry-run`, the missing-launcher JSON-path smoke, and `git diff --check` after promoting the validated file from the fallback worktree.
+- Codex status: `.claude/state/cycle44b-codex-fallback-result.md` and `.claude/state/cycle44b-codex-review-result.md` were accepted for closure; no blocking review findings remained.
+- Hardware gate status: no Xbox-side or capture-launch activity was in scope for cycle 44B; closure remains intentionally host-side only.
+- Required before next promotion/closure: none for cycle 44B; detector-backed JSON validation is an optional follow-up slice, not a blocker on this closed diff.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -17,6 +17,12 @@
 - Do not label validation CLOSED if a required gate for the same slice is still open.
 
 ## Detailed record
+
+- 2026-05-26 cycle 44B fallback rotation: Qwen proved the receipt/write path but twice exited without the required result artifact for the same bounded objective. Hermes therefore rotated the implementation lane onto Codex while preserving the partial diff already present in `composite_preflight.py`.
+
+- 2026-05-26 cycle 44B initial Qwen launch: Hermes accepted the 44A scout recommendation to extend the composite-preflight family with opt-in queryable diagnostics, then launched a bounded Qwen 35B implementation slice. Receipt landed, but no result artifact or completed validation set followed.
+
+- 2026-05-26 cycle 44A strategic rerank scout: the read-only scout concluded that broader mission progress now comes from better host-side tooling/observability around the composite-preflight family, not from reopening startup-witness micro-variants.
 
 - 2026-05-26 cycle 43A closeout validation: Codex reviewed the landed 43A result artifacts, confirmed the bounded fix pass had already addressed the three review findings, and reran the requested non-live validation set after the doc sync. All checks stayed green, so the slice could close without another source edit.
 

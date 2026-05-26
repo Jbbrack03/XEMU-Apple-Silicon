@@ -3,10 +3,10 @@
 ## Structured summary
 
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 43A composite-preflight hardening closeout for the landed host-side wrapper gating family.
+- Latest completed slice: cycle 44B bounded host-side JSON diagnostic extension in `composite_preflight.py`, validated and promoted onto the root branch.
 - Active worker: none.
-- Next bounded slice: none by default; reopen only if a live capture/Xbox validation or later review finds a regression in the wrapper/preflight contract.
-- Biggest caution: cycle 43A closeout revalidated only syntax/help/rc-plumbing and bounded diff coherence; the new synchronous preflight gates still need future live host/capture usage to exercise the full path end to end.
+- Next bounded slice: none in this closed handoff; derive and launch the next successor slice in the next active-state update.
+- Biggest caution: cycle 44B is closed on host-side evidence only; detector-backed JSON validation remains a useful follow-up if this CLI path becomes relied-on operationally.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -16,6 +16,12 @@
 - Remove or update any stale pending-closeout wording once the commit and state sync are real.
 
 ## Detailed record
+
+- 2026-05-26 cycle 44B fallback rotation: after two Qwen receipt-without-result failures on the same bounded JSON-diagnostics objective, Hermes kept the slice open and rotated the live implementation lane onto Codex.
+
+- 2026-05-26 cycle 44B initial Qwen launch: after closing 43A in commit `95016b6d27`, Hermes launched a bounded Qwen 35B implementation slice to add an opt-in host-side `--json` diagnostic path to the composite-preflight wrapper family. Receipt landed, but result/validation did not.
+
+- 2026-05-26 cycle 44A strategic rerank scout: the read-only scout concluded that the best next bounded move is better queryable host-side observability for the already-hardened wrapper family, not another startup-witness proof variant.
 
 - 2026-05-26 cycle 43A closeout: the landed composite-preflight hardening work is now closed. The wrapper family gained a shared synchronous gate before Xbox-side launch, the bounded review-fix pass already addressed the three known findings, and the final closeout pass reran the requested non-live validations before syncing the compact control plane back to no-active-worker truth.
 
@@ -28,3 +34,5 @@
 - 2026-05-26 result-discipline failure after relaunch: Hermes verified the 42K launch path was writable and did get `.claude/state/cycle42k-receipt.md`, but the Qwen worker still exited on max-turns without a final result artifact or code diff. The control plane is therefore back to BLOCKED_CONTROL_PLANE and the next attempt should move off Qwen unless the objective is narrowed further.
 - 2026-05-26 relaunch repair: Hermes verified the 42K launch path was writable, relaunched the bounded Qwen worker with a stricter immediate-receipt contract, and confirmed `.claude/state/cycle42k-receipt.md` landed. The slice is active again while the result artifact is still pending.
 - Cycle 42I is complete and remains the last hardware-green truth. Hermes repaired the 42J local-lane launch contract, reran the slice as a bounded reasoning-only scout pass, and got the missing receipt/result artifacts. That scout pass narrowed the next implementation candidate to an EEPROM breadcrumb instead of chainload-bracket markers, which clears the old startup blocker but still leaves 42J in CLOSEOUT until the state/doc sync is reconciled.
+
+- 2026-05-26 cycle 44B closeout reconciliation: Hermes confirmed the fallback result artifact, reran the bounded host-side checks, obtained an accept/no-blocker review artifact, and moved the control plane out of false `ACTIVE` into `CLOSEOUT`.

@@ -11,6 +11,14 @@
 
 ## Resolved blockers
 
+### Cycle 44B Qwen result-discipline failures
+- State: RESOLVED
+- Blocker class: control-plane
+- First seen: 2026-05-26T16:29:00Z
+- Resolved at: 2026-05-26T16:34:12Z
+- Affected lane: Qwen-35B
+- Impact: the cycle 44B implementation objective wrote receipts and even a partial `composite_preflight.py` diff, but Qwen exited twice without the required result artifact, so Hermes rotated the same bounded slice onto a live Codex fallback instead of leaving a false ACTIVE Qwen state behind.
+
 ### Cycle 43A stale ACTIVE control-plane summary
 - State: RESOLVED
 - Blocker class: control-plane

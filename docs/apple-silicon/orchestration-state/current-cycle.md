@@ -4,12 +4,12 @@
 
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 43A composite-preflight hardening — bounded host-side closeout for the landed wrapper-gating family.
+- Last completed cycle: 44B composite-preflight JSON diagnostics closeout — bounded host-side CLI/JSON diagnostic extension now closed on the root branch.
 - Branch: apple-silicon-performance.
-- Commit truth: cycle 43A closes in the current HEAD commit; the bounded script family now hardens `capture-composite-reference.sh`, `retail-title-automation-proof.py`, `retail-gameplay-oracle.py`, and `retail-oracle-workflow.py` around the shared `composite_preflight.py` gate so the host-side wrappers fail fast before Xbox-side launch when composite capture is not viable.
+- Commit truth: the cycle 44B closure commit now exists on the root branch; the validated `scripts/apple-silicon/composite_preflight.py` diff has been promoted out of the fallback worktree and into repo history.
 - Live worker: none.
-- Validation truth: the cycle 43A closeout pass reread both result artifacts, reviewed only the five cycle-43A script files, and reran `python3 -m py_compile`, `bash -n`, the wrapper `--help` checks, and `git diff --check`; all passed. No Xbox-side action, live capture-hardware run, or end-to-end retail launch rerun happened in this closeout pass.
-- Next bounded slice: none required for cycle 43A by default; reopen only if a later live host/capture check finds a regression or a new preflight-contract change is intentionally scoped.
+- Validation truth: cycle 44B retains the implementation artifact `.claude/state/cycle44b-codex-fallback-result.md` and accept/no-blocker review artifact `.claude/state/cycle44b-codex-review-result.md`; supervisor-owned root-repo checks (`py_compile`, `bash -n`, `--help`, `--json --dry-run`, missing-launcher JSON path, and `git diff --check`) were green before closure.
+- Next bounded slice: none in this closed record; the next fresh supervision pass must derive and launch the successor slice separately.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -20,6 +20,12 @@
 - Update this summary before appending or editing the long narrative below.
 
 ## Detailed record
+
+- 2026-05-26 cycle 44B fallback rotation: the same bounded JSON-diagnostics objective failed twice on Qwen after receipt confirmation but before the required result artifact. Hermes kept the slice family open, preserved the partial diff in `composite_preflight.py`, and rotated the live implementation lane onto a Codex fallback session with receipt confirmed at `.claude/state/cycle44b-codex-fallback-receipt.md`.
+
+- 2026-05-26 cycle 44B initial Qwen launch: Hermes closed cycle 43A at commit `95016b6d27`, ran a bounded 44A strategic rerank scout in a disposable Qwen worktree, accepted the scout recommendation to extend the composite-preflight family with queryable host-side diagnostics, and launched a fresh Qwen 35B implementation slice. Receipt landed, but the worker twice exited without the required result artifact.
+
+- 2026-05-26 cycle 44A strategic rerank scout: a read-only Qwen scout reread the canonical Apple-Silicon docs after the startup-witness checkpoint and 43A closeout, then recommended a bounded host-side `--json` preflight-diagnostic slice as the best next move because it compounds observability value without reopening the closed startup-witness line.
 
 - 2026-05-26 cycle 43A composite-preflight hardening closeout: Codex reread `.claude/state/cycle43a-codex-result.md` and `.claude/state/cycle43a-codex-reviewfix2-result.md`, reviewed the bounded five-file script diff, found it coherent, reran the required non-live validations, and closed the slice with control-plane docs synced back to no-active-worker truth. The landed behavior is a synchronous host-side composite-preflight gate before the wrappers touch the Xbox, plus preserved rc/status propagation and explicit opt-outs for intentionally broken capture paths.
 
@@ -35,3 +41,5 @@
 - Cycle 42J bounded Qwen scout/implementation-prep — CLOSEOUT on apple-silicon-performance; live worker finished and emitted the required receipt/result artifacts. Scope stayed reasoning-only: no source files changed, no code verification ran, and the durable outcome is a narrowed next-step choice rather than a landed implementation.
 - 2026-05-25 control-plane incident: the first 42J Qwen launch died on a Qwen CLI approval-mode conflict, the repaired relaunch then stalled on worktree-local tool-permission / startup-discipline issues (glob approval failure, then a max-turn fallback) and never produced the required .claude/state/cycle42j-receipt.md or .claude/state/cycle42j-result.md artifacts. Hermes updated the lane to BLOCKED_CONTROL_PLANE instead of pretending the worker was still active.
 - Cycle 42I real-Xbox deployment and classification — COMPLETED 2026-05-25 with outcome (0xBC; count=0 mapped_pages_seen=420 kseg0_count=0 kseg1_count=0 truncated_at_cap=0 kseg1_scanned=1) from benchmark-runs/cycle42i-realxbox-20260525T214945Z. Interpretation: sub-cause (2) page torn down before agent scan remains the leading explanation; low-RAM placement and uncached-kseg1-only survival are ruled out on this run.
+
+- 2026-05-26 cycle 44B fallback review closeout: the Codex fallback result artifact and a follow-up accept/no-blocker review both landed, so Hermes reconciled the compact state from false `ACTIVE` to `CLOSEOUT` while root-branch promotion remains pending.
