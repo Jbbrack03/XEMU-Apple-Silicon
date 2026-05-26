@@ -2,12 +2,12 @@
 
 ## Structured summary
 
-- State: CLOSED_42M_OPERATIONAL_TEARDOWN_CONCLUSION.
-- Slice under validation: 42L hardware evidence carried through the 42M strategic checkpoint.
-- Last green validation: cycle 42L real-Xbox run completed cleanly with EEPROM tail de3faabc, checksum-confirmed pre-teardown phys 0x03FDE000, final marker 0xBC, and zero WTNS hits in both alias windows.
-- Codex status: 42K independent review artifact at /Users/jbbrack03/XEMU_MacOS/worktrees/codex-cycle42k-fallback-20260526-011843/.claude/state/cycle42k-codex-review.md was PASS-WITH-CAUTIONS and is already adopted in landed commit e42471ebec; 42L and 42M add no new code diff.
-- Hardware gate status: the checksum-valid breadcrumb proves the producer-side page lived inside the scanned RAM aperture before teardown, so the surviving count=0 result is operationally strong enough to stop funding more post-chainload scan variants by default.
-- Required before next promotion/closure: no immediate gate remains on this family; only reopen with a deliberately-scoped earlier-window discriminator if stronger causal proof becomes necessary.
+- State: CLOSED_43A_COMPOSITE_PREFLIGHT_HARDENING.
+- Slice under validation: 43A host-side composite-preflight hardening across the bounded wrapper/script family.
+- Last green validation: on 2026-05-26, `python3 -m py_compile` passed for `composite_preflight.py`, `retail-gameplay-oracle.py`, `retail-oracle-workflow.py`, and `retail-title-automation-proof.py`; `bash -n` passed for `capture-composite-reference.sh`; `capture-composite-reference.sh --help` plus the three Python wrapper `--help` checks passed; `git diff --check` passed.
+- Codex status: `.claude/state/cycle43a-codex-result.md` and `.claude/state/cycle43a-codex-reviewfix2-result.md` were reread during closeout, the five-file cycle-43A diff was accepted as coherent, and no source widening beyond that family was introduced in closure.
+- Hardware gate status: no live Xbox, capture-hardware, or end-to-end retail workflow execution was rerun in closeout; residual risk remains limited to live host/capture behavior outside syntax/help/diff validation.
+- Required before next promotion/closure: none for cycle 43A; any future live regression or contract change should reopen as a new bounded slice instead of extending this closeout.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -17,6 +17,8 @@
 - Do not label validation CLOSED if a required gate for the same slice is still open.
 
 ## Detailed record
+
+- 2026-05-26 cycle 43A closeout validation: Codex reviewed the landed 43A result artifacts, confirmed the bounded fix pass had already addressed the three review findings, and reran the requested non-live validation set after the doc sync. All checks stayed green, so the slice could close without another source edit.
 
 - 2026-05-26 cycle 42M strategic checkpoint: Hermes promoted the 42L checksum-valid runtime breadcrumb from a pending closeout signal to the current operational conclusion. Because the reconstructed phys 0x03FDE000 sits inside the widened scan aperture while both aliases still read zero hits, further post-chainload scan micro-variants are no longer the default path forward.
 

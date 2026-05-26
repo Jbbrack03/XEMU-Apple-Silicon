@@ -3,10 +3,10 @@
 ## Structured summary
 
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 42M strategic checkpoint closed the immediate 42L follow-up after syncing the canonical docs to the checksum-valid teardown signal.
+- Latest completed slice: cycle 43A composite-preflight hardening closeout for the landed host-side wrapper gating family.
 - Active worker: none.
-- Next bounded slice: none by default; only reopen with an earlier-window discriminator if stronger proof becomes necessary.
-- Biggest caution: the breadcrumb materially reduces stale-payload doubt and is operationally strong, but it still proves producer-side pre-teardown location rather than post-chainload survival.
+- Next bounded slice: none by default; reopen only if a live capture/Xbox validation or later review finds a regression in the wrapper/preflight contract.
+- Biggest caution: cycle 43A closeout revalidated only syntax/help/rc-plumbing and bounded diff coherence; the new synchronous preflight gates still need future live host/capture usage to exercise the full path end to end.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -16,6 +16,8 @@
 - Remove or update any stale pending-closeout wording once the commit and state sync are real.
 
 ## Detailed record
+
+- 2026-05-26 cycle 43A closeout: the landed composite-preflight hardening work is now closed. The wrapper family gained a shared synchronous gate before Xbox-side launch, the bounded review-fix pass already addressed the three known findings, and the final closeout pass reran the requested non-live validations before syncing the compact control plane back to no-active-worker truth.
 
 - 2026-05-26 cycle 42M strategic checkpoint: Hermes synced the canonical docs to the 42L breadcrumb result and explicitly stopped the post-chainload startup-witness micro-cycle. The next default action is to hold this family closed unless a future earlier-window discriminator is intentionally scoped.
 

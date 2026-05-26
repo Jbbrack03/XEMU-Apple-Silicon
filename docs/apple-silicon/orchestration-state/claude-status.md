@@ -6,8 +6,8 @@
 - State: CLOSED.
 - Active session: none.
 - Current objective: none in progress on the Claude lane.
-- Last completed slice: 42M strategic checkpoint closed the immediate 42L follow-up after the landed 42K implementation and left Claude intentionally idle.
-- Next expected action: keep Claude idle unless a future strategic decision explicitly reopens this question as an earlier-window discriminator or broader architecture-sensitive redesign.
+- Last completed slice: 43A composite-preflight hardening closeout; the bounded closeout pass accepted the landed wrapper/preflight diff and created the closure commit.
+- Next expected action: keep Claude idle unless a later live capture/Xbox regression or a fresh review finding reopens this family as a new bounded slice.
 - Blocker class: none.
 - Last truth update: 2026-05-26.
 
@@ -20,4 +20,4 @@
 
 ## Detailed record
 
-- 2026-05-26 Codex fallback rotation: after the same bounded 42K EEPROM-breadcrumb objective failed twice on Qwen, Hermes preflighted the lane, created a fresh Codex fallback worktree, launched the bounded worker there, and confirmed `.claude/state/cycle42k-receipt.md` landed promptly. Final result and diff truth are still pending.
+- 2026-05-26 cycle 43A closeout: the compact state no longer claims an active worker. Codex performed the final bounded diff review, reran the requested non-live validations, synced the orchestration-state docs to closed truth, and then exited the lane with no live worker remaining.

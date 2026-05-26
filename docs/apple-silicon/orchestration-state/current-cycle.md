@@ -4,12 +4,12 @@
 
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 42M strategic checkpoint — canonical docs synced to the 42L checksum-valid teardown signal and the startup-witness micro-cycle is closed for now.
+- Last completed cycle: 43A composite-preflight hardening — bounded host-side closeout for the landed wrapper-gating family.
 - Branch: apple-silicon-performance.
-- Commit truth: cycle 42K implementation is landed at e42471ebec; cycle 42L real-Xbox runtime readback at benchmark-runs/cycle42l-realxbox-20260526T024502Z recovered tail bytes de3faabc, reconstructed pre-teardown phys 0x03FDE000, and still saw zero WTNS hits in both aliases; this doc-only checkpoint closes the immediate follow-up by treating teardown-before-agent-scan as the operational conclusion unless a future earlier-window discriminator is explicitly reopened.
+- Commit truth: cycle 43A closes in the current HEAD commit; the bounded script family now hardens `capture-composite-reference.sh`, `retail-title-automation-proof.py`, `retail-gameplay-oracle.py`, and `retail-oracle-workflow.py` around the shared `composite_preflight.py` gate so the host-side wrappers fail fast before Xbox-side launch when composite capture is not viable.
 - Live worker: none.
-- Validation truth: the checksum-confirmed breadcrumb proves the producer-side page lived inside the scanned RAM aperture before teardown, so the remaining count=0 outcome is no longer actionable evidence for another post-chainload scan micro-variation.
-- Next bounded slice: none by default; only reopen this family with a fresh earlier-window discriminator if stronger causal proof becomes necessary.
+- Validation truth: the cycle 43A closeout pass reread both result artifacts, reviewed only the five cycle-43A script files, and reran `python3 -m py_compile`, `bash -n`, the wrapper `--help` checks, and `git diff --check`; all passed. No Xbox-side action, live capture-hardware run, or end-to-end retail launch rerun happened in this closeout pass.
+- Next bounded slice: none required for cycle 43A by default; reopen only if a later live host/capture check finds a regression or a new preflight-contract change is intentionally scoped.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -20,6 +20,8 @@
 - Update this summary before appending or editing the long narrative below.
 
 ## Detailed record
+
+- 2026-05-26 cycle 43A composite-preflight hardening closeout: Codex reread `.claude/state/cycle43a-codex-result.md` and `.claude/state/cycle43a-codex-reviewfix2-result.md`, reviewed the bounded five-file script diff, found it coherent, reran the required non-live validations, and closed the slice with control-plane docs synced back to no-active-worker truth. The landed behavior is a synchronous host-side composite-preflight gate before the wrappers touch the Xbox, plus preserved rc/status propagation and explicit opt-outs for intentionally broken capture paths.
 
 - 2026-05-26 cycle 42M strategic checkpoint: Hermes synced the canonical docs to the 42L checksum-valid breadcrumb result and explicitly closed the immediate startup-witness micro-cycle. The control plane now treats teardown-before-agent-scan as the operational conclusion for this family, and any future proof slice must reopen as an earlier-window discriminator rather than another post-chainload scan tweak.
 

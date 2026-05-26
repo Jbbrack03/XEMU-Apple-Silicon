@@ -29,6 +29,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 DEFAULT_HOST = os.environ.get("ORACLE_HOST", "192.168.0.200")
 
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import composite_preflight as _composite_preflight
+
 TITLE_DEFAULTS = {
     "crimson": {
         "name": "Crimson Skies",
@@ -415,7 +419,40 @@ def main(argv: list[str] | None = None) -> int:
         return write_report("blocked", 1, blocked_reasons=["game XBE not found on Xbox"])
 
     capture_tool = HERE / "xemu-capture-app.py"
-    if not args.skip_capture_preflight and capture_tool.exists():
+    xemu_capture_app_bundle = ROOT / "tools/xemu-capture/dist/xemu-capture.app"
+    if (not args.skip_capture_preflight
+            and not args.dry_run
+            and args.capture_backend == "xemu-capture"
+            and not xemu_capture_app_bundle.exists()
+            and not args.allow_broken_capture):
+        return write_report(
+            "blocked", 1,
+            blocked_reasons=[
+                f"xemu-capture backend selected but app bundle missing at "
+                f"{xemu_capture_app_bundle}; build via "
+                f"`cd tools/xemu-capture && make` or pass "
+                f"--capture-backend ffmpeg or --allow-broken-capture."
+            ],
+        )
+    if (not args.skip_capture_preflight
+            and not args.dry_run
+            and args.capture_backend == "xemu-capture"
+            and not capture_tool.exists()):
+        step("capture-preflight", "fail", error=f"xemu-capture launcher missing: {capture_tool}")
+        if not args.allow_broken_capture:
+            return write_report(
+                "blocked", 1,
+                blocked_reasons=[
+                    f"xemu-capture backend selected but launcher is missing at "
+                    f"{capture_tool}; restore scripts/apple-silicon/xemu-capture-app.py, "
+                    f"switch to --capture-backend ffmpeg, or pass "
+                    f"--allow-broken-capture."
+                ],
+            )
+    if (not args.skip_capture_preflight
+            and not args.dry_run
+            and args.capture_backend == "xemu-capture"
+            and capture_tool.exists()):
         auth = run([sys.executable, str(capture_tool), "auth"],
                    out_dir / "capture-auth.json", timeout=25.0)
         auth_json = json_stdout(auth)
@@ -452,6 +489,37 @@ def main(argv: list[str] | None = None) -> int:
         elif not args.allow_broken_capture:
             return write_report("blocked", 1,
                                 blocked_reasons=["capture device did not deliver frames"])
+
+    if (not args.skip_capture_preflight
+            and not args.dry_run
+            and args.capture_backend == "ffmpeg"):
+        pf_dir = out_dir / "ffmpeg-preflight"
+        pf = _composite_preflight.run_preflight(
+            pf_dir,
+            device=args.capture_device,
+            audio_device=args.capture_audio_device,
+            timeout=_composite_preflight.env_int("COMPOSITE_PREFLIGHT_TIMEOUT", 8),
+            mode=_composite_preflight.env_str(
+                "COMPOSITE_PREFLIGHT_MODE", "ffmpeg",
+                choices=("auto", "xemu-capture", "ffmpeg")),
+            no_audio=args.no_audio,
+        )
+        step("ffmpeg-preflight", "ok" if pf.get("ok") else "fail",
+             rc=pf.get("exit_code"), status=pf.get("status"),
+             detector=pf.get("detector"),
+             elapsed_s=pf.get("elapsed_s"),
+             meta_path=pf.get("meta_path"))
+        if pf.get("meta_path"):
+            report["artifacts"]["ffmpeg_preflight_meta"] = pf["meta_path"]
+        if not pf.get("ok") and not args.allow_broken_capture:
+            pf_rc = pf.get("exit_code")
+            rc = pf_rc if isinstance(pf_rc, int) and pf_rc > 0 else 1
+            return write_report(
+                "blocked", rc,
+                blocked_reasons=[
+                    _composite_preflight.preflight_blocking_reason(pf)
+                ],
+            )
 
     bridge_evidence = args.bridge_evidence
     if not args.skip_bridge_proof and not evidence_ok(bridge_evidence):
@@ -501,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
             "--hardware-port-index", str(args.hardware_port_index),
             "--launch-delay-s", "0",
             "--record-extra-s", "8",
+            "--capture-device", args.capture_device,
+            "--capture-audio-device", args.capture_audio_device,
             "--capture-backend", args.capture_backend,
             "--frame-interval-s", "5",
             "--route-offset-ms", "0",
@@ -515,6 +585,8 @@ def main(argv: list[str] | None = None) -> int:
             igr_cmd.append("--no-audio")
         if args.dry_run:
             igr_cmd.append("--dry-run")
+        if args.skip_capture_preflight:
+            igr_cmd.append("--skip-preflight")
         igr = run(igr_cmd, out_dir / "igr-proof.json", timeout=igr_timeout)
         exit_evidence = igr_dir / "verdict.json"
         step("igr-proof", "ok" if igr.get("rc") == 0 and evidence_ok(exit_evidence) else "fail",
@@ -563,6 +635,10 @@ def main(argv: list[str] | None = None) -> int:
         gameplay_cmd.append("--no-audio")
     if args.dry_run:
         gameplay_cmd.append("--dry-run")
+    if args.skip_capture_preflight:
+        gameplay_cmd.append("--skip-preflight")
+    if args.allow_broken_capture and "--allow-capture-failure" not in gameplay_cmd:
+        gameplay_cmd.append("--allow-capture-failure")
     if args.gameplay_timeout_s is not None:
         timeout = args.gameplay_timeout_s
     else:

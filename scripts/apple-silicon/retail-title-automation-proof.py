@@ -19,6 +19,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 DEFAULT_HOST = os.environ.get("ORACLE_HOST", "192.168.0.200")
 
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
 _spec = _imp.spec_from_file_location("oracle_orchestrator", HERE / "oracle-orchestrator.py")
 orch = _imp.module_from_spec(_spec)  # type: ignore[arg-type]
 assert _spec and _spec.loader
@@ -33,6 +36,8 @@ _spec3 = _imp.spec_from_file_location("return_proof", HERE / "retail-title-retur
 return_proof = _imp.module_from_spec(_spec3)  # type: ignore[arg-type]
 assert _spec3 and _spec3.loader
 _spec3.loader.exec_module(return_proof)  # type: ignore[union-attr]
+
+import composite_preflight as _composite_preflight
 
 
 def sha256_file(path: Path) -> str:
@@ -67,15 +72,24 @@ def run(argv: list[str], log: Path, timeout: float | None = None) -> dict[str, A
 
 def capture_device_visible(pattern: str) -> dict[str, Any]:
     ffmpeg = os.environ.get("FFMPEG", "ffmpeg")
-    proc = subprocess.run(
-        [ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=15,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "rc": None,
+            "matched": False,
+            "stdout": "",
+            "stderr": "",
+            "error": f"ffmpeg probe spawn failed: {exc!r}",
+        }
     text = (proc.stdout or "") + (proc.stderr or "")
     return {
         "rc": proc.returncode,
@@ -101,6 +115,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wait-retries", type=int, default=90)
     parser.add_argument("--wait-delay-s", type=float, default=2.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="Bypass the synchronous composite-preflight gate (cycle 34); "
+                             "use only when the capture chain is verified by other means.")
+    parser.add_argument("--preflight-timeout", type=int,
+                        default=_composite_preflight.env_int("COMPOSITE_PREFLIGHT_TIMEOUT", 8),
+                        help="composite-preflight.sh wall-clock seconds (cycle 34, default 8 / env COMPOSITE_PREFLIGHT_TIMEOUT).")
+    parser.add_argument("--preflight-mode",
+                        choices=("auto", "xemu-capture", "ffmpeg"),
+                        default=_composite_preflight.env_str(
+                            "COMPOSITE_PREFLIGHT_MODE", "ffmpeg",
+                            choices=("auto", "xemu-capture", "ffmpeg")),
+                        help="composite-preflight.sh detector mode (cycle 34, default ffmpeg / env COMPOSITE_PREFLIGHT_MODE).")
     args = parser.parse_args(argv)
 
     patched = args.patched_xbe.resolve()
@@ -128,13 +154,44 @@ def main(argv: list[str] | None = None) -> int:
         except json.JSONDecodeError as exc:
             report["patch_meta_error"] = str(exc)
 
-    cap_probe = capture_device_visible(args.capture_device)
+    if args.dry_run:
+        cap_probe = {"skipped": True, "reason": "--dry-run"}
+    elif args.skip_preflight:
+        cap_probe = {"skipped": True, "reason": "--skip-preflight"}
+    else:
+        cap_probe = {"skipped": True,
+                     "reason": "preflight-subsumes-enumeration"}
     report["capture_probe"] = cap_probe
-    if not cap_probe["matched"] and not args.dry_run:
-        report["status"] = "capture-device-missing"
-        (out_dir / "verdict.json").write_text(json.dumps(report, indent=2, sort_keys=True),
-                                              encoding="utf-8")
-        return 1
+
+    if not args.skip_preflight and not args.dry_run:
+        preflight_dir = out_dir / "preflight"
+        pf = _composite_preflight.run_preflight(
+            preflight_dir,
+            device=args.capture_device,
+            audio_device=args.capture_audio_device,
+            timeout=args.preflight_timeout,
+            mode=args.preflight_mode,
+            no_audio=args.no_audio,
+        )
+        report["preflight"] = pf
+        if not pf["ok"]:
+            report["status"] = "preflight-failed"
+            report["failed_reasons"] = [_composite_preflight.preflight_blocking_reason(pf)]
+            (out_dir / "verdict.json").write_text(
+                json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+            print(json.dumps({
+                "status": "preflight-failed",
+                "out_dir": str(out_dir),
+                "preflight_status": pf["status"],
+                "preflight_exit_code": pf["exit_code"],
+                "preflight_detector": pf["detector"],
+            }, indent=2))
+            rc = pf["exit_code"]
+            return rc if isinstance(rc, int) and rc > 0 else 1
+    elif args.skip_preflight:
+        report["preflight"] = {"status": "skipped", "reason": "--skip-preflight"}
+    elif args.dry_run:
+        report["preflight"] = {"status": "skipped", "reason": "--dry-run"}
 
     if args.dry_run:
         report["status"] = "dry-run"
@@ -169,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if args.no_audio:
         comp_cmd.append("--no-audio")
+    comp_cmd.append("--skip-preflight")
     rec_log = (out_dir / "composite-record-wrapper.log").open("w", encoding="utf-8")
     rec = subprocess.Popen(comp_cmd, cwd=ROOT, stdout=rec_log,
                            stderr=subprocess.STDOUT, text=True)

@@ -41,7 +41,11 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 DEFAULT_HOST = os.environ.get("ORACLE_HOST", "192.168.0.200")
 
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
 import importlib.util as _imp
+import composite_preflight as _composite_preflight
 
 _spec = _imp.spec_from_file_location("oracle_orchestrator", HERE / "oracle-orchestrator.py")
 orch = _imp.module_from_spec(_spec)  # type: ignore[arg-type]
@@ -311,8 +315,11 @@ def main(argv: list[str] | None = None) -> int:
                         "past the requested duration.")
     p.add_argument("--allow-capture-failure", action="store_true",
                    help="Do not fail the run solely because composite capture "
-                        "failed or produced no video. Useful only for "
-                        "dashboard-return bootstrapping.")
+                        "failed, produced no media, or failed the synchronous "
+                        "composite-preflight gate. This is an explicit opt-out "
+                        "that may still launch the Xbox-side run with a broken "
+                        "capture path; useful only for dashboard-return "
+                        "bootstrapping or other externally observed runs.")
     p.add_argument("--exit-delay-ms", type=int, default=5000)
     p.add_argument("--exit-hold-ms", type=int, default=6000)
     p.add_argument("--exit-attempts", type=int, default=2)
@@ -327,7 +334,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-unproven", action="store_true",
                    help="Run despite missing backend evidence. Dangerous.")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="Bypass the synchronous composite-preflight gate (cycle 34); "
+                        "use only when the capture chain is verified by other means.")
+    p.add_argument("--preflight-timeout", type=int,
+                   default=_composite_preflight.env_int("COMPOSITE_PREFLIGHT_TIMEOUT", 8),
+                   help="composite-preflight.sh wall-clock seconds (cycle 34, default 8 / env COMPOSITE_PREFLIGHT_TIMEOUT).")
+    p.add_argument("--preflight-mode",
+                   choices=("auto", "xemu-capture", "ffmpeg"),
+                   default=_composite_preflight.env_str(
+                       "COMPOSITE_PREFLIGHT_MODE", "",
+                       choices=("auto", "xemu-capture", "ffmpeg")),
+                   help="composite-preflight.sh detector mode (cycle 34; defaults to "
+                        "match --capture-backend so the preflight probes the same "
+                        "backend the recorder uses — xemu-capture or ffmpeg — "
+                        "unless overridden via COMPOSITE_PREFLIGHT_MODE).")
     args = p.parse_args(argv)
+    if not args.preflight_mode:
+        args.preflight_mode = (
+            "xemu-capture" if args.capture_backend == "xemu-capture" else "ffmpeg"
+        )
 
     if args.input_backend == "hardware" and not args.input_driver_cmd:
         args.input_driver_cmd = hardware_driver_template(
@@ -401,10 +427,56 @@ def main(argv: list[str] | None = None) -> int:
          "oracle-orchestrator status rc=0" if status.get("rc") == 0
          else "Xbox/oracle status is not green")
 
-    cap_probe = capture_device_visible(args.capture_device)
+    if args.dry_run:
+        cap_probe = {"skipped": True, "reason": "--dry-run"}
+    elif args.skip_preflight:
+        cap_probe = {"skipped": True, "reason": "--skip-preflight"}
+    elif failures and not args.allow_unproven:
+        cap_probe = {"skipped": True, "reason": "earlier-gate-failure"}
+    else:
+        cap_probe = {"skipped": True,
+                     "reason": "preflight-subsumes-enumeration"}
     report["capture_probe"] = cap_probe
-    gate("composite-capture-device", bool(cap_probe.get("matched")) or args.allow_unproven,
-         f"AVFoundation device pattern {args.capture_device!r}")
+
+    if args.skip_preflight:
+        report["preflight"] = {"status": "skipped", "reason": "--skip-preflight"}
+        gate("composite-capture-preflight", True, "skipped via --skip-preflight")
+    elif args.dry_run:
+        report["preflight"] = {"status": "skipped", "reason": "--dry-run"}
+        gate("composite-capture-preflight", True, "skipped via --dry-run")
+    elif failures and not args.allow_unproven:
+        report["preflight"] = {"status": "skipped", "reason": "earlier-gate-failure"}
+        gate("composite-capture-preflight", True,
+             "skipped because earlier gates already block the run")
+    else:
+        preflight_dir = out_dir / "preflight"
+        pf = _composite_preflight.run_preflight(
+            preflight_dir,
+            device=args.capture_device,
+            audio_device=args.capture_audio_device,
+            timeout=args.preflight_timeout,
+            mode=args.preflight_mode,
+            no_audio=args.no_audio,
+        )
+        report["preflight"] = pf
+        pf_reason = _composite_preflight.preflight_blocking_reason(pf)
+        if pf.get("ok"):
+            pf_gate_ok = True
+            pf_gate_message = pf_reason
+        elif args.allow_capture_failure:
+            pf_gate_ok = True
+            pf_gate_message = (
+                f"tolerated via --allow-capture-failure: {pf_reason}"
+            )
+        elif args.allow_unproven:
+            pf_gate_ok = True
+            pf_gate_message = f"tolerated via --allow-unproven: {pf_reason}"
+        else:
+            pf_gate_ok = False
+            pf_gate_message = pf_reason
+        gate("composite-capture-preflight",
+             pf_gate_ok,
+             pf_gate_message)
 
     route_csv = out_dir / "route-with-exit.csv"
     exit_info = write_route_with_exit(events, route_csv, args.exit_backend,
@@ -423,6 +495,13 @@ def main(argv: list[str] | None = None) -> int:
                                               encoding="utf-8")
         print(json.dumps({"verdict": "blocked", "out_dir": str(out_dir),
                           "blocked_reasons": failures}, indent=2))
+        failed_gate_names = {g["name"] for g in report["gates"]
+                             if g.get("status") == "fail"}
+        if failed_gate_names == {"composite-capture-preflight"}:
+            pf = report.get("preflight") or {}
+            rc = pf.get("exit_code")
+            if isinstance(rc, int) and rc > 0:
+                return rc
         return 1
 
     if args.dry_run:
@@ -462,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.no_audio:
             comp_cmd.append("--no-audio")
+        comp_cmd.append("--skip-preflight")
     else:
         comp_cmd = [
             sys.executable, str(HERE / "capture-frame-sequence.py"),
