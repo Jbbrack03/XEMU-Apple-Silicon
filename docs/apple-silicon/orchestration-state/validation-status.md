@@ -1,14 +1,13 @@
 # Validation Status
 
 ## Structured summary
-- State: CLOSED_45D.
-- Slice under validation: cycle 45D run-diag JSON adoption — bounded host/workflow adoption slice closed on root branch.
-- Last green validation: the root-branch cycle 45D closeout commit follows an ACCEPT review plus supervisor-owned `git diff --check`, `python3 -m py_compile scripts/apple-silicon/oracle-orchestrator.py scripts/apple-silicon/oracle-client.py`, and `python3 scripts/apple-silicon/oracle-orchestrator.py run-diag --help` after promotion.
-- Codex status: fallback implementation and independent review both completed in the 45D worktree; no live worker remains.
-- Hardware gate status: no new Xbox-side correctness claim was in scope for 45D; the next likely slice is the hardware-facing follow-up that consumes the new JSON readback surface.
-- Required before next promotion/closure: none for 45D; choose and launch the next successor slice when ready.
+- State: CLOSED_45E.
+- Slice under validation: cycle 45E real-Xbox witness-only post-JSON validation after refreshing the deployed oracle-agent.
+- Last green validation: Hermes rebuilt and redeployed oracle-agent, verified live JSON support on the Xbox, then reran python3 scripts/apple-silicon/oracle-orchestrator.py run-diag with witness-only plus post-JSON readbacks successfully.
+- Codex status: not required for 45E because the bounded outcome was supervisor-owned hardware validation plus doc/state closeout; no source diff beyond control-plane docs/state.
+- Hardware gate status: the repaired post-JSON path now captures real-Xbox evidence directly; the successful 45E rerun preserved the prior residual of byte 0xBC, witness.scan-self count 0, and witness.scan count 1 instead of changing the hardware conclusion.
+- Required before next promotion/closure: none for 45E; the next likely slice is 45F automation of the repaired witness-only post-JSON recipe.
 - Last truth update: 2026-05-26.
-
 ## Update contract
 
 - Put the current validation truth in this summary even if the detailed narrative is long.
@@ -35,3 +34,6 @@
 - Cycle 42J scout artifacts now exist at .claude/state/cycle42j-receipt.md and .claude/state/cycle42j-result.md. The scout stayed reasoning-only, produced no source diff, and selected the EEPROM-breadcrumb path as the smaller safer next implementation candidate.
 - Cycle 42I evidence landed from benchmark-runs/cycle42i-realxbox-20260525T214945Z: SUMMARY.md and 15-summary.json report final_eeprom_byte=0xBC, count=0 mapped_pages_seen=420 kseg0_count=0 kseg1_count=0 truncated_at_cap=0 kseg1_scanned=1, and verdict=sub-cause-2-leading, which preserves the cycle-42H predicted interpretation and advances the teardown-window hypothesis from residual ambiguity to the leading remaining explanation.
 - 2026-05-26 cycle 45D startup note: Hermes treated the missing Qwen receipt as a startup-discipline/control-plane incident, terminated the unconfirmed Qwen launch, and rotated the same bounded objective onto Codex fallback with a confirmed receipt before leaving the slice ACTIVE.
+- 2026-05-26 cycle 45E hardware rerun: after refreshing the deployed oracle-agent, Hermes obtained structured post-JSON artifacts confirming , , and  on the real Xbox.
+
+- 2026-05-26 cycle 45E hardware rerun: after refreshing the deployed oracle-agent, Hermes obtained structured post-JSON artifacts confirming byte 0xBC, witness.scan-self count 0, and witness.scan count 1 on the real Xbox.

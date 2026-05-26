@@ -2,12 +2,11 @@
 
 ## Structured summary
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 45D run-diag JSON adoption closed on root after fallback implementation, ACCEPT review, and supervisor-owned validation.
+- Latest completed slice: cycle 45E closed after Hermes refreshed the Xbox-side oracle-agent and reran the witness-only real-Xbox validation with successful post-JSON readbacks.
 - Active worker: none.
-- Next bounded slice: candidate 45E is a real-Xbox validation follow-up using the new post-relaunch JSON readbacks; choose the exact command/evidence recipe in the next rotation pass.
-- Biggest caution: Claude lane auth drift was observed during this pass (`claude-max-bypass` returned `Not logged in`), but Hermes avoided blocking the project by routing the review continuation through Codex.
+- Next bounded slice: candidate 45F is a small tooling or runbook slice to turn the repaired witness-only post-JSON procedure into a reusable one-command path for future real-Xbox runs.
+- Biggest caution: the first 45E validation attempt proved the repo-side run-diag JSON support was ahead of the deployed Xbox agent; Hermes repaired that drift in the same pass, but future hardware slices should verify live JSON support before trusting the first post-JSON run.
 - Last truth update: 2026-05-26.
-
 ## Update contract
 
 - Start with the compact truth above.
@@ -36,3 +35,4 @@
 
 - 2026-05-26 cycle 44B closeout reconciliation: Hermes confirmed the fallback result artifact, reran the bounded host-side checks, obtained an accept/no-blocker review artifact, and moved the control plane out of false `ACTIVE` into `CLOSEOUT`.
 - 2026-05-26 cycle 45D fallback rotation: after the initial Qwen 35B implementation launch failed to post its required receipt, Hermes killed the unconfirmed worker and relaunched the same bounded JSON-adoption slice on Codex, which posted a receipt promptly.
+- 2026-05-26 cycle 45E validation closeout: Hermes kept the slice bounded, repaired the stale Xbox-side oracle-agent deployment in the same pass, and preserved the prior witness-only residual through the new machine-readable post-JSON path.

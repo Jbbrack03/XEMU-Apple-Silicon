@@ -3,14 +3,13 @@
 ## Structured summary
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 45D run-diag JSON adoption closed on root after the fallback implementation result, ACCEPT review at `.claude/state/cycle45d-codex-review-result.md`, and supervisor-owned bounded validations.
+- Last completed cycle: 45E real-Xbox witness-only post-JSON validation closed after Hermes repaired the stale oracle-agent deployment, reran the witness-only validation, and captured machine-readable post-relaunch evidence on the real Xbox.
 - Branch: apple-silicon-performance.
-- Commit truth: root HEAD now contains the bounded cycle 45D closeout commit (`cycle 45D run-diag JSON adoption closeout — bounded root-branch promotion + ACCEPT review closure`).
+- Commit truth: root HEAD now contains the bounded cycle 45E closeout commit named docs/state: close cycle 45E post-JSON real-Xbox validation after oracle-agent refresh.
 - Live worker: none.
-- Validation truth: cycle 45D has a fallback implementation result, an ACCEPT review result, and supervisor-owned `git diff --check`, `python3 -m py_compile`, and `run-diag --help` validation on root after promotion.
-- Next bounded slice: candidate 45E is a real-Xbox validation follow-up that uses the new `run-diag --post-json-command ...` surface to capture post-relaunch JSON evidence; choose the exact hardware-facing recipe in the next rotation pass.
+- Validation truth: cycle 45E has supervisor-owned oracle-smoke preflight, a rebuilt and redeployed JSON-capable oracle-agent, and a successful run-diag witness-only rerun with post-JSON artifacts showing EEPROM byte 0xBC, witness.scan-self count 0, and witness.scan count 1.
+- Next bounded slice: candidate 45F is a tooling follow-up that packages the repaired eeprom.scratch.reset plus run-diag post-JSON witness-only recipe into a reusable bounded helper or runbook for future real-Xbox cycles.
 - Last truth update: 2026-05-26.
-
 ## Update contract
 
 - Use exactly one state value from ACTIVE, CLOSEOUT, CLOSED, BLOCKED_QUOTA, BLOCKED_AUTH, BLOCKED_PERMISSIONS, BLOCKED_CONTROL_PLANE, PAUSED.
@@ -43,3 +42,6 @@
 
 - 2026-05-26 cycle 44B fallback review closeout: the Codex fallback result artifact and a follow-up accept/no-blocker review both landed, so Hermes reconciled the compact state from false `ACTIVE` to `CLOSEOUT` while root-branch promotion remains pending.
 - 2026-05-26 cycle 45D rotation: the first Qwen 35B implementation launch was preflight-green but failed receipt discipline, so Hermes killed the unconfirmed session and relaunched the same bounded slice on a live Codex fallback with receipt confirmation.
+- 2026-05-26 cycle 45E validation: the first post-JSON run exposed deployment drift rather than a hardware failure; Hermes refreshed the Xbox-side oracle-agent, reran the same bounded witness-only validation, and captured successful machine-readable , , and  artifacts under .
+
+- 2026-05-26 cycle 45E validation: the first post-JSON run exposed deployment drift rather than a hardware failure; Hermes refreshed the Xbox-side oracle-agent, reran the same bounded witness-only validation, and captured successful machine-readable eeprom.scratch.read, witness.scan-self, and witness.scan artifacts under benchmark-runs/cycle45e-realxbox-postjson-rerun-20260526T205253Z/.
