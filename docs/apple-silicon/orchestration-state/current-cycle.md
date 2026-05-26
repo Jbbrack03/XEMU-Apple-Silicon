@@ -3,12 +3,12 @@
 ## Structured summary
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 45E real-Xbox witness-only post-JSON validation closed after Hermes repaired the stale oracle-agent deployment, reran the witness-only validation, and captured machine-readable post-relaunch evidence on the real Xbox.
+- Last completed cycle: 45F witness-only post-JSON helper packaging closed after the Codex fallback result artifact was reconciled, the bounded helper/doc diff passed supervisor-owned validation, and the reusable launch packet stayed available under `docs/apple-silicon/orchestration-state/successor-packets/cycle45f-witness-postjson-helper.md`.
 - Branch: apple-silicon-performance.
-- Commit truth: root HEAD now contains the bounded cycle 45E closeout commit named docs/state: close cycle 45E post-JSON real-Xbox validation after oracle-agent refresh.
+- Commit truth: root HEAD now contains the bounded cycle 45F closeout commit that lands the witness-only post-JSON helper packaging slice.
 - Live worker: none.
-- Validation truth: cycle 45E has supervisor-owned oracle-smoke preflight, a rebuilt and redeployed JSON-capable oracle-agent, and a successful run-diag witness-only rerun with post-JSON artifacts showing EEPROM byte 0xBC, witness.scan-self count 0, and witness.scan count 1.
-- Next bounded slice: candidate 45F is a tooling follow-up that packages the repaired eeprom.scratch.reset plus run-diag post-JSON witness-only recipe into a reusable bounded helper or runbook for future real-Xbox cycles.
+- Validation truth: cycle 45F is a tooling/doc closure only; 45E remains the latest green real-Xbox hardware truth, and 45F added a reusable helper plus canonical workflow entry without changing that hardware conclusion.
+- Next bounded slice: none selected yet; if another witness-only post-JSON hardware pass is needed, launch from `docs/apple-silicon/orchestration-state/successor-packets/cycle45f-witness-postjson-helper.md` instead of reconstructing the recipe from prose.
 - Last truth update: 2026-05-26.
 ## Update contract
 

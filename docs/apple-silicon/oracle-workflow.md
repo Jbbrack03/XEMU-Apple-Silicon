@@ -295,6 +295,37 @@ If the new XBE renders synthetic input, also include
 | `docs/apple-silicon/diagnostic-xbe-plan.md` | Diag-XBE library architecture + per-XBE specifications |
 | `docs/apple-silicon/real-xbox-oracle-feasibility.md` | Original feasibility study (superseded same-day by Phase 1+2+3.0) |
 
+## Witness-only Post-JSON Recipe
+
+Cycle 45E established the canonical witness-only post-JSON validation path,
+and cycle 45F packages that same sequence into one helper invocation:
+
+```sh
+scripts/apple-silicon/oracle-witness-postjson.sh \
+    --out benchmark-runs/<timestamp>-witness-only-postjson
+```
+
+Default behavior is intentionally opinionated and matches the repaired 45E
+recipe: it can run the optional smoke preflight, requires live `help --json`
+support for `eeprom.scratch.read`, `eeprom.scratch.reset`, `witness.scan`,
+and `witness.scan-self`, sends `unsafe.enable`, resets the EEPROM scratch
+baseline to `0x00`, then drives `oracle-orchestrator.py run-diag` with the
+cycle-45E witness-only XBE path `E:\Apps\witness-only\default.xbe`, FTP collect
+path `/E/Apps/witness-only`, and the three post-JSON readbacks
+`eeprom.scratch.read`, `witness.scan-self`, and `witness.scan`.
+
+Successful runs should leave `verdict.json` plus:
+- `post-json/eeprom.scratch.read.json`
+- `post-json/witness.scan-self.json`
+- `post-json/witness.scan.json`
+
+For the proven 45E witness-only recipe, the expected structured values are
+EEPROM byte `0xBC` / `188`, `witness.scan-self count = 0`, and
+`witness.scan count = 1`. If `help --json` support is missing or
+`run-diag` reports `post-json-readback-failed`, treat that as deployed
+oracle-agent drift first and redeploy the Xbox-side agent before reclassifying
+hardware truth.
+
 ## Versioning
 
 | Component | Version | Notes |

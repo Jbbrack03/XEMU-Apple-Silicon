@@ -1,12 +1,12 @@
 # Validation Status
 
 ## Structured summary
-- State: CLOSED_45E.
-- Slice under validation: cycle 45E real-Xbox witness-only post-JSON validation after refreshing the deployed oracle-agent.
-- Last green validation: Hermes rebuilt and redeployed oracle-agent, verified live JSON support on the Xbox, then reran python3 scripts/apple-silicon/oracle-orchestrator.py run-diag with witness-only plus post-JSON readbacks successfully.
-- Codex status: not required for 45E because the bounded outcome was supervisor-owned hardware validation plus doc/state closeout; no source diff beyond control-plane docs/state.
-- Hardware gate status: the repaired post-JSON path now captures real-Xbox evidence directly; the successful 45E rerun preserved the prior residual of byte 0xBC, witness.scan-self count 0, and witness.scan count 1 instead of changing the hardware conclusion.
-- Required before next promotion/closure: none for 45E; the next likely slice is 45F automation of the repaired witness-only post-JSON recipe.
+- State: CLOSED_45F.
+- Slice under validation: cycle 45F witness-only post-JSON helper packaging.
+- Last green validation: Hermes reran `bash -n scripts/apple-silicon/oracle-witness-postjson.sh`, reran a true `--dry-run --out /tmp/cycle45f-closeout-dry-run` helper pass, and confirmed the helper/doc diff still encodes the repaired 45E witness-only post-JSON command shape and artifact expectations.
+- Codex status: fallback implementation/result artifact completed after two Qwen receipt-only exits on the same bounded objective; supervisor diff review accepted the bounded helper/doc landing for closure.
+- Hardware gate status: unchanged from 45E; 45F packaged the reusable host-side invocation path but did not reopen or change the real-Xbox conclusion.
+- Required before next promotion/closure: none for 45F; future witness-only post-JSON reruns should start from the landed helper and successor packet instead of reconstructing the recipe manually.
 - Last truth update: 2026-05-26.
 ## Update contract
 

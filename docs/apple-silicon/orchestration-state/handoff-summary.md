@@ -2,10 +2,10 @@
 
 ## Structured summary
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 45E closed after Hermes refreshed the Xbox-side oracle-agent and reran the witness-only real-Xbox validation with successful post-JSON readbacks.
+- Latest completed slice: cycle 45F closed after Hermes reconciled the stale ACTIVE state, accepted the Codex fallback result artifact, and landed the reusable witness-only post-JSON helper plus canonical workflow update.
 - Active worker: none.
-- Next bounded slice: candidate 45F is a small tooling or runbook slice to turn the repaired witness-only post-JSON procedure into a reusable one-command path for future real-Xbox runs.
-- Biggest caution: the first 45E validation attempt proved the repo-side run-diag JSON support was ahead of the deployed Xbox agent; Hermes repaired that drift in the same pass, but future hardware slices should verify live JSON support before trusting the first post-JSON run.
+- Next bounded slice: none selected yet; the next witness-only post-JSON hardware rerun should launch from the landed helper or the `cycle45f-witness-postjson-helper` successor packet rather than from ad-hoc prose.
+- Biggest caution: Claude auth drift is still unresolved for Claude-lane work, and Qwen already failed twice on this exact bounded objective before the Codex fallback finished it, so do not route this slice family back onto Qwen by default.
 - Last truth update: 2026-05-26.
 ## Update contract
 
