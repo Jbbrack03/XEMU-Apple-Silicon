@@ -102,6 +102,54 @@ void self_witness_cycle42d_marker(uint8_t milestone)
                         (milestone & 0x0Fu))));
 }
 
+/* Cycle-42K fallback: append a compact page-location breadcrumb in
+ * the reserved EEPROM tail without moving the existing 0xFF marker.
+ * The payload is only intended to be trusted when the final 0xFF byte
+ * is the cycle-42F positive marker (0xBC) AND the checksum matches.
+ * To avoid re-arming a stale pre-run payload after the existing
+ * `eeprom.scratch.reset` baseline (which clears 0xFF only), invalidate
+ * the checksum FIRST, then repopulate lo/hi/checksum, then write the
+ * legacy 0xBC marker LAST. See `xbed_self_witness.h` for the decode
+ * contract. */
+static inline __attribute__((no_stack_protector))
+void self_witness_cycle42k_write_phys_breadcrumb(uintptr_t phys)
+{
+    uint32_t page_index = (uint32_t)(phys >> 12);
+    UCHAR lo = (UCHAR)(page_index & 0xFFu);
+    UCHAR hi = (UCHAR)((page_index >> 8) & 0xFFu);
+    UCHAR ck = (UCHAR)(lo ^ hi ^ XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_CK_XOR);
+    UCHAR invalid_ck = (UCHAR)(ck ^ 0xFFu);
+
+    (void)HalWriteSMBusValue(
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_CK_OFF,
+        FALSE,
+        (ULONG)invalid_ck);
+    (void)HalWriteSMBusValue(
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_LO_OFF,
+        FALSE,
+        (ULONG)lo);
+    (void)HalWriteSMBusValue(
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_HI_OFF,
+        FALSE,
+        (ULONG)hi);
+    (void)HalWriteSMBusValue(
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_SMBUS_ADDR,
+        (UCHAR)XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_CK_OFF,
+        FALSE,
+        (ULONG)ck);
+
+    /* Write the legacy 0xBC marker LAST so the existing 0xFF
+     * readout remains the authoritative "payload may be meaningful"
+     * gate for post-run investigation. A complete adjunct-write
+     * failure can still leave stale side bytes, but the checksum-first
+     * invalidation makes partial-update false positives conservative. */
+    self_witness_cycle42d_marker(
+        XBED_SELF_WITNESS_C42D_M_POST_READBACK);
+}
+
 uintptr_t __attribute__((no_stack_protector))
 xbed_self_witness_fire(uint32_t stage)
 {
@@ -522,8 +570,7 @@ xbed_self_witness_fire(uint32_t stage)
          * policy semantics. The kseg0 alias remains valid through
          * function-local scope; no risk of pointer invalidation. */
         if (vp_c42d[0] == XBED_SELF_WITNESS_MAGIC) {
-            self_witness_cycle42d_marker(
-                XBED_SELF_WITNESS_C42D_M_POST_READBACK);
+            self_witness_cycle42k_write_phys_breadcrumb(phys_c42d);
         }
 
         return s_witness_phys;

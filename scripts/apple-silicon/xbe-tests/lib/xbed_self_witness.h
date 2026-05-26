@@ -684,10 +684,12 @@
  * is the next adjacent nibble; reserves room for future cycle-42E+
  * markers (0xC0..0xFF) without colliding.
  *
- * Why NOT a new EEPROM offset: offset 0xFF is the single byte the
- * agent's `eeprom.scratch.read` verb is wired to (cycle-39 design);
- * adding a new offset would require oracle-agent verb changes. The
- * 1-byte resolution is sufficient for the 12-milestone marker set.
+ * Why NOT move the primary marker off 0xFF: offset 0xFF is the
+ * single byte the agent's `eeprom.scratch.read` verb is wired to
+ * (cycle-39 design), so the primary status marker must stay there
+ * to avoid oracle-agent protocol changes. The 1-byte resolution is
+ * sufficient for the 12-milestone marker set; any future adjunct
+ * payload must preserve 0xFF as the final truth byte.
  *
  * Why NOT add a host-log channel that doesn't depend on vsnprintf:
  * the cycle-15 `xbed_host_log_write` (non-formatting) already exists
@@ -1016,6 +1018,44 @@
  * row of the post-run interpretation matrix + the Honest framing on
  * what 0xBC does and does NOT prove. */
 #define XBED_SELF_WITNESS_C42D_M_POST_READBACK        0xCu
+
+/* Cycle-42K fallback (2026-05-25): preserve enough pre-teardown
+ * location truth to make the post-chainload investigation less
+ * blind, while staying inside the existing EEPROM surface.
+ *
+ * The primary status byte remains 0xFF (= 0xBC on the cycle-42F
+ * positive path) so `eeprom.scratch.read` and existing runbooks do
+ * not change. The three preceding bytes in the documented reserved
+ * 0xC0..0xFF tail carry an adjunct payload ONLY for that positive
+ * path:
+ *
+ *   0xFC = phys-page-index low byte
+ *   0xFD = phys-page-index high byte
+ *   0xFE = checksum = low ^ high ^ 0x4B
+ *
+ * `phys-page-index` means `(phys >> 12)`. The stage-6 fast path's
+ * existing guards already constrain `phys` to the 64 MiB retail RAM
+ * aperture and require 4 KiB alignment, so the full location truth
+ * fits in 16 bits and the original physical address reconstructs as
+ * `phys = ((high << 8) | low) << 12`.
+ *
+ * Honest framing:
+ *   - payload is meaningful ONLY when 0xFF == 0xBC and the checksum
+ *     matches; stale or partial side bytes must be ignored.
+ *   - implementation writes an invalid checksum first, then lo/hi,
+ *     then the final checksum, then 0xBC last; this reduces the
+ *     chance that a fresh 0xBC re-arms stale side bytes after the
+ *     existing 0xFF-only reset baseline, but it does NOT formally
+ *     rule out a total adjunct-write failure with the final marker
+ *     still landing.
+ *   - this proves where the producer-side page lived BEFORE teardown;
+ *     it does NOT prove the page still survives there post-chainload.
+ *   - no oracle-agent verb changes are required because the existing
+ *     full `eeprom` dump already exposes bytes 0xFC..0xFF raw. */
+#define XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_LO_OFF  0xFCu
+#define XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_HI_OFF  0xFDu
+#define XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_CK_OFF  0xFEu
+#define XBED_SELF_WITNESS_EEPROM_PHYS_PAGE_CK_XOR  0x4Bu
 
 
 /* Initialize the self-witness if not already initialized, then stamp
