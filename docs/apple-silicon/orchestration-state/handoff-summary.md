@@ -2,11 +2,11 @@
 
 ## Structured summary
 
-- Control-plane state: CLOSEOUT.
-- Latest completed slice: cycle 42K fallback implementation is implementation-complete with result artifact, independent Codex review, and successful witness-only build, but the closure commit and runtime readback slice are still pending.
+- Control-plane state: CLOSED.
+- Latest completed slice: cycle 42M strategic checkpoint closed the immediate 42L follow-up after syncing the canonical docs to the checksum-valid teardown signal.
 - Active worker: none.
-- Next bounded slice: close out 42K truthfully, then run the narrow real-hardware EEPROM-tail readback validation slice for bytes 0xFC..0xFF.
-- Biggest caution: the breadcrumb design is acceptable but still carries the documented stale-payload caveat if side-byte writes fail while the final 0xBC marker lands.
+- Next bounded slice: none by default; only reopen with an earlier-window discriminator if stronger proof becomes necessary.
+- Biggest caution: the breadcrumb materially reduces stale-payload doubt and is operationally strong, but it still proves producer-side pre-teardown location rather than post-chainload survival.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -16,6 +16,10 @@
 - Remove or update any stale pending-closeout wording once the commit and state sync are real.
 
 ## Detailed record
+
+- 2026-05-26 cycle 42M strategic checkpoint: Hermes synced the canonical docs to the 42L breadcrumb result and explicitly stopped the post-chainload startup-witness micro-cycle. The next default action is to hold this family closed unless a future earlier-window discriminator is intentionally scoped.
+
+- 2026-05-26 cycle 42L runtime readback: Hermes rebooted back to dashboard, uploaded the landed witness-only XBE, reset the EEPROM scratch baseline, ran the bounded real-Xbox slice, and recovered de 3f aa bc with a valid checksum. Because the reconstructed phys 0x03FDE000 sits inside the scanned aperture while witness.scan-self still reported zero hits, the residual now points more strongly to teardown-before-agent-scan than to discoverability drift.
 
 - 2026-05-26 Codex fallback rotation: after the same bounded 42K EEPROM-breadcrumb objective failed twice on Qwen, Hermes preflighted the lane, created a fresh Codex fallback worktree, launched the bounded worker there, and confirmed `.claude/state/cycle42k-receipt.md` landed promptly. Final result and diff truth are still pending.
 

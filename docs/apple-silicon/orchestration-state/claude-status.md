@@ -6,8 +6,8 @@
 - State: CLOSED.
 - Active session: none.
 - Current objective: none in progress on the Claude lane.
-- Last completed slice: 42H closed at 934e9273ef; 42I was a Hermes-run hardware validation slice; 42J completed as a Qwen scout, and 42K is now being attempted on a Codex fallback lane after two Qwen failures on the same bounded objective.
-- Next expected action: keep Claude idle for this pass; only rotate the bounded 42K objective to Claude if the Codex fallback reports scope growth, EEPROM-path doubt, or another implementation-lane failure.
+- Last completed slice: 42M strategic checkpoint closed the immediate 42L follow-up after the landed 42K implementation and left Claude intentionally idle.
+- Next expected action: keep Claude idle unless a future strategic decision explicitly reopens this question as an earlier-window discriminator or broader architecture-sensitive redesign.
 - Blocker class: none.
 - Last truth update: 2026-05-26.
 

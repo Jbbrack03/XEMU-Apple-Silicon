@@ -2,14 +2,14 @@
 
 ## Structured summary
 
-- State: CLOSEOUT.
-- Active cycle: 42K.
-- Last completed cycle: 42J scout/implementation-prep (no-diff).
+- State: CLOSED.
+- Active cycle: none.
+- Last completed cycle: 42M strategic checkpoint — canonical docs synced to the 42L checksum-valid teardown signal and the startup-witness micro-cycle is closed for now.
 - Branch: apple-silicon-performance.
-- Commit truth: last landed code slice remains cycle 42H CLOSED at 934e9273ef; cycle 42I remains the completed run-only hardware result; cycle 42J completed as a no-diff Qwen scout that selected Option B (EEPROM breadcrumb); cycle 42K Codex fallback implementation has now produced the result artifact, passed independent Codex review with cautions, and built successfully into witness-only artifacts in the fallback worktree, but the closure commit does not exist yet.
-- Live worker: none; the fallback implementation worker exited after emitting receipt/result artifacts, and the independent review artifact now exists at /Users/jbbrack03/XEMU_MacOS/worktrees/codex-cycle42k-fallback-20260526-011843/.claude/state/cycle42k-codex-review.md.
-- Validation truth: cycle 42K now has result artifact + independent review + successful full witness-only build in the fallback worktree; hardware/runtime truth is still pending and no closure commit has landed yet.
-- Next bounded slice: close out cycle 42K truthfully, then rotate into the narrow runtime EEPROM-tail readback validation slice to check bytes 0xFC..0xFF on real hardware.
+- Commit truth: cycle 42K implementation is landed at e42471ebec; cycle 42L real-Xbox runtime readback at benchmark-runs/cycle42l-realxbox-20260526T024502Z recovered tail bytes de3faabc, reconstructed pre-teardown phys 0x03FDE000, and still saw zero WTNS hits in both aliases; this doc-only checkpoint closes the immediate follow-up by treating teardown-before-agent-scan as the operational conclusion unless a future earlier-window discriminator is explicitly reopened.
+- Live worker: none.
+- Validation truth: the checksum-confirmed breadcrumb proves the producer-side page lived inside the scanned RAM aperture before teardown, so the remaining count=0 outcome is no longer actionable evidence for another post-chainload scan micro-variation.
+- Next bounded slice: none by default; only reopen this family with a fresh earlier-window discriminator if stronger causal proof becomes necessary.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -20,6 +20,10 @@
 - Update this summary before appending or editing the long narrative below.
 
 ## Detailed record
+
+- 2026-05-26 cycle 42M strategic checkpoint: Hermes synced the canonical docs to the 42L checksum-valid breadcrumb result and explicitly closed the immediate startup-witness micro-cycle. The control plane now treats teardown-before-agent-scan as the operational conclusion for this family, and any future proof slice must reopen as an earlier-window discriminator rather than another post-chainload scan tweak.
+
+- 2026-05-26 cycle 42L real-Xbox runtime readback: after landing cycle 42K at e42471ebec, Hermes reset the EEPROM baseline to 0x00, uploaded the new witness-only XBE, ran the bounded runtime slice on real hardware, and recovered tail bytes de 3f aa bc. The checksum matches, so the preserved pre-teardown phys reconstructs to 0x03FDE000; witness.scan-self still returned count=0 mapped_pages_seen=420 kseg0_count=0 kseg1_count=0 truncated_at_cap=0 kseg1_scanned=1, which strongly favors teardown-before-agent-scan over an enumeration-window miss.
 
 - 2026-05-26 Codex fallback rotation: after the same bounded 42K EEPROM-breadcrumb objective failed twice on Qwen, Hermes preflighted the lane, created a fresh Codex fallback worktree, launched the bounded worker there, and confirmed `.claude/state/cycle42k-receipt.md` landed promptly. Final result and diff truth are still pending.
 

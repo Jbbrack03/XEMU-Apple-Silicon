@@ -1,5 +1,21 @@
 # Decision Log
 
+## 2026-05-26 (cycle 42M strategic checkpoint after the 42L checksum-valid runtime breadcrumb)
+
+**Decision.** Close the immediate startup-witness micro-cycle instead of funding another post-chainload scan variant. The 42L runtime readback already produced the strongest teardown-window signal so far, and this checkpoint treats that evidence as operationally sufficient for now.
+
+**Rationale.** The checksum-valid EEPROM breadcrumb de 3f aa bc reconstructs a producer-side pre-teardown physical page of 0x03FDE000, which sits inside the exact RAM aperture the widened agent scan already covered across both aliases. With witness.scan-self still returning zero hits, the residual now points most strongly to teardown-before-agent-scan rather than a low-RAM placement miss or an alias-window mistake. Because the same startup-witness family has already consumed four consecutive bounded slices, strategic focus improves by stopping the post-chainload micro-variation loop here and only reopening this question if stronger causal proof becomes necessary.
+
+**Outcome.** Canonical docs and orchestration-state summaries now treat teardown-before-agent-scan as the current operational conclusion, no live worker remains, and there is no default follow-on implementation slice. If future proof is still required, it must be scoped as an earlier-window discriminator rather than another post-chainload scan tweak.
+
+## 2026-05-26 (cycle 42L real-Xbox EEPROM-tail runtime readback after landed cycle 42K implementation)
+
+**Decision.** Execute the bounded real-hardware runtime slice immediately after landing cycle 42K instead of leaving the new EEPROM breadcrumb unvalidated. Hermes rebooted back to dashboard, uploaded the landed witness-only XBE, re-armed the EEPROM baseline with unsafe.enable + eeprom.scratch.reset, then chainloaded E:/Apps/witness-only/default.xbe through the validated oracle wrappers and collected the post-run evidence at benchmark-runs/cycle42l-realxbox-20260526T024502Z.
+
+**Outcome.** Final EEPROM tail bytes were de 3f aa bc. The checksum validates (0xAA == 0xDE ^ 0x3F ^ 0x4B), so the breadcrumb reconstructs a producer-side pre-teardown physical page of 0x03FDE000. Post-chainload witness.scan-self still returned count=0 mapped_pages_seen=420 kseg0_count=0 kseg1_count=0 truncated_at_cap=0 kseg1_scanned=1, while the cycle-23 control buffer remained the usual phys=0x03eb3000 live shape. Because 0x03FDE000 sits inside the scanned RAM aperture, this materially strengthens teardown-before-agent-scan over any remaining enumeration-window explanation. The stale-payload caveat is not fully erased in principle, but this run is much stronger than the prior 0xFF-only signal because Hermes explicitly reset the baseline to 0x00 before launch and the adjunct checksum matched afterward.
+
+**Next.** Treat this as a strategic-checkpoint moment rather than funding another post-chainload scan micro-variation. If more proof is still required, the next bounded slice should instrument an earlier lifetime window; otherwise the teardown-before-agent-scan residual may now be strong enough to close operationally.
+
 
 ## 2026-05-25 (cycle 42I real-Xbox classification landed; cycle 42J Qwen-bounded follow-up launched)
 
