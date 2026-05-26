@@ -27,6 +27,7 @@
 #include <lwip/api.h>
 #include <lwip/netif.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,45 +68,346 @@ static int read_eeprom(unsigned char *out)
     return 0;
 }
 
+static int args_has_flag(const char *args, const char *flag)
+{
+    if (!args || !flag || !*flag) return 0;
+
+    size_t flag_len = strlen(flag);
+    const char *p = args;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+
+        const char *tok = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        if ((size_t)(p - tok) == flag_len &&
+            strncmp(tok, flag, flag_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static size_t trim_trailing_flag_token(const char *s, size_t len, const char *flag)
+{
+    size_t flag_len = flag ? strlen(flag) : 0;
+    size_t end = len;
+
+    if (!s || !flag_len) return len;
+
+    while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '\t' ||
+                       s[end - 1] == '\r' || s[end - 1] == '\n')) {
+        end--;
+    }
+    if (end < flag_len) return end;
+    if (strncmp(s + end - flag_len, flag, flag_len) != 0) return end;
+    if (end > flag_len) {
+        char before = s[end - flag_len - 1];
+        if (before != ' ' && before != '\t' &&
+            before != '\r' && before != '\n') {
+            return end;
+        }
+    }
+
+    end -= flag_len;
+    while (end > 0 && (s[end - 1] == ' ' || s[end - 1] == '\t' ||
+                       s[end - 1] == '\r' || s[end - 1] == '\n')) {
+        end--;
+    }
+    return end;
+}
+
+static void json_escape_string(char *out, size_t outsz, const char *src)
+{
+    static const char s_hex[] = "0123456789ABCDEF";
+    size_t n = 0;
+
+    if (outsz == 0) return;
+    if (!src) src = "";
+
+    while (*src && n + 1 < outsz) {
+        unsigned char ch = (unsigned char)*src++;
+        const char *rep = NULL;
+        size_t rep_len = 0;
+        char esc[7];
+
+        switch (ch) {
+        case '\"':
+            rep = "\\\"";
+            rep_len = 2;
+            break;
+        case '\\':
+            rep = "\\\\";
+            rep_len = 2;
+            break;
+        case '\b':
+            rep = "\\b";
+            rep_len = 2;
+            break;
+        case '\f':
+            rep = "\\f";
+            rep_len = 2;
+            break;
+        case '\n':
+            rep = "\\n";
+            rep_len = 2;
+            break;
+        case '\r':
+            rep = "\\r";
+            rep_len = 2;
+            break;
+        case '\t':
+            rep = "\\t";
+            rep_len = 2;
+            break;
+        default:
+            if (ch < 0x20u) {
+                esc[0] = '\\';
+                esc[1] = 'u';
+                esc[2] = '0';
+                esc[3] = '0';
+                esc[4] = s_hex[(ch >> 4) & 0x0Fu];
+                esc[5] = s_hex[ch & 0x0Fu];
+                esc[6] = 0;
+                rep = esc;
+                rep_len = 6;
+            } else {
+                out[n++] = (char)ch;
+                continue;
+            }
+            break;
+        }
+
+        if (n + rep_len >= outsz) break;
+        memcpy(out + n, rep, rep_len);
+        n += rep_len;
+    }
+
+    out[n] = 0;
+}
+
+static void json_send_begin(struct netconn *c)
+{
+    op_send_text_begin(c, 0);
+    op_send_line(c, "{");
+}
+
+static void json_send_end(struct netconn *c)
+{
+    op_send_line(c, "}");
+    op_send_text_end(c);
+}
+
+static void json_send_ok_begin(struct netconn *c, const char *command)
+{
+    char escaped[256];
+    char line[320];
+
+    json_send_begin(c);
+    op_send_line(c, "  \"ok\": true,");
+
+    json_escape_string(escaped, sizeof(escaped), command);
+    snprintf(line, sizeof(line), "  \"command\": \"%s\",", escaped);
+    op_send_line(c, line);
+}
+
+static void json_send_string_field(struct netconn *c,
+                                   const char *key,
+                                   const char *value,
+                                   int comma)
+{
+    char escaped[1536];
+    char line[1664];
+
+    json_escape_string(escaped, sizeof(escaped), value);
+    snprintf(line, sizeof(line),
+             "  \"%s\": \"%s\"%s",
+             key, escaped, comma ? "," : "");
+    op_send_line(c, line);
+}
+
+static void json_send_u32_field(struct netconn *c,
+                                const char *key,
+                                uint32_t value,
+                                int comma)
+{
+    char line[128];
+
+    snprintf(line, sizeof(line),
+             "  \"%s\": %lu%s",
+             key, (unsigned long)value, comma ? "," : "");
+    op_send_line(c, line);
+}
+
+static void json_send_bool_field(struct netconn *c,
+                                 const char *key,
+                                 int value,
+                                 int comma)
+{
+    char line[128];
+
+    snprintf(line, sizeof(line),
+             "  \"%s\": %s%s",
+             key, value ? "true" : "false", comma ? "," : "");
+    op_send_line(c, line);
+}
+
+static void json_send_errorf(struct netconn *c,
+                             const char *command,
+                             const char *fmt, ...)
+{
+    char message[384];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof(message), fmt, ap);
+    va_end(ap);
+
+    json_send_begin(c);
+    op_send_line(c, "  \"ok\": false,");
+    json_send_string_field(c, "command", command ? command : "unknown", 1);
+    json_send_string_field(c, "error", message, 0);
+    json_send_end(c);
+}
+
+static void json_send_message_success(struct netconn *c,
+                                      const char *command,
+                                      const char *message)
+{
+    json_send_ok_begin(c, command);
+    json_send_string_field(c, "message", message, 0);
+    json_send_end(c);
+}
+
+static const char *s_help_lines[] = {
+    "info                                  agent + console info",
+    "eeprom                                256-byte EEPROM hex dump",
+    "eeprom.scratch.read                   read cycle-39 EEPROM scratchpad byte at off=0xFF + sub-case interp",
+    "eeprom.scratch.reset                  clear cycle-39 EEPROM scratchpad (needs unsafe.enable; writes 0x00 at off=0xFF)",
+    "mem.read addr=0xHEX len=N             binary read of memory",
+    "mem.write addr=0xHEX data=<hex>       binary write (needs unsafe.enable)",
+    "nv2a.read off=0xHEX                   read NV2A BAR0 register",
+    "nv2a.write off=0xHEX val=0xHEX        write NV2A reg (needs unsafe.enable)",
+    "vram.read off=0xHEX len=N             read NV2A VRAM aperture",
+    "screenshot                            capture front buffer (XOSS+pixels)",
+    "runxbe path=<xbox-path>               chainload another XBE",
+    "unsafe.enable                         arm mem.write / nv2a.write / smc.write / smc.fan",
+    "controller.set port=N [...]           update synthetic input state",
+    "controller.button port=N name=X value=V edit one button by xemu name",
+    "controller.axis   port=N name=X value=V edit one axis by xemu name",
+    "controller.get [port=N]               read back synthetic input state",
+    "controller.clear [port=N]             zero one or all ports",
+    "controller.buffer-info                buffer addr/size for shim hooks",
+    "witness.scan                          enumerate kseg0 oracle_ctrl_buffer instances + reserved[0,1] (cycle-23 A.4 readback)",
+    "witness.scan-self                     enumerate kseg0+kseg1 xbed_self_witness 'WTNS' pages + reserved[0,1] (cycle-29 option (c) readback; cycle-42H phys-range widening — emits per-buf alias=kseg0|kseg1 + kseg0_count/kseg1_count/kseg0_mapped/kseg1_mapped/truncated_at_cap/kseg1_scanned summary fields)",
+    "tier2.preflight                       read-only Tier-2 hook slot check",
+    "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)",
+    "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)",
+    "tier2.uninstall                       restore Tier-2 hook slot (unsafe)",
+    "tier2.status                          read Tier-2 hook page + counters",
+    "smc.read off=0xHEX                    read one SMC register (allowlisted)",
+    "smc.write off=0xHEX val=0xHEX         write SMC reg (needs unsafe.enable; allowlist 0x05,0x06)",
+    "smc.temps                             cpu_c/board_c/avpack + last-set fan",
+    "smc.fan val=auto|0-100                set fan curve floor (needs unsafe.enable)",
+    "reboot                                reboot to dashboard",
+    "bye                                   close connection",
+    "help [--json]                         this list",
+    NULL
+};
+
 int cmd_info(struct netconn *c, const char *args)
 {
-    (void)args;
+    int json = args_has_flag(args, "--json");
     VIDEO_MODE vm = XVideoGetMode();
-    op_send_okf(c,
-                "%s; ip=%s; mode=%dx%d@%dbpp; writes_enabled=%d",
-                VERSION_STR,
-                ip4addr_ntoa(netif_ip4_addr(g_pnetif)),
-                vm.width, vm.height, vm.bpp,
-                s_unsafe_writes_enabled);
+    if (!json) {
+        op_send_okf(c,
+                    "%s; ip=%s; mode=%dx%d@%dbpp; writes_enabled=%d",
+                    VERSION_STR,
+                    ip4addr_ntoa(netif_ip4_addr(g_pnetif)),
+                    vm.width, vm.height, vm.bpp,
+                    s_unsafe_writes_enabled);
+        return 0;
+    }
+
+    json_send_ok_begin(c, "info");
+    json_send_string_field(c, "version", VERSION_STR, 1);
+    json_send_string_field(c, "ip", ip4addr_ntoa(netif_ip4_addr(g_pnetif)), 1);
+    op_send_line(c, "  \"mode\": {");
+    {
+        char line[128];
+        snprintf(line, sizeof(line), "    \"width\": %d,", vm.width);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "    \"height\": %d,", vm.height);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "    \"bpp\": %d", vm.bpp);
+        op_send_line(c, line);
+    }
+    op_send_line(c, "  },");
+    json_send_bool_field(c, "writes_enabled", s_unsafe_writes_enabled, 0);
+    json_send_end(c);
     return 0;
 }
 
 int cmd_eeprom(struct netconn *c, const char *args)
 {
-    (void)args;
+    int json = args_has_flag(args, "--json");
     unsigned char eeprom[EEPROM_SIZE];
     memset(eeprom, 0, sizeof(eeprom));
     if (read_eeprom(eeprom) != 0) {
+        if (json) {
+            json_send_errorf(c, "eeprom", "HalReadSMBusValue failed");
+            return 0;
+        }
         op_send_errf(c, "HalReadSMBusValue failed");
         return 0;
     }
-    op_send_text_begin(c, EEPROM_SIZE);
+
+    if (!json) {
+        op_send_text_begin(c, EEPROM_SIZE);
+    } else {
+        json_send_ok_begin(c, "eeprom");
+        json_send_u32_field(c, "size", EEPROM_SIZE, 1);
+        op_send_line(c, "  \"rows\": [");
+    }
+
     char hex[64 + 4];
     for (int row = 0; row < EEPROM_SIZE; row += 32) {
         int p = 0;
         for (int j = 0; j < 32 && (row + j) < EEPROM_SIZE; j++) {
             p += snprintf(hex + p, sizeof(hex) - p, "%02X", eeprom[row + j]);
         }
-        op_send_line(c, hex);
+        if (!json) {
+            op_send_line(c, hex);
+        } else {
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "    {\"offset\": %d, \"hex\": \"%s\"}%s",
+                     row, hex, (row + 32 < EEPROM_SIZE) ? "," : "");
+            op_send_line(c, line);
+        }
     }
-    op_send_text_end(c);
+
+    if (!json) {
+        op_send_text_end(c);
+    } else {
+        op_send_line(c, "  ]");
+        json_send_end(c);
+    }
     return 0;
 }
 
 int cmd_unsafe_enable(struct netconn *c, const char *args)
 {
-    (void)args;
+    int json = args_has_flag(args, "--json");
     s_unsafe_writes_enabled = 1;
+    if (json) {
+        json_send_ok_begin(c, "unsafe.enable");
+        json_send_string_field(c, "message", "writes enabled for this session", 1);
+        json_send_bool_field(c, "writes_enabled", s_unsafe_writes_enabled, 0);
+        json_send_end(c);
+        return 0;
+    }
     op_send_okf(c, "writes enabled for this session");
     return 0;
 }
@@ -142,11 +444,17 @@ int cmd_unsafe_enable(struct netconn *c, const char *args)
 
 int cmd_eeprom_scratch_read(struct netconn *c, const char *args)
 {
-    (void)args;
+    int json = args_has_flag(args, "--json");
     ULONG val = 0;
     NTSTATUS s = HalReadSMBusValue(EEPROM_SMBUS_ADDR, EEPROM_SCRATCH_OFF,
                                    FALSE, &val);
     if (!NT_SUCCESS(s)) {
+        if (json) {
+            json_send_errorf(c, "eeprom.scratch.read",
+                             "HalReadSMBusValue failed status=0x%08lx",
+                             (unsigned long)s);
+            return 0;
+        }
         op_send_errf(c, "HalReadSMBusValue failed status=0x%08lx",
                      (unsigned long)s);
         return 0;
@@ -180,6 +488,16 @@ int cmd_eeprom_scratch_read(struct netconn *c, const char *args)
                  "stale pre-baseline value or foreign write — rerun with "
                  "eeprom.scratch.reset baseline)";
     }
+    if (json) {
+        json_send_ok_begin(c, "eeprom.scratch.read");
+        json_send_u32_field(c, "offset", EEPROM_SCRATCH_OFF, 1);
+        json_send_u32_field(c, "byte", byte, 1);
+        json_send_u32_field(c, "tag", (byte & 0xF0u) >> 4, 1);
+        json_send_u32_field(c, "stage_nib", byte & 0x0Fu, 1);
+        json_send_string_field(c, "interp", interp, 0);
+        json_send_end(c);
+        return 0;
+    }
     op_send_okf(c, "off=0x%02X byte=0x%02X tag=0x%01X stage_nib=0x%01X "
                    "interp=\"%s\"",
                 (unsigned)EEPROM_SCRATCH_OFF,
@@ -192,16 +510,35 @@ int cmd_eeprom_scratch_read(struct netconn *c, const char *args)
 
 int cmd_eeprom_scratch_reset(struct netconn *c, const char *args)
 {
-    (void)args;
+    int json = args_has_flag(args, "--json");
     if (!s_unsafe_writes_enabled) {
+        if (json) {
+            json_send_errorf(c, "eeprom.scratch.reset",
+                             "writes disabled — call unsafe.enable first");
+            return 0;
+        }
         op_send_errf(c, "writes disabled — call unsafe.enable first");
         return 0;
     }
     NTSTATUS s = HalWriteSMBusValue(EEPROM_SMBUS_ADDR, EEPROM_SCRATCH_OFF,
                                     FALSE, 0x00u);
     if (!NT_SUCCESS(s)) {
+        if (json) {
+            json_send_errorf(c, "eeprom.scratch.reset",
+                             "HalWriteSMBusValue failed status=0x%08lx",
+                             (unsigned long)s);
+            return 0;
+        }
         op_send_errf(c, "HalWriteSMBusValue failed status=0x%08lx",
                      (unsigned long)s);
+        return 0;
+    }
+    if (json) {
+        json_send_ok_begin(c, "eeprom.scratch.reset");
+        json_send_u32_field(c, "offset", EEPROM_SCRATCH_OFF, 1);
+        json_send_u32_field(c, "byte", 0u, 1);
+        json_send_string_field(c, "message", "cycle-39 scratchpad cleared", 0);
+        json_send_end(c);
         return 0;
     }
     op_send_okf(c, "off=0x%02X byte=0x00 (cycle-39 scratchpad cleared)",
@@ -218,6 +555,11 @@ int cmd_eeprom_scratch_reset(struct netconn *c, const char *args)
  */
 int cmd_mem_read(struct netconn *c, const char *args)
 {
+    if (args_has_flag(args, "--json")) {
+        json_send_errorf(c, "mem.read",
+                         "--json is not supported for binary response commands");
+        return 0;
+    }
     uint32_t addr = 0, len = 0;
     if (op_parse_kv_u32(args, "addr", &addr) != 0 ||
         op_parse_kv_u32(args, "len", &len) != 0) {
@@ -247,6 +589,7 @@ int cmd_mem_read(struct netconn *c, const char *args)
  */
 int cmd_mem_write(struct netconn *c, const char *args)
 {
+    int json = args_has_flag(args, "--json");
     /* Static scratch (moved off the stack to avoid blowing nxdk's
      * default thread stack budget when this command is dispatched
      * back-to-back with screenshot-sized binary writes elsewhere). */
@@ -254,27 +597,60 @@ int cmd_mem_write(struct netconn *c, const char *args)
     static uint8_t buf[ORACLE_MAX_WRITE_LEN];
 
     if (!s_unsafe_writes_enabled) {
+        if (json) {
+            json_send_errorf(c, "mem.write",
+                             "writes disabled — call unsafe.enable first");
+            return 0;
+        }
         op_send_errf(c, "writes disabled — call unsafe.enable first");
         return 0;
     }
     uint32_t addr = 0;
     if (op_parse_kv_u32(args, "addr", &addr) != 0 ||
         op_parse_kv_str(args, "data", data_hex, sizeof(data_hex)) != 0) {
+        if (json) {
+            json_send_errorf(c, "mem.write",
+                             "usage: mem.write addr=0xHEX data=<hex>");
+            return 0;
+        }
         op_send_errf(c, "usage: mem.write addr=0xHEX data=<hex>");
         return 0;
     }
     size_t blen = 0;
     if (op_parse_hex_buf(data_hex, buf, sizeof(buf), &blen) != 0) {
+        if (json) {
+            json_send_errorf(c, "mem.write",
+                             "data hex invalid or too long (max %u bytes)",
+                             ORACLE_MAX_WRITE_LEN);
+            return 0;
+        }
         op_send_errf(c, "data hex invalid or too long (max %u bytes)",
                      ORACLE_MAX_WRITE_LEN);
         return 0;
     }
     if (!op_addr_range_ok(addr, (uint32_t)blen)) {
+        if (json) {
+            json_send_errorf(c, "mem.write",
+                             "addr range 0x%08lx+%lu not in allowlist",
+                             (unsigned long)addr, (unsigned long)blen);
+            return 0;
+        }
         op_send_errf(c, "addr range 0x%08lx+%lu not in allowlist",
                      (unsigned long)addr, (unsigned long)blen);
         return 0;
     }
     memcpy((void *)(uintptr_t)addr, buf, blen);
+    if (json) {
+        char line[128];
+
+        json_send_ok_begin(c, "mem.write");
+        snprintf(line, sizeof(line), "  \"addr_hex\": \"0x%08lx\",",
+                 (unsigned long)addr);
+        op_send_line(c, line);
+        json_send_u32_field(c, "bytes_written", (uint32_t)blen, 0);
+        json_send_end(c);
+        return 0;
+    }
     op_send_okf(c, "wrote %u bytes at 0x%08lx", (unsigned)blen,
                 (unsigned long)addr);
     return 0;
@@ -282,47 +658,107 @@ int cmd_mem_write(struct netconn *c, const char *args)
 
 int cmd_nv2a_read(struct netconn *c, const char *args)
 {
+    int json = args_has_flag(args, "--json");
     uint32_t off = 0;
     if (op_parse_kv_u32(args, "off", &off) != 0) {
+        if (json) {
+            json_send_errorf(c, "nv2a.read", "usage: nv2a.read off=0xHEX");
+            return 0;
+        }
         op_send_errf(c, "usage: nv2a.read off=0xHEX");
         return 0;
     }
     if ((off & 3u) != 0) {
+        if (json) {
+            json_send_errorf(c, "nv2a.read", "off must be 4-byte aligned");
+            return 0;
+        }
         op_send_errf(c, "off must be 4-byte aligned");
         return 0;
     }
     if (off >= NV2A_BAR0_SIZE) {
+        if (json) {
+            json_send_errorf(c, "nv2a.read",
+                             "off 0x%08lx outside BAR0", (unsigned long)off);
+            return 0;
+        }
         op_send_errf(c, "off 0x%08lx outside BAR0", (unsigned long)off);
         return 0;
     }
     volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(NV2A_BAR0_BASE + off);
     uint32_t val = *p;
+    if (json) {
+        char line[128];
+
+        json_send_ok_begin(c, "nv2a.read");
+        snprintf(line, sizeof(line), "  \"off_hex\": \"0x%08lx\",",
+                 (unsigned long)off);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "  \"value_hex\": \"0x%08lx\"",
+                 (unsigned long)val);
+        op_send_line(c, line);
+        json_send_end(c);
+        return 0;
+    }
     op_send_okf(c, "0x%08lx", (unsigned long)val);
     return 0;
 }
 
 int cmd_nv2a_write(struct netconn *c, const char *args)
 {
+    int json = args_has_flag(args, "--json");
     if (!s_unsafe_writes_enabled) {
+        if (json) {
+            json_send_errorf(c, "nv2a.write",
+                             "writes disabled — call unsafe.enable first");
+            return 0;
+        }
         op_send_errf(c, "writes disabled — call unsafe.enable first");
         return 0;
     }
     uint32_t off = 0, val = 0;
     if (op_parse_kv_u32(args, "off", &off) != 0 ||
         op_parse_kv_u32(args, "val", &val) != 0) {
+        if (json) {
+            json_send_errorf(c, "nv2a.write",
+                             "usage: nv2a.write off=0xHEX val=0xHEX");
+            return 0;
+        }
         op_send_errf(c, "usage: nv2a.write off=0xHEX val=0xHEX");
         return 0;
     }
     if ((off & 3u) != 0) {
+        if (json) {
+            json_send_errorf(c, "nv2a.write", "off must be 4-byte aligned");
+            return 0;
+        }
         op_send_errf(c, "off must be 4-byte aligned");
         return 0;
     }
     if (off >= NV2A_BAR0_SIZE) {
+        if (json) {
+            json_send_errorf(c, "nv2a.write",
+                             "off 0x%08lx outside BAR0", (unsigned long)off);
+            return 0;
+        }
         op_send_errf(c, "off 0x%08lx outside BAR0", (unsigned long)off);
         return 0;
     }
     volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(NV2A_BAR0_BASE + off);
     *p = val;
+    if (json) {
+        char line[128];
+
+        json_send_ok_begin(c, "nv2a.write");
+        snprintf(line, sizeof(line), "  \"off_hex\": \"0x%08lx\",",
+                 (unsigned long)off);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "  \"value_hex\": \"0x%08lx\"",
+                 (unsigned long)val);
+        op_send_line(c, line);
+        json_send_end(c);
+        return 0;
+    }
     op_send_okf(c, "wrote 0x%08lx at off 0x%08lx",
                 (unsigned long)val, (unsigned long)off);
     return 0;
@@ -337,6 +773,11 @@ int cmd_nv2a_write(struct netconn *c, const char *args)
  *   pre-flush contents (avoiding the cached kseg0 alias). */
 int cmd_vram_read(struct netconn *c, const char *args)
 {
+    if (args_has_flag(args, "--json")) {
+        json_send_errorf(c, "vram.read",
+                         "--json is not supported for binary response commands");
+        return 0;
+    }
     uint32_t off = 0, len = 0;
     if (op_parse_kv_u32(args, "off", &off) != 0 ||
         op_parse_kv_u32(args, "len", &len) != 0) {
@@ -381,7 +822,11 @@ int cmd_vram_read(struct netconn *c, const char *args)
  */
 int cmd_screenshot(struct netconn *c, const char *args)
 {
-    (void)args;
+    if (args_has_flag(args, "--json")) {
+        json_send_errorf(c, "screenshot",
+                         "--json is not supported for binary response commands");
+        return 0;
+    }
     VIDEO_MODE vm = XVideoGetMode();
     if (vm.width <= 0 || vm.height <= 0 || vm.bpp <= 0) {
         op_send_errf(c, "no active video mode (w=%d h=%d bpp=%d)",
@@ -443,9 +888,14 @@ int cmd_screenshot(struct netconn *c, const char *args)
  */
 int cmd_runxbe(struct netconn *c, const char *args)
 {
+    int json = args_has_flag(args, "--json");
     char path[260];
     const char *p = strstr(args, "path=");
     if (!p) {
+        if (json) {
+            json_send_errorf(c, "runxbe", "usage: runxbe path=<xbox-path>");
+            return 0;
+        }
         op_send_errf(c, "usage: runxbe path=<xbox-path>");
         return 0;
     }
@@ -453,11 +903,19 @@ int cmd_runxbe(struct netconn *c, const char *args)
     while (*p == ' ' || *p == '\t') p++;
     size_t n = 0;
     while (p[n] && n + 1 < sizeof(path)) n++;
-    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t' ||
-                     p[n - 1] == '\r' || p[n - 1] == '\n')) {
-        n--;
+    if (json) {
+        n = trim_trailing_flag_token(p, n, "--json");
+    } else {
+        while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t' ||
+                         p[n - 1] == '\r' || p[n - 1] == '\n')) {
+            n--;
+        }
     }
     if (n == 0) {
+        if (json) {
+            json_send_errorf(c, "runxbe", "usage: runxbe path=<xbox-path>");
+            return 0;
+        }
         op_send_errf(c, "usage: runxbe path=<xbox-path>");
         return 0;
     }
@@ -466,7 +924,14 @@ int cmd_runxbe(struct netconn *c, const char *args)
     /* This call replaces the agent image, so any session-set fan
      * curve would be stranded. Same rationale as cmd_reboot. */
     oracle_smc_cleanup_if_manual();
-    op_send_okf(c, "launching %s", path);
+    if (json) {
+        json_send_ok_begin(c, "runxbe");
+        json_send_string_field(c, "path", path, 1);
+        json_send_string_field(c, "message", "launching XBE", 0);
+        json_send_end(c);
+    } else {
+        op_send_okf(c, "launching %s", path);
+    }
     /* Best effort: drain the netconn and close the listener before
      * blowing away our own image. */
     netconn_close(c);
@@ -481,12 +946,15 @@ int cmd_runxbe(struct netconn *c, const char *args)
 
 int cmd_reboot(struct netconn *c, const char *args)
 {
-    (void)args;
+    if (args_has_flag(args, "--json")) {
+        json_send_message_success(c, "reboot", "rebooting");
+    } else {
+        op_send_okf(c, "rebooting");
+    }
     /* If this session put the SMC into manual fan mode, restore auto
      * before the kernel reboots. We don't know whether Xyclops/PIC
      * retains FANMODE across a soft reboot — fail-safe to auto. */
     oracle_smc_cleanup_if_manual();
-    op_send_okf(c, "rebooting");
     netconn_close(c);
     Sleep(500);
     HalReturnToFirmware(HalRebootRoutine);
@@ -495,7 +963,10 @@ int cmd_reboot(struct netconn *c, const char *args)
 
 int cmd_bye(struct netconn *c, const char *args)
 {
-    (void)args;
+    if (args_has_flag(args, "--json")) {
+        json_send_message_success(c, "bye", "bye");
+        return 1;
+    }
     /* `bye` only closes the connection — the agent stays alive.
      * Do NOT touch fan state here; oracle-client.py's polite-close
      * sends `bye` after every command, which would silently revert
@@ -618,9 +1089,15 @@ static int a4_reader_candidate_ok(uintptr_t va)
 
 int cmd_witness_scan(struct netconn *c, const char *args)
 {
-    (void)args;
-    op_send_text_begin(c, 0);
+    int json = args_has_flag(args, "--json");
+    if (!json) {
+        op_send_text_begin(c, 0);
+    } else {
+        json_send_ok_begin(c, "witness.scan");
+        op_send_line(c, "  \"matches\": [");
+    }
     int reported = 0;
+    int first_match = 1;
     uint32_t mapped_pages_seen = 0;
     for (uintptr_t va = A4_RDR_KSEG0_SCAN_START;
          va < A4_RDR_KSEG0_SCAN_END;
@@ -630,29 +1107,60 @@ int cmd_witness_scan(struct netconn *c, const char *args)
         if (!a4_reader_candidate_ok(va)) continue;
 
         volatile uint32_t *p = (volatile uint32_t *)va;
-        char buf[200];
+        char buf[320];
         uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
         /* Mark the live buffer (the one this agent allocated this boot
          * and pointed `oracle_ctrl_get()` at) so the host side doesn't
          * have to cross-reference `controller.buffer-info`. */
         const int is_live =
             ((uintptr_t)oracle_ctrl_get() == va) ? 1 : 0;
-        snprintf(buf, sizeof(buf),
-                 "buf.%d phys=0x%08lx virt=0x%08lx live=%d "
-                 "reserved0=0x%08lx reserved1=0x%08lx",
-                 reported, (unsigned long)phys, (unsigned long)va,
-                 is_live,
-                 (unsigned long)p[2], (unsigned long)p[3]);
-        op_send_line(c, buf);
+        if (!json) {
+            snprintf(buf, sizeof(buf),
+                     "buf.%d phys=0x%08lx virt=0x%08lx live=%d "
+                     "reserved0=0x%08lx reserved1=0x%08lx",
+                     reported, (unsigned long)phys, (unsigned long)va,
+                     is_live,
+                     (unsigned long)p[2], (unsigned long)p[3]);
+            op_send_line(c, buf);
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "%s    {\"index\": %d, \"phys_hex\": \"0x%08lx\", "
+                     "\"virt_hex\": \"0x%08lx\", \"live\": %s, "
+                     "\"reserved0_hex\": \"0x%08lx\", "
+                     "\"reserved1_hex\": \"0x%08lx\"}",
+                     first_match ? "" : ",",
+                     reported, (unsigned long)phys, (unsigned long)va,
+                     is_live ? "true" : "false",
+                     (unsigned long)p[2], (unsigned long)p[3]);
+            op_send_line(c, buf);
+            first_match = 0;
+        }
         reported++;
         if (reported >= 256) break;
     }
-    char summary[96];
-    snprintf(summary, sizeof(summary),
-             "count=%d mapped_pages_seen=%u",
-             reported, (unsigned)mapped_pages_seen);
-    op_send_line(c, summary);
-    op_send_text_end(c);
+    if (!json) {
+        char summary[96];
+        snprintf(summary, sizeof(summary),
+                 "count=%d mapped_pages_seen=%u",
+                 reported, (unsigned)mapped_pages_seen);
+        op_send_line(c, summary);
+        op_send_text_end(c);
+    } else {
+        char line[128];
+
+        op_send_line(c, "  ],");
+        snprintf(line, sizeof(line), "  \"count\": %d,", reported);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"mapped_pages_seen\": %u,",
+                 (unsigned)mapped_pages_seen);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"truncated_at_cap\": %s",
+                 (reported >= 256) ? "true" : "false");
+        op_send_line(c, line);
+        json_send_end(c);
+    }
     return 0;
 }
 
@@ -1026,6 +1534,8 @@ static int self_wtns_scan_window(struct netconn *c,
                                  uintptr_t va_start,
                                  uintptr_t va_end,
                                  const char *alias_tag,
+                                 int json,
+                                 int *first_match,
                                  int *reported,
                                  int *window_count,
                                  uint32_t *window_mapped)
@@ -1038,15 +1548,29 @@ static int self_wtns_scan_window(struct netconn *c,
         if (!self_wtns_reader_candidate_ok(va)) continue;
 
         volatile uint32_t *p = (volatile uint32_t *)va;
-        char buf[224];
+        char buf[320];
         uintptr_t phys = (uintptr_t)va & 0x03FFFFFFu;
-        snprintf(buf, sizeof(buf),
-                 "buf.%d alias=%s phys=0x%08lx virt=0x%08lx "
-                 "reserved0=0x%08lx reserved1=0x%08lx",
-                 *reported, alias_tag,
-                 (unsigned long)phys, (unsigned long)va,
-                 (unsigned long)p[2], (unsigned long)p[3]);
-        op_send_line(c, buf);
+        if (!json) {
+            snprintf(buf, sizeof(buf),
+                     "buf.%d alias=%s phys=0x%08lx virt=0x%08lx "
+                     "reserved0=0x%08lx reserved1=0x%08lx",
+                     *reported, alias_tag,
+                     (unsigned long)phys, (unsigned long)va,
+                     (unsigned long)p[2], (unsigned long)p[3]);
+            op_send_line(c, buf);
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "%s    {\"index\": %d, \"alias\": \"%s\", "
+                     "\"phys_hex\": \"0x%08lx\", \"virt_hex\": \"0x%08lx\", "
+                     "\"reserved0_hex\": \"0x%08lx\", "
+                     "\"reserved1_hex\": \"0x%08lx\"}",
+                     *first_match ? "" : ",",
+                     *reported, alias_tag,
+                     (unsigned long)phys, (unsigned long)va,
+                     (unsigned long)p[2], (unsigned long)p[3]);
+            op_send_line(c, buf);
+            *first_match = 0;
+        }
         (*reported)++;
         (*window_count)++;
         if (*reported >= SELF_WTNS_REPORT_CAP) return 1;
@@ -1056,9 +1580,15 @@ static int self_wtns_scan_window(struct netconn *c,
 
 int cmd_witness_scan_self(struct netconn *c, const char *args)
 {
-    (void)args;
-    op_send_text_begin(c, 0);
+    int json = args_has_flag(args, "--json");
+    if (!json) {
+        op_send_text_begin(c, 0);
+    } else {
+        json_send_ok_begin(c, "witness.scan-self");
+        op_send_line(c, "  \"matches\": [");
+    }
     int reported = 0;
+    int first_match = 1;
     int kseg0_count = 0;
     int kseg1_count = 0;
     uint32_t kseg0_mapped = 0;
@@ -1070,6 +1600,8 @@ int cmd_witness_scan_self(struct netconn *c, const char *args)
                                         SELF_WTNS_KSEG0_SCAN_START,
                                         SELF_WTNS_KSEG0_SCAN_END,
                                         "kseg0",
+                                        json,
+                                        &first_match,
                                         &reported,
                                         &kseg0_count,
                                         &kseg0_mapped);
@@ -1101,6 +1633,8 @@ int cmd_witness_scan_self(struct netconn *c, const char *args)
                                               SELF_WTNS_KSEG1_SCAN_START,
                                               SELF_WTNS_KSEG1_SCAN_END,
                                               "kseg1",
+                                              json,
+                                              &first_match,
                                               &reported,
                                               &kseg1_count,
                                               &kseg1_mapped);
@@ -1109,57 +1643,99 @@ int cmd_witness_scan_self(struct netconn *c, const char *args)
 
     int truncated_at_cap = (cap_hit || kseg1_cap_hit) ? 1 : 0;
     uint32_t mapped_pages_seen = kseg0_mapped + kseg1_mapped;
-    char summary[256];
-    snprintf(summary, sizeof(summary),
-             "count=%d mapped_pages_seen=%u "
-             "kseg0_count=%d kseg1_count=%d "
-             "kseg0_mapped=%u kseg1_mapped=%u "
-             "truncated_at_cap=%d kseg1_scanned=%d",
-             reported, (unsigned)mapped_pages_seen,
-             kseg0_count, kseg1_count,
-             (unsigned)kseg0_mapped, (unsigned)kseg1_mapped,
-             truncated_at_cap, kseg1_scanned);
-    op_send_line(c, summary);
-    op_send_text_end(c);
+    if (!json) {
+        char summary[256];
+        snprintf(summary, sizeof(summary),
+                 "count=%d mapped_pages_seen=%u "
+                 "kseg0_count=%d kseg1_count=%d "
+                 "kseg0_mapped=%u kseg1_mapped=%u "
+                 "truncated_at_cap=%d kseg1_scanned=%d",
+                 reported, (unsigned)mapped_pages_seen,
+                 kseg0_count, kseg1_count,
+                 (unsigned)kseg0_mapped, (unsigned)kseg1_mapped,
+                 truncated_at_cap, kseg1_scanned);
+        op_send_line(c, summary);
+        op_send_text_end(c);
+    } else {
+        char line[160];
+
+        op_send_line(c, "  ],");
+        snprintf(line, sizeof(line), "  \"count\": %d,", reported);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"mapped_pages_seen\": %u,",
+                 (unsigned)mapped_pages_seen);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "  \"kseg0_count\": %d,", kseg0_count);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line), "  \"kseg1_count\": %d,", kseg1_count);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"kseg0_mapped\": %u,",
+                 (unsigned)kseg0_mapped);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"kseg1_mapped\": %u,",
+                 (unsigned)kseg1_mapped);
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"truncated_at_cap\": %s,",
+                 truncated_at_cap ? "true" : "false");
+        op_send_line(c, line);
+        snprintf(line, sizeof(line),
+                 "  \"kseg1_scanned\": %s",
+                 kseg1_scanned ? "true" : "false");
+        op_send_line(c, line);
+        json_send_end(c);
+    }
     return 0;
 }
 
 int cmd_help(struct netconn *c, const char *args)
 {
-    (void)args;
-    op_send_text_begin(c, 0);
-    op_send_line(c, "info                                  agent + console info");
-    op_send_line(c, "eeprom                                256-byte EEPROM hex dump");
-    op_send_line(c, "eeprom.scratch.read                   read cycle-39 EEPROM scratchpad byte at off=0xFF + sub-case interp");
-    op_send_line(c, "eeprom.scratch.reset                  clear cycle-39 EEPROM scratchpad (needs unsafe.enable; writes 0x00 at off=0xFF)");
-    op_send_line(c, "mem.read addr=0xHEX len=N             binary read of memory");
-    op_send_line(c, "mem.write addr=0xHEX data=<hex>       binary write (needs unsafe.enable)");
-    op_send_line(c, "nv2a.read off=0xHEX                   read NV2A BAR0 register");
-    op_send_line(c, "nv2a.write off=0xHEX val=0xHEX        write NV2A reg (needs unsafe.enable)");
-    op_send_line(c, "vram.read off=0xHEX len=N             read NV2A VRAM aperture");
-    op_send_line(c, "screenshot                            capture front buffer (XOSS+pixels)");
-    op_send_line(c, "runxbe path=<xbox-path>               chainload another XBE");
-    op_send_line(c, "unsafe.enable                         arm mem.write / nv2a.write / smc.write / smc.fan");
-    op_send_line(c, "controller.set port=N [...]           update synthetic input state");
-    op_send_line(c, "controller.button port=N name=X value=V edit one button by xemu name");
-    op_send_line(c, "controller.axis   port=N name=X value=V edit one axis by xemu name");
-    op_send_line(c, "controller.get [port=N]               read back synthetic input state");
-    op_send_line(c, "controller.clear [port=N]             zero one or all ports");
-    op_send_line(c, "controller.buffer-info                buffer addr/size for shim hooks");
-    op_send_line(c, "witness.scan                          enumerate kseg0 oracle_ctrl_buffer instances + reserved[0,1] (cycle-23 A.4 readback)");
-    op_send_line(c, "witness.scan-self                     enumerate kseg0+kseg1 xbed_self_witness 'WTNS' pages + reserved[0,1] (cycle-29 option (c) readback; cycle-42H phys-range widening — emits per-buf alias=kseg0|kseg1 + kseg0_count/kseg1_count/kseg0_mapped/kseg1_mapped/truncated_at_cap/kseg1_scanned summary fields)");
-    op_send_line(c, "tier2.preflight                       read-only Tier-2 hook slot check");
-    op_send_line(c, "tier2.install-jump-only confirm=...   install resident tail-jump hook (crashes)");
-    op_send_line(c, "tier2.install-noop confirm=...        install resident no-op counter hook (crashes)");
-    op_send_line(c, "tier2.uninstall                       restore Tier-2 hook slot (unsafe)");
-    op_send_line(c, "tier2.status                          read Tier-2 hook page + counters");
-    op_send_line(c, "smc.read off=0xHEX                    read one SMC register (allowlisted)");
-    op_send_line(c, "smc.write off=0xHEX val=0xHEX         write SMC reg (needs unsafe.enable; allowlist 0x05,0x06)");
-    op_send_line(c, "smc.temps                             cpu_c/board_c/avpack + last-set fan");
-    op_send_line(c, "smc.fan val=auto|0-100                set fan curve floor (needs unsafe.enable)");
-    op_send_line(c, "reboot                                reboot to dashboard");
-    op_send_line(c, "bye                                   close connection");
-    op_send_line(c, "help                                  this list");
-    op_send_text_end(c);
+    int json = args_has_flag(args, "--json");
+    if (!json) {
+        op_send_text_begin(c, 0);
+        for (const char **line = s_help_lines; *line; line++) {
+            op_send_line(c, *line);
+        }
+        op_send_text_end(c);
+        return 0;
+    }
+
+    json_send_ok_begin(c, "help");
+    op_send_line(c, "  \"json_supported_commands\": [");
+    op_send_line(c, "    \"info\",");
+    op_send_line(c, "    \"eeprom\",");
+    op_send_line(c, "    \"eeprom.scratch.read\",");
+    op_send_line(c, "    \"eeprom.scratch.reset\",");
+    op_send_line(c, "    \"mem.write\",");
+    op_send_line(c, "    \"nv2a.read\",");
+    op_send_line(c, "    \"nv2a.write\",");
+    op_send_line(c, "    \"runxbe\",");
+    op_send_line(c, "    \"unsafe.enable\",");
+    op_send_line(c, "    \"witness.scan\",");
+    op_send_line(c, "    \"witness.scan-self\",");
+    op_send_line(c, "    \"reboot\",");
+    op_send_line(c, "    \"bye\",");
+    op_send_line(c, "    \"help\"");
+    op_send_line(c, "  ],");
+    op_send_line(c, "  \"json_rejected_commands\": [");
+    op_send_line(c, "    \"mem.read\",");
+    op_send_line(c, "    \"vram.read\",");
+    op_send_line(c, "    \"screenshot\"");
+    op_send_line(c, "  ],");
+    op_send_line(c, "  \"lines\": [");
+    for (const char **line = s_help_lines; *line; line++) {
+        char escaped[1536];
+        char out[1664];
+
+        json_escape_string(escaped, sizeof(escaped), *line);
+        snprintf(out, sizeof(out), "    \"%s\"%s",
+                 escaped, line[1] ? "," : "");
+        op_send_line(c, out);
+    }
+    op_send_line(c, "  ]");
+    json_send_end(c);
     return 0;
 }

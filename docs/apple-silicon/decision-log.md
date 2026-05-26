@@ -1,5 +1,13 @@
 # Decision Log
 
+## 2026-05-26 (cycle 45B oracle-agent JSON diagnostics review-fix closeout)
+
+**Decision.** Close cycle 45B on the root branch after the bounded Codex review-fix continuation resolved both independent-review findings in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c`.
+
+**Rationale.** The continuation emitted its required final result artifact, the refreshed review verdict is ACCEPT, `git diff --check -- scripts/apple-silicon/xbe-tests/oracle-agent/commands.c` is clean, and the supervisor-owned oracle-agent build smoke passes. With no live worker remaining and the diff bounded to one source file, leaving the control plane at ACTIVE would be stale rather than truthful.
+
+**Outcome.** The oracle-agent now keeps JSON-mode error responses inside the same top-level envelope discipline as JSON-mode successes, and `runxbe path=... --json` strips a trailing standalone `--json` token before launch so the XBE path is not corrupted. The slice is closed on the root branch. The next bounded action is cycle 45C: a strategic-checkpoint scout that will rank the best consumer-side adoption of the new JSON diagnostics.
+
 ## 2026-05-26 (cycle 42M strategic checkpoint after the 42L checksum-valid runtime breadcrumb)
 
 **Decision.** Close the immediate startup-witness micro-cycle instead of funding another post-chainload scan variant. The 42L runtime readback already produced the strongest teardown-window signal so far, and this checkpoint treats that evidence as operationally sufficient for now.
