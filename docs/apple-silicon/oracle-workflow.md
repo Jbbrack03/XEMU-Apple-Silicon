@@ -36,7 +36,7 @@ default-on visual gate.
 |       │                                                             |
 |       ├── oracle-orchestrator.py                                    |
 |       │       ├── ensure-agent (FTP SITE EXEC the agent XBE)        |
-|       │       ├── run-diag (chainload diag XBE + FTP-pull capture)  |
+|       │       ├── run-diag (chainload diag XBE + FTP-pull capture + optional post-relaunch JSON readbacks) |
 |       │       └── capture (screenshot front buffer via agent RPC)   |
 |       │                                                             |
 |       ├── oracle-client.py                                          |
@@ -280,7 +280,7 @@ If the new XBE renders synthetic input, also include
 |---|---|
 | `scripts/apple-silicon/oracle-smoke.sh` | Single-command pipeline health check |
 | `scripts/apple-silicon/oracle-client.py` | Mac-side wrapper around the agent's TCP/9001 protocol |
-| `scripts/apple-silicon/oracle-orchestrator.py` | Higher-level driver: ensure-agent / capture / run-diag / validate |
+| `scripts/apple-silicon/oracle-orchestrator.py` | Higher-level driver: ensure-agent / capture / run-diag / validate; `run-diag` can now persist opt-in post-relaunch JSON readbacks under `post-json/` and in `verdict.json` |
 | `scripts/apple-silicon/controller-replay.py` | Mac-side replay of a `XEMU_RECORD_INPUT` CSV into the agent |
 | `scripts/apple-silicon/composite-record.sh` | ffmpeg AV recorder for the MS2109 capture stick |
 | `scripts/apple-silicon/xbe-harness/xbe_orchestrator.py` | Matrix runner: per-(XBE × renderer) PASS/FAIL |

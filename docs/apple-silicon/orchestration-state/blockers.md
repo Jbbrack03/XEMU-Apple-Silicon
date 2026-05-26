@@ -11,6 +11,15 @@
 
 ## Resolved blockers
 
+### Cycle 45D initial Qwen receipt miss
+- State: RESOLVED
+- Blocker class: control-plane
+- First seen: 2026-05-26T19:49:00Z
+- Resolved at: 2026-05-26T19:50:59Z
+- Affected lane: Qwen-35B
+- Impact: the first cycle 45D implementation launch stayed process-alive but failed to emit its required receipt promptly, so Hermes terminated the unconfirmed Qwen session and rotated the same bounded slice onto a live Codex fallback before leaving the control plane ACTIVE.
+
+
 ### Cycle 44B Qwen result-discipline failures
 - State: RESOLVED
 - Blocker class: control-plane
@@ -40,3 +49,11 @@
 - Recovery action taken: Hermes rotated the same bounded EEPROM-breadcrumb objective to a fresh Codex fallback worktree and confirmed a new receipt artifact landed there before restoring ACTIVE state.
 - Notify Josh: no
 - Notes: keep the next implementation attempt off Qwen for this same bounded objective unless the assignment is narrowed further.
+
+### Claude review auth smoke (mitigated by Codex review rotation)
+- State: MITIGATED
+- Blocker class: auth
+- First seen: 2026-05-26T20:27:46Z
+- Mitigated at: 2026-05-26T20:27:46Z
+- Affected lane: Claude Code
+- Impact: a fresh `claude-max-bypass` smoke returned `Not logged in`, so Hermes did not trust Claude for the 45D review handoff and immediately launched a Codex review continuation instead; this is lane-health debt, not an active project blocker.

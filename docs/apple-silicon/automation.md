@@ -4119,9 +4119,13 @@ oracle-orchestrator.py capture --out shots/now.png
 
 # Full chainload-and-collect cycle: agent → runxbe → wait FTP back
 # → relaunch agent → mirror artifacts → screenshot post-state.
+# Optional post-relaunch JSON readbacks persist one JSON artifact
+# per requested command under `post-json/`.
 oracle-orchestrator.py run-diag \
     --xbe   'E:\XBMC4Gamers\Apps\diag-mirror\default.xbe' \
     --ftp-collect /E/XBMC4Gamers/Apps/diag-mirror \
+    --post-json-command eeprom.scratch.read \
+    --post-json-command witness.scan-self \
     --out   benchmark-runs/oracle-mirror
 
 # Compare a captured PNG against a reference oracle frame.
@@ -4137,8 +4141,16 @@ directory before rebooting; the orchestrator only knows where to
 look (`--ftp-collect`).
 
 `run-diag` writes a `verdict.json` to the output directory with
-status, timestamps, and pulled-artifact paths so it can be consumed
-by downstream pipeline steps.
+status, timestamps, pulled-artifact paths, and any requested
+post-relaunch JSON readbacks. Each requested `--post-json-command`
+also writes a machine-readable artifact at
+`post-json/<command>.json`. The current bounded allowlist is
+`eeprom.scratch.read`, `witness.scan`, `witness.scan-self`,
+`info`, and `help`. A malformed JSON payload, remote `500-`, or
+post-relaunch transport/protocol failure flips the overall
+`run-diag` verdict to `post-json-readback-failed` and records the
+per-command failure structurally instead of leaving only a text
+blob in the logs.
 
 ### Standard recipe
 

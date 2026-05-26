@@ -1,12 +1,11 @@
 # Handoff Summary
 
 ## Structured summary
-
 - Control-plane state: CLOSED.
-- Latest completed slice: cycle 44B bounded host-side JSON diagnostic extension in `composite_preflight.py`, validated and promoted onto the root branch.
+- Latest completed slice: cycle 45D run-diag JSON adoption closed on root after fallback implementation, ACCEPT review, and supervisor-owned validation.
 - Active worker: none.
-- Next bounded slice: none in this closed handoff; derive and launch the next successor slice in the next active-state update.
-- Biggest caution: cycle 44B is closed on host-side evidence only; detector-backed JSON validation remains a useful follow-up if this CLI path becomes relied-on operationally.
+- Next bounded slice: candidate 45E is a real-Xbox validation follow-up using the new post-relaunch JSON readbacks; choose the exact command/evidence recipe in the next rotation pass.
+- Biggest caution: Claude lane auth drift was observed during this pass (`claude-max-bypass` returned `Not logged in`), but Hermes avoided blocking the project by routing the review continuation through Codex.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -36,3 +35,4 @@
 - Cycle 42I is complete and remains the last hardware-green truth. Hermes repaired the 42J local-lane launch contract, reran the slice as a bounded reasoning-only scout pass, and got the missing receipt/result artifacts. That scout pass narrowed the next implementation candidate to an EEPROM breadcrumb instead of chainload-bracket markers, which clears the old startup blocker but still leaves 42J in CLOSEOUT until the state/doc sync is reconciled.
 
 - 2026-05-26 cycle 44B closeout reconciliation: Hermes confirmed the fallback result artifact, reran the bounded host-side checks, obtained an accept/no-blocker review artifact, and moved the control plane out of false `ACTIVE` into `CLOSEOUT`.
+- 2026-05-26 cycle 45D fallback rotation: after the initial Qwen 35B implementation launch failed to post its required receipt, Hermes killed the unconfirmed worker and relaunched the same bounded JSON-adoption slice on Codex, which posted a receipt promptly.

@@ -1,15 +1,14 @@
 # Current Cycle
 
 ## Structured summary
-
 - State: CLOSED.
 - Active cycle: none.
-- Last completed cycle: 44B composite-preflight JSON diagnostics closeout — bounded host-side CLI/JSON diagnostic extension now closed on the root branch.
+- Last completed cycle: 45D run-diag JSON adoption closed on root after the fallback implementation result, ACCEPT review at `.claude/state/cycle45d-codex-review-result.md`, and supervisor-owned bounded validations.
 - Branch: apple-silicon-performance.
-- Commit truth: the cycle 44B closure commit now exists on the root branch; the validated `scripts/apple-silicon/composite_preflight.py` diff has been promoted out of the fallback worktree and into repo history.
+- Commit truth: root HEAD now contains the bounded cycle 45D closeout commit (`cycle 45D run-diag JSON adoption closeout — bounded root-branch promotion + ACCEPT review closure`).
 - Live worker: none.
-- Validation truth: cycle 44B retains the implementation artifact `.claude/state/cycle44b-codex-fallback-result.md` and accept/no-blocker review artifact `.claude/state/cycle44b-codex-review-result.md`; supervisor-owned root-repo checks (`py_compile`, `bash -n`, `--help`, `--json --dry-run`, missing-launcher JSON path, and `git diff --check`) were green before closure.
-- Next bounded slice: none in this closed record; the next fresh supervision pass must derive and launch the successor slice separately.
+- Validation truth: cycle 45D has a fallback implementation result, an ACCEPT review result, and supervisor-owned `git diff --check`, `python3 -m py_compile`, and `run-diag --help` validation on root after promotion.
+- Next bounded slice: candidate 45E is a real-Xbox validation follow-up that uses the new `run-diag --post-json-command ...` surface to capture post-relaunch JSON evidence; choose the exact hardware-facing recipe in the next rotation pass.
 - Last truth update: 2026-05-26.
 
 ## Update contract
@@ -43,3 +42,4 @@
 - Cycle 42I real-Xbox deployment and classification — COMPLETED 2026-05-25 with outcome (0xBC; count=0 mapped_pages_seen=420 kseg0_count=0 kseg1_count=0 truncated_at_cap=0 kseg1_scanned=1) from benchmark-runs/cycle42i-realxbox-20260525T214945Z. Interpretation: sub-cause (2) page torn down before agent scan remains the leading explanation; low-RAM placement and uncached-kseg1-only survival are ruled out on this run.
 
 - 2026-05-26 cycle 44B fallback review closeout: the Codex fallback result artifact and a follow-up accept/no-blocker review both landed, so Hermes reconciled the compact state from false `ACTIVE` to `CLOSEOUT` while root-branch promotion remains pending.
+- 2026-05-26 cycle 45D rotation: the first Qwen 35B implementation launch was preflight-green but failed receipt discipline, so Hermes killed the unconfirmed session and relaunched the same bounded slice on a live Codex fallback with receipt confirmation.

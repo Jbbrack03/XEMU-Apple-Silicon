@@ -95,12 +95,23 @@ DEFAULT_AGENT_PATH = os.environ.get(
     r"E:\Apps\oracle-agent\default.xbe",
 )
 DEFAULT_AGENT_PORT = int(os.environ.get("ORACLE_PORT", 9001))
+POST_JSON_COMMANDS = (
+    "eeprom.scratch.read",
+    "witness.scan",
+    "witness.scan-self",
+    "info",
+    "help",
+)
 
 
 # ---------- low-level helpers ----------
 
 def _log(msg: str) -> None:
     print(f"[oracle] {msg}", flush=True)
+
+
+def _artifact_relpath(path: Path, root: Path) -> str:
+    return str(path.relative_to(root))
 
 
 def _tcp_open(host: str, port: int, timeout: float = 2.0,
@@ -425,10 +436,84 @@ def capture_screenshot(host: str, out_png: Path,
         return False
 
 
+def _write_json_artifact(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+
+
+def _run_post_json_command(host: str, port: int, command: str,
+                           out_dir: Path) -> dict:
+    artifact_path = out_dir / "post-json" / f"{command}.json"
+    result: dict = {
+        "command": command,
+        "request": f"{command} --json",
+        "artifact": _artifact_relpath(artifact_path, out_dir),
+    }
+    try:
+        with oc.OracleClient(host, port, timeout=15.0) as client:
+            code, payload = client.raw(result["request"])
+        text = payload.decode("utf-8", "replace")
+        result["protocol_code"] = code
+        if code not in ("200", "201"):
+            result["status"] = "unexpected-protocol-code"
+            result["error"] = (
+                f"expected text JSON response, got protocol code {code}"
+            )
+            result["raw_payload"] = text
+        else:
+            try:
+                response = json.loads(text)
+                result["response"] = response
+                if not isinstance(response, dict):
+                    result["status"] = "unexpected-json-shape"
+                    result["error"] = (
+                        f"expected top-level JSON object, got "
+                        f"{type(response).__name__}"
+                    )
+                elif response.get("ok") is False:
+                    result["status"] = "remote-error"
+                    result["error"] = response.get(
+                        "error", "agent returned ok=false without error text"
+                    )
+                else:
+                    result["status"] = "ok"
+            except json.JSONDecodeError as e:
+                result["status"] = "malformed-json"
+                result["error"] = str(e)
+                result["raw_payload"] = text
+    except oc.OracleRemoteError as e:
+        result["status"] = "remote-error"
+        result["error"] = str(e)
+    except oc.OracleProtocolError as e:
+        result["status"] = "protocol-error"
+        result["error"] = str(e)
+    except oc.OracleTransportError as e:
+        result["status"] = "transport-error"
+        result["error"] = str(e)
+    except OSError as e:
+        result["status"] = "transport-error"
+        result["error"] = str(e)
+    _write_json_artifact(artifact_path, result)
+    return result
+
+
+def run_post_json_readbacks(host: str, port: int, commands: Iterable[str],
+                            out_dir: Path) -> List[dict]:
+    results = []
+    for command in commands:
+        _log(f"post-json readback: {command}")
+        results.append(_run_post_json_command(host, port, command, out_dir))
+    return results
+
+
 # ---------- diagnostic XBE chainload pipeline ----------
 
 def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
-             out_dir: Path, agent_path: str = DEFAULT_AGENT_PATH,
+             out_dir: Path,
+             post_json_commands: Optional[Iterable[str]] = None,
+             agent_path: str = DEFAULT_AGENT_PATH,
              port: int = DEFAULT_AGENT_PORT) -> dict:
     """Full pipeline:
       1. ensure_agent
@@ -441,6 +526,7 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
          ConnectionRefusedError, so order matters here.
       6. relaunch the agent
       7. screenshot post-state (informational)
+      8. optionally replay JSON-capable post-relaunch readbacks
 
     Returns a dict suitable for JSON.verdict.json. The diagnostic XBE
     is responsible for capturing whatever it needs to disk under its
@@ -456,6 +542,7 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
         "xbe": xbe_path,
         "ftp_collect": ftp_collect,
         "started_at": started_at,
+        "post_json_commands": list(post_json_commands or []),
     }
     if not ensure_agent(host=host, agent_path=agent_path, port=port):
         record["status"] = "agent-launch-failed"
@@ -557,6 +644,17 @@ def run_diag(host: str, xbe_path: str, ftp_collect: Optional[str],
     post_png = out_dir / "post.png"
     capture_screenshot(host, post_png, port=port)
     record["post_screenshot"] = str(post_png) if post_png.exists() else None
+    if record["post_json_commands"]:
+        readbacks = run_post_json_readbacks(
+            host, port, record["post_json_commands"], out_dir
+        )
+        record["post_json_readbacks"] = readbacks
+        if any(item.get("status") != "ok" for item in readbacks):
+            record["finished_at"] = time.time()
+            record["status"] = "post-json-readback-failed"
+            return record
+    else:
+        record["post_json_readbacks"] = []
     record["finished_at"] = time.time()
     record["status"] = "ok"
     return record
@@ -626,6 +724,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     pr.add_argument("--xbe", required=True)
     pr.add_argument("--ftp-collect", help="FTP directory to mirror after run")
     pr.add_argument("--out", required=True, help="local output directory")
+    pr.add_argument("--post-json-command", action="append",
+                    choices=POST_JSON_COMMANDS, default=[],
+                    help="replay a supported JSON-capable command after "
+                         "agent relaunch and persist a per-command JSON "
+                         "artifact; repeatable")
 
     pv = sub.add_parser("validate",
                         help="Compare captured PNG vs reference PNG")
@@ -711,7 +814,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.cmd == "run-diag":
         out_dir = Path(args.out)
         record = run_diag(args.host, args.xbe, args.ftp_collect,
-                          out_dir, agent_path=args.agent_path, port=args.port)
+                          out_dir, args.post_json_command,
+                          agent_path=args.agent_path, port=args.port)
         with open(out_dir / "verdict.json", "w") as f:
             json.dump(record, f, indent=2)
         print(json.dumps(record, indent=2))

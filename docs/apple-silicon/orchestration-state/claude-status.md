@@ -1,13 +1,12 @@
 # Claude Status
 
 ## Structured summary
-
 - Worker lane: Claude Code.
 - State: CLOSED.
 - Active session: none.
 - Current objective: none in progress on the Claude lane.
-- Last completed slice: 44B closed through Codex fallback implementation plus supervisor-owned root-branch promotion; Claude remained intentionally idle.
-- Next expected action: keep Claude idle unless the next slice widens beyond a bounded local-lane task or turns architecture-sensitive.
+- Last completed slice: Claude remained idle during cycle 45D. A fresh `claude-max-bypass` auth smoke returned `Not logged in`, so do not rely on this lane until that login drift is repaired.
+- Next expected action: repair Claude login/auth before the next Claude-specific review or architecture-sensitive rotation.
 - Blocker class: none.
 - Last truth update: 2026-05-26.
 
