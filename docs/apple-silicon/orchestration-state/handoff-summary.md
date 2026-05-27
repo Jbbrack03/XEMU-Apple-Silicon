@@ -1,19 +1,30 @@
 # Handoff Summary
 
 ## Structured summary
-- Control-plane state: CLOSED.
-- Latest completed slice: cycle 45F closed after Codex fallback finished the reusable witness-only post-JSON helper and canonical workflow doc update.
-- Active worker: none.
-- Next bounded slice: none.
-- Biggest caution: the fresh-session control-plane now has dedicated rules/helper support for remote tmux launches and remote-path inspection, but future passes must still reconcile fast result-artifact completions out of ACTIVE in the same pass.
+- Control-plane state: CLOSEOUT.
+- Latest completed slice: cycle 46B closed after the supervisor promoted the bounded oracle-agent normalization fix and reconciled the compact control-plane state to committed truth.
+- Active worker: none; Codex finished the bounded 46D pass and wrote the required result artifact.
+- Next bounded slice: none beyond active cycle 46D; supervisor closeout is the only remaining bounded step unless a fresh successor packet is intentionally opened afterward.
+- Biggest caution: keep the closeout confined to the bounded 46D file set; the scout-classified `.inl` drift and `.last_cycle42i_outdir` marker were already clean/absent, so no wider hygiene sweep is justified here.
 - Last truth update: 2026-05-26.
 ## Update contract
 
 - Start with the compact truth above.
 - Treat long cycle history below as archive, not the primary live control plane.
 - Remove or update any stale pending-closeout wording once the commit and state sync are real.
-
 ## Detailed record
+
+- 2026-05-26 cycle 46D bounded closeout execution: Codex executed the successor packet in the root worktree, verified the two `.inl` files already matched HEAD and `.last_cycle42i_outdir` was already absent, then reconciled the compact orchestration-state docs and posted the required result artifact. The slice now awaits supervisor closeout rather than additional implementation.
+
+- 2026-05-26 cycle 46D successor packetization: Hermes converted the post-46B follow-up from prose-only parking into launch-ready packet `docs/apple-silicon/orchestration-state/successor-packets/cycle46d-root-hygiene-closeout.md`, so future rotation passes can launch the bounded hygiene slice without reconstructing the recipe from scattered notes.
+
+- 2026-05-26 cycle 46B closeout sync: supervisor-owned promotion is now committed at `2cab19205c`, no live worker remains, repeated clean rebuilds reproduced matching oracle-agent artifact hashes, and the compact control-plane summaries were reconciled from stale closeout wording back to committed closed truth.
+
+- 2026-05-26T22:11:39Z cycle 46A Qwen scout failure: the Qwen worker eventually wrote the required receipt artifact after a direct nudge, but then exited without the required final result artifact. Hermes therefore treated the run as a result-discipline failure rather than healthy slice completion.
+
+- 2026-05-26T22:12:09Z cycle 46A Codex fallback launch: Hermes kept the same bounded classification slice open, rotated the live worker from Qwen onto Codex, and required a fresh receipt/result artifact pair before allowing the control plane to remain ACTIVE.
+
+- 2026-05-26T22:00:09Z cycle 46A root-drift scout launch: Hermes found the compact control plane closed with no live worker and no explicit successor slice while the root repo still carried bounded dirty oracle-agent/build artifacts. Hermes therefore launched a read-only Qwen scout to classify whether the drift is unfinished closeout debt, safe revert/noise, or the seed of the next bounded follow-up before widening into new implementation.
 
 - 2026-05-26 cycle 44B fallback rotation: after two Qwen receipt-without-result failures on the same bounded JSON-diagnostics objective, Hermes kept the slice open and rotated the live implementation lane onto Codex.
 

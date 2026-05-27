@@ -1,20 +1,31 @@
 # Validation Status
 
 ## Structured summary
-- State: CLOSED_45F.
-- Slice under validation: cycle 45F witness-only post-JSON helper packaging.
-- Last green validation: supervisor-owned `bash -n` plus bounded dry-run/static review confirmed `scripts/apple-silicon/oracle-witness-postjson.sh` matches the 45E-proven witness-only post-JSON recipe and `docs/apple-silicon/oracle-workflow.md` now documents one canonical invocation path.
-- Codex status: completed; Codex fallback finished the bounded helper/doc slice and wrote `.claude/state/cycle45f-codex-fallback-result.md`.
-- Hardware gate status: unchanged from 45E; 45F is a tooling/documentation closure slice, not a new hardware-conclusion slice.
-- Required before next promotion/closure: none.
+- State: CLOSEOUT_46D.
+- Slice under validation: cycle 46D root-hygiene closeout.
+- Last green validation: targeted root-hygiene verification confirmed `scripts/apple-silicon/xbe-tests/lib/vs.inl` and `scripts/apple-silicon/xbe-tests/lib/xbed_tex_vs.inl` already match HEAD, `.last_cycle42i_outdir` is absent, and the compact orchestration-state docs now reflect the post-46B closeout truth. 46B remains the last closed tooling validation truth and 45E remains the last green hardware truth.
+- Codex status: completed the bounded 46D pass and wrote the required result artifact; only supervisor closeout/promotion remains.
+- Hardware gate status: unchanged from 45E; 46D is repo-hygiene/control-plane sync only.
+- Required before next promotion/closure: supervisor review/commit of the bounded 46D closeout diff.
 - Last truth update: 2026-05-26.
 ## Update contract
 
 - Put the current validation truth in this summary even if the detailed narrative is long.
 - Distinguish completed validation for the last closed slice from pending validation for the next slice.
 - Do not label validation CLOSED if a required gate for the same slice is still open.
-
 ## Detailed record
+
+- 2026-05-26 cycle 46D bounded closeout validation: Codex reran the scoped root-hygiene checks, confirmed the two scout-classified `.inl` drifts were already clean, confirmed `.last_cycle42i_outdir` was already absent, and synced the compact orchestration-state docs to the resulting truth. No hardware rerun was required, and the slice now sits in CLOSEOUT awaiting supervisor promotion.
+
+- 2026-05-26 cycle 46D successor packetization: Hermes converted the post-46B follow-up from prose-only parking into launch-ready packet `docs/apple-silicon/orchestration-state/successor-packets/cycle46d-root-hygiene-closeout.md`, so future rotation passes can launch the bounded hygiene slice without reconstructing the recipe from scattered notes.
+
+- 2026-05-26 cycle 46B closeout sync: supervisor-owned promotion is now committed at `2cab19205c`, no live worker remains, repeated clean rebuilds reproduced matching oracle-agent artifact hashes, and the compact control-plane summaries were reconciled from stale closeout wording back to committed closed truth.
+
+- 2026-05-26T22:11:39Z cycle 46A Qwen scout failure: the Qwen worker eventually wrote the required receipt artifact after a direct nudge, but then exited without the required final result artifact. Hermes therefore treated the run as a result-discipline failure rather than healthy slice completion.
+
+- 2026-05-26T22:12:09Z cycle 46A Codex fallback launch: Hermes kept the same bounded classification slice open, rotated the live worker from Qwen onto Codex, and required a fresh receipt/result artifact pair before allowing the control plane to remain ACTIVE.
+
+- 2026-05-26T22:00:09Z cycle 46A scout launch: validation is pending only on the read-only classification artifact. Hardware truth remains anchored at cycle 45E while Hermes asks Qwen to classify the remaining root drift and nominate the smallest safe next slice.
 
 - 2026-05-26 cycle 44B fallback rotation: Qwen proved the receipt/write path but twice exited without the required result artifact for the same bounded objective. Hermes therefore rotated the implementation lane onto Codex while preserving the partial diff already present in `composite_preflight.py`.
 

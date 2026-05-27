@@ -1,14 +1,14 @@
 # Current Cycle
 
 ## Structured summary
-- State: CLOSED.
-- Active cycle: none.
-- Last completed cycle: 45F witness-only post-JSON helper packaging closed after a Codex fallback finished the bounded helper/doc slice and wrote the required final result artifact in the preserved 45F worktree.
+- State: CLOSEOUT.
+- Active cycle: 46D root-hygiene closeout.
+- Last completed cycle: 46B oracle-agent packaged-artifact determinism continuation closed after supervisor-owned promotion landed the bounded reproducible-build normalization fix on the root branch.
 - Branch: apple-silicon-performance.
-- Commit truth: root HEAD now contains the bounded cycle 45F closeout commit named cycle 45F witness-only post-JSON helper packaging closeout — bounded helper+workflow promotion and state closure.
+- Commit truth: root HEAD still contains the bounded cycle 46B closeout commit named cycle 46B oracle-agent packaged-artifact determinism closeout — bounded reproducible-build normalization promotion; the bounded 46D closeout diff is present only in the worktree and awaits supervisor promotion.
 - Live worker: none.
-- Validation truth: 45E remains the last green hardware truth; 45F added a reusable helper plus canonical workflow documentation for that already-proven witness-only post-JSON recipe.
-- Next bounded slice: none.
+- Validation truth: 46D closeout verification now confirms the scout-classified root-noise targets are already clean/absent, while 46B remains the last closed tooling validation truth and 45E remains the last green hardware truth.
+- Next bounded slice: none beyond the active 46D closeout; derive a fresh successor packet only if a new post-closeout follow-up is intentionally opened after supervisor promotion.
 - Last truth update: 2026-05-26.
 ## Update contract
 
@@ -16,8 +16,19 @@
 - If State is CLOSED, the closure commit must already exist in git.
 - If there is no active slice, set Active cycle to none explicitly.
 - Update this summary before appending or editing the long narrative below.
-
 ## Detailed record
+
+- 2026-05-26 cycle 46D bounded closeout execution: Codex executed successor packet `docs/apple-silicon/orchestration-state/successor-packets/cycle46d-root-hygiene-closeout.md`, confirmed `scripts/apple-silicon/xbe-tests/lib/vs.inl` and `scripts/apple-silicon/xbe-tests/lib/xbed_tex_vs.inl` already matched HEAD, confirmed `.last_cycle42i_outdir` was already absent, then synced the compact orchestration-state docs and wrote the required result artifact. The slice is now in CLOSEOUT awaiting supervisor review/promotion.
+
+- 2026-05-26 cycle 46D successor packetization: Hermes converted the post-46B follow-up from prose-only parking into launch-ready packet `docs/apple-silicon/orchestration-state/successor-packets/cycle46d-root-hygiene-closeout.md`, so future rotation passes can launch the bounded hygiene slice without reconstructing the recipe from scattered notes.
+
+- 2026-05-26 cycle 46B closeout sync: supervisor-owned promotion is now committed at `2cab19205c`, no live worker remains, repeated clean rebuilds reproduced matching oracle-agent artifact hashes, and the compact control-plane summaries were reconciled from stale closeout wording back to committed closed truth.
+
+- 2026-05-26T22:11:39Z cycle 46A Qwen scout failure: the Qwen worker eventually wrote the required receipt artifact after a direct nudge, but then exited without the required final result artifact. Hermes therefore treated the run as a result-discipline failure rather than healthy slice completion.
+
+- 2026-05-26T22:12:09Z cycle 46A Codex fallback launch: Hermes kept the same bounded classification slice open, rotated the live worker from Qwen onto Codex, and required a fresh receipt/result artifact pair before allowing the control plane to remain ACTIVE.
+
+- 2026-05-26T22:00:09Z cycle 46A root-drift scout launch: Hermes found the compact control plane closed with no live worker and no explicit successor slice while the root repo still carried bounded dirty oracle-agent/build artifacts. Hermes therefore launched a read-only Qwen scout to classify whether the drift is unfinished closeout debt, safe revert/noise, or the seed of the next bounded follow-up before widening into new implementation.
 
 - 2026-05-26 cycle 44B fallback rotation: the same bounded JSON-diagnostics objective failed twice on Qwen after receipt confirmation but before the required result artifact. Hermes kept the slice family open, preserved the partial diff in `composite_preflight.py`, and rotated the live implementation lane onto a Codex fallback session with receipt confirmed at `.claude/state/cycle44b-codex-fallback-receipt.md`.
 
