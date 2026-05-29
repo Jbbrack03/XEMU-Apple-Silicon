@@ -441,6 +441,10 @@ unsigned int pgraph_mtl_surface_iter_address_size(uint32_t *out_addrs,
  * the full rationale. Gated by `XEMU_METAL_FRONT_FB_FALLBACK=1` at
  * the renderer level. */
 void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write);
+
+/* 2026-05-28 (47L): depth-only draw tracking — mirrors note_color_draw()
+ * for surfaces that receive depth writes but no color writes. */
+void pgraph_mtl_surface_note_depth_draw(void *texture);
 bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
                                                      uint32_t display_height,
                                                      uint32_t crtc_vram_addr);
@@ -519,6 +523,26 @@ void pgraph_mtl_surface_download_in_range_if_dirty(uint32_t start,
 
 uint64_t pgraph_mtl_surface_downloads(void);
 uint64_t pgraph_mtl_surface_download_bytes(void);
+
+/* 2026-05-29 (47J): diagnostic probe for the direct-publish path.
+ *
+ * Logs sibling state for the given vram_addr. This answers whether
+ * the direct-publish route (as opposed to the fallback route) has
+ * observable sibling/freshness state relevant to the A/B/C
+ * classification question.
+ *
+ * Gated on XEMU_METAL_DIAG_PUBLISH to keep production paths clean.
+ * Emits one line per sibling plus a summary line.
+ *
+ * Format:
+ *   xemu-perf: metal_siblings_summary vram_addr=0x... reason=<reason>
+ *     total=N color_siblings=N freshest_color_seq=N freshest_depth_seq=N
+ *   xemu-perf: metal_siblings vram_addr=0x... reason=<reason>
+ *     sibling[0] vram=0x... color=1/0 w=H h=V pitch=P fmt=F
+ *       last_color_draw_seq=N last_depth_draw_seq=N draw_dirty=0/1
+ *       last_use_seq=N frame_draws=N
+ */
+void pgraph_mtl_surface_log_siblings_at(uint32_t vram_addr, const char *reason);
 
 #ifdef __cplusplus
 }

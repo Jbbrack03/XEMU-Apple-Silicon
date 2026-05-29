@@ -2035,6 +2035,7 @@ void pgraph_mtl_surface_note_depth_draw(void *texture)
         return;
     }
 
+    e->frame_draw_count_any++;
     uint32_t n = ++e->frame_draw_count;
     e->last_depth_draw_seq = ++s_use_seq;
     if (s_fallback_draw_candidate == NULL ||
@@ -2549,12 +2550,13 @@ static void diag_log_siblings_at_bind(uint32_t vram_addr, uint32_t width, uint32
                 "color=%u w=%u h=%u pitch=%u fmt=%u "
                 "guest_w=%u guest_h=%u "
                 "last_color_draw_seq=%lu last_depth_draw_seq=%lu "
-                "draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
+                "draws_any=%u draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
                 (unsigned)e->vram_addr, (unsigned)e->is_color,
                 e->width, e->height, e->pitch, e->nv097_format,
                 e->guest_width, e->guest_height,
                 (unsigned long)e->last_color_draw_seq,
                 (unsigned long)e->last_depth_draw_seq,
+                (unsigned)e->frame_draw_count_any,
                 (unsigned)atomic_load(&e->draw_dirty),
                 (unsigned long)e->last_use_seq,
                 e->frame_draw_count);
@@ -2597,15 +2599,25 @@ static void diag_log_siblings_at(uint32_t vram_addr, const char *publish_reason)
                 "xemu-perf: metal_siblings vram_addr=0x%x "
                 "color=%u w=%u h=%u pitch=%u fmt=%u "
                 "last_color_draw_seq=%lu last_depth_draw_seq=%lu "
-                "draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
+                "draws_any=%u draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
                 (unsigned)e->vram_addr, (unsigned)e->is_color,
                 e->width, e->height, e->pitch, e->nv097_format,
                 (unsigned long)e->last_color_draw_seq,
                 (unsigned long)e->last_depth_draw_seq,
+                (unsigned)e->frame_draw_count_any,
                 (unsigned)atomic_load(&e->draw_dirty),
                 (unsigned long)e->last_use_seq,
                 e->frame_draw_count);
     }
+}
+
+/* Public wrapper for the static diag_log_siblings_at.
+ * Called from renderer.c to log sibling state at the CRTC address.
+ * Gated on XEMU_METAL_DIAG_PUBLISH.
+ */
+void pgraph_mtl_surface_log_siblings_at(uint32_t vram_addr, const char *reason)
+{
+    diag_log_siblings_at(vram_addr, reason);
 }
 
 /* ---------------------------------------------------------------- */
