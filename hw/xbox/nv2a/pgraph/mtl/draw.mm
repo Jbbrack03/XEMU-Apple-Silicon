@@ -1158,17 +1158,6 @@ void pgraph_mtl_draw_translated(void *pipeline_state,
                       NV_PGRAPH_CONTROL_0_GREEN_WRITE_ENABLE |
                       NV_PGRAPH_CONTROL_0_BLUE_WRITE_ENABLE)) != 0;
     pgraph_mtl_surface_note_color_draw(surface_color, color_write);
-    /* 2026-05-28 (47L): track depth-only draws for dominant-draw evidence.
-     * When color_write is false but depth_write is true, the surface is
-     * a depth/stencil target — note_color_draw() skips it, so we need
-     * note_depth_draw() to track it for fallback-dominant-draw classification. */
-    if (!color_write) {
-        bool depth_write =
-            (control_0 & NV_PGRAPH_CONTROL_0_ZWRITEENABLE) != 0;
-        if (depth_write && surface_depth != NULL) {
-            pgraph_mtl_surface_note_depth_draw(surface_depth);
-        }
-    }
     atomic_fetch_add(&s_draw_count, 1);
     if (indexed) {
         atomic_fetch_add(&s_draw_indexed_count, 1);

@@ -1,20 +1,11 @@
 # Validation Status
 
 ## Structured summary
-- State: CLOSED_46D.
-- Slice under validation: cycle 46D root-hygiene closeout.
-- Last green validation: targeted root-hygiene verification confirmed `scripts/apple-silicon/xbe-tests/lib/vs.inl` and `scripts/apple-silicon/xbe-tests/lib/xbed_tex_vs.inl` already match HEAD, `.last_cycle42i_outdir` is absent, and the compact orchestration-state docs now reflect the final post-46D closed truth.
-- Codex status: completed; Codex wrote the required 46D result artifact and no further worker action remains.
-- Hardware gate status: unchanged from 45E; 46D is repo-hygiene/control-plane sync only.
-- Required before next promotion/closure: none.
-- Last truth update: 2026-05-26.
-## Update contract
-
-- Put the current validation truth in this summary even if the detailed narrative is long.
-- Distinguish completed validation for the last closed slice from pending validation for the next slice.
-- Do not label validation CLOSED if a required gate for the same slice is still open.
+- State: ACTIVE_48L_VALIDATED.
+- Slice under validation: 48L exact-worktree runtime validation is **completed**. Packet A observability artifact (`metal_siblings_summary` and depth-draw observability) has been proven to emit correctly from the review-packet-a build at `82ebecc1c9577e5f97af846b6acc2f9dc088a486`.
+- Last green validation: 48L runtime validation confirmed that the exact review-packet-a build produces `metal_siblings_summary` output and depth-draw observability as expected. This is a bounded 3-file observability artifact, not a project-readiness signal.
+- Codex status: Packet A observability artifact is validated for its narrow scope. Broader validation-plan exit criteria remain unproven and are separate from Packet A. Route family question (normal-path sibling-sync) was characterized in 49B as explained by harness preconditions, not a software defect — closed for now.
+- Hardware gate status: Packet A has been validated for its narrow observability scope. The broader validation-plan exit criteria (full visual/tool validation for project readiness) remain unproven.
+- Required before next promotion/closure: Packet A is complete as an observability artifact. Any future promotion requires separate validation of the broader exit criteria, which remain unproven.
+- Last truth update: 2026-05-30.
 ## Detailed record
-
-- 2026-05-26 cycle 46D supervisor finalization: Hermes verified commit `e592942c86` already contains the bounded closeout diff, confirmed the receipt/result artifacts remain present with no live worker, and closed the validation ledger for 46D.
-
-- 2026-05-26 cycle 46D bounded closeout validation: Codex reran the scoped root-hygiene checks, confirmed the two scout-classified `.inl` drifts were already clean, confirmed `.last_cycle42i_outdir` was already absent, and synced the compact orchestration-state docs to the resulting truth. No hardware rerun was required.

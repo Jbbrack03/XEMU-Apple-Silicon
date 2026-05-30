@@ -215,15 +215,6 @@ typedef struct MtlSurfaceBinding {
      * while leaving the color target at its clear color. */
     uint32_t frame_draw_count;
 
-    /* 2026-05-28 (47M): diagnostic counter — tracks ALL draws to this
-     * color-bound surface regardless of write mask. When color_write is
-     * false the surface is still a render target; the draw executed but
-     * with writes disabled. This recovers draw-history evidence for
-     * targets like 0x3c84000 that are bound as color RTs but receive
-     * draws with color writes disabled. Does NOT affect frame_draw_count
-     * or fallback-dominant-draw behavior. */
-    uint32_t frame_draw_count_any;
-
     /* 2026-05-19 surface-graph diag (Tool 1): monotonic seq snapshot of
      * the most recent color-writing draw that hit this binding. Mirrors
      * `last_use_seq` but only updates on color-write, so the graph
@@ -590,9 +581,9 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
         atomic_fetch_add(&s_front_fb_publishes, 1);
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s\n",
+                "width=%u height=%u format=%u reason=%s\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
         return true;
     }
 
@@ -648,9 +639,9 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s snapshot=1\n",
+                "width=%u height=%u format=%u reason=%s snapshot=1\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
     }
     return true;
 }
@@ -695,7 +686,6 @@ static void fallback_draw_reset(void)
     s_fallback_draw_candidate_count = 0;
     for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
         e->frame_draw_count = 0;
-        e->frame_draw_count_any = 0;
     }
 }
 
@@ -769,9 +759,6 @@ static MtlSurfaceBinding *cache_get_at_depth(uint32_t vram_addr)
 static void sync_color_siblings_into(MtlSurfaceBinding *target);
 static void sync_depth_siblings_into(MtlSurfaceBinding *target);
 
-static void diag_log_siblings_at(uint32_t vram_addr, const char *publish_reason);
-static void diag_log_siblings_at_bind(uint32_t vram_addr, uint32_t width, uint32_t height,
-                                                    uint32_t pitch, uint32_t nv097_format, const char *bind_reason);
 static bool binding_shape_compatible(MtlSurfaceBinding *e, bool is_color,
                                      uint32_t vram_addr,
                                      uint32_t width, uint32_t height,
@@ -1583,8 +1570,6 @@ bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
      * mtl_bind_current_surfaces; non-ex retained for the legacy
      * single-slot wrappers. */
     sync_color_siblings_into(e);
-    diag_log_siblings_at_bind(vram_addr, width, height, pitch,
-                              nv097_color_format, "bind_color_ex");
     s_color_binding = e;
     return true;
 }
@@ -1832,7 +1817,6 @@ bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
     if (e == NULL || e->texture == NULL) {
         return false;
     }
-    diag_log_siblings_at(vram_addr, reason);
 
     /* Bump last_use_seq so LRU eviction doesn't reclaim the surface that
      * the compositor is about to sample. Matches the bookkeeping inside
@@ -1852,9 +1836,9 @@ bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s pointer_only=1\n",
+                "width=%u height=%u format=%u reason=%s pointer_only=1\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
     }
     return true;
 }
@@ -1953,10 +1937,10 @@ static bool publish_display_binding_front_fb(MtlSurfaceBinding *e,
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
                 "width=%u height=%u source_width=%u source_height=%u "
-                "format=%u line_offset=%.3f color_draws=%u draws_any=%u reason=%s display=1\n",
+                "format=%u line_offset=%.3f reason=%s display=1\n",
                 (unsigned)e->vram_addr, display_width, display_height,
                 e->width, e->height, e->nv097_format, line_offset,
-                (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                reason ? reason : "?");
     }
     return true;
 }
@@ -1977,21 +1961,11 @@ bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
 
 void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
 {
-    if (!s_initialized || texture == NULL) {
+    if (!s_initialized || texture == NULL || !color_write) {
         return;
     }
     MtlSurfaceBinding *e = cache_get_by_texture(texture);
     if (e == NULL) {
-        return;
-    }
-
-    /* 2026-05-28 (47M): diagnostic — track ALL draws to color-bound
-     * surfaces regardless of write mask. This recovers draw-history
-     * evidence for targets like 0x3c84000 that are bound as color RTs
-     * but receive draws with color writes disabled. */
-    e->frame_draw_count_any++;
-
-    if (!color_write) {
         return;
     }
 
@@ -2002,42 +1976,6 @@ void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
      * — frame_draw_count alone is cumulative and only resets on the
      * fallback-publish path (Codex review 2026-05-19, finding #2). */
     e->last_color_draw_seq = ++s_use_seq;
-    if (s_fallback_draw_candidate == NULL ||
-        n > s_fallback_draw_candidate_count ||
-        (n == s_fallback_draw_candidate_count && e == s_color_binding)) {
-        s_fallback_draw_candidate = e;
-        s_fallback_draw_candidate_count = n;
-    }
-}
-
-/* 2026-05-28 (47L): diagnostic probe for depth-only draw tracking.
- *
- * Mirrors note_color_draw() but tracks surfaces that receive depth
- * writes but no color writes. This recovers dominant-draw evidence
- * for depth-only surfaces (like 0x3c84000 in PGR2) that are used
- * as draw targets but never written to with color.
- *
- * Gated on XEMU_METAL_DIAG_DEPTH_DRAW to keep production paths clean.
- * Updates last_depth_draw_seq, frame_draw_count, and
- * s_fallback_draw_candidate (same logic as note_color_draw).
- *
- * When the flag is set, depth-only surfaces can become the
- * fallback-dominant-draw candidate, enabling A/B/C classification
- * for surfaces that are drawn to but never written with color.
- */
-void pgraph_mtl_surface_note_depth_draw(void *texture)
-{
-    if (!s_initialized || texture == NULL || !getenv("XEMU_METAL_DIAG_DEPTH_DRAW")) {
-        return;
-    }
-    MtlSurfaceBinding *e = cache_get_by_texture(texture);
-    if (e == NULL) {
-        return;
-    }
-
-    e->frame_draw_count_any++;
-    uint32_t n = ++e->frame_draw_count;
-    e->last_depth_draw_seq = ++s_use_seq;
     if (s_fallback_draw_candidate == NULL ||
         n > s_fallback_draw_candidate_count ||
         (n == s_fallback_draw_candidate_count && e == s_color_binding)) {
@@ -2086,13 +2024,11 @@ bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_fallback_candidate "
                 "vram_addr=0x%x width=%u height=%u format=%u "
-                "color_draws=%u draws_any=%u reason=%s%s\n",
+                "color_draws=%u reason=%s%s\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)selected_count,
-                (unsigned)e->frame_draw_count_any, reason,
+                e->nv097_format, (unsigned)selected_count, reason,
                 (e == s_color_binding && s_fallback_draw_candidate == NULL)
                     ? " source=current-binding" : "");
-        diag_log_siblings_at(e->vram_addr, reason);
     }
     uint32_t publish_width = display_width ? display_width : e->width;
     uint32_t publish_height = display_height ? display_height : e->height;
@@ -2490,134 +2426,6 @@ void pgraph_mtl_surface_dump_graph_jsonl(FILE *out,
 
     atomic_fetch_add(&s_graph_dumps, 1);
     fflush(out);
-}
-
-/* 2026-05-27 (47M): diagnostic probe for the direct-publish path.
- *
- * Walks the cache and logs sibling state for the given vram_addr.
- * This answers whether the direct-publish route (as opposed to the
- * fallback route) has observable sibling/freshness state relevant
- * to the A/B/C classification question.
- *
- * Gated on XEMU_METAL_DIAG_PUBLISH to keep production paths clean.
- * Emits one line per sibling plus a summary line.
- *
- * Format:
- *   xemu-perf: metal_siblings_summary vram_addr=0x... reason=<reason>
- *     total=N color_siblings=N freshest_color_seq=N freshest_depth_seq=N
- *   xemu-perf: metal_siblings vram_addr=0x... reason=<reason>
- *     sibling[0] vram=0x... color=1/0 w=H h=V pitch=P fmt=F
- *       last_color_draw_seq=N last_depth_draw_seq=N draw_dirty=0/1
- *       last_use_seq=N frame_draws=N
- */
-static void diag_log_siblings_at_bind(uint32_t vram_addr, uint32_t width, uint32_t height,
-                                        uint32_t pitch, uint32_t nv097_format, const char *bind_reason)
-{
-    if (!s_initialized || !getenv("XEMU_METAL_DIAG_BIND")) {
-        return;
-    }
-
-    int total = 0, color_count = 0;
-    uint64_t freshest_color_seq = 0, freshest_depth_seq = 0;
-
-    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
-        if (e->vram_addr != vram_addr) continue;
-        total++;
-        if (e->is_color) color_count++;
-        if (e->last_color_draw_seq > freshest_color_seq) {
-            freshest_color_seq = e->last_color_draw_seq;
-        }
-        if (e->last_depth_draw_seq > freshest_depth_seq) {
-            freshest_depth_seq = e->last_depth_draw_seq;
-        }
-    }
-
-    fprintf(stderr,
-            "xemu-perf: metal_bind_siblings_summary vram_addr=0x%x "
-            "bind_reason=%s total=%d color_siblings=%d "
-            "freshest_color_seq=%lu freshest_depth_seq=%lu "
-            "bound_w=%u bound_h=%u bound_pitch=%u bound_fmt=%u\n",
-            (unsigned)vram_addr, bind_reason ? bind_reason : "?",
-            total, color_count,
-            (unsigned long)freshest_color_seq,
-            (unsigned long)freshest_depth_seq,
-            width, height, pitch, nv097_format);
-
-    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
-        if (e->vram_addr != vram_addr) continue;
-        fprintf(stderr,
-                "xemu-perf: metal_bind_siblings vram_addr=0x%x "
-                "color=%u w=%u h=%u pitch=%u fmt=%u "
-                "guest_w=%u guest_h=%u "
-                "last_color_draw_seq=%lu last_depth_draw_seq=%lu "
-                "draws_any=%u draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
-                (unsigned)e->vram_addr, (unsigned)e->is_color,
-                e->width, e->height, e->pitch, e->nv097_format,
-                e->guest_width, e->guest_height,
-                (unsigned long)e->last_color_draw_seq,
-                (unsigned long)e->last_depth_draw_seq,
-                (unsigned)e->frame_draw_count_any,
-                (unsigned)atomic_load(&e->draw_dirty),
-                (unsigned long)e->last_use_seq,
-                e->frame_draw_count);
-    }
-}
-
-static void diag_log_siblings_at(uint32_t vram_addr, const char *publish_reason)
-{
-    if (!s_initialized || !getenv("XEMU_METAL_DIAG_PUBLISH")) {
-        return;
-    }
-
-    int total = 0, color_count = 0;
-    uint64_t freshest_color_seq = 0, freshest_depth_seq = 0;
-
-    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
-        if (e->vram_addr != vram_addr) continue;
-        total++;
-        if (e->is_color) color_count++;
-        if (e->last_color_draw_seq > freshest_color_seq) {
-            freshest_color_seq = e->last_color_draw_seq;
-        }
-        if (e->last_depth_draw_seq > freshest_depth_seq) {
-            freshest_depth_seq = e->last_depth_draw_seq;
-        }
-    }
-
-    fprintf(stderr,
-            "xemu-perf: metal_siblings_summary vram_addr=0x%x "
-            "reason=%s total=%d color_siblings=%d "
-            "freshest_color_seq=%lu freshest_depth_seq=%lu\n",
-            (unsigned)vram_addr, publish_reason ? publish_reason : "?",
-            total, color_count,
-            (unsigned long)freshest_color_seq,
-            (unsigned long)freshest_depth_seq);
-
-    for (MtlSurfaceBinding *e = s_cache_head; e != NULL; e = e->next) {
-        if (e->vram_addr != vram_addr) continue;
-        fprintf(stderr,
-                "xemu-perf: metal_siblings vram_addr=0x%x "
-                "color=%u w=%u h=%u pitch=%u fmt=%u "
-                "last_color_draw_seq=%lu last_depth_draw_seq=%lu "
-                "draws_any=%u draw_dirty=%u last_use_seq=%lu frame_draws=%u\n",
-                (unsigned)e->vram_addr, (unsigned)e->is_color,
-                e->width, e->height, e->pitch, e->nv097_format,
-                (unsigned long)e->last_color_draw_seq,
-                (unsigned long)e->last_depth_draw_seq,
-                (unsigned)e->frame_draw_count_any,
-                (unsigned)atomic_load(&e->draw_dirty),
-                (unsigned long)e->last_use_seq,
-                e->frame_draw_count);
-    }
-}
-
-/* Public wrapper for the static diag_log_siblings_at.
- * Called from renderer.c to log sibling state at the CRTC address.
- * Gated on XEMU_METAL_DIAG_PUBLISH.
- */
-void pgraph_mtl_surface_log_siblings_at(uint32_t vram_addr, const char *reason)
-{
-    diag_log_siblings_at(vram_addr, reason);
 }
 
 /* ---------------------------------------------------------------- */

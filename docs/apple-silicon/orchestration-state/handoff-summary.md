@@ -1,19 +1,10 @@
 # Handoff Summary
 
 ## Structured summary
-- Control-plane state: CLOSED.
-- Latest completed slice: cycle 46D root-hygiene closeout closed after the supervisor verified the bounded doc-state reconciliation commit and finalized compact state.
-- Active worker: none.
-- Next bounded slice: none.
-- Biggest caution: reopen only with a fresh successor packet if a new bounded post-46D follow-up is intentionally scoped.
-- Last truth update: 2026-05-26.
-## Update contract
-
-- Start with the compact truth above.
-- Treat long cycle history below as archive, not the primary live control plane.
-- Remove or update any stale pending-closeout wording once the commit and state sync are real.
+- Control-plane state: ACTIVE.
+- Latest completed slice: cycle 48L exact-worktree runtime validation completed; Packet A observability artifact validated for `metal_siblings_summary` and depth-draw observability emission from the review-packet-a build. Route family (normal-path sibling-sync) characterized and closed for now per 49B.
+- Active worker: None. Packet A is a bounded observability artifact on `review-packet-a` @ `82ebecc1c9577e5f97af846b6acc2f9dc088a486` and is complete for its narrow scope.
+- Next bounded slice: Open for new slices. Packet A does not block future work.
+- Biggest caution: Packet A is NOT a project-readiness or user-testing signal. The broader validation-plan exit criteria remain unproven and must be validated separately before any promotion.
+- Last truth update: 2026-05-30.
 ## Detailed record
-
-- 2026-05-26 cycle 46D supervisor finalization: Hermes verified commit `e592942c86` already contains the bounded closeout diff, confirmed receipt/result truth with no live worker remaining, and closed the compact control plane in the same root repo.
-
-- 2026-05-26 cycle 46D bounded closeout execution: Codex executed the successor packet in the root worktree, verified the two `.inl` files already matched HEAD and `.last_cycle42i_outdir` was already absent, then reconciled the compact orchestration-state docs and posted the required result artifact. The slice is now fully closed.
