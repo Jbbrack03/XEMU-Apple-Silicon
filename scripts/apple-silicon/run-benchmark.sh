@@ -41,7 +41,7 @@ Options:
                            Sets XEMU_METAL_CAPTURE=<path> for the run; the
                            Metal renderer's MTLCaptureManager writes a
                            .gputrace document at <path> bounded by
-                           XEMU_METAL_CAPTURE_FRAMES (default 60). Open the
+                           XEMU_METAL_CAPTURE_FRAMES (default 180). Open the
                            output in Xcode (Window > Organizer > GPU Frame
                            Capture). Requires the Metal renderer to be the
                            active backend; on the GL renderer the env var
@@ -85,6 +85,43 @@ Options:
                            captures. An explicit user-set XEMU_METAL_HUD
                            in the calling environment wins over the
                            auto-export.
+  --metal-sibling-sync       50C (2026-05-30): opt-in color-sibling sync
+                           for the sibling-sync diagnostic lane. Sets
+                           XEMU_METAL_RTT_SIBLING_SYNC=1. Default OFF.
+                           See docs/apple-silicon/benchmarks/ for the
+                           sibling-sync discrimination matrix.
+  --metal-sibling-sync-depth 50B (2026-05-30): opt-in depth-sibling sync,
+                           separate from color sync. Sets
+                           XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1. Default
+                           OFF. Use with --metal-sibling-sync for full
+                           sync, or alone for depth-only experiments.
+  --metal-sibling-sync-depth-only
+                           50E (2026-05-30): depth-only sync mode. Sets
+                           XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1 and
+                           explicitly keeps XEMU_METAL_RTT_SIBLING_SYNC=0.
+                           This is the key discriminator for testing
+                           whether depth merges are the active bottleneck
+                           or merely correlated runtime activity.
+  --metal-sibling-sync-depth-skip-dim-mismatch
+                           50S (2026-05-31): clip-rect isolation
+                           discrimination. When combined with
+                           --metal-sibling-sync-depth, skips depth sync
+                           when source and target dimensions differ.
+                           If this fixes the regression, the
+                           dimension-mismatching merges cross an
+                           isolation boundary (B). If not, the merges
+                           are legitimate (A).
+  --metal-sibling-sync-depth-isolation-predicate
+                           50T (2026-05-31): narrower isolation predicate.
+                           When combined with --metal-sibling-sync-depth,
+                           skips depth sync only when source is smaller
+                           than target in at least one dimension (unsafe).
+                           When source is larger, sync is safe (source
+                           fully covers target). Replaces the coarse 50S
+                           dim-mismatch gate with this narrower predicate.
+                           Log: SKIPPED (isolation predicate) instead of
+                           SKIPPED (dim mismatch). Diagnostic field:
+                           isolation_breach instead of dim_mismatch.
 EOF
 }
 
@@ -95,6 +132,11 @@ METAL_SCREENSHOT_PATH=""
 METAL_SCREENSHOT_AT_FRAME=""
 METAL_NO_VALIDATE=0
 METAL_NO_HUD=0
+METAL_SIBLING_SYNC=0
+METAL_SIBLING_SYNC_DEPTH=0
+METAL_SIBLING_SYNC_DEPTH_ONLY=0
+METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=0
+METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --metal-capture)
@@ -140,6 +182,36 @@ while [[ $# -gt 0 ]]; do
         --metal-no-hud)
             METAL_NO_HUD=1
             shift
+            ;;
+        --metal-sibling-sync)
+            METAL_SIBLING_SYNC=1
+            shift
+            ;;
+        --metal-sibling-sync-depth)
+            METAL_SIBLING_SYNC_DEPTH=1
+            shift
+            ;;
+        --metal-sibling-sync-depth-only)
+            # 50E: depth-only sync (color OFF, depth ON). This is the key
+            # discriminator for whether depth merges are the active bottleneck
+            # or merely correlated runtime activity. Sets XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1
+            # and explicitly keeps XEMU_METAL_RTT_SIBLING_SYNC=0.
+            METAL_SIBLING_SYNC_DEPTH=1
+            METAL_SIBLING_SYNC=0
+            METAL_SIBLING_SYNC_DEPTH_ONLY=1
+            shift
+            ;;
+        --metal-sibling-sync-depth-skip-dim-mismatch)
+            # 50S: clip-rect isolation discrimination. Skips depth sync
+            # when source and target dimensions differ.
+            METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=1
+            shift
+        --metal-sibling-sync-depth-isolation-predicate)
+            # 50T: narrower isolation predicate. Skips depth sync only when
+            # source is smaller than target in at least one dimension.
+            METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=1
+            shift
+            ;;
             ;;
         --)
             shift
@@ -300,6 +372,28 @@ if [[ "${XEMU_RENDERER:-}" == "METAL" ]]; then
     echo "Metal auto-on: validation=${AUTO_METAL_VALIDATION} hud=${AUTO_METAL_HUD}"
 fi
 
+# Sibling-sync env vars (50C: PGR2 merge-scene discrimination).
+# These are opt-in diagnostic flags for the sibling-sync lane only.
+if [[ "$METAL_SIBLING_SYNC" -eq 1 ]]; then
+    export XEMU_METAL_RTT_SIBLING_SYNC=1
+fi
+if [[ "$METAL_SIBLING_SYNC_DEPTH" -eq 1 ]]; then
+    export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1
+fi
+if [[ "$METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH" -eq 1 ]]; then
+if [[ "$METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE" -eq 1 ]]; then
+    export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=1
+fi
+    export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=1
+fi
+# 50E/50J: depth-only sync — XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1 enables
+# depth sync; color sync is disabled by default (unset). Setting
+# XEMU_METAL_RTT_SIBLING_SYNC=0 would disable sibling sync entirely
+# because xemu treats "0" as disabled, so we leave it unset.
+# Depth-only mode: XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1 enables depth sync;
+# color sync is disabled by default (unset). We do NOT set
+# XEMU_METAL_RTT_SIBLING_SYNC=0 because xemu treats "0" as disabled.
+
 # Default to 2 so the per-run config matches the Apple Silicon system
 # build's first-run default (1080p-class, ~7 % renderer-cost growth on
 # PGR2 vs scale 1; see docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md).
@@ -380,7 +474,7 @@ EOF
     echo "env_XEMU_METAL_CAPTURE: ${XEMU_METAL_CAPTURE:-unset}"
     echo "env_XEMU_METAL_CAPTURE_FRAMES: ${XEMU_METAL_CAPTURE_FRAMES:-unset}"
     echo "metal_screenshot_path: ${METAL_SCREENSHOT_PATH:-none}"
-    echo "metal_screenshot_at_frame: ${METAL_SCREENSHOT_AT_FRAME:-default(60)}"
+    echo "metal_screenshot_at_frame: ${METAL_SCREENSHOT_AT_FRAME:-default(180)}"
     echo "env_XEMU_METAL_SCREENSHOT_PATH: ${XEMU_METAL_SCREENSHOT_PATH:-unset}"
     echo "env_XEMU_METAL_SCREENSHOT_AT_FRAME: ${XEMU_METAL_SCREENSHOT_AT_FRAME:-unset}"
     echo "env_XEMU_METAL_SCREENSHOT_INTERVAL: ${XEMU_METAL_SCREENSHOT_INTERVAL:-unset}"
@@ -390,8 +484,13 @@ EOF
     echo "env_XEMU_METAL_VALIDATION: ${XEMU_METAL_VALIDATION:-unset}"
     echo "env_XEMU_METAL_HUD: ${XEMU_METAL_HUD:-unset}"
     echo
+    echo "env_XEMU_METAL_RTT_SIBLING_SYNC: ${XEMU_METAL_RTT_SIBLING_SYNC:-unset}"
+    echo "env_XEMU_METAL_RTT_SIBLING_SYNC_DEPTH: ${XEMU_METAL_RTT_SIBLING_SYNC_DEPTH:-unset}"
+    echo "env_XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH: ${XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH:-unset}"
+    echo "env_XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE: ${XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE:-unset}"
     sw_vers || true
     uname -m || true
+    echo "env_XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ONLY: ${XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ONLY:-unset}"
     sysctl -n machdep.cpu.brand_string 2>/dev/null || true
     git -C "$ROOT_DIR" rev-parse HEAD || true
     git -C "$ROOT_DIR" status --short || true
@@ -513,15 +612,35 @@ fi
 # 2026-05-03 — programmatic PNG screenshot of the final composited
 # drawable. Exports XEMU_METAL_SCREENSHOT_PATH so the Metal renderer
 # captures the post-HUD-pre-present drawable into a PNG.
-# --metal-screenshot-at-frame is optional (default 60); maps to
-# XEMU_METAL_SCREENSHOT_AT_FRAME. Same export-pre-launch pattern as
-# --metal-capture above.
+# 50I (2026-05-30): default screenshot source to "nv2a" (pre-compositing
+# framebuffer) so the capture shows actual gameplay content instead of
+# the HUD-overlay composited drawable (which produces mostly white/blank
+# frames). Override with XEMU_METAL_SCREENSHOT_SOURCE=drawable for the
+# old behavior. --metal-screenshot-at-frame is optional (default 180);
+# maps to XEMU_METAL_SCREENSHOT_AT_FRAME. Same export-pre-launch pattern
+# as --metal-capture above.
 if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
+    # 50J: convert relative screenshot path to absolute so xemu can write it
+    # regardless of its working directory (the relative path is resolved
+    # against ROOT_DIR, the repo root).
+    if [[ "$METAL_SCREENSHOT_PATH" != /* ]]; then
+        METAL_SCREENSHOT_PATH="${ROOT_DIR}/$METAL_SCREENSHOT_PATH"
+    fi
+    # 50J: ensure the screenshot directory exists before xemu tries to write
+    mkdir -p "$(dirname "$METAL_SCREENSHOT_PATH")"
     export XEMU_METAL_SCREENSHOT_PATH="$METAL_SCREENSHOT_PATH"
     if [[ -n "$METAL_SCREENSHOT_AT_FRAME" ]]; then
         export XEMU_METAL_SCREENSHOT_AT_FRAME="$METAL_SCREENSHOT_AT_FRAME"
     fi
-    echo "Metal screenshot: $METAL_SCREENSHOT_PATH (at frame=${METAL_SCREENSHOT_AT_FRAME:-60})"
+    # 2026-05-31: depth-only lane — use depth screenshot source
+    if [[ "${METAL_SIBLING_SYNC_DEPTH_ONLY:-0}" == "1" ]]; then
+        export XEMU_METAL_SCREENSHOT_SOURCE="depth"
+    else
+        export XEMU_METAL_SCREENSHOT_SOURCE="${XEMU_METAL_SCREENSHOT_SOURCE:-nv2a}"
+    fi
+    echo "Metal screenshot: $METAL_SCREENSHOT_PATH (at frame=${METAL_SCREENSHOT_AT_FRAME:-180}, source=${XEMU_METAL_SCREENSHOT_SOURCE})"
+    # Append screenshot source to metadata (written before screenshot block)
+    echo "metal_screenshot_source: ${XEMU_METAL_SCREENSHOT_SOURCE}" >> "$META_FILE"
 fi
 
 # Tool 2 (2026-05-19): temporal capture mode — every-frame PNG output
@@ -754,3 +873,5 @@ echo "Finished. Metadata: $META_FILE"
 echo "Log: $LOG_FILE"
 echo "Capture log: $CAPTURE_LOG"
 echo "Snapshot log: $SNAPSHOT_LOG"
+
+
