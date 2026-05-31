@@ -206,12 +206,12 @@ while [[ $# -gt 0 ]]; do
             # when source and target dimensions differ.
             METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=1
             shift
+            ;;
         --metal-sibling-sync-depth-isolation-predicate)
             # 50T: narrower isolation predicate. Skips depth sync only when
             # source is smaller than target in at least one dimension.
             METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=1
             shift
-            ;;
             ;;
         --)
             shift
@@ -381,10 +381,10 @@ if [[ "$METAL_SIBLING_SYNC_DEPTH" -eq 1 ]]; then
     export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1
 fi
 if [[ "$METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH" -eq 1 ]]; then
+    export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=1
+fi
 if [[ "$METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE" -eq 1 ]]; then
     export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=1
-fi
-    export XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=1
 fi
 # 50E/50J: depth-only sync — XEMU_METAL_RTT_SIBLING_SYNC_DEPTH=1 enables
 # depth sync; color sync is disabled by default (unset). Setting
@@ -417,8 +417,12 @@ surface_scale = $SURFACE_SCALE
 [sys.files]
 bootrom_path = '$MCPX'
 flashrom_path = '$BIOS'
+eeprom_path = '/Users/jbbrack03/Library/Application Support/xemu/xemu/eeprom.bin'
 hdd_path = '$SCRATCH_HDD'
 dvd_path = '$DISC'
+
+[display]
+renderer = 'METAL'
 
 [input.bindings]
 port1 = '$PORT1_BINDING'

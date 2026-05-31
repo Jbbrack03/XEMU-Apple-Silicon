@@ -2784,7 +2784,7 @@ static bool sibling_sync_depth_isolation_predicate_enabled(void)
     if (s_cached < 0) {
         const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE");
         fprintf(stderr, "50T DEBUG: getenv returned %s\n", e ? e : "NULL");
-        s_cached = (e != NULL && *e !=   && strcmp(e, "0") != 0) ? 1 : 0;
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
         fprintf(stderr, "50T DEBUG: s_cached = %d\n", s_cached);
     }
     return s_cached != 0;
