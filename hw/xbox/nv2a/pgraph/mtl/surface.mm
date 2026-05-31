@@ -3137,6 +3137,99 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         }
     }
 
+    /* 50V: narrow scale/viewport compatibility diagnostic. The 50U
+     * overlap-check proved the clip-rects overlap, but two surfaces
+     * can overlap in clip space while representing incompatible
+     * scale/origin/viewport mappings. This diagnostic logs:
+     *   - scissor rectangles (captured at bind time, not logged by 50U)
+     *   - source->target scale factors (width ratio, height ratio)
+     *   - normalized clip extents (clip origin + extent as fraction of surface)
+     *   - full containment check (is one clip fully inside the other?)
+     *   - scale-equality flag (key predicate: equal scale = likely compatible)
+     * This is purely diagnostic — no behavior change. */
+    {
+        float src_scale_x = (source->width > 0 && target->width > 0)
+            ? (float)source->width / (float)target->width : 1.0f;
+        float src_scale_y = (source->height > 0 && target->height > 0)
+            ? (float)source->height / (float)target->height : 1.0f;
+        bool scale_equal = (src_scale_x == 1.0f && src_scale_y == 1.0f);
+
+        /* Normalized clip: clip origin as fraction of surface, extent as fraction */
+        float src_norm_cx = (source->width > 0) ? (float)source->clip_x / (float)source->width : 0.0f;
+        float src_norm_cy = (source->height > 0) ? (float)source->clip_y / (float)source->height : 0.0f;
+        float src_norm_cw = (source->width > 0) ? (float)source->clip_w / (float)source->width : 1.0f;
+        float src_norm_ch = (source->height > 0) ? (float)source->clip_h / (float)source->height : 1.0f;
+        float tgt_norm_cx = (target->width > 0) ? (float)target->clip_x / (float)target->width : 0.0f;
+        float tgt_norm_cy = (target->height > 0) ? (float)target->clip_y / (float)target->height : 0.0f;
+        float tgt_norm_cw = (target->width > 0) ? (float)target->clip_w / (float)target->width : 1.0f;
+        float tgt_norm_ch = (target->height > 0) ? (float)target->clip_h / (float)target->height : 1.0f;
+
+        /* Full containment: is src clip fully inside tgt clip (in screen space)? */
+        bool src_inside_tgt = (source->clip_x >= target->clip_x &&
+                               source->clip_x + source->clip_w <= target->clip_x + target->clip_w &&
+                               source->clip_y >= target->clip_y &&
+                               source->clip_y + source->clip_h <= target->clip_y + target->clip_h);
+        bool tgt_inside_src = (target->clip_x >= source->clip_x &&
+                               target->clip_x + target->clip_w <= source->clip_x + source->clip_w &&
+                               target->clip_y >= source->clip_y &&
+                               target->clip_y + target->clip_h <= source->clip_y + source->clip_h);
+
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge 50V scale-viewport-diag "
+                "vram=0x%08x src=%ux%u@(%u,%u) tgt=%ux%u@(%u,%u) "
+                "src_clip=(%u,%u,%u,%u) tgt_clip=(%u,%u,%u,%u) "
+                "src_scissor=(%u,%u,%u,%u) tgt_scissor=(%u,%u,%u,%u) "
+                "src_scale=(%.3f,%.3f) tgt_scale=(%.3f,%.3f) "
+                "scale_equal=%d src_inside_tgt=%d tgt_inside_src=%d\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->clip_x, source->clip_y,
+                target->width, target->height,
+                target->clip_x, target->clip_y,
+                source->clip_x, source->clip_y,
+                source->clip_w, source->clip_h,
+                target->clip_x, target->clip_y,
+                target->clip_w, target->clip_h,
+                source->scissor_x, source->scissor_y,
+                source->scissor_w, source->scissor_h,
+                target->scissor_x, target->scissor_y,
+                target->scissor_w, target->scissor_h,
+                src_scale_x, src_scale_y,
+                (float)target->width / (float)source->width,
+                (float)target->height / (float)source->height,
+                scale_equal, src_inside_tgt, tgt_inside_src);
+    }
+
+    /* 50Z: mapping-compatibility guard (opt-in). When the env flag
+     * XEMU_METAL_SIBLING_SYNC_DEPTH_MAPPING_GUARD=1 is set, skip
+     * depth sibling sync when the source/target pair is overlap-compatible
+     * (50U passed) but mapping-incompatible (scale factors unequal).
+     * This tests whether the 0x038e0000 merges are the active bottleneck
+     * by converting them into explicit mapping-incompatibility skips. */
+    {
+        const char *guard_env = getenv("XEMU_METAL_SIBLING_SYNC_DEPTH_MAPPING_GUARD");
+        if (guard_env && guard_env[0] == '1') {
+            float src_scale_x = (source->width > 0 && target->width > 0)
+                ? (float)source->width / (float)target->width : 1.0f;
+            float src_scale_y = (source->height > 0 && target->height > 0)
+                ? (float)source->height / (float)target->height : 1.0f;
+            bool mapping_incompatible = !(src_scale_x == 1.0f && src_scale_y == 1.0f);
+            if (mapping_incompatible) {
+                fprintf(stderr,
+                        "xemu.metal.sibling_sync: depth merge SKIPPED (50Z mapping-incompatibility guard) "
+                        "vram=0x%08x src=%ux%u tgt=%ux%u src_scale=(%.3f,%.3f) tgt_scale=(%.3f,%.3f)\n",
+                        target->vram_addr,
+                        source->width, source->height,
+                        target->width, target->height,
+                        src_scale_x, src_scale_y,
+                        (float)target->width / (float)source->width,
+                        (float)target->height / (float)source->height);
+                atomic_fetch_add(&s_sibling_sync_skip, 1);
+                return;
+            }
+        }
+    }
+
     bool sync_msaa = (source->msaa_texture != NULL &&
                       target->msaa_texture != NULL &&
                       source->msaa_sample_count > 1 &&
