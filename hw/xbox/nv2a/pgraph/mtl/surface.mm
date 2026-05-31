@@ -2768,6 +2768,27 @@ static bool sibling_sync_enabled(void)
     return s_cached != 0;
 }
 
+
+static bool sibling_sync_depth_isolation_predicate_enabled(void)
+{
+    /* 50T: narrower isolation predicate for clip-rect isolation
+     * discrimination. When set, skips depth sync when the source
+     * sibling is smaller than the target in at least one dimension.
+     * This is narrower than the 50S coarse gate (which skipped on
+     * any dimension difference) because it allows syncs where the
+     * source is larger (safe - source fully covers target region)
+     * while still skipping when the source is smaller (unsafe -
+     * target would retain stale content in regions the source
+     * does not cover). */
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE");
+        fprintf(stderr, "50T DEBUG: getenv returned %s\n", e ? e : "NULL");
+        s_cached = (e != NULL && *e !=   && strcmp(e, "0") != 0) ? 1 : 0;
+        fprintf(stderr, "50T DEBUG: s_cached = %d\n", s_cached);
+    }
+    return s_cached != 0;
+}
 /* For the given target binding, find any other same-VRAM same-pitch
  * same-format same-aspect (color/depth) sibling that has fresher
  * last_color_draw_seq and copy its texture (and MSAA companion, if both
@@ -2959,6 +2980,23 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         return;
     }
 
+    /* 50T: narrower isolation predicate. Skip sync when source is
+     * smaller than target in at least one dimension - this is when
+     * the blit would leave the target with stale content in regions
+     * the source does not cover. When source is larger, the sync is
+     * safe (source fully covers target region) and beneficial. */
+    if (sibling_sync_depth_isolation_predicate_enabled() &&
+        (source->width < target->width || source->height < target->height)) {
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge SKIPPED (isolation predicate) "
+                "vram=0x%08x src=%ux%u tgt=%ux%u\n",
+                target->vram_addr,
+                source->width, source->height,
+                target->width, target->height);
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
     bool sync_msaa = (source->msaa_texture != NULL &&
                       target->msaa_texture != NULL &&
                       source->msaa_sample_count > 1 &&
@@ -3030,6 +3068,25 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
 
     target->last_depth_draw_seq = source->last_depth_draw_seq;
     atomic_store(&target->draw_dirty, (uint32_t)1);
+
+    /* 50B diagnostic: log depth sync merge details.
+     * 50S: added dim_mismatch field (replaced by 50T isolation predicate).
+     * 50T: isolation_breach field indicates source < target in at least
+     * one dimension (the narrower predicate that would trigger a skip). */
+    fprintf(stderr,
+            "xemu.metal.sibling_sync: depth merge vram=0x%08x "
+            "src=%ux%u tgt=%ux%u fmt=%u draw_seq_delta=%lu "
+            "isolation_breach=%s "
+            "sync_msaa=%s\n",
+            target->vram_addr,
+            source->width, source->height,
+            target->width, target->height,
+            target->nv097_format,
+            (unsigned long)(source->last_depth_draw_seq -
+                           target->last_depth_draw_seq),
+            (source->width < target->width ||
+             source->height < target->height) ? "yes" : "no",
+            sync_msaa ? "yes" : "no");
 
     atomic_fetch_add(&s_sibling_sync_count, 1);
 }
