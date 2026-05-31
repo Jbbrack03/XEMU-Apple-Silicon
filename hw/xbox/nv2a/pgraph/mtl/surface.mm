@@ -2768,6 +2768,16 @@ static bool sibling_sync_enabled(void)
     return s_cached != 0;
 }
 
+static bool sibling_sync_depth_enabled(void)
+{
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return s_cached != 0;
+}
+
 
 static bool sibling_sync_depth_isolation_predicate_enabled(void)
 {
@@ -2956,7 +2966,7 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         target->texture == NULL) {
         return;
     }
-    if (!sibling_sync_enabled()) {
+    if (!sibling_sync_depth_enabled()) {
         return;
     }
 
