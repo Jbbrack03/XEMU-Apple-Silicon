@@ -232,6 +232,22 @@ typedef struct MtlSurfaceBinding {
      * "never depth-drawn". */
     uint64_t last_depth_draw_seq;
 
+    /* 50U: clip-rect / scissor-rect captured at bind time for true
+     * overlap predicate in sibling sync. Stores the guest-space clip
+     * rectangle (clip_x, clip_y, clip_w, clip_h) and the scissor
+     * rectangle (scissor_x, scissor_y, scissor_w, scissor_h) that
+     * were active when this binding was created. Used by the 50U
+     * predicate to check actual screen-space overlap between siblings
+     * rather than the coarse width/height proxy from 50T. */
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_w;
+    uint32_t clip_h;
+    uint32_t scissor_x;
+    uint32_t scissor_y;
+    uint32_t scissor_w;
+    uint32_t scissor_h;
+
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
 
@@ -1374,7 +1390,11 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
                            uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_color_format,
-                           const uint8_t *vram_ptr)
+                           const uint8_t *vram_ptr,
+                           uint32_t clip_x, uint32_t clip_y,
+                           uint32_t clip_w, uint32_t clip_h,
+                           uint32_t scissor_x, uint32_t scissor_y,
+                           uint32_t scissor_w, uint32_t scissor_h)
 {
     if (width == 0 || height == 0) {
         return NULL;
@@ -1425,6 +1445,15 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    /* 50U: store clip-rect / scissor-rect for true overlap predicate */
+    e->clip_x           = clip_x;
+    e->clip_y           = clip_y;
+    e->clip_w           = clip_w;
+    e->clip_h           = clip_h;
+    e->scissor_x        = scissor_x;
+    e->scissor_y        = scissor_y;
+    e->scissor_w        = scissor_w;
+    e->scissor_h        = scissor_h;
     atomic_store(&e->dirty_vram, (uint32_t)0);
     atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
@@ -1440,7 +1469,11 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
                            uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_zeta_format,
-                           const uint8_t *vram_ptr)
+                           const uint8_t *vram_ptr,
+                           uint32_t clip_x, uint32_t clip_y,
+                           uint32_t clip_w, uint32_t clip_h,
+                           uint32_t scissor_x, uint32_t scissor_y,
+                           uint32_t scissor_w, uint32_t scissor_h)
 {
     if (width == 0 || height == 0) {
         return NULL;
@@ -1486,6 +1519,15 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    /* 50U: store clip-rect / scissor-rect for true overlap predicate */
+    e->clip_x           = clip_x;
+    e->clip_y           = clip_y;
+    e->clip_w           = clip_w;
+    e->clip_h           = clip_h;
+    e->scissor_x        = scissor_x;
+    e->scissor_y        = scissor_y;
+    e->scissor_w        = scissor_w;
+    e->scissor_h        = scissor_h;
     atomic_store(&e->dirty_vram, (uint32_t)0);
     atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
@@ -1508,7 +1550,9 @@ bool pgraph_mtl_surface_bind_color(uint32_t vram_addr, uint32_t size,
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
-        pitch, nv097_color_format, vram_ptr);
+        pitch, nv097_color_format, vram_ptr,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e == NULL) {
         return false;
     }
@@ -1534,7 +1578,9 @@ bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
-        pitch, nv097_zeta_format, vram_ptr);
+        pitch, nv097_zeta_format, vram_ptr,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e == NULL) {
         return false;
     }
@@ -1554,14 +1600,20 @@ bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_color_format,
-                                      const uint8_t *vram_ptr)
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h)
 {
     if (!s_initialized || width == 0 || height == 0) {
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         vram_addr, size, width, height, guest_width, guest_height,
-        pitch, nv097_color_format, vram_ptr);
+        pitch, nv097_color_format, vram_ptr,
+        clip_x, clip_y, clip_w, clip_h,
+        scissor_x, scissor_y, scissor_w, scissor_h);
     if (e == NULL) {
         return false;
     }
@@ -1580,14 +1632,20 @@ bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_zeta_format,
-                                      const uint8_t *vram_ptr)
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h)
 {
     if (!s_initialized || width == 0 || height == 0) {
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         vram_addr, size, width, height, guest_width, guest_height,
-        pitch, nv097_zeta_format, vram_ptr);
+        pitch, nv097_zeta_format, vram_ptr,
+        clip_x, clip_y, clip_w, clip_h,
+        scissor_x, scissor_y, scissor_w, scissor_h);
     if (e == NULL) {
         return false;
     }
@@ -1763,7 +1821,9 @@ void pgraph_mtl_surface_ensure_color(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         s_color_binding ? s_color_binding->vram_addr : 0,
-        0, width, height, 0, 0, 0, nv097_color_format, NULL);
+        0, width, height, 0, 0, 0, nv097_color_format, NULL,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e != NULL) {
         s_color_binding = e;
     }
@@ -1784,7 +1844,9 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         s_depth_binding ? s_depth_binding->vram_addr : 0,
-        0, width, height, 0, 0, 0, nv097_zeta_format, NULL);
+        0, width, height, 0, 0, 0, nv097_zeta_format, NULL,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e != NULL) {
         s_depth_binding = e;
     }
@@ -2799,6 +2861,42 @@ static bool sibling_sync_depth_isolation_predicate_enabled(void)
     }
     return s_cached != 0;
 }
+
+static bool sibling_sync_depth_true_overlap_predicate_enabled(void)
+{
+    /* 50U: true clip-rect overlap predicate. When set, checks whether
+     * the source and target sibling bindings have clip-rects that
+     * actually overlap in screen space. Two rectangles overlap when
+     * their x-ranges and y-ranges both intersect:
+     *   overlap_x = !(src_x + src_w <= tgt_x || tgt_x + tgt_w <= src_x)
+     *   overlap_y = !(src_y + src_h <= tgt_y || tgt_y + tgt_h <= src_y)
+     * If both overlap, the sync is legitimate (A). If they don't
+     * overlap, the sync crosses an isolation boundary and should be
+     * skipped (B). This replaces the 50T width/height proxy with
+     * actual screen-space overlap data from the guest clip-rect. */
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_TRUE_OVERLAP");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return s_cached != 0;
+}
+
+static bool rects_overlap(uint32_t x1, uint32_t w1, uint32_t x2, uint32_t w2)
+{
+    return !(x1 + w1 <= x2 || x2 + w2 <= x1);
+}
+
+static bool clip_rects_overlap(const MtlSurfaceBinding *a, const MtlSurfaceBinding *b)
+{
+    /* Both bindings must have non-zero clip-rect data for the check
+     * to be meaningful. Zero clip-rect means "full surface" (no clip). */
+    if (a->clip_w == 0 || a->clip_h == 0 || b->clip_w == 0 || b->clip_h == 0) {
+        return true; /* no clip data — fall back to dimension proxy */
+    }
+    return rects_overlap(a->clip_x, a->clip_w, b->clip_x, b->clip_w) &&
+           rects_overlap(a->clip_y, a->clip_h, b->clip_y, b->clip_h);
+}
 /* For the given target binding, find any other same-VRAM same-pitch
  * same-format same-aspect (color/depth) sibling that has fresher
  * last_color_draw_seq and copy its texture (and MSAA companion, if both
@@ -3005,6 +3103,38 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
                 target->width, target->height);
         atomic_fetch_add(&s_sibling_sync_skip, 1);
         return;
+    }
+
+    /* 50U: true clip-rect overlap predicate. Checks whether the source
+     * and target sibling bindings have clip-rects that actually overlap
+     * in screen space. If they don't overlap, the sync crosses an
+     * isolation boundary and should be skipped. This replaces the 50T
+     * width/height proxy with actual screen-space overlap data. */
+    if (sibling_sync_depth_true_overlap_predicate_enabled()) {
+        bool overlap = clip_rects_overlap(source, target);
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge 50U overlap-check "
+                "vram=0x%08x src=%ux%u@(%u,%u) tgt=%ux%u@(%u,%u) "
+                "src_clip=(%u,%u,%u,%u) tgt_clip=(%u,%u,%u,%u) "
+                "overlap=%d\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->clip_x, source->clip_y,
+                target->width, target->height,
+                target->clip_x, target->clip_y,
+                source->clip_x, source->clip_y,
+                source->clip_w, source->clip_h,
+                target->clip_x, target->clip_y,
+                target->clip_w, target->clip_h,
+                overlap);
+        if (!overlap) {
+            fprintf(stderr,
+                    "xemu.metal.sibling_sync: depth merge SKIPPED (50U true overlap predicate - no clip-rect overlap) "
+                    "vram=0x%08x\n",
+                    target->vram_addr);
+            atomic_fetch_add(&s_sibling_sync_skip, 1);
+            return;
+        }
     }
 
     bool sync_msaa = (source->msaa_texture != NULL &&

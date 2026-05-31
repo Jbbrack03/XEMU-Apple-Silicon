@@ -861,7 +861,15 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                             width, height,
                             pitch,
                             pg->surface_shape.color_format,
-                            d->vram_ptr)) {
+                            d->vram_ptr,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height)) {
                         uint32_t bound_guest_w = width;
                         uint32_t bound_guest_h = height;
                         uint32_t bound_pitch = pitch;
@@ -925,7 +933,15 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                             width, height,
                             pitch,
                             pg->surface_shape.zeta_format,
-                            d->vram_ptr)) {
+                            d->vram_ptr,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height)) {
                         mtl_arm_access_callback(d, (uint32_t)vram_addr,
                                                 size);
                         bound_z = true;

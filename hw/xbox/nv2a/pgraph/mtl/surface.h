@@ -97,14 +97,22 @@ bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_color_format,
-                                      const uint8_t *vram_ptr);
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h);
 bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t width, uint32_t height,
                                       uint32_t guest_width,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_zeta_format,
-                                      const uint8_t *vram_ptr);
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h);
 
 /* Lookup helpers. Mirror vk/surface.c::pgraph_vk_surface_get and
  * pgraph_vk_surface_get_within. The returned pointer is owned by the
