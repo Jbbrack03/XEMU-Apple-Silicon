@@ -1,10 +1,29 @@
 # Handoff Summary
 
-## Structured summary
-- Control-plane state: ACTIVE.
-- Latest completed slice: cycle 48L exact-worktree runtime validation completed; Packet A observability artifact validated for `metal_siblings_summary` and depth-draw observability emission from the review-packet-a build. Route family (normal-path sibling-sync) characterized and closed for now per 49B.
-- Active worker: None. Packet A is a bounded observability artifact on `review-packet-a` @ `82ebecc1c9577e5f97af846b6acc2f9dc088a486` and is complete for its narrow scope.
-- Next bounded slice: Open for new slices. Packet A does not block future work.
-- Biggest caution: Packet A is NOT a project-readiness or user-testing signal. The broader validation-plan exit criteria remain unproven and must be validated separately before any promotion.
-- Last truth update: 2026-05-30.
-## Detailed record
+## Latest completed truth-bearing recovery
+- 50AH recovery established the exact native-depth answer needed for control-plane routing: native depth draws do occur on the exact PGR2 lane, but the saved depth surface remained uniformly white and executed sibling-sync completions stayed at zero. Treat 50AH as historical/already answered evidence, not as the current active lane.
+
+## Current live control-plane posture
+- No currently active 50AI or 50AM worker exists in Kanban, so neither lane should be described as live/active.
+- Hermes remains the supervisor/orchestrator.
+- Qwen remains the primary implementation lane in routing policy.
+- Codex remains the independent validator/escalation lane.
+- Claude Code remains manual rollback only.
+
+## This bounded reconciliation slice
+- This slice is documentation-only.
+- Its purpose is to make the four live orchestration-state docs stop implying an ACTIVE 50AI/50AM lane when no live worker exists.
+
+## Recommended post-slice classification
+- After this repair, the 48H documentation/control-plane family should be treated as not-active and can be CLOSED from a documentation-truth standpoint.
+- If a future live implementation or recovery worker appears, Kanban should reopen the story with a new bounded slice instead of relying on stale ACTIVE prose.
+
+## Key truth constraints
+- Keep Kanban as the lifecycle source of truth when stale repo prose disagrees.
+- Preserve the routing-policy truth: Hermes supervises, Qwen is the primary implementation lane in policy, Codex is the independent validator/escalation lane, and Claude Code is manual rollback only.
+- Do not treat the repo as clean or single-file-scoped.
+- Broader validation-plan exit remains unproven.
+- Serious user-testing readiness remains unproven.
+
+## Last truth update
+- 2026-06-01.
