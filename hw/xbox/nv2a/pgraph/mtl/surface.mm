@@ -2548,6 +2548,16 @@ uint32_t pgraph_mtl_surface_get_depth_vram_addr(void)
     return s_depth_binding->vram_addr;
 }
 
+/* 50AP: getter for the current depth binding's draw_dirty flag.
+ * Used by the screenshot capture diagnostic to determine whether
+ * depth writes actually reached the bound depth surface at capture
+ * time. Returns 1 if draw_dirty is set, 0 otherwise. */
+uint32_t pgraph_mtl_surface_get_depth_dirty(void)
+{
+    if (!s_initialized || s_depth_binding == NULL) return 0;
+    return (uint32_t)atomic_load(&s_depth_binding->draw_dirty);
+}
+
 /* -------- M11 MSAA accessors -------- */
 
 void pgraph_mtl_surface_set_msaa_sample_count(uint32_t sample_count)
@@ -3064,8 +3074,29 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         target->texture == NULL) {
         return;
     }
+
+    /* 50AN: bounded diagnostic — instrument first candidate-decision chain
+     * for vram_addr=0x038e0000 (z-buffer for 0x3c84000 color RT). Logs each
+     * gate name, pass/fail, and whether the candidate was accepted or skipped.
+     * Only fires for 0x038e0000 to keep output bounded. */
+    const bool is_038e = (target->vram_addr == 0x038e0000);
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: first-candidate-decision-chain START vram=0x%08x\n",
+                target->vram_addr);
+    }
+
     if (!sibling_sync_depth_enabled()) {
+        if (is_038e) {
+            fprintf(stderr,
+                    "50AN DIAG: GATE-1 sibling_sync_depth_enabled = SKIPPED "
+                    "(env XEMU_METAL_RTT_SIBLING_SYNC_DEPTH not set)\n");
+        }
         return;
+    }
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: GATE-1 sibling_sync_depth_enabled = ACCEPTED\n");
     }
 
     MtlSurfaceBinding *source = NULL;
@@ -3084,8 +3115,24 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         }
     }
     if (source == NULL) {
+        if (is_038e) {
+            fprintf(stderr,
+                    "50AN DIAG: GATE-2 fresh-sibling-found = SKIPPED "
+                    "(no fresher sibling in cache for vram=0x%08x)\n",
+                    target->vram_addr);
+        }
         atomic_fetch_add(&s_sibling_sync_skip, 1);
         return;
+    }
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: GATE-2 fresh-sibling-found = ACCEPTED "
+                "(src=%ux%u fmt=%u seq_delta=%lu)\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->nv097_format,
+                (unsigned long)(source->last_depth_draw_seq -
+                               target->last_depth_draw_seq));
     }
 
     /* 50T: narrower isolation predicate. Skip sync when source is
@@ -3323,6 +3370,21 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
 
     atomic_fetch_add(&s_sibling_sync_count, 1);
 }
+
+/* 50AN: file-based diagnostic helper for first candidate-decision chain */
+static FILE *s_50an_log = NULL;
+static void s_50an_log_open(void) {
+    if (!s_50an_log) {
+        s_50an_log = fopen("/tmp/50an-diag.log", "a");
+    }
+}
+static void s_50an_log_close(void) {
+    if (s_50an_log) {
+        fclose(s_50an_log);
+        s_50an_log = NULL;
+    }
+}
+#define S_50AN_LOG(...) do { s_50an_log_open(); if(s_50an_log) fprintf(s_50an_log, __VA_ARGS__); } while(0)
 
 /* ---------------------------------------------------------------- */
 /* M5.10 (2026-05-03): set-draw-dirty + download API. */

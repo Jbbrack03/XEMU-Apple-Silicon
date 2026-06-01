@@ -101,6 +101,10 @@ extern "C" void *pgraph_mtl_get_framebuffer_metal_texture(void);
 extern "C" void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
 extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void *texture);
 extern "C" void *pgraph_mtl_surface_get_depth_texture(void);
+extern "C" uint32_t pgraph_mtl_surface_get_depth_dirty(void);
+extern "C" uint32_t pgraph_mtl_surface_get_depth_vram_addr(void);
+extern "C" uint64_t pgraph_mtl_surface_sibling_syncs(void);
+extern "C" uint64_t pgraph_mtl_surface_sibling_sync_skips(void);
 
 /* T2 (2026-05-12): per-host-refresh CRTC-aware publish. The GL path
  * calls nv2a_get_framebuffer_surface() once per host vsync from
@@ -1812,6 +1816,32 @@ void xemu_metal_end_imgui_frame(void)
                                 (__bridge void*)src_tex,
                                 (unsigned)s_screenshot_capture_fmt,
                                 (__bridge void*)s_screenshot_capture_buf);
+                    }
+
+                    /* 50AP: depth capture diagnostic. Log sibling sync state
+                     * and depth dirty state at screenshot capture time.
+                     * This distinguishes between:
+                     *   A) depth writes never reached the captured sibling
+                     *      (dirty=0, sync_skip=0 or sync_count=0)
+                     *   B) sibling sync skipped the captured sibling
+                     *      (dirty=0, sync_skip>0, sync_count>0)
+                     *   C) depth writes reached the sibling but it was
+                     *      rebound/reset without fresher sync
+                     *      (dirty=1 at some point, but texture is 1.0)
+                     * Controlled by XEMU_METAL_DIAG_DEPTH_CAPTURE=1. */
+                    if (getenv("XEMU_METAL_DIAG_DEPTH_CAPTURE")) {
+                        uint32_t depth_dirty = pgraph_mtl_surface_get_depth_dirty();
+                        uint64_t sync_count = pgraph_mtl_surface_sibling_syncs();
+                        uint64_t sync_skips = pgraph_mtl_surface_sibling_sync_skips();
+                        uint32_t depth_vram = pgraph_mtl_surface_get_depth_vram_addr();
+                        void *depth_tex_ptr = pgraph_mtl_surface_get_depth_texture();
+                        fprintf(stderr,
+                                "xemu-perf: metal_screenshot_depth_capture_diag "
+                                "depth_vram=0x%08x depth_tex=%p depth_dirty=%u "
+                                "sync_count=%lu sync_skips=%lu\n",
+                                depth_vram, depth_tex_ptr, depth_dirty,
+                                (unsigned long)sync_count,
+                                (unsigned long)sync_skips);
                     }
                 } else {
                     fprintf(stderr,

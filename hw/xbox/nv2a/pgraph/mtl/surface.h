@@ -265,6 +265,7 @@ uint32_t pgraph_mtl_surface_get_height(void);
  * see WHICH cached SurfaceBinding is the actual draw destination. */
 uint32_t pgraph_mtl_surface_get_color_vram_addr(void);
 uint32_t pgraph_mtl_surface_get_depth_vram_addr(void);
+uint32_t pgraph_mtl_surface_get_depth_dirty(void);
 
 /*
  * M11: configure the per-renderer MSAA sample count.
