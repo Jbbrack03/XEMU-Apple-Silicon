@@ -1,5 +1,13 @@
 # Decision Log
 
+## 2026-06-02 (reliability re-architecture + autonomous real-Xbox oracle loop)
+
+**Decision.** Re-align the Hermes orchestration off the 252-task PGR2 "50-series" micro-hypothesis spiral and back onto the plan backbone, deploy the missing reliability + correctness mechanisms, and prove the headless real-Xbox autonomous game-test loop.
+
+**Rationale.** Diagnosis showed the throughput problems were harness/orchestration, not Qwen capability or the graphics hypothesis: hung workers held all worker slots (stale-reclaim was set to 4h), the architect was defaulting to an empty kanban board, chronic Qwen tasks looped without converging, and visual validation relied on an LLM "looks right" judgment that had passed garbled frames. The board had drifted entirely off its own plan (252/377 open tasks on one artifact, 0 on the XBE backbone), against strategy.md's own "no blind PGR2 reruns" guidance.
+
+**Outcome.** (1) Reliability: stale-reclaim 4h->90min; active board switched to xemu; deterministic Qwen->Codex escalation; kanban_comment bug fixed. (2) Board: 67 PGR2 drift tasks archived (reversible); plan backbone created -- F1 (correctness oracle gate, DONE), F2 (deterministic capture), O1 (real-Xbox golden oracle, human-gated), B1 (PGR2-as-spec-XBE), B2 (Phase-4 XBE wave), M1 (M15-gate tracking, DONE), M2 (close 4 missing M15 links). (3) Correctness tool: built scripts/apple-silicon/xemu_frame_correctness_oracle.py -- objective property/invariant + metric-vs-golden gate; LLM visual judgment removed from the gate. (4) Architect prompt hardened (plan-anchoring, depth-cap, no blind PGR2 reruns, oracle-is-the-gate). (5) Real-Xbox oracle: per-game profiles extracted from the XEMU test HDD (FATX) and copied to E:\UDATA/TDATA; the OGX360 IGR exit (Back+Start+LT+RT -> iND-BiOS) proven to return the console to the dashboard; a full Crimson Skies retail-gameplay-oracle run validated the autonomous loop end-to-end (dashboard_returned=true; 82/91 captured frames pass the correctness oracle). Open: F2 in development, O1 awaiting a one-time human golden curation; the renderer-correctness problem itself remains unproven.
+
 ## 2026-05-26 (cycle 45B oracle-agent JSON diagnostics review-fix closeout)
 
 **Decision.** Close cycle 45B on the root branch after the bounded Codex review-fix continuation resolved both independent-review findings in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c`.
@@ -15437,3 +15445,58 @@ sync.
   for clear→draw ordering on Apple Silicon while it works for upload→draw
   and draw→blit. The synchronous wait is a working but heavier-than-
   necessary hammer.
+
+---
+
+## 2026-06-03 — Rainbow/M15 capture is NOT human-gated; grounded black-frame classifier + authoritative gameplay gate
+
+**Capture truth (debunks the 2026-06-03 "human-gated" escalation).** An
+orchestrated agent escalated that the M2 Rainbow / M15 gameplay-evidence
+capture lane was "genuinely human-gated," asking for passwordless sudo
+(launchctl asuser/bsexec) or a manual GUI-session bridge to run
+`screencapture -x` from an SSH background session. This was WRONG — wrong tool,
+not a real gate:
+- Evidence frames are captured IN-EMULATOR (`XEMU_GL_SCREENSHOT_PATH` flip-stall
+  GL framebuffer dump; QMP/HMP `screendump`; Metal NV2A PNG) — no macOS screen
+  capture, no Aqua session, no TCC, no sudo. `metal-gl-compare.sh --trigger
+  flip` already uses this; live runs (e.g. benchmark-runs/20260603-101131-…-
+  halo-f2-smoke) produce 1280x960 game-only PNGs that pass the frame oracle.
+- Even a real screen grab is not gated for a LOCAL in-session process running
+  as jbbrack03 (the console user); only the SSH-background path the agent chose
+  is. Capture must never run from the SSH/background bootstrap.
+- Action: agents must NOT escalate capture as human-gated or request sudo/GUI
+  bridges. Capture is solved; the open work is renderer correctness + F2
+  deterministic alignment, not capture infrastructure.
+
+**Grounded black-frame classifier (compare-screenshots.py + metal-gl-compare.sh).**
+A black Metal frame is usually a renderer gap (geometry Metal can't draw yet)
+but sometimes legitimate (fade-to-black). It is now classified DIFFERENTIALLY
+against the GL reference at the SAME guest moment, emitted per frame as
+`content_class` (summary.json `frames[]` + report.md table):
+- `METAL_GEOMETRY_GAP` — GL has geometry, Metal is black, pair state-aligned →
+  authoritative hard fail, named.
+- `METAL_GEOMETRY_GAP_UNVERIFIED` — same divergence but NOT state-aligned (cold
+  launch); falls back to the pixel-diff threshold, makes no authoritative
+  renderer-bug claim.
+- `EXPECTED_BLACK` — both renderers black (fade/load) → passes regardless of
+  pixel diff.
+- `CONTENT_BOTH` / `METAL_SPURIOUS` / `AMBIGUOUS`.
+Agents/validators must read `content_class`: a black Metal frame is a RENDERER
+signal, never a capture/infra/human-gate failure. Thresholds calibrated on real
+captures; tested by `scripts/apple-silicon/test_compare_content_class.py` (9/9),
+shellcheck clean. Validated e2e on a real boot (benchmark-runs/…-contentclass-
+e2e: flip-60 early-boot frame correctly read EXPECTED_BLACK, not a false gap).
+
+**Authoritative gameplay evidence requires a snapshot.** Cold-launch gameplay
+diffs can only yield `METAL_GEOMETRY_GAP_UNVERIFIED`. `m15-visual-gate.sh` now
+has a state-aligned gameplay-evidence step (`--gameplay-game GAME
+--gameplay-snapshot TAG`, e.g. `pgr2 pgr2_gameplay_b4`) that drives a restored
+savevm tag at a matched flip ordinal so GL and Metal are the same guest moment;
+gameplay evidence without a snapshot is REFUSED (not silently downgraded).
+`metal-gl-compare.sh` warns when `--evidence-class gameplay` runs without
+`--snapshot`. To close the M2 evidence-only links authoritatively: create
+per-title gameplay savevm tags (F2) and run the gate's gameplay step.
+
+**Codex-validate candidate (rule #15).** These changes alter the M15 gate's
+verdict semantics (named renderer-gap vs generic threshold fail; EXPECTED_BLACK
+pass-through) and merit an independent Codex read.

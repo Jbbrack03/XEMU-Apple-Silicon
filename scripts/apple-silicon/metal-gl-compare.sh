@@ -377,6 +377,22 @@ if [[ -n "$SNAPSHOT_TAG" ]]; then
     log "  loadvm_at   = ${LOADVM_AT}s"
 fi
 log "  trigger     = $TRIGGER (ordinal=$TRIGGER_ORDINAL)"
+
+# Differential content classification (2026-06-03): a renderer-gap verdict
+# (reference shows geometry, candidate is black) is only authoritative when the
+# two legs are the SAME guest moment. The strong F1 guarantee is a restored
+# savevm tag (--snapshot) at a matched flip ordinal; a cold-launch flip pair is
+# only approximately aligned, so a gap is reported as *_UNVERIFIED rather than
+# failing the gate on possible temporal drift between the legs.
+if [[ "$TRIGGER" == "flip" && -n "$SNAPSHOT_TAG" ]]; then
+    STATE_ALIGNED="yes"
+else
+    STATE_ALIGNED="no"
+fi
+log "  state_aligned = $STATE_ALIGNED (renderer-gap verdict authoritative only when yes)"
+if [[ "$EVIDENCE_CLASS" == "gameplay" && "$STATE_ALIGNED" != "yes" ]]; then
+    log "  WARNING: gameplay evidence is not state-aligned (needs --snapshot <tag> + --trigger flip); a black Metal frame will be reported METAL_GEOMETRY_GAP_UNVERIFIED, not an authoritative renderer-gap. Pass --snapshot for authoritative gameplay evidence."
+fi
 log "  evidence    = $EVIDENCE_CLASS"
 if [[ "$METAL_VALIDATE" -eq 1 ]]; then
     log "  metal_validate = on"
@@ -771,6 +787,7 @@ diff_one_frame() {
         "$gl_png" "$metal_png" \
         --crop "$crop" \
         --resize smaller \
+        --state-aligned "$STATE_ALIGNED" \
         --out-dir "$frame_dir" \
         > "$stdout_file" 2>&1
     rc=$?
@@ -781,6 +798,7 @@ diff_one_frame() {
     fi
 
     local mae rms max_abs changed_pct raw_gl_size raw_metal_size resized
+    local content_class baseline_state candidate_state content_alignment
     mae="$(parse_kv mean_abs_error "$stdout_file")"
     rms="$(parse_kv rms_error "$stdout_file")"
     max_abs="$(parse_kv max_abs_error "$stdout_file")"
@@ -788,10 +806,16 @@ diff_one_frame() {
     raw_gl_size="$(parse_kv raw_baseline_size "$stdout_file")"
     raw_metal_size="$(parse_kv raw_candidate_size "$stdout_file")"
     resized="$(parse_kv resized "$stdout_file")"
+    content_class="$(parse_kv content_class "$stdout_file")"
+    baseline_state="$(parse_kv baseline_state "$stdout_file")"
+    candidate_state="$(parse_kv candidate_state "$stdout_file")"
+    content_alignment="$(parse_kv content_alignment "$stdout_file")"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$ordinal" "$gl_png" "$metal_png" "$mae" "$rms" "$max_abs" "$changed_pct" \
         "$raw_gl_size" "$raw_metal_size" "$resized" \
+        "${content_class:-UNKNOWN}" "${baseline_state:-?}" "${candidate_state:-?}" \
+        "${content_alignment:-unknown}" \
         >> "$OUT_DIR/diffs/frames.tsv"
 }
 
@@ -873,13 +897,40 @@ fi
 # Determine PASS/FAIL by walking frames.tsv.
 PASS=1
 FAIL_LINES=()
-while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
+over_threshold() { awk -v c="$1" -v t="$THRESHOLD" 'BEGIN { exit !(c+0 > t+0) }'; }
+while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized content_class baseline_state candidate_state content_alignment; do
     [[ -z "$ordinal" ]] && continue
-    # Float compare: candidate's changed_pct vs THRESHOLD.
-    if awk -v c="$changed_pct" -v t="$THRESHOLD" 'BEGIN { exit !(c+0 > t+0) }'; then
-        PASS=0
-        FAIL_LINES+=("frame $ordinal: changed_pixels_pct=$changed_pct > threshold=$THRESHOLD")
-    fi
+    # Differential content class governs the verdict; the raw pixel-diff
+    # threshold is the fallback when both legs drew content (or the class is
+    # indeterminate). EXPECTED_BLACK (both legs black, e.g. a fade) is never a
+    # renderer fault. A METAL_GEOMETRY_GAP is only a hard fail when the pair is
+    # state-aligned; an unverified gap falls back to the threshold so temporal
+    # drift cannot manufacture a renderer-bug verdict.
+    case "$content_class" in
+        EXPECTED_BLACK)
+            : ;;  # legitimate black scene; pass regardless of pixel diff
+        METAL_GEOMETRY_GAP)
+            PASS=0
+            FAIL_LINES+=("frame $ordinal: METAL_GEOMETRY_GAP — reference (GL) drew geometry but the candidate (Metal) frame is black: the Metal renderer cannot draw this scene yet [state-aligned; authoritative]")
+            ;;
+        METAL_SPURIOUS)
+            PASS=0
+            FAIL_LINES+=("frame $ordinal: METAL_SPURIOUS — candidate (Metal) drew geometry the reference (GL) does not have")
+            ;;
+        METAL_GEOMETRY_GAP_UNVERIFIED)
+            if over_threshold "$changed_pct"; then
+                PASS=0
+                FAIL_LINES+=("frame $ordinal: changed_pixels_pct=$changed_pct > threshold=$THRESHOLD (likely METAL_GEOMETRY_GAP — GL has geometry, Metal is black; alignment unverified — re-run with --snapshot to confirm vs temporal drift)")
+            fi
+            ;;
+        *)
+            # CONTENT_BOTH / AMBIGUOUS / UNKNOWN: pixel-diff threshold governs.
+            if over_threshold "$changed_pct"; then
+                PASS=0
+                FAIL_LINES+=("frame $ordinal: changed_pixels_pct=$changed_pct > threshold=$THRESHOLD")
+            fi
+            ;;
+    esac
 done < "$OUT_DIR/diffs/frames.tsv"
 
 REPORT_MD="$OUT_DIR/report.md"
@@ -929,13 +980,14 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
         fi
     fi
     printf '\n## Per-frame visual diff\n\n'
-    printf '| frame | gl_size | metal_size | resized | mae | rms | max_abs | changed_pct |\n'
-    printf '|------:|---------|------------|---------|----:|----:|--------:|------------:|\n'
-    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
+    printf '| frame | gl_size | metal_size | resized | mae | rms | max_abs | changed_pct | content_class | gl/metal state |\n'
+    printf '|------:|---------|------------|---------|----:|----:|--------:|------------:|---------------|----------------|\n'
+    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized content_class baseline_state candidate_state content_alignment; do
         [[ -z "$ordinal" ]] && continue
-        printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+        printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s/%s |\n' \
             "$ordinal" "${raw_gl_size:-?}" "${raw_metal_size:-?}" "${resized:-?}" \
-            "$mae" "$rms" "$max_abs" "$changed_pct"
+            "$mae" "$rms" "$max_abs" "$changed_pct" \
+            "${content_class:-?}" "${baseline_state:-?}" "${candidate_state:-?}"
     done < "$OUT_DIR/diffs/frames.tsv"
     if [[ "$PASS" -eq 0 ]]; then
         printf '\n## Frames over threshold\n\n'
@@ -987,6 +1039,7 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     printf '  "loadvm_at_seconds": %s,\n' "${LOADVM_AT:-0}"
     printf '  "trigger": "%s",\n' "$TRIGGER"
     printf '  "trigger_ordinal": %s,\n' "$TRIGGER_ORDINAL"
+    printf '  "state_aligned": "%s",\n' "$STATE_ALIGNED"
     if [[ "$TRIGGER" == "flip" ]]; then
         if [[ -e "$FLIP_STALL_SENTINEL" ]]; then
             printf '  "trigger_fired": true,\n'
@@ -996,12 +1049,13 @@ if [[ "$PASS" -eq 0 ]]; then verdict="FAIL"; fi
     fi
     printf '  "frames": [\n'
     first=1
-    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized; do
+    while IFS=$'\t' read -r ordinal gl_png metal_png mae rms max_abs changed_pct raw_gl_size raw_metal_size resized content_class baseline_state candidate_state content_alignment; do
         [[ -z "$ordinal" ]] && continue
         if [[ $first -eq 1 ]]; then first=0; else printf ',\n'; fi
-        printf '    { "index": %s, "mae": %s, "rms": %s, "max_abs": %s, "changed_pct": %s, "gl_png": "%s", "metal_png": "%s", "raw_gl_size": "%s", "raw_metal_size": "%s", "resized": "%s" }' \
+        printf '    { "index": %s, "mae": %s, "rms": %s, "max_abs": %s, "changed_pct": %s, "gl_png": "%s", "metal_png": "%s", "raw_gl_size": "%s", "raw_metal_size": "%s", "resized": "%s", "content_class": "%s", "gl_state": "%s", "metal_state": "%s" }' \
             "$ordinal" "$mae" "$rms" "$max_abs" "$changed_pct" "$gl_png" "$metal_png" \
-            "${raw_gl_size:-unknown}" "${raw_metal_size:-unknown}" "${resized:-unknown}"
+            "${raw_gl_size:-unknown}" "${raw_metal_size:-unknown}" "${resized:-unknown}" \
+            "${content_class:-UNKNOWN}" "${baseline_state:-unknown}" "${candidate_state:-unknown}"
     done < "$OUT_DIR/diffs/frames.tsv"
     printf '\n  ]\n'
     printf '}\n'
