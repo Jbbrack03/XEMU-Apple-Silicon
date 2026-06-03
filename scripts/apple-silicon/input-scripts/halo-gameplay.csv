@@ -1,0 +1,23 @@
+# Halo: Combat Evolved - Gameplay input script
+# Drives from title screen to first mission gameplay
+# Flow: Start -> difficulty selection -> Easy -> begin mission -> move forward
+# Controls: start, a, lstick_y (navigate/select), lstick_x (move)
+# Expected result: "The Pillar of Autumn" mission loads with gameplay rendering
+#
+# time_ms,control,value
+20000,start,1
+21000,start,0
+22000,lstick_y,-32767
+33000,lstick_y,0
+35000,a,1
+36000,a,0
+37000,start,1
+38000,start,0
+39000,lstick_y,-32767
+60000,lstick_y,0
+61000,a,1
+62000,a,0
+63000,lstick_x,32767
+83000,lstick_x,0
+84000,lstick_y,-32767
+100000,lstick_y,0
