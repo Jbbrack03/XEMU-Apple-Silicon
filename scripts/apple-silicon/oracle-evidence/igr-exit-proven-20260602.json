@@ -1,0 +1,7 @@
+{
+  "status": "ok",
+  "backend": "controller-igr",
+  "method": "OGX360 Back+Start+LT+RT -> iND-BiOS IGRMODE=2 IGRLOADSDASH=1",
+  "proven": "dashboard reboot observed (FTP down->up) after IGR combo; physical-controller context = representative of in-game",
+  "host": "192.168.0.200"
+}

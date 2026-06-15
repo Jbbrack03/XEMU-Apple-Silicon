@@ -390,6 +390,7 @@ static bool mtl_front_fb_fallback_enabled(void)
  * is needed because this is a diagnostic-only path. */
 static FILE       *s_surface_graph_file        = NULL;
 static uint64_t    s_surface_graph_flip_seq    = 0;
+static uint64_t    s_flip_stall_ord            = 0;
 static int         s_surface_graph_mode_cached = 0;
 static int         s_surface_graph_at          = 0; /* 0 = unset */
 static int         s_surface_graph_interval    = 0; /* 0 = unset (=> every flip) */
@@ -861,7 +862,15 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                             width, height,
                             pitch,
                             pg->surface_shape.color_format,
-                            d->vram_ptr)) {
+                            d->vram_ptr,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height)) {
                         uint32_t bound_guest_w = width;
                         uint32_t bound_guest_h = height;
                         uint32_t bound_pitch = pitch;
@@ -925,7 +934,15 @@ static bool mtl_bind_current_surfaces(NV2AState *d, bool color, bool zeta)
                             width, height,
                             pitch,
                             pg->surface_shape.zeta_format,
-                            d->vram_ptr)) {
+                            d->vram_ptr,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height,
+                            pg->surface_shape.clip_x,
+                            pg->surface_shape.clip_y,
+                            pg->surface_shape.clip_width,
+                            pg->surface_shape.clip_height)) {
                         mtl_arm_access_callback(d, (uint32_t)vram_addr,
                                                 size);
                         bound_z = true;
@@ -1083,6 +1100,20 @@ static void pgraph_mtl_flip_stall(NV2AState *d)
     VGADisplayParams vga_display_params;
     d->vga.get_params(&d->vga, &vga_display_params);
     hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
+
+    /* M2 diagnostic: bump the flip-stall ordinal for publish
+     * diagnostic logging. */
+    s_flip_stall_ord++;
+    pgraph_mtl_surface_set_flip_ordinal(s_flip_stall_ord);
+
+    /* M2 diagnostic: log CRTC address and ordinal for each
+     * flip-stall. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_flip_stall ord=%llu crtc=0x%llx\n",
+                (unsigned long long)s_flip_stall_ord,
+                (unsigned long long)crtc_addr);
+    }
 
     /* M5.10 (2026-05-03): download every draw-dirty surface to guest
      * VRAM so the guest's authoritative buffer-swap path (whatever
@@ -2319,6 +2350,20 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     d->vga.get_params(&d->vga, &vga_display_params);
     hwaddr crtc_addr = d->pcrtc.start + vga_display_params.line_offset;
 
+    /* M2 diagnostic: bump the flip-stall ordinal for publish
+     * diagnostic logging. */
+    s_flip_stall_ord++;
+    pgraph_mtl_surface_set_flip_ordinal(s_flip_stall_ord);
+
+    /* M2 diagnostic: log CRTC address and ordinal for each
+     * flip-stall. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_flip_stall ord=%llu crtc=0x%llx\n",
+                (unsigned long long)s_flip_stall_ord,
+                (unsigned long long)crtc_addr);
+    }
+
     qemu_mutex_unlock(&d->pfifo.lock);
 
     /* Try to publish the surface that contains `crtc_addr`. */
@@ -2345,8 +2390,8 @@ static int pgraph_mtl_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_lock(&d->pgraph.lock);
     int has_fb = pgraph_mtl_surface_has_front_framebuffer();
     if (!(mtl_front_fb_fallback_enabled() && has_fb)) {
-        bool published = pgraph_mtl_surface_publish_front_fb_pointer_only(
-            (uint32_t)crtc_addr, "crtc-refresh");
+        bool published = pgraph_mtl_surface_publish_front_fb(
+            (uint32_t)crtc_addr, (uint32_t)crtc_addr, "crtc-refresh");
         (void)published;
         has_fb = pgraph_mtl_surface_has_front_framebuffer();
     }

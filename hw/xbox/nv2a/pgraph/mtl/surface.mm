@@ -215,13 +215,9 @@ typedef struct MtlSurfaceBinding {
      * while leaving the color target at its clear color. */
     uint32_t frame_draw_count;
 
-    /* 2026-05-28 (47M): diagnostic counter — tracks ALL draws to this
-     * color-bound surface regardless of write mask. When color_write is
-     * false the surface is still a render target; the draw executed but
-     * with writes disabled. This recovers draw-history evidence for
-     * targets like 0x3c84000 that are bound as color RTs but receive
-     * draws with color writes disabled. Does NOT affect frame_draw_count
-     * or fallback-dominant-draw behavior. */
+    /* Packet A (48A): per-frame count of ALL draws (color + depth-only)
+     * touching this binding; used by the XEMU_METAL_DIAG_DEPTH_DRAW probe
+     * (pgraph_mtl_surface_note_depth_draw) and the sibling diag logs. */
     uint32_t frame_draw_count_any;
 
     /* 2026-05-19 surface-graph diag (Tool 1): monotonic seq snapshot of
@@ -240,6 +236,22 @@ typedef struct MtlSurfaceBinding {
      * lookup hit, including the bind that triggers the sync). Zero means
      * "never depth-drawn". */
     uint64_t last_depth_draw_seq;
+
+    /* 50U: clip-rect / scissor-rect captured at bind time for true
+     * overlap predicate in sibling sync. Stores the guest-space clip
+     * rectangle (clip_x, clip_y, clip_w, clip_h) and the scissor
+     * rectangle (scissor_x, scissor_y, scissor_w, scissor_h) that
+     * were active when this binding was created. Used by the 50U
+     * predicate to check actual screen-space overlap between siblings
+     * rather than the coarse width/height proxy from 50T. */
+    uint32_t clip_x;
+    uint32_t clip_y;
+    uint32_t clip_w;
+    uint32_t clip_h;
+    uint32_t scissor_x;
+    uint32_t scissor_y;
+    uint32_t scissor_w;
+    uint32_t scissor_h;
 
     struct MtlSurfaceBinding *next;
 } MtlSurfaceBinding;
@@ -380,11 +392,13 @@ static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
  * can re-read them under the same lock without tearing. */
 static _Atomic(uint64_t) s_graph_dumps = 0;
 static uint32_t          s_last_publish_source_vram_addr  = 0;
+static uint32_t          s_last_publish_crtc_addr         = 0;
 static void             *s_last_publish_source_texture    = NULL;
 static void             *s_last_publish_published_texture = NULL;
 static const char       *s_last_publish_kind              = NULL;
 static const char       *s_last_publish_reason            = NULL;
 static uint64_t          s_last_publish_seq               = 0;
+static uint64_t          s_flip_ordinal                   = 0;
 
 static bool s_initialized = false;
 
@@ -590,9 +604,9 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
         atomic_fetch_add(&s_front_fb_publishes, 1);
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s\n",
+                "width=%u height=%u format=%u reason=%s\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
         return true;
     }
 
@@ -648,9 +662,9 @@ static bool publish_front_texture(MtlSurfaceBinding *e, const char *reason)
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s snapshot=1\n",
+                "width=%u height=%u format=%u reason=%s snapshot=1\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
     }
     return true;
 }
@@ -768,10 +782,10 @@ static MtlSurfaceBinding *cache_get_at_depth(uint32_t vram_addr)
  * because it shares the s_render_queue + draw-done fence machinery. */
 static void sync_color_siblings_into(MtlSurfaceBinding *target);
 static void sync_depth_siblings_into(MtlSurfaceBinding *target);
-
 static void diag_log_siblings_at(uint32_t vram_addr, const char *publish_reason);
 static void diag_log_siblings_at_bind(uint32_t vram_addr, uint32_t width, uint32_t height,
-                                                    uint32_t pitch, uint32_t nv097_format, const char *bind_reason);
+                                      uint32_t pitch, uint32_t nv097_format, const char *bind_reason);
+
 static bool binding_shape_compatible(MtlSurfaceBinding *e, bool is_color,
                                      uint32_t vram_addr,
                                      uint32_t width, uint32_t height,
@@ -1387,7 +1401,11 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
                            uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_color_format,
-                           const uint8_t *vram_ptr)
+                           const uint8_t *vram_ptr,
+                           uint32_t clip_x, uint32_t clip_y,
+                           uint32_t clip_w, uint32_t clip_h,
+                           uint32_t scissor_x, uint32_t scissor_y,
+                           uint32_t scissor_w, uint32_t scissor_h)
 {
     if (width == 0 || height == 0) {
         return NULL;
@@ -1438,6 +1456,15 @@ cache_find_or_create_color(uint32_t vram_addr, uint32_t size,
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    /* 50U: store clip-rect / scissor-rect for true overlap predicate */
+    e->clip_x           = clip_x;
+    e->clip_y           = clip_y;
+    e->clip_w           = clip_w;
+    e->clip_h           = clip_h;
+    e->scissor_x        = scissor_x;
+    e->scissor_y        = scissor_y;
+    e->scissor_w        = scissor_w;
+    e->scissor_h        = scissor_h;
     atomic_store(&e->dirty_vram, (uint32_t)0);
     atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
@@ -1453,7 +1480,11 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
                            uint32_t width, uint32_t height,
                            uint32_t guest_width, uint32_t guest_height,
                            uint32_t pitch, uint32_t nv097_zeta_format,
-                           const uint8_t *vram_ptr)
+                           const uint8_t *vram_ptr,
+                           uint32_t clip_x, uint32_t clip_y,
+                           uint32_t clip_w, uint32_t clip_h,
+                           uint32_t scissor_x, uint32_t scissor_y,
+                           uint32_t scissor_w, uint32_t scissor_h)
 {
     if (width == 0 || height == 0) {
         return NULL;
@@ -1499,6 +1530,15 @@ cache_find_or_create_depth(uint32_t vram_addr, uint32_t size,
     e->mtl_pixel_format = (uint32_t)mtl_fmt;
     e->texture          = tex;
     e->last_use_seq     = ++s_use_seq;
+    /* 50U: store clip-rect / scissor-rect for true overlap predicate */
+    e->clip_x           = clip_x;
+    e->clip_y           = clip_y;
+    e->clip_w           = clip_w;
+    e->clip_h           = clip_h;
+    e->scissor_x        = scissor_x;
+    e->scissor_y        = scissor_y;
+    e->scissor_w        = scissor_w;
+    e->scissor_h        = scissor_h;
     atomic_store(&e->dirty_vram, (uint32_t)0);
     atomic_store(&e->draw_dirty, (uint32_t)0);
     e->access_cb        = NULL;
@@ -1521,7 +1561,9 @@ bool pgraph_mtl_surface_bind_color(uint32_t vram_addr, uint32_t size,
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
-        pitch, nv097_color_format, vram_ptr);
+        pitch, nv097_color_format, vram_ptr,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e == NULL) {
         return false;
     }
@@ -1547,7 +1589,9 @@ bool pgraph_mtl_surface_bind_depth(uint32_t vram_addr, uint32_t size,
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         vram_addr, size, width, height, /*guest_w=*/0, /*guest_h=*/0,
-        pitch, nv097_zeta_format, vram_ptr);
+        pitch, nv097_zeta_format, vram_ptr,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e == NULL) {
         return false;
     }
@@ -1567,14 +1611,20 @@ bool pgraph_mtl_surface_bind_color_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_color_format,
-                                      const uint8_t *vram_ptr)
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h)
 {
     if (!s_initialized || width == 0 || height == 0) {
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         vram_addr, size, width, height, guest_width, guest_height,
-        pitch, nv097_color_format, vram_ptr);
+        pitch, nv097_color_format, vram_ptr,
+        clip_x, clip_y, clip_w, clip_h,
+        scissor_x, scissor_y, scissor_w, scissor_h);
     if (e == NULL) {
         return false;
     }
@@ -1595,14 +1645,20 @@ bool pgraph_mtl_surface_bind_depth_ex(uint32_t vram_addr, uint32_t size,
                                       uint32_t guest_height,
                                       uint32_t pitch,
                                       uint32_t nv097_zeta_format,
-                                      const uint8_t *vram_ptr)
+                                      const uint8_t *vram_ptr,
+                                      uint32_t clip_x, uint32_t clip_y,
+                                      uint32_t clip_w, uint32_t clip_h,
+                                      uint32_t scissor_x, uint32_t scissor_y,
+                                      uint32_t scissor_w, uint32_t scissor_h)
 {
     if (!s_initialized || width == 0 || height == 0) {
         return false;
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         vram_addr, size, width, height, guest_width, guest_height,
-        pitch, nv097_zeta_format, vram_ptr);
+        pitch, nv097_zeta_format, vram_ptr,
+        clip_x, clip_y, clip_w, clip_h,
+        scissor_x, scissor_y, scissor_w, scissor_h);
     if (e == NULL) {
         return false;
     }
@@ -1778,7 +1834,9 @@ void pgraph_mtl_surface_ensure_color(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_color(
         s_color_binding ? s_color_binding->vram_addr : 0,
-        0, width, height, 0, 0, 0, nv097_color_format, NULL);
+        0, width, height, 0, 0, 0, nv097_color_format, NULL,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e != NULL) {
         s_color_binding = e;
     }
@@ -1799,7 +1857,9 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
     }
     MtlSurfaceBinding *e = cache_find_or_create_depth(
         s_depth_binding ? s_depth_binding->vram_addr : 0,
-        0, width, height, 0, 0, 0, nv097_zeta_format, NULL);
+        0, width, height, 0, 0, 0, nv097_zeta_format, NULL,
+        /* clip_x */0, /* clip_y */0, /* clip_w */0, /* clip_h */0,
+        /* scissor_x */0, /* scissor_y */0, /* scissor_w */0, /* scissor_h */0);
     if (e != NULL) {
         s_depth_binding = e;
     }
@@ -1808,14 +1868,42 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
 /* ---------------------------------------------------------------- */
 
 bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
+                                         uint32_t crtc_addr,
                                          const char *reason)
 {
     if (!s_initialized) {
         return false;
     }
+    /* M2: record the CRTC address used at publish time so the
+     * capture/diagnostic path can ground the publication telemetry.
+     * Written before the cache lookup so the value is always set
+     * when a publish occurs, even if the cache miss causes an early return. */
+    s_last_publish_crtc_addr = crtc_addr;
     MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    /* M2 diagnostic: log vram_addr, cache hit/miss at publish time. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram=0x%x crtc=0x%x ord=%llu reason=%s "
+                "cache=%s\n",
+                (unsigned)vram_addr, (unsigned)crtc_addr, (unsigned long long)s_flip_ordinal, reason ? reason : "?",
+                e ? "HIT" : "MISS");
+    }
     if (e == NULL) {
         return false;
+    }
+    /* M2 diagnostic: log binding details at publish time. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish binding vram=0x%x crtc=0x%x ord=%llu "
+                "width=%u height=%u guest_w=%u guest_h=%u "
+                "nv097_fmt=%u mtl_fmt=%u texture=%p is_color=%d "
+                "vram_size=%u pitch=%u reason=%s\n",
+                (unsigned)e->vram_addr, (unsigned)crtc_addr, (unsigned long long)s_flip_ordinal, e->width, e->height,
+                e->guest_width, e->guest_height,
+                e->nv097_format, e->mtl_pixel_format,
+                e->texture, e->is_color,
+                e->size, e->pitch,
+                reason ? reason : "?");
     }
 
     return publish_front_texture(e, reason);
@@ -1832,7 +1920,6 @@ bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
     if (e == NULL || e->texture == NULL) {
         return false;
     }
-    diag_log_siblings_at(vram_addr, reason);
 
     /* Bump last_use_seq so LRU eviction doesn't reclaim the surface that
      * the compositor is about to sample. Matches the bookkeeping inside
@@ -1852,9 +1939,9 @@ bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
     if (getenv("XEMU_METAL_DIAG_PUBLISH")) {
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
-                "width=%u height=%u format=%u color_draws=%u draws_any=%u reason=%s pointer_only=1\n",
+                "width=%u height=%u format=%u reason=%s pointer_only=1\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                e->nv097_format, reason ? reason : "?");
     }
     return true;
 }
@@ -1953,10 +2040,10 @@ static bool publish_display_binding_front_fb(MtlSurfaceBinding *e,
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_publish vram_addr=0x%x "
                 "width=%u height=%u source_width=%u source_height=%u "
-                "format=%u line_offset=%.3f color_draws=%u draws_any=%u reason=%s display=1\n",
+                "format=%u line_offset=%.3f reason=%s display=1\n",
                 (unsigned)e->vram_addr, display_width, display_height,
                 e->width, e->height, e->nv097_format, line_offset,
-                (unsigned)e->frame_draw_count, (unsigned)e->frame_draw_count_any, reason ? reason : "?");
+                reason ? reason : "?");
     }
     return true;
 }
@@ -1977,21 +2064,11 @@ bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
 
 void pgraph_mtl_surface_note_color_draw(void *texture, bool color_write)
 {
-    if (!s_initialized || texture == NULL) {
+    if (!s_initialized || texture == NULL || !color_write) {
         return;
     }
     MtlSurfaceBinding *e = cache_get_by_texture(texture);
     if (e == NULL) {
-        return;
-    }
-
-    /* 2026-05-28 (47M): diagnostic — track ALL draws to color-bound
-     * surfaces regardless of write mask. This recovers draw-history
-     * evidence for targets like 0x3c84000 that are bound as color RTs
-     * but receive draws with color writes disabled. */
-    e->frame_draw_count_any++;
-
-    if (!color_write) {
         return;
     }
 
@@ -2086,13 +2163,11 @@ bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
         fprintf(stderr,
                 "xemu-perf: metal_front_fb_fallback_candidate "
                 "vram_addr=0x%x width=%u height=%u format=%u "
-                "color_draws=%u draws_any=%u reason=%s%s\n",
+                "color_draws=%u reason=%s%s\n",
                 (unsigned)e->vram_addr, e->width, e->height,
-                e->nv097_format, (unsigned)selected_count,
-                (unsigned)e->frame_draw_count_any, reason,
+                e->nv097_format, (unsigned)selected_count, reason,
                 (e == s_color_binding && s_fallback_draw_candidate == NULL)
                     ? " source=current-binding" : "");
-        diag_log_siblings_at(e->vram_addr, reason);
     }
     uint32_t publish_width = display_width ? display_width : e->width;
     uint32_t publish_height = display_height ? display_height : e->height;
@@ -2335,12 +2410,27 @@ void *pgraph_mtl_get_framebuffer_metal_texture(void)
     if (!s_initialized) {
         return NULL;
     }
+    /* M2 diagnostic: log what we are about to return. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_get initialized=%d\n",
+                (int)s_initialized);
+    }
 
     void *retained = NULL;
     pthread_mutex_lock(&s_front_framebuffer_lock);
     void *raw = atomic_load(&s_front_framebuffer_texture);
     if (raw != NULL) {
         id<MTLTexture> tex = (__bridge id<MTLTexture>)raw;
+        /* M2 diagnostic: log texture details at get time. */
+        if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+            fprintf(stderr,
+                    "xemu-perf: metal_front_fb_get texture=%p crtc=0x%x ord=%llu "
+                    "width=%lu height=%lu fmt=%u\n",
+                    (__bridge void*)tex, pgraph_mtl_surface_get_last_publish_crtc_addr(), (unsigned long long)s_flip_ordinal, (unsigned long)tex.width,
+                    (unsigned long)tex.height,
+                    (unsigned)tex.pixelFormat);
+        }
         retained = (__bridge_retained void *)tex;
     }
     pthread_mutex_unlock(&s_front_framebuffer_lock);
@@ -2374,6 +2464,28 @@ uint64_t pgraph_mtl_surface_cache_entries(void)
 uint64_t pgraph_mtl_surface_graph_dumps(void)
 {
     return atomic_load(&s_graph_dumps);
+}
+
+/* M2 diagnostic (2026-06-04): set the flip-stall ordinal for
+ * publish diagnostic logging. */
+void pgraph_mtl_surface_set_flip_ordinal(uint64_t ordinal)
+{
+    s_flip_ordinal = ordinal;
+}
+
+/* M2 diagnostic (2026-06-04): return the vram_addr of the last
+ * published front-fb surface (the CRTC address used at publish
+ * time). */
+uint32_t pgraph_mtl_surface_get_last_publish_vram_addr(void)
+{
+    return s_last_publish_source_vram_addr;
+}
+/* M2 diagnostic (2026-06-04): return the CRTC address of the last
+ * published front-fb surface.
+ */
+uint32_t pgraph_mtl_surface_get_last_publish_crtc_addr(void)
+{
+    return s_last_publish_crtc_addr;
 }
 
 /* Tool 1 (2026-05-19): structured per-flip dump of every cache binding.
@@ -2678,6 +2790,16 @@ uint32_t pgraph_mtl_surface_get_depth_vram_addr(void)
     return s_depth_binding->vram_addr;
 }
 
+/* 50AP: getter for the current depth binding's draw_dirty flag.
+ * Used by the screenshot capture diagnostic to determine whether
+ * depth writes actually reached the bound depth surface at capture
+ * time. Returns 1 if draw_dirty is set, 0 otherwise. */
+uint32_t pgraph_mtl_surface_get_depth_dirty(void)
+{
+    if (!s_initialized || s_depth_binding == NULL) return 0;
+    return (uint32_t)atomic_load(&s_depth_binding->draw_dirty);
+}
+
 /* -------- M11 MSAA accessors -------- */
 
 void pgraph_mtl_surface_set_msaa_sample_count(uint32_t sample_count)
@@ -2960,6 +3082,73 @@ static bool sibling_sync_enabled(void)
     return s_cached != 0;
 }
 
+static bool sibling_sync_depth_enabled(void)
+{
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return s_cached != 0;
+}
+
+
+static bool sibling_sync_depth_isolation_predicate_enabled(void)
+{
+    /* 50T: narrower isolation predicate for clip-rect isolation
+     * discrimination. When set, skips depth sync when the source
+     * sibling is smaller than the target in at least one dimension.
+     * This is narrower than the 50S coarse gate (which skipped on
+     * any dimension difference) because it allows syncs where the
+     * source is larger (safe - source fully covers target region)
+     * while still skipping when the source is smaller (unsafe -
+     * target would retain stale content in regions the source
+     * does not cover). */
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE");
+        fprintf(stderr, "50T DEBUG: getenv returned %s\n", e ? e : "NULL");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+        fprintf(stderr, "50T DEBUG: s_cached = %d\n", s_cached);
+    }
+    return s_cached != 0;
+}
+
+static bool sibling_sync_depth_true_overlap_predicate_enabled(void)
+{
+    /* 50U: true clip-rect overlap predicate. When set, checks whether
+     * the source and target sibling bindings have clip-rects that
+     * actually overlap in screen space. Two rectangles overlap when
+     * their x-ranges and y-ranges both intersect:
+     *   overlap_x = !(src_x + src_w <= tgt_x || tgt_x + tgt_w <= src_x)
+     *   overlap_y = !(src_y + src_h <= tgt_y || tgt_y + tgt_h <= src_y)
+     * If both overlap, the sync is legitimate (A). If they don't
+     * overlap, the sync crosses an isolation boundary and should be
+     * skipped (B). This replaces the 50T width/height proxy with
+     * actual screen-space overlap data from the guest clip-rect. */
+    static int s_cached = -1;
+    if (s_cached < 0) {
+        const char *e = getenv("XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_TRUE_OVERLAP");
+        s_cached = (e != NULL && *e != '\0' && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return s_cached != 0;
+}
+
+static bool rects_overlap(uint32_t x1, uint32_t w1, uint32_t x2, uint32_t w2)
+{
+    return !(x1 + w1 <= x2 || x2 + w2 <= x1);
+}
+
+static bool clip_rects_overlap(const MtlSurfaceBinding *a, const MtlSurfaceBinding *b)
+{
+    /* Both bindings must have non-zero clip-rect data for the check
+     * to be meaningful. Zero clip-rect means "full surface" (no clip). */
+    if (a->clip_w == 0 || a->clip_h == 0 || b->clip_w == 0 || b->clip_h == 0) {
+        return true; /* no clip data — fall back to dimension proxy */
+    }
+    return rects_overlap(a->clip_x, a->clip_w, b->clip_x, b->clip_w) &&
+           rects_overlap(a->clip_y, a->clip_h, b->clip_y, b->clip_h);
+}
 /* For the given target binding, find any other same-VRAM same-pitch
  * same-format same-aspect (color/depth) sibling that has fresher
  * last_color_draw_seq and copy its texture (and MSAA companion, if both
@@ -3127,8 +3316,29 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         target->texture == NULL) {
         return;
     }
-    if (!sibling_sync_enabled()) {
+
+    /* 50AN: bounded diagnostic — instrument first candidate-decision chain
+     * for vram_addr=0x038e0000 (z-buffer for 0x3c84000 color RT). Logs each
+     * gate name, pass/fail, and whether the candidate was accepted or skipped.
+     * Only fires for 0x038e0000 to keep output bounded. */
+    const bool is_038e = (target->vram_addr == 0x038e0000);
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: first-candidate-decision-chain START vram=0x%08x\n",
+                target->vram_addr);
+    }
+
+    if (!sibling_sync_depth_enabled()) {
+        if (is_038e) {
+            fprintf(stderr,
+                    "50AN DIAG: GATE-1 sibling_sync_depth_enabled = SKIPPED "
+                    "(env XEMU_METAL_RTT_SIBLING_SYNC_DEPTH not set)\n");
+        }
         return;
+    }
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: GATE-1 sibling_sync_depth_enabled = ACCEPTED\n");
     }
 
     MtlSurfaceBinding *source = NULL;
@@ -3147,8 +3357,166 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
         }
     }
     if (source == NULL) {
+        if (is_038e) {
+            fprintf(stderr,
+                    "50AN DIAG: GATE-2 fresh-sibling-found = SKIPPED "
+                    "(no fresher sibling in cache for vram=0x%08x)\n",
+                    target->vram_addr);
+        }
         atomic_fetch_add(&s_sibling_sync_skip, 1);
         return;
+    }
+    if (is_038e) {
+        fprintf(stderr,
+                "50AN DIAG: GATE-2 fresh-sibling-found = ACCEPTED "
+                "(src=%ux%u fmt=%u seq_delta=%lu)\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->nv097_format,
+                (unsigned long)(source->last_depth_draw_seq -
+                               target->last_depth_draw_seq));
+    }
+
+    /* 50T: narrower isolation predicate. Skip sync when source is
+     * smaller than target in at least one dimension - this is when
+     * the blit would leave the target with stale content in regions
+     * the source does not cover. When source is larger, the sync is
+     * safe (source fully covers target region) and beneficial. */
+    if (sibling_sync_depth_isolation_predicate_enabled() &&
+        (source->width < target->width || source->height < target->height)) {
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge SKIPPED (isolation predicate) "
+                "vram=0x%08x src=%ux%u tgt=%ux%u\n",
+                target->vram_addr,
+                source->width, source->height,
+                target->width, target->height);
+        atomic_fetch_add(&s_sibling_sync_skip, 1);
+        return;
+    }
+
+    /* 50U: true clip-rect overlap predicate. Checks whether the source
+     * and target sibling bindings have clip-rects that actually overlap
+     * in screen space. If they don't overlap, the sync crosses an
+     * isolation boundary and should be skipped. This replaces the 50T
+     * width/height proxy with actual screen-space overlap data. */
+    if (sibling_sync_depth_true_overlap_predicate_enabled()) {
+        bool overlap = clip_rects_overlap(source, target);
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge 50U overlap-check "
+                "vram=0x%08x src=%ux%u@(%u,%u) tgt=%ux%u@(%u,%u) "
+                "src_clip=(%u,%u,%u,%u) tgt_clip=(%u,%u,%u,%u) "
+                "overlap=%d\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->clip_x, source->clip_y,
+                target->width, target->height,
+                target->clip_x, target->clip_y,
+                source->clip_x, source->clip_y,
+                source->clip_w, source->clip_h,
+                target->clip_x, target->clip_y,
+                target->clip_w, target->clip_h,
+                overlap);
+        if (!overlap) {
+            fprintf(stderr,
+                    "xemu.metal.sibling_sync: depth merge SKIPPED (50U true overlap predicate - no clip-rect overlap) "
+                    "vram=0x%08x\n",
+                    target->vram_addr);
+            atomic_fetch_add(&s_sibling_sync_skip, 1);
+            return;
+        }
+    }
+
+    /* 50V: narrow scale/viewport compatibility diagnostic. The 50U
+     * overlap-check proved the clip-rects overlap, but two surfaces
+     * can overlap in clip space while representing incompatible
+     * scale/origin/viewport mappings. This diagnostic logs:
+     *   - scissor rectangles (captured at bind time, not logged by 50U)
+     *   - source->target scale factors (width ratio, height ratio)
+     *   - normalized clip extents (clip origin + extent as fraction of surface)
+     *   - full containment check (is one clip fully inside the other?)
+     *   - scale-equality flag (key predicate: equal scale = likely compatible)
+     * This is purely diagnostic — no behavior change. */
+    {
+        float src_scale_x = (source->width > 0 && target->width > 0)
+            ? (float)source->width / (float)target->width : 1.0f;
+        float src_scale_y = (source->height > 0 && target->height > 0)
+            ? (float)source->height / (float)target->height : 1.0f;
+        bool scale_equal = (src_scale_x == 1.0f && src_scale_y == 1.0f);
+
+        /* Normalized clip: clip origin as fraction of surface, extent as fraction */
+        float src_norm_cx = (source->width > 0) ? (float)source->clip_x / (float)source->width : 0.0f;
+        float src_norm_cy = (source->height > 0) ? (float)source->clip_y / (float)source->height : 0.0f;
+        float src_norm_cw = (source->width > 0) ? (float)source->clip_w / (float)source->width : 1.0f;
+        float src_norm_ch = (source->height > 0) ? (float)source->clip_h / (float)source->height : 1.0f;
+        float tgt_norm_cx = (target->width > 0) ? (float)target->clip_x / (float)target->width : 0.0f;
+        float tgt_norm_cy = (target->height > 0) ? (float)target->clip_y / (float)target->height : 0.0f;
+        float tgt_norm_cw = (target->width > 0) ? (float)target->clip_w / (float)target->width : 1.0f;
+        float tgt_norm_ch = (target->height > 0) ? (float)target->clip_h / (float)target->height : 1.0f;
+
+        /* Full containment: is src clip fully inside tgt clip (in screen space)? */
+        bool src_inside_tgt = (source->clip_x >= target->clip_x &&
+                               source->clip_x + source->clip_w <= target->clip_x + target->clip_w &&
+                               source->clip_y >= target->clip_y &&
+                               source->clip_y + source->clip_h <= target->clip_y + target->clip_h);
+        bool tgt_inside_src = (target->clip_x >= source->clip_x &&
+                               target->clip_x + target->clip_w <= source->clip_x + source->clip_w &&
+                               target->clip_y >= source->clip_y &&
+                               target->clip_y + target->clip_h <= source->clip_y + source->clip_h);
+
+        fprintf(stderr,
+                "xemu.metal.sibling_sync: depth merge 50V scale-viewport-diag "
+                "vram=0x%08x src=%ux%u@(%u,%u) tgt=%ux%u@(%u,%u) "
+                "src_clip=(%u,%u,%u,%u) tgt_clip=(%u,%u,%u,%u) "
+                "src_scissor=(%u,%u,%u,%u) tgt_scissor=(%u,%u,%u,%u) "
+                "src_scale=(%.3f,%.3f) tgt_scale=(%.3f,%.3f) "
+                "scale_equal=%d src_inside_tgt=%d tgt_inside_src=%d\n",
+                target->vram_addr,
+                source->width, source->height,
+                source->clip_x, source->clip_y,
+                target->width, target->height,
+                target->clip_x, target->clip_y,
+                source->clip_x, source->clip_y,
+                source->clip_w, source->clip_h,
+                target->clip_x, target->clip_y,
+                target->clip_w, target->clip_h,
+                source->scissor_x, source->scissor_y,
+                source->scissor_w, source->scissor_h,
+                target->scissor_x, target->scissor_y,
+                target->scissor_w, target->scissor_h,
+                src_scale_x, src_scale_y,
+                (float)target->width / (float)source->width,
+                (float)target->height / (float)source->height,
+                scale_equal, src_inside_tgt, tgt_inside_src);
+    }
+
+    /* 50Z: mapping-compatibility guard (opt-in). When the env flag
+     * XEMU_METAL_SIBLING_SYNC_DEPTH_MAPPING_GUARD=1 is set, skip
+     * depth sibling sync when the source/target pair is overlap-compatible
+     * (50U passed) but mapping-incompatible (scale factors unequal).
+     * This tests whether the 0x038e0000 merges are the active bottleneck
+     * by converting them into explicit mapping-incompatibility skips. */
+    {
+        const char *guard_env = getenv("XEMU_METAL_SIBLING_SYNC_DEPTH_MAPPING_GUARD");
+        if (guard_env && guard_env[0] == '1') {
+            float src_scale_x = (source->width > 0 && target->width > 0)
+                ? (float)source->width / (float)target->width : 1.0f;
+            float src_scale_y = (source->height > 0 && target->height > 0)
+                ? (float)source->height / (float)target->height : 1.0f;
+            bool mapping_incompatible = !(src_scale_x == 1.0f && src_scale_y == 1.0f);
+            if (mapping_incompatible) {
+                fprintf(stderr,
+                        "xemu.metal.sibling_sync: depth merge SKIPPED (50Z mapping-incompatibility guard) "
+                        "vram=0x%08x src=%ux%u tgt=%ux%u src_scale=(%.3f,%.3f) tgt_scale=(%.3f,%.3f)\n",
+                        target->vram_addr,
+                        source->width, source->height,
+                        target->width, target->height,
+                        src_scale_x, src_scale_y,
+                        (float)target->width / (float)source->width,
+                        (float)target->height / (float)source->height);
+                atomic_fetch_add(&s_sibling_sync_skip, 1);
+                return;
+            }
+        }
     }
 
     bool sync_msaa = (source->msaa_texture != NULL &&
@@ -3223,8 +3591,42 @@ static void sync_depth_siblings_into(MtlSurfaceBinding *target)
     target->last_depth_draw_seq = source->last_depth_draw_seq;
     atomic_store(&target->draw_dirty, (uint32_t)1);
 
+    /* 50B diagnostic: log depth sync merge details.
+     * 50S: added dim_mismatch field (replaced by 50T isolation predicate).
+     * 50T: isolation_breach field indicates source < target in at least
+     * one dimension (the narrower predicate that would trigger a skip). */
+    fprintf(stderr,
+            "xemu.metal.sibling_sync: depth merge vram=0x%08x "
+            "src=%ux%u tgt=%ux%u fmt=%u draw_seq_delta=%lu "
+            "isolation_breach=%s "
+            "sync_msaa=%s\n",
+            target->vram_addr,
+            source->width, source->height,
+            target->width, target->height,
+            target->nv097_format,
+            (unsigned long)(source->last_depth_draw_seq -
+                           target->last_depth_draw_seq),
+            (source->width < target->width ||
+             source->height < target->height) ? "yes" : "no",
+            sync_msaa ? "yes" : "no");
+
     atomic_fetch_add(&s_sibling_sync_count, 1);
 }
+
+/* 50AN: file-based diagnostic helper for first candidate-decision chain */
+static FILE *s_50an_log = NULL;
+static void s_50an_log_open(void) {
+    if (!s_50an_log) {
+        s_50an_log = fopen("/tmp/50an-diag.log", "a");
+    }
+}
+static void s_50an_log_close(void) {
+    if (s_50an_log) {
+        fclose(s_50an_log);
+        s_50an_log = NULL;
+    }
+}
+#define S_50AN_LOG(...) do { s_50an_log_open(); if(s_50an_log) fprintf(s_50an_log, __VA_ARGS__); } while(0)
 
 /* ---------------------------------------------------------------- */
 /* M5.10 (2026-05-03): set-draw-dirty + download API. */

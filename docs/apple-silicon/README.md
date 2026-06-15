@@ -255,12 +255,13 @@ visible regressions point first at the renderer.
   index, triage flowchart, phase exit-gate procedures, triangulation
   appendix. Read after `handoff.md` when starting a Metal-track
   session.
-- `orchestration-workflow.md`: **(2026-05-21)** canonical workflow for
-  supervising Claude Code on this repo without context-window collapse.
-  Defines Hermes/Claude/Codex/oracle roles, the artifact-over-transcript
-  rule, required status files, supervised-cycle vs unattended-cycle loops,
-  validation gates, permission-bypass policy, and Telegram escalation
-  triggers. Read before any long-running Claude-orchestrated session.
+- `_archive/hermes-orchestration/`: **ARCHIVED / INACTIVE (2026-06-15).**
+  The decommissioned Hermes multi-agent orchestration layer and its Codex
+  external-validation workflow (`orchestration-workflow.md` +
+  `orchestration-state/`). The project now operates with Claude Code working
+  solo — Claude owns implementation, validation, orchestration, and handoffs
+  directly (CLAUDE.md rule #15). Preserved as a reference design only; not a
+  current operating procedure. See the archive's `README.md`.
 - `metal-renderer-plan.md`: **(2026-05-04)** staged Metal renderer
   implementation plan, slices M0–M15, validation gates, risk register,
   open questions, and current M5.x follow-up / M15 blocker status.

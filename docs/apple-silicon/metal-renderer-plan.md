@@ -1966,13 +1966,13 @@ mid-route snapshot for fast iteration).
    remove the side-channel publish; ensure the side-channel
    `pgraph_mtl_get_framebuffer_metal_texture` falls back to the new
    getter.
-4. Address the codex-validate MEDIUM finding from M5.9-followup-E:
+4. Address the MEDIUM finding from the M5.9-followup-E review:
    `register_access_cb_for` / `_unregister_access_cb_for` use
    unfiltered `cache_get_at` and can hit the wrong aspect now that
    color and depth coexist at the same vram_addr. Either move
    callback tracking to a separate vram-range registry, or have the
    register/unregister helpers walk all matching entries.
-5. Address the codex-validate LOW finding: extend
+5. Address the LOW finding from the same review: extend
    `pgraph_mtl_surface_get_color_vram_addr` to return
    `{has_binding, vram_addr}` so the `metal_draw_target` diagnostic
    stops conflating "real vram_addr=0", "ensure-by-shape fallback",

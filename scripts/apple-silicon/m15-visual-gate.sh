@@ -32,6 +32,9 @@
 #   ./m15-visual-gate.sh --skip-tier1            # skip step 4 (Metal counters only)
 #   ./m15-visual-gate.sh --skip-oracle           # skip step 2 (no real Xbox needed)
 #   ./m15-visual-gate.sh --out DIR               # custom output dir
+#   ./m15-visual-gate.sh --gameplay-game pgr2 --gameplay-snapshot pgr2_gameplay_b4
+#                                                # + state-aligned gameplay-evidence diff
+#                                                #   (authoritative METAL_GEOMETRY_GAP, not _UNVERIFIED)
 
 set -u
 set -o pipefail
@@ -44,6 +47,13 @@ DO_CANARY=1
 DO_TIER1=1
 DO_ORACLE=1
 OUT_DIR=""
+# Gameplay-evidence step (2026-06-03). Only runs when a snapshot tag is given,
+# so GL and Metal are the same restored guest moment and a black Metal frame is
+# an authoritative METAL_GEOMETRY_GAP rather than a _UNVERIFIED guess.
+GAMEPLAY_GAME=""
+GAMEPLAY_SNAPSHOT=""
+GAMEPLAY_ORDINAL="1200"
+GAMEPLAY_LOADVM_AT="2"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -52,10 +62,30 @@ while [ $# -gt 0 ]; do
         --skip-tier1) DO_TIER1=0; shift;;
         --skip-oracle) DO_ORACLE=0; shift;;
         --out) OUT_DIR="$2"; shift 2;;
+        --gameplay-game) GAMEPLAY_GAME="$2"; shift 2;;
+        --gameplay-snapshot) GAMEPLAY_SNAPSHOT="$2"; shift 2;;
+        --gameplay-ordinal) GAMEPLAY_ORDINAL="$2"; shift 2;;
+        --gameplay-loadvm-at) GAMEPLAY_LOADVM_AT="$2"; shift 2;;
         -h|--help) sed -n '1,/^# Usage:/p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
         *) echo "unknown arg: $1" >&2; exit 2;;
     esac
 done
+
+# Enforce: gameplay evidence MUST be state-aligned (snapshot-backed). The step
+# is only reachable via --gameplay-snapshot; requesting gameplay evidence (a
+# game) without a snapshot is refused rather than silently downgraded to a
+# non-authoritative METAL_GEOMETRY_GAP_UNVERIFIED verdict.
+if [ -n "$GAMEPLAY_GAME" ] && [ -z "$GAMEPLAY_SNAPSHOT" ]; then
+    echo "error: --gameplay-game requires --gameplay-snapshot TAG — gameplay" \
+         "evidence must be state-aligned for an authoritative" \
+         "METAL_GEOMETRY_GAP verdict (cold-launch gameplay only yields" \
+         "METAL_GEOMETRY_GAP_UNVERIFIED)" >&2
+    exit 2
+fi
+if [ -n "$GAMEPLAY_SNAPSHOT" ] && [ -z "$GAMEPLAY_GAME" ]; then
+    echo "error: --gameplay-snapshot requires --gameplay-game GAME" >&2
+    exit 2
+fi
 
 if [ -z "$OUT_DIR" ]; then
     OUT_DIR="$FORK/benchmark-runs/m15-gate-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -152,6 +182,35 @@ if [ "$DO_PAIRED" -eq 1 ]; then
         fi
     done
     [ "$PAIRED_FAIL" -eq 0 ] || fail "05 paired Metal-vs-GL static canary: at least one canary failed"
+fi
+
+# --- 6. Gameplay-evidence paired diff (authoritative; snapshot-aligned) -----
+# Unlike step 5's static canaries, this drives a gameplay scene from a restored
+# savevm tag at a matched flip ordinal, so GL and Metal are the SAME guest
+# moment. A black Metal frame there is an authoritative METAL_GEOMETRY_GAP, not
+# an _UNVERIFIED guess against temporal drift. Only runs when --gameplay-snapshot
+# is supplied (the arg check above refuses gameplay evidence without it).
+if [ -n "$GAMEPLAY_SNAPSHOT" ]; then
+    GP_OUT="$OUT_DIR/06-gameplay-evidence"
+    info "06 gameplay-evidence metal-gl-compare ($GAMEPLAY_GAME, snapshot=$GAMEPLAY_SNAPSHOT, state-aligned)..."
+    GP_RC=0
+    "$HERE/metal-gl-compare.sh" "$GAMEPLAY_GAME" \
+        --snapshot "$GAMEPLAY_SNAPSHOT" \
+        --loadvm-at "$GAMEPLAY_LOADVM_AT" \
+        --trigger flip --trigger-ordinal "$GAMEPLAY_ORDINAL" \
+        --evidence-class gameplay --metal-no-validate \
+        --out-dir "$GP_OUT" > "$OUT_DIR/06-gameplay.log" 2>&1 || GP_RC=$?
+    GP_CLASSES="$(python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print(",".join(sorted({f.get("content_class","?") for f in d.get("frames",[])})) or "none")
+except Exception:
+    print("unreadable")' "$GP_OUT/summary.json" 2>/dev/null)"
+    if [ "$GP_RC" -eq 0 ]; then
+        ok "06 gameplay-evidence: PASS (state-aligned; content_class=${GP_CLASSES:-none})"
+    else
+        fail "06 gameplay-evidence: FAIL (content_class=${GP_CLASSES:-unknown}; state-aligned/authoritative) — see $OUT_DIR/06-gameplay.log"
+    fi
 fi
 
 echo "================================================================"

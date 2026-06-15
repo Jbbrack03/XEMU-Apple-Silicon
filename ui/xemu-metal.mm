@@ -100,6 +100,11 @@ static NSString *const k_present_msl =
 extern "C" void *pgraph_mtl_get_framebuffer_metal_texture(void);
 extern "C" void *pgraph_mtl_surface_get_metal_texture_at(uint32_t vram_addr);
 extern "C" void  pgraph_mtl_release_framebuffer_metal_texture(void *texture);
+extern "C" void *pgraph_mtl_surface_get_depth_texture(void);
+extern "C" uint32_t pgraph_mtl_surface_get_depth_dirty(void);
+extern "C" uint32_t pgraph_mtl_surface_get_depth_vram_addr(void);
+extern "C" uint64_t pgraph_mtl_surface_sibling_syncs(void);
+extern "C" uint64_t pgraph_mtl_surface_sibling_sync_skips(void);
 
 /* T2 (2026-05-12): per-host-refresh CRTC-aware publish. The GL path
  * calls nv2a_get_framebuffer_surface() once per host vsync from
@@ -272,7 +277,7 @@ static _Atomic uint64_t      s_capture_frames_seen;
  * Frame numbering is 1-indexed against the about-to-present frame
  * (atomic_load(&s_presents_total) + 1) so XEMU_METAL_SCREENSHOT_AT_FRAME=1
  * captures the very first present, =60 captures the 60th, etc. The
- * default at-frame is 60 so a typical scripted-input boot has time to
+ * default at-frame is 180 so a typical scripted-input boot has time to
  * settle before the snapshot fires.
  *
  * XEMU_METAL_SCREENSHOT_INTERVAL=N (>=1) repeats the capture every N
@@ -294,10 +299,59 @@ static uint64_t              s_screenshot_interval;      /* 0 = single shot */
  * "vram:0xADDR" reads a specific cached SurfaceBinding by vram_addr
  * (useful to inspect back-buffer / aux RTs without going through
  * CRTC publish — magenta artifact investigation). */
-static int                   s_screenshot_source;        /* 0=drawable, 1=nv2a, 2=vram_addr */
+static int                   s_screenshot_source;        /* 0=drawable, 1=nv2a, 2=vram_addr, 3=depth, 4=depth_vram */
 static uint32_t              s_screenshot_vram_addr;     /* used when source==2 */
 static _Atomic uint64_t      s_screenshots_taken;        /* counter for METAL_SCREENSHOTS_TAKEN */
 static _Atomic uint64_t      s_screenshots_done;         /* in-flight + completed; for filename suffix */
+
+/* 2026-05-30 — screenshot capture state for the blit+encode path.
+ * When should_fire is true, the renderer thread creates a blit encoder
+ * that copies the source texture (drawable or nv2a) into this
+ * host-shared MTLBuffer. The addCompletedHandler then reads the buffer,
+ * converts depth formats to grayscale if needed, and writes the PNG.
+ *
+ * s_screenshot_capture_tex is the source texture (drawable.texture for
+ * source==0, pgraph_mtl_get_framebuffer_metal_texture() for source==1,
+ * or a VRAM-mapped texture for source==2). s_screenshot_capture_fmt is
+ * the pixel format of that source texture. s_screenshot_capture_w/h are
+ * the dimensions. s_screenshot_capture_buf is the host-shared MTLBuffer
+ * that receives the blit. s_screenshot_capture_filename is the PNG path
+ * for this capture. s_screenshot_capture_is_depth is true when the
+ * source format is a depth format that needs grayscale conversion.
+ *
+ * All fields are set atomically or under the renderer-thread's exclusive
+ * access (no other thread touches them during the capture lifecycle). */
+static id<MTLTexture>        s_screenshot_capture_tex;   /* source texture */
+static MTLPixelFormat        s_screenshot_capture_fmt;   /* source format */
+static NSUInteger            s_screenshot_capture_w;     /* width */
+static NSUInteger            s_screenshot_capture_h;     /* height */
+static id<MTLBuffer>         s_screenshot_capture_buf;   /* host-shared readback buffer */
+static char                 *s_screenshot_capture_filename; /* PNG path */
+static bool                  s_screenshot_capture_is_depth; /* needs grayscale conversion */
+
+/* 2026-06-08 — M2 pre-HUD drawable capture. Gated on
+ * XEMU_METAL_PRE_HUD_SCREENSHOT_PATH=/path/to/file.png. Captures the
+ * drawable texture AFTER the present pipeline has written the NV2A
+ * framebuffer but BEFORE ImGui/HUD encoding. This is the discriminator
+ * that tells us whether the remaining defect is in final-present
+ * write/preservation (pre-HUD already bad) or in a later
+ * drawable/HUD/capture mutation (pre-HUD still good).
+ *
+ * Uses the same blit+encode+PNG machinery as the post-HUD screenshot
+ * path. The blit encoder is created here (before ImGui render) and the
+ * PNG write happens in the same addCompletedHandler. */
+static char                 *s_pre_hud_screenshot_path;  /* malloc'd or NULL */
+static uint64_t              s_pre_hud_screenshot_at_frame;  /* 1-indexed; 0 = disabled */
+static uint64_t              s_pre_hud_screenshot_interval;  /* 0 = single shot */
+static _Atomic uint64_t      s_pre_hud_screenshots_done;  /* counter for filename suffix */
+static id<MTLTexture>        s_pre_hud_capture_tex;
+static MTLPixelFormat        s_pre_hud_capture_fmt;
+static NSUInteger            s_pre_hud_capture_w;
+static NSUInteger            s_pre_hud_capture_h;
+static id<MTLBuffer>         s_pre_hud_capture_buf;
+static char                 *s_pre_hud_capture_filename;
+static bool                  s_pre_hud_capture_is_depth;
+
 /* Separate "end-of-frame" tick: bumps every time
  * xemu_metal_end_imgui_frame runs the cmdbuf commit, regardless of
  * whether addPresentedHandler: ever fires. We can't use
@@ -692,22 +746,58 @@ static void stop_metal_capture_if_active(void)
             "xemu-perf: metal_capture_stopped frames_captured=%llu\n",
             (unsigned long long)atomic_load(&s_capture_frames_seen));
 }
-
 /* 2026-05-03 — parse XEMU_METAL_SCREENSHOT_PATH /
  * XEMU_METAL_SCREENSHOT_AT_FRAME / XEMU_METAL_SCREENSHOT_INTERVAL.
+ * 2026-06-08 — M2: also parse XEMU_METAL_PRE_HUD_SCREENSHOT_PATH /
+ * XEMU_METAL_PRE_HUD_SCREENSHOT_AT_FRAME /
+ * XEMU_METAL_PRE_HUD_SCREENSHOT_INTERVAL.
  * Called once from xemu_metal_init before the first nextDrawable call
- * because XEMU_METAL_SCREENSHOT_PATH governs s_layer.framebufferOnly
- * (the drawable texture cannot be the source of a blit when
- * framebufferOnly=YES, so we have to flip it before any drawable is
- * acquired).
+ * because XEMU_METAL_SCREENSHOT_PATH and
+ * XEMU_METAL_PRE_HUD_SCREENSHOT_PATH both govern
+ * s_layer.framebufferOnly (the drawable texture cannot be the source
+ * of a blit when framebufferOnly=YES, so we have to flip it before
+ * any drawable is acquired).
  *
  * Defaults:
- *   XEMU_METAL_SCREENSHOT_AT_FRAME → 60   (1-indexed against
+ *   XEMU_METAL_SCREENSHOT_AT_FRAME -> 60   (1-indexed against
  *                                          pgraph_mtl_present_total + 1)
- *   XEMU_METAL_SCREENSHOT_INTERVAL → 0    (single shot)
+ *   XEMU_METAL_SCREENSHOT_INTERVAL -> 0    (single shot)
  */
 static void parse_screenshot_env(void)
 {
+    /* 2026-06-08 — M2: always parse pre-HUD env vars regardless of
+     * whether the post-HUD path is requested. */
+    const char *pre_path = getenv("XEMU_METAL_PRE_HUD_SCREENSHOT_PATH");
+    if (pre_path != NULL && pre_path[0] != '\0') {
+        s_pre_hud_screenshot_path = strdup(pre_path);
+        if (s_pre_hud_screenshot_path != NULL) {
+            s_pre_hud_screenshot_at_frame = 60;
+            const char *pre_at = getenv("XEMU_METAL_PRE_HUD_SCREENSHOT_AT_FRAME");
+            if (pre_at != NULL && pre_at[0] != '\0') {
+                char *endp = NULL;
+                unsigned long n = strtoul(pre_at, &endp, 10);
+                if (endp != NULL && *endp == '\0' && n >= 1) {
+                    s_pre_hud_screenshot_at_frame = (uint64_t)n;
+                }
+            }
+            s_pre_hud_screenshot_interval = 0;
+            const char *pre_iv = getenv("XEMU_METAL_PRE_HUD_SCREENSHOT_INTERVAL");
+            if (pre_iv != NULL && pre_iv[0] != '\0') {
+                char *endp = NULL;
+                unsigned long n = strtoul(pre_iv, &endp, 10);
+                if (endp != NULL && *endp == '\0') {
+                    s_pre_hud_screenshot_interval = (uint64_t)n;
+                }
+            }
+            fprintf(stderr,
+                    "xemu-perf: metal_pre_hud_screenshot path=%s "
+                    "at_frame=%llu interval=%llu\n",
+                    s_pre_hud_screenshot_path,
+                    (unsigned long long)s_pre_hud_screenshot_at_frame,
+                    (unsigned long long)s_pre_hud_screenshot_interval);
+        }
+    }
+
     const char *path = getenv("XEMU_METAL_SCREENSHOT_PATH");
     if (path == NULL || path[0] == '\0') {
         return;
@@ -717,7 +807,7 @@ static void parse_screenshot_env(void)
         return;
     }
 
-    s_screenshot_at_frame = 60;
+    s_screenshot_at_frame = 180;
     const char *at_env = getenv("XEMU_METAL_SCREENSHOT_AT_FRAME");
     if (at_env != NULL && at_env[0] != '\0') {
         char *endp = NULL;
@@ -752,14 +842,36 @@ static void parse_screenshot_env(void)
                 s_screenshot_source = 2;
                 s_screenshot_vram_addr = (uint32_t)n;
             }
+        } else if (strcmp(src_env, "depth") == 0 || strcmp(src_env, "3") == 0) {
+            /* 2026-05-31: depth source -- capture the NV2A depth surface
+             * texture for depth-only lanes. Uses pgraph_mtl_surface_get_depth_texture(). */
+            s_screenshot_source = 3;
+        } else if (strncmp(src_env, "depth_vram:", 11) == 0) {
+            /* 2026-06-08: depth source at specific vram_addr -- capture the
+             * NV2A depth surface at a specific VRAM address. This is used
+             * when the screenshot needs to target a specific depth surface
+             * (e.g. the contradiction-lane depth at 0x038e0000) rather than
+             * whatever s_depth_binding happens to point to at capture time.
+             * Uses pgraph_mtl_surface_get_metal_texture_at(vram_addr). */
+            char *endp = NULL;
+            unsigned long n = strtoul(src_env + 11, &endp, 0);
+            if (endp != NULL && *endp == '\0' && n != 0) {
+                s_screenshot_source = 4;
+                s_screenshot_vram_addr = (uint32_t)n;
+            }
         }
     }
 
-    char source_desc[32];
+    char source_desc[64];
     if (s_screenshot_source == 1) {
         snprintf(source_desc, sizeof(source_desc), "nv2a");
     } else if (s_screenshot_source == 2) {
         snprintf(source_desc, sizeof(source_desc), "vram:0x%08x",
+                 s_screenshot_vram_addr);
+    } else if (s_screenshot_source == 3) {
+        snprintf(source_desc, sizeof(source_desc), "depth");
+    } else if (s_screenshot_source == 4) {
+        snprintf(source_desc, sizeof(source_desc), "depth_vram:0x%08x",
                  s_screenshot_vram_addr);
     } else {
         snprintf(source_desc, sizeof(source_desc), "drawable");
@@ -814,6 +926,45 @@ static char *build_screenshot_filename(uint64_t idx)
     return out;
 }
 
+/* M2 — variant of build_screenshot_filename that takes an explicit
+ * path string, interval, and index. Used by the pre-HUD capture path
+ * which has its own path/interval/counter separate from the post-HUD
+ * screenshot. Returns malloc'd buffer; caller frees. Returns NULL on
+ * alloc failure. */
+static char *build_screenshot_filename_for_path(const char *base_path,
+                                                 uint64_t interval,
+                                                 uint64_t idx)
+{
+    if (base_path == NULL) {
+        return NULL;
+    }
+    if (interval == 0) {
+        return strdup(base_path);
+    }
+    /* Insert ".NNNN" before ".png" if present, else append. */
+    size_t plen = strlen(base_path);
+    const char *suffix_start = NULL;
+    if (plen >= 4 &&
+        strcasecmp(base_path + plen - 4, ".png") == 0) {
+        suffix_start = base_path + plen - 4;
+    }
+    size_t pre_len = suffix_start ? (size_t)(suffix_start - base_path) : plen;
+    size_t out_size = pre_len + 5 + 4 + 1;
+    char *out = (char *)malloc(out_size);
+    if (out == NULL) {
+        return NULL;
+    }
+    if (suffix_start) {
+        snprintf(out, out_size, "%.*s.%04llu.png",
+                 (int)pre_len, base_path,
+                 (unsigned long long)idx);
+    } else {
+        snprintf(out, out_size, "%s.%04llu.png",
+                 base_path, (unsigned long long)idx);
+    }
+    return out;
+}
+
 /* 2026-05-03 — convert a BGRA8 byte buffer to RGBA8 in place. FPNG
  * expects RGBA (R first in memory); the drawable is BGRA8Unorm_sRGB
  * (B first). The swap is per-pixel; SIMD here would be premature
@@ -856,6 +1007,105 @@ static bool encode_drawable_png(const char *filename,
                 filename, (unsigned)w, (unsigned)h);
     }
     return ok;
+}
+
+/* Helper: bytes per pixel for a depth pixel format. Returns 0 for
+ * non-depth formats. */
+static uint32_t depth_bytes_per_pixel(MTLPixelFormat fmt)
+{
+    switch (fmt) {
+        case MTLPixelFormatDepth16Unorm:
+            return 2;
+        case MTLPixelFormatDepth24Unorm_Stencil8:
+        case MTLPixelFormatDepth32Float:
+        case MTLPixelFormatDepth32Float_Stencil8:
+            return 4;
+        default:
+            return 0;
+    }
+}
+
+/* 2026-05-30 — convert a depth-format texture readback to a grayscale
+ * PNG-compatible RGBA8 buffer. Maps depth [0,1] → grayscale [0,255]
+ * (near = black, far = white). The output buffer is w*h*4 bytes of
+ * RGBA (fpng expects RGBA). This is the truthful pre-compositing
+ * capture path for depth-only lanes where the nv2a framebuffer is a
+ * depth-format texture (Depth16Unorm, Depth32Float, etc.).
+ *
+ * Depth formats handled:
+ *   Depth16Unorm          — 2 bytes/pixel, uint16 normalized
+ *   Depth24Unorm_Stencil8 — 4 bytes/pixel, uint24 in first 3 bytes
+ *   Depth32Float          — 4 bytes/pixel, float [0,1]
+ *   Depth32Float_Stencil8 — 4 bytes/pixel, float depth in first 4 bytes
+ *
+ * Stencil-only (Stencil8) is NOT a depth format and is not handled
+ * here — it would need a different visualization approach.
+ */
+static void convert_depth_to_grayscale(uint8_t *dst_rgba,
+                                       const uint8_t *src_depth,
+                                       uint32_t w,
+                                       uint32_t h,
+                                       MTLPixelFormat fmt)
+{
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t *row = src_depth + (size_t)y * w * depth_bytes_per_pixel(fmt);
+        uint8_t *out = dst_rgba + (size_t)y * (size_t)w * 4;
+        for (uint32_t x = 0; x < w; ++x) {
+            uint8_t gray = 0;
+            switch (fmt) {
+                case MTLPixelFormatDepth16Unorm: {
+                    const uint16_t *p = (const uint16_t *)(row + x * 2);
+                    gray = (uint8_t)((*p >> 8) & 0xFF);
+                    break;
+                }
+                case MTLPixelFormatDepth24Unorm_Stencil8: {
+                    const uint8_t *p = row + x * 4;
+                    uint32_t depth24 = ((uint32_t)p[0] << 16) |
+                                       ((uint32_t)p[1] << 8) |
+                                       (uint32_t)p[2];
+                    gray = (uint8_t)((depth24 >> 16) & 0xFF);
+                    break;
+                }
+                case MTLPixelFormatDepth32Float: {
+                    const float *p = (const float *)(row + x * 4);
+                    float d = *p;
+                    if (d < 0.0f) d = 0.0f;
+                    if (d > 1.0f) d = 1.0f;
+                    gray = (uint8_t)(d * 255.0f);
+                    break;
+                }
+                case MTLPixelFormatDepth32Float_Stencil8: {
+                    const float *p = (const float *)(row + x * 4);
+                    float d = *p;
+                    if (d < 0.0f) d = 0.0f;
+                    if (d > 1.0f) d = 1.0f;
+                    gray = (uint8_t)(d * 255.0f);
+                    break;
+                }
+                default:
+                    gray = row[x];
+                    break;
+            }
+            out[x * 4 + 0] = gray;
+            out[x * 4 + 1] = gray;
+            out[x * 4 + 2] = gray;
+            out[x * 4 + 3] = 0xFF;
+        }
+    }
+}
+
+/* Helper: is this a depth pixel format we can visualize? */
+static bool is_depth_format(MTLPixelFormat fmt)
+{
+    switch (fmt) {
+        case MTLPixelFormatDepth16Unorm:
+        case MTLPixelFormatDepth24Unorm_Stencil8:
+        case MTLPixelFormatDepth32Float:
+        case MTLPixelFormatDepth32Float_Stencil8:
+            return true;
+        default:
+            return false;
+    }
 }
 
 /* M13 — initialize the per-frame MTLCounterSampleBuffer used for
@@ -1067,7 +1317,9 @@ bool xemu_metal_init(SDL_Window *window)
      * Silicon defaults" quick-reference table. */
     s_layer.device                = s_device;
     s_layer.pixelFormat           = MTLPixelFormatBGRA8Unorm_sRGB;
-    s_layer.framebufferOnly       = (s_screenshot_path == NULL) ? YES : NO;
+    s_layer.framebufferOnly       = ((s_screenshot_path == NULL &&
+                                      s_pre_hud_screenshot_path == NULL)
+                                     ? YES : NO);
     s_layer.maximumDrawableCount  = 3;
     s_layer.displaySyncEnabled    = YES;
 
@@ -1320,6 +1572,12 @@ void xemu_metal_shutdown(void)
         s_screenshot_path = NULL;
     }
 
+    /* M2 — release pre-HUD screenshot path. */
+    if (s_pre_hud_screenshot_path != NULL) {
+        free(s_pre_hud_screenshot_path);
+        s_pre_hud_screenshot_path = NULL;
+    }
+
     s_active = false;
 }
 
@@ -1502,6 +1760,93 @@ void xemu_metal_end_imgui_frame(void)
         pgraph_mtl_release_framebuffer_metal_texture(fb_tex_handle);
     }
 
+    /* M2 — pre-HUD drawable capture. Capture the drawable texture
+     * AFTER the present pipeline has written the NV2A framebuffer but
+     * BEFORE ImGui/HUD encoding. This discriminates whether the
+     * remaining defect is in final-present write/preservation (pre-HUD
+     * already bad) or in a later drawable/HUD/capture mutation
+     * (pre-HUD still good).
+     *
+     * Uses the same blit+encode+PNG machinery as the post-HUD
+     * screenshot path. The blit encoder is created here and the PNG
+     * write happens in the addCompletedHandler. */
+    uint64_t cur_pre_hud_frame = atomic_fetch_add(&s_end_frames, 0) + 1;
+    if (s_pre_hud_screenshot_path != NULL) {
+        uint64_t cur_frame = cur_pre_hud_frame;
+        bool pre_hud_should_fire = false;
+        if (s_pre_hud_screenshot_interval == 0) {
+            pre_hud_should_fire = (cur_frame == s_pre_hud_screenshot_at_frame);
+        } else if (cur_frame >= s_pre_hud_screenshot_at_frame) {
+            uint64_t since = cur_frame - s_pre_hud_screenshot_at_frame;
+            pre_hud_should_fire = (since % s_pre_hud_screenshot_interval) == 0;
+        }
+
+        if (pre_hud_should_fire) {
+            uint64_t idx = atomic_fetch_add(&s_pre_hud_screenshots_done, 1) + 1;
+            char *filename = build_screenshot_filename_for_path(
+                s_pre_hud_screenshot_path, s_pre_hud_screenshot_interval, idx);
+            
+            /* Capture the drawable texture (post-present, pre-HUD). */
+            id<MTLTexture> src_tex = s_current_drawable.texture;
+            MTLPixelFormat src_fmt = src_tex.pixelFormat;
+            NSUInteger src_w = src_tex.width;
+            NSUInteger src_h = src_tex.height;
+            
+            fprintf(stderr,
+                    "xemu-perf: metal_pre_hud_screenshot capture source=drawable "
+                    "(pre-HUD) w=%lu h=%lu fmt=%u\n",
+                    (unsigned long)src_w, (unsigned long)src_h,
+                    (unsigned)src_fmt);
+            
+            s_pre_hud_capture_tex = src_tex;
+            s_pre_hud_capture_fmt = src_fmt;
+            s_pre_hud_capture_w = src_w;
+            s_pre_hud_capture_h = src_h;
+            s_pre_hud_capture_filename = filename;
+            s_pre_hud_capture_is_depth = is_depth_format(src_fmt);
+            
+            /* Create the host-shared readback buffer. */
+            size_t bytes_per_pixel = 4;
+            size_t buffer_size = (size_t)src_w * (size_t)src_h * bytes_per_pixel;
+            
+            if (s_pre_hud_capture_buf != nil) {
+                s_pre_hud_capture_buf = nil;
+            }
+            
+            s_pre_hud_capture_buf =
+                [s_device newBufferWithLength:buffer_size
+                                      options:MTLResourceStorageModeShared];
+            if (s_pre_hud_capture_buf == nil) {
+                fprintf(stderr,
+                        "xemu-perf: metal_pre_hud_screenshot capture buffer alloc "
+                        "failed (size=%zu bytes)\n", buffer_size);
+                s_pre_hud_capture_filename = NULL;
+            } else {
+                /* Create the blit encoder to copy the source texture
+                 * into the readback buffer. */
+                id<MTLBlitCommandEncoder> blit_enc = [s_current_cmd blitCommandEncoder];
+                blit_enc.label = @"xemu.metal.pre_hud_screenshot_blit";
+                
+                [blit_enc copyFromTexture:src_tex
+                                sourceSlice:0
+                                sourceLevel:0
+                              sourceOrigin:MTLOriginMake(0, 0, 0)
+                                sourceSize:MTLSizeMake(src_w, src_h, 1)
+                                  toBuffer:s_pre_hud_capture_buf
+                                destinationOffset:0
+                                 destinationBytesPerRow:(NSUInteger)src_w * bytes_per_pixel
+                                destinationBytesPerImage:(NSUInteger)src_w * (NSUInteger)src_h * bytes_per_pixel];
+                
+                [blit_enc endEncoding];
+                fprintf(stderr,
+                        "xemu-perf: metal_pre_hud_screenshot blit created "
+                        "path=%s w=%lu h=%lu fmt=%u depth=%d\n",
+                        filename, (unsigned long)src_w, (unsigned long)src_h,
+                        (unsigned)src_fmt, (int)s_pre_hud_capture_is_depth);
+            }
+        }
+    }
+
     /* C++ HUD has already called ImGui::Render(); we encode its draw
      * data into the active render encoder. */
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
@@ -1552,93 +1897,272 @@ void xemu_metal_end_imgui_frame(void)
             uint64_t since = cur_frame - s_screenshot_at_frame;
             should_fire = (since % s_screenshot_interval) == 0;
         }
+
+        /* 2026-05-30 — screenshot capture: when should_fire is true,
+         * create a blit encoder that copies the source texture into a
+         * host-shared MTLBuffer. The addCompletedHandler then reads the
+         * buffer, converts depth formats to grayscale if needed, and
+         * writes the PNG.
+         *
+         * Source selection:
+         *   source==0 (drawable): use s_current_drawable.texture
+         *   source==1 (nv2a): use pgraph_mtl_get_framebuffer_metal_texture()
+         *   source==2 (vram_addr): use cached SurfaceBinding by vram_addr
+         *
+         * Depth-format handling:
+         *   If the source texture is a depth format (Depth16Unorm,
+         *   Depth24Unorm_Stencil8, Depth32Float, Depth32Float_Stencil8),
+         *   the addCompletedHandler converts it to a truthful grayscale
+         *   visualization (near=black, far=white) instead of treating
+         *   raw bytes as BGRA8.
+         *
+         * The blit encoder is created here on the renderer thread and
+         * the actual readback happens in the addCompletedHandler after
+         * the GPU has finished the command buffer. */
         if (should_fire) {
-            /* 2026-05-03 diagnostic — XEMU_METAL_SCREENSHOT_SOURCE=nv2a
-             * captures the NV2A framebuffer texture pre-present (before
-             * compositing into the drawable). When the NV2A side has not
-             * yet produced a frame, present_input_tex is nil and we fall
-             * back to the drawable so we still get a screenshot. */
-            id<MTLTexture> drawable_tex = s_current_drawable.texture;
-            id<MTLTexture> source_tex = drawable_tex;
-            if (s_screenshot_source == 1 && present_input_tex != nil) {
-                source_tex = present_input_tex;
+            atomic_fetch_add(&s_screenshots_taken, 1);
+            uint64_t idx = atomic_fetch_add(&s_screenshots_done, 1) + 1;
+            char *filename = build_screenshot_filename(idx);
+            
+            /* Determine the source texture and its format. */
+            id<MTLTexture> src_tex = nil;
+            MTLPixelFormat src_fmt = MTLPixelFormatInvalid;
+            NSUInteger src_w = 0;
+            NSUInteger src_h = 0;
+            
+            if (s_screenshot_source == 0) {
+                /* Drawable: the post-HUD composited drawable texture. */
+                src_tex = s_current_drawable.texture;
+                src_fmt = src_tex.pixelFormat;
+                src_w = src_tex.width;
+                src_h = src_tex.height;
+                fprintf(stderr,
+                        "xemu-perf: metal_screenshot capture source=drawable "
+                        "w=%lu h=%lu fmt=%u\n",
+                        (unsigned long)src_w, (unsigned long)src_h,
+                        (unsigned)src_fmt);
+            } else if (s_screenshot_source == 1) {
+                /* NV2A: the pre-present framebuffer texture from the
+                 * surface manager. This is the truthful pre-compositing
+                 * capture path for depth-only lanes. */
+                void *fb_tex_handle = pgraph_mtl_get_framebuffer_metal_texture();
+                if (fb_tex_handle != NULL) {
+                    src_tex = (__bridge id<MTLTexture>)fb_tex_handle;
+                    src_fmt = src_tex.pixelFormat;
+                    src_w = src_tex.width;
+                    src_h = src_tex.height;
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=nv2a "
+                            "w=%lu h=%lu fmt=%u (depth=%d)\n",
+                            (unsigned long)src_w, (unsigned long)src_h,
+                            (unsigned)src_fmt,
+                            (int)is_depth_format(src_fmt));
+                    /* 50O diagnostic: log full capture context. */
+                    if (getenv("XEMU_METAL_DIAG_SCREENSHOT")) {
+                        fprintf(stderr,
+                                "xemu-perf: metal_screenshot_diag capture_ctx "
+                                "w=%lu h=%lu fmt=%u depth=%d "
+                                "is_depth=%d capture_tex=%p "
+                                "capture_fmt=%u capture_buf=%p\n",
+                                (unsigned long)src_w, (unsigned long)src_h,
+                                (unsigned)src_fmt,
+                                (int)is_depth_format(src_fmt),
+                                (int)s_screenshot_capture_is_depth,
+                                (__bridge void*)src_tex,
+                                (unsigned)s_screenshot_capture_fmt,
+                                (__bridge void*)s_screenshot_capture_buf);
+                    }
+                    /* Release the retained reference — the blit encoder
+                     * holds its own reference via the MTLBlitEncoder. */
+                    pgraph_mtl_release_framebuffer_metal_texture(fb_tex_handle);
+                } else {
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=nv2a "
+                            "no_front_fb (skipping)\n");
+                    free(filename);
+                    /* Don't set should_fire again; just skip this capture. */
+                    should_fire = false;
+                }
             } else if (s_screenshot_source == 2) {
-                void *t = pgraph_mtl_surface_get_metal_texture_at(
+                /* VRAM address: read from a specific cached SurfaceBinding.
+                 * For now, fall back to drawable if the VRAM path is not
+                 * yet implemented — the vram_addr path is primarily for
+                 * magenta artifact investigation. */
+                fprintf(stderr,
+                        "xemu-perf: metal_screenshot capture source=vram:0x%08x "
+                        "(not yet implemented; falling back to drawable)\n",
+                        s_screenshot_vram_addr);
+                src_tex = s_current_drawable.texture;
+                src_fmt = src_tex.pixelFormat;
+                src_w = src_tex.width;
+                src_h = src_tex.height;
+            } else if (s_screenshot_source == 3) {
+                /* 2026-05-31: depth source — capture the NV2A depth surface
+                 * texture. This is the correct capture path for depth-only
+                 * lanes where the color surface is not the target. */
+                void *depth_tex_handle = pgraph_mtl_surface_get_depth_texture();
+                if (depth_tex_handle != NULL) {
+                    src_tex = (__bridge id<MTLTexture>)depth_tex_handle;
+                    src_fmt = src_tex.pixelFormat;
+                    src_w = src_tex.width;
+                    src_h = src_tex.height;
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=depth "
+                            "w=%lu h=%lu fmt=%u (depth=%d)\n",
+                            (unsigned long)src_w, (unsigned long)src_h,
+                            (unsigned)src_fmt,
+                            (int)is_depth_format(src_fmt));
+                    /* 50O diagnostic: log full capture context. */
+                    if (getenv("XEMU_METAL_DIAG_SCREENSHOT")) {
+                        fprintf(stderr,
+                                "xemu-perf: metal_screenshot_diag capture_ctx "
+                                "w=%lu h=%lu fmt=%u depth=%d "
+                                "is_depth=%d capture_tex=%p "
+                                "capture_fmt=%u capture_buf=%p\n",
+                                (unsigned long)src_w, (unsigned long)src_h,
+                                (unsigned)src_fmt,
+                                (int)is_depth_format(src_fmt),
+                                (int)s_screenshot_capture_is_depth,
+                                (__bridge void*)src_tex,
+                                (unsigned)s_screenshot_capture_fmt,
+                                (__bridge void*)s_screenshot_capture_buf);
+                    }
+
+                    /* 50AP: depth capture diagnostic. Log sibling sync state
+                     * and depth dirty state at screenshot capture time.
+                     * This distinguishes between:
+                     *   A) depth writes never reached the captured sibling
+                     *      (dirty=0, sync_skip=0 or sync_count=0)
+                     *   B) sibling sync skipped the captured sibling
+                     *      (dirty=0, sync_skip>0, sync_count>0)
+                     *   C) depth writes reached the sibling but it was
+                     *      rebound/reset without fresher sync
+                     *      (dirty=1 at some point, but texture is 1.0)
+                     * Controlled by XEMU_METAL_DIAG_DEPTH_CAPTURE=1. */
+                    if (getenv("XEMU_METAL_DIAG_DEPTH_CAPTURE")) {
+                        uint32_t depth_dirty = pgraph_mtl_surface_get_depth_dirty();
+                        uint64_t sync_count = pgraph_mtl_surface_sibling_syncs();
+                        uint64_t sync_skips = pgraph_mtl_surface_sibling_sync_skips();
+                        uint32_t depth_vram = pgraph_mtl_surface_get_depth_vram_addr();
+                        void *depth_tex_ptr = pgraph_mtl_surface_get_depth_texture();
+                        fprintf(stderr,
+                                "xemu-perf: metal_screenshot_depth_capture_diag "
+                                "depth_vram=0x%08x depth_tex=%p depth_dirty=%u "
+                                "sync_count=%lu sync_skips=%lu\n",
+                                depth_vram, depth_tex_ptr, depth_dirty,
+                                (unsigned long)sync_count,
+                                (unsigned long)sync_skips);
+                    }
+                } else {
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=depth "
+                            "no_depth_tex (skipping)\n");
+                    free(filename);
+                    should_fire = false;
+                }
+            } else if (s_screenshot_source == 4) {
+                /* 2026-06-08: depth source at specific vram_addr -- capture
+                 * the NV2A depth surface at a specific VRAM address. This
+                 * is used when the screenshot needs to target a specific
+                 * depth surface (e.g. the contradiction-lane depth) rather
+                 * than whatever s_depth_binding happens to point to. */
+                void *depth_tex_handle = pgraph_mtl_surface_get_metal_texture_at(
                     s_screenshot_vram_addr);
-                if (t != NULL) {
-                    source_tex = (__bridge id<MTLTexture>)t;
+                if (depth_tex_handle != NULL) {
+                    src_tex = (__bridge id<MTLTexture>)depth_tex_handle;
+                    src_fmt = src_tex.pixelFormat;
+                    src_w = src_tex.width;
+                    src_h = src_tex.height;
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=depth_vram:0x%08x "
+                            "w=%lu h=%lu fmt=%u (depth=%d)\n",
+                            s_screenshot_vram_addr,
+                            (unsigned long)src_w, (unsigned long)src_h,
+                            (unsigned)src_fmt,
+                            (int)is_depth_format(src_fmt));
+                    /* 50AP: depth capture diagnostic. Log sibling sync state
+                     * and depth dirty state at screenshot capture time. */
+                    if (getenv("XEMU_METAL_DIAG_DEPTH_CAPTURE")) {
+                        uint32_t depth_dirty = pgraph_mtl_surface_get_depth_dirty();
+                        uint64_t sync_count = pgraph_mtl_surface_sibling_syncs();
+                        uint64_t sync_skips = pgraph_mtl_surface_sibling_sync_skips();
+                        uint32_t depth_vram = pgraph_mtl_surface_get_depth_vram_addr();
+                        void *depth_tex_ptr = pgraph_mtl_surface_get_depth_texture();
+                        fprintf(stderr,
+                                "xemu-perf: metal_screenshot_depth_capture_diag "
+                                "depth_vram=0x%08x depth_tex=%p depth_dirty=%u "
+                                "sync_count=%lu sync_skips=%lu\n",
+                                depth_vram, depth_tex_ptr, depth_dirty,
+                                (unsigned long)sync_count,
+                                (unsigned long)sync_skips);
+                    }
+                } else {
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture source=depth_vram:0x%08x "
+                            "no_texture_at_vram (skipping)\n",
+                            s_screenshot_vram_addr);
+                    free(filename);
+                    should_fire = false;
                 }
             }
-            NSUInteger w = source_tex.width;
-            NSUInteger h = source_tex.height;
-            size_t bytes_per_row   = (size_t)w * 4;
-            size_t total_bytes     = bytes_per_row * (size_t)h;
-            id<MTLBuffer> readback =
-                [s_device newBufferWithLength:total_bytes
-                                       options:MTLResourceStorageModeShared];
-            if (readback != nil) {
-                readback.label = @"xemu.metal.screenshot_readback";
-                id<MTLBlitCommandEncoder> blit =
-                    [s_current_cmd blitCommandEncoder];
-                blit.label = @"xemu.metal.screenshot_blit";
-                [blit copyFromTexture:source_tex
-                          sourceSlice:0
-                          sourceLevel:0
-                         sourceOrigin:MTLOriginMake(0, 0, 0)
-                           sourceSize:MTLSizeMake(w, h, 1)
-                             toBuffer:readback
-                    destinationOffset:0
-               destinationBytesPerRow:bytes_per_row
-             destinationBytesPerImage:total_bytes];
-                /* synchronizeResource: is a no-op for Shared on Apple
-                 * Silicon UMA; included for correctness on hypothetical
-                 * Discrete-GPU paths. */
-                [blit endEncoding];
-
-                uint64_t shot_idx = atomic_fetch_add(&s_screenshots_done, 1) + 1;
-                char *fname = build_screenshot_filename(shot_idx);
-                /* The capturing block holds `readback` alive (ARC
-                 * retains via __strong) until the handler runs. The
-                 * filename buffer is malloc'd; we free it inside the
-                 * block. fpng can fail; log + continue. */
-                uint32_t shot_w = (uint32_t)w;
-                uint32_t shot_h = (uint32_t)h;
-                [s_current_cmd addCompletedHandler:^(id<MTLCommandBuffer> /*cb*/) {
-                    if (fname == NULL) {
-                        return;
-                    }
-                    /* readback is host-Shared; contents() is the raw
-                     * BGRA8 byte array (stride = w*4). */
-                    uint8_t *bytes = (uint8_t *)[readback contents];
-                    if (bytes != NULL) {
-                        bool ok = encode_drawable_png(fname, bytes,
-                                                      shot_w, shot_h);
-                        if (ok) {
-                            atomic_fetch_add(&s_screenshots_taken, 1);
-                            fprintf(stderr,
-                                    "xemu-perf: metal_screenshot_written "
-                                    "path=%s w=%u h=%u\n",
-                                    fname,
-                                    (unsigned)shot_w,
-                                    (unsigned)shot_h);
-                        }
-                    }
-                    free(fname);
-                }];
-            } else {
-                fprintf(stderr,
-                        "xemu-metal: screenshot readback buffer alloc "
-                        "failed (size=%zu); skipping shot frame=%llu\n",
-                        total_bytes,
-                        (unsigned long long)cur_frame);
+            
+            if (src_tex != nil && should_fire) {
+                /* Store the capture state for the addCompletedHandler. */
+                s_screenshot_capture_tex = src_tex;
+                s_screenshot_capture_fmt = src_fmt;
+                s_screenshot_capture_w = src_w;
+                s_screenshot_capture_h = src_h;
+                s_screenshot_capture_filename = filename;
+                s_screenshot_capture_is_depth = is_depth_format(src_fmt);
+                
+                /* Create the host-shared readback buffer. For depth formats,
+                 * we need w*h*4 bytes (RGBA8 output). For BGRA8, we need
+                 * w*h*4 bytes (BGRA8 input, swapped to RGBA8 in-place). */
+                size_t bytes_per_pixel = 4; /* RGBA8 output is always 4 bytes */
+                size_t buffer_size = (size_t)src_w * (size_t)src_h * bytes_per_pixel;
+                
+                /* Release any previous capture buffer. */
+                if (s_screenshot_capture_buf != nil) {
+                    s_screenshot_capture_buf = nil;
+                }
+                
+                s_screenshot_capture_buf =
+                    [s_device newBufferWithLength:buffer_size
+                                          options:MTLResourceStorageModeShared];
+                if (s_screenshot_capture_buf == nil) {
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot capture buffer alloc "
+                            "failed (size=%zu bytes)\n", buffer_size);
+                    s_screenshot_capture_filename = NULL;
+                } else {
+                    /* Create the blit encoder to copy the source texture
+                     * into the readback buffer. */
+                    id<MTLBlitCommandEncoder> blit_enc = [s_current_cmd blitCommandEncoder];
+                    blit_enc.label = @"xemu.metal.screenshot_blit";
+                    
+                    [blit_enc copyFromTexture:src_tex
+                                    sourceSlice:0
+                                    sourceLevel:0
+                                  sourceOrigin:MTLOriginMake(0, 0, 0)
+                                    sourceSize:MTLSizeMake(src_w, src_h, 1)
+                                      toBuffer:s_screenshot_capture_buf
+                                    destinationOffset:0
+                                     destinationBytesPerRow:(NSUInteger)src_w * bytes_per_pixel
+                                   destinationBytesPerImage:(NSUInteger)src_w * (NSUInteger)src_h * bytes_per_pixel];
+                    
+                    [blit_enc endEncoding];
+                    fprintf(stderr,
+                            "xemu-perf: metal_screenshot blit created "
+                            "path=%s w=%lu h=%lu fmt=%u depth=%d\n",
+                            filename, (unsigned long)src_w, (unsigned long)src_h,
+                            (unsigned)src_fmt, (int)s_screenshot_capture_is_depth);
+                }
             }
         }
     }
-
-    /* M10 — frame pacing. Default path: presentDrawable:atTime: with
+    /* M10 â frame pacing. Default path: presentDrawable:atTime: with
      * an explicit deadline computed from vblank_interval_ns and the
      * previous target. Mirrors DuckStation metal_device.mm:2577-2601.
-     *
      * The first frame uses now+vblank_interval_ns as the seed; each
      * subsequent frame extends the previous target by exactly one
      * vblank_interval_ns so guest-frame cadence stays locked to the
@@ -1762,6 +2286,7 @@ void xemu_metal_end_imgui_frame(void)
 
         /* Job 3 — capture frame counting. Once we hit the target,
          * stop capture from inside the callback. stopCapture is
+
          * thread-safe per Apple's MTLCaptureManager docs. The
          * boolean s_capture_active guards against repeat stops if
          * multiple completed-handlers fire close together. */
@@ -1771,6 +2296,102 @@ void xemu_metal_end_imgui_frame(void)
                 stop_metal_capture_if_active();
             }
         }
+
+        auto finish_screenshot_capture = ^(const char *log_prefix,
+                                          char **filename_slot,
+                                          __strong id<MTLBuffer> *buffer_slot,
+                                          __strong id<MTLTexture> *texture_slot,
+                                          NSUInteger width,
+                                          NSUInteger height,
+                                          bool is_depth,
+                                          MTLPixelFormat fmt) {
+            if (*filename_slot == NULL || buffer_slot == nil) {
+                return;
+            }
+
+            const uint8_t *src_bytes =
+                (const uint8_t *)(*buffer_slot).contents;
+            if (src_bytes != NULL) {
+                uint32_t w = (uint32_t)width;
+                uint32_t h = (uint32_t)height;
+                char *filename = *filename_slot;
+
+                /* Allocate the output buffer. For depth formats, we need
+                 * w*h*4 bytes of RGBA8 (grayscale). For BGRA8, we reuse
+                 * the same buffer and swap in-place. */
+                size_t output_size = (size_t)w * (size_t)h * 4;
+                uint8_t *output_buf = (uint8_t *)malloc(output_size);
+                if (output_buf != NULL) {
+                    if (is_depth) {
+                        /* Convert depth format to truthful grayscale:
+                         * near=black (0), far=white (255). */
+                        convert_depth_to_grayscale(output_buf,
+                                                   src_bytes,
+                                                   w, h, fmt);
+                        fprintf(stderr,
+                                "%s depth->gray path=%s w=%u h=%u fmt=%u\n",
+                                log_prefix, filename, w, h, (unsigned)fmt);
+                    } else {
+                        /* BGRA8: copy and swap in-place. */
+                        memcpy(output_buf, src_bytes, output_size);
+                        swap_bgra_to_rgba_in_place(output_buf,
+                                                   (size_t)w * (size_t)h);
+                    }
+
+                    /* Encode PNG. */
+                    static bool s_fpng_inited = false;
+                    if (!s_fpng_inited) {
+                        fpng::fpng_init();
+                        s_fpng_inited = true;
+                    }
+                    bool ok = fpng::fpng_encode_image_to_file(
+                        filename, output_buf, w, h, 4, 0);
+                    if (!ok) {
+                        fprintf(stderr,
+                                "%s fpng_encode failed path=%s\n",
+                                log_prefix, filename);
+                    } else {
+                        fprintf(stderr,
+                                "%s saved path=%s w=%u h=%u depth=%d\n",
+                                log_prefix, filename, w, h, (int)is_depth);
+                    }
+                    free(output_buf);
+                } else {
+                    fprintf(stderr,
+                            "%s output_buf alloc failed (size=%zu)\n",
+                            log_prefix, output_size);
+                }
+            }
+
+            /* Clear the capture state for the next shot. */
+            free(*filename_slot);
+            *filename_slot = NULL;
+            if (buffer_slot != nil) {
+                *buffer_slot = nil;
+            }
+            *texture_slot = nil;
+        };
+
+        /* Job 4 — screenshot capture: if a screenshot was queued, read
+         * the blit buffer, convert depth formats to grayscale if needed,
+         * and write the PNG. This runs on the Metal callback queue after
+         * the GPU has finished the command buffer. */
+        finish_screenshot_capture("xemu-perf: metal_pre_hud_screenshot",
+                                  &s_pre_hud_capture_filename,
+                                  &s_pre_hud_capture_buf,
+                                  &s_pre_hud_capture_tex,
+                                  s_pre_hud_capture_w,
+                                  s_pre_hud_capture_h,
+                                  s_pre_hud_capture_is_depth,
+                                  s_pre_hud_capture_fmt);
+        finish_screenshot_capture("xemu-perf: metal_screenshot",
+                                  &s_screenshot_capture_filename,
+                                  &s_screenshot_capture_buf,
+                                  &s_screenshot_capture_tex,
+                                  s_screenshot_capture_w,
+                                  s_screenshot_capture_h,
+                                  s_screenshot_capture_is_depth,
+                                  s_screenshot_capture_fmt);
     }];
 
     if (s_force_legacy_present) {
@@ -1848,3 +2469,4 @@ void xemu_metal_render_frame(void)
 
     nv2a_release_framebuffer_surface();
 }
+
