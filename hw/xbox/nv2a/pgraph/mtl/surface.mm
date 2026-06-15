@@ -387,11 +387,13 @@ static _Atomic(uint64_t) s_recreate_shape_mismatch = 0;
  * can re-read them under the same lock without tearing. */
 static _Atomic(uint64_t) s_graph_dumps = 0;
 static uint32_t          s_last_publish_source_vram_addr  = 0;
+static uint32_t          s_last_publish_crtc_addr         = 0;
 static void             *s_last_publish_source_texture    = NULL;
 static void             *s_last_publish_published_texture = NULL;
 static const char       *s_last_publish_kind              = NULL;
 static const char       *s_last_publish_reason            = NULL;
 static uint64_t          s_last_publish_seq               = 0;
+static uint64_t          s_flip_ordinal                   = 0;
 
 static bool s_initialized = false;
 
@@ -1855,14 +1857,42 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
 /* ---------------------------------------------------------------- */
 
 bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
+                                         uint32_t crtc_addr,
                                          const char *reason)
 {
     if (!s_initialized) {
         return false;
     }
+    /* M2: record the CRTC address used at publish time so the
+     * capture/diagnostic path can ground the publication telemetry.
+     * Written before the cache lookup so the value is always set
+     * when a publish occurs, even if the cache miss causes an early return. */
+    s_last_publish_crtc_addr = crtc_addr;
     MtlSurfaceBinding *e = cache_get_within(vram_addr);
+    /* M2 diagnostic: log vram_addr, cache hit/miss at publish time. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish vram=0x%x crtc=0x%x ord=%llu reason=%s "
+                "cache=%s\n",
+                (unsigned)vram_addr, (unsigned)crtc_addr, (unsigned long long)s_flip_ordinal, reason ? reason : "?",
+                e ? "HIT" : "MISS");
+    }
     if (e == NULL) {
         return false;
+    }
+    /* M2 diagnostic: log binding details at publish time. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_publish binding vram=0x%x crtc=0x%x ord=%llu "
+                "width=%u height=%u guest_w=%u guest_h=%u "
+                "nv097_fmt=%u mtl_fmt=%u texture=%p is_color=%d "
+                "vram_size=%u pitch=%u reason=%s\n",
+                (unsigned)e->vram_addr, (unsigned)crtc_addr, (unsigned long long)s_flip_ordinal, e->width, e->height,
+                e->guest_width, e->guest_height,
+                e->nv097_format, e->mtl_pixel_format,
+                e->texture, e->is_color,
+                e->size, e->pitch,
+                reason ? reason : "?");
     }
 
     return publish_front_texture(e, reason);
@@ -2333,12 +2363,27 @@ void *pgraph_mtl_get_framebuffer_metal_texture(void)
     if (!s_initialized) {
         return NULL;
     }
+    /* M2 diagnostic: log what we are about to return. */
+    if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+        fprintf(stderr,
+                "xemu-perf: metal_front_fb_get initialized=%d\n",
+                (int)s_initialized);
+    }
 
     void *retained = NULL;
     pthread_mutex_lock(&s_front_framebuffer_lock);
     void *raw = atomic_load(&s_front_framebuffer_texture);
     if (raw != NULL) {
         id<MTLTexture> tex = (__bridge id<MTLTexture>)raw;
+        /* M2 diagnostic: log texture details at get time. */
+        if (getenv("XEMU_METAL_DIAG_FRONT_FB")) {
+            fprintf(stderr,
+                    "xemu-perf: metal_front_fb_get texture=%p crtc=0x%x ord=%llu "
+                    "width=%lu height=%lu fmt=%u\n",
+                    (__bridge void*)tex, pgraph_mtl_surface_get_last_publish_crtc_addr(), (unsigned long long)s_flip_ordinal, (unsigned long)tex.width,
+                    (unsigned long)tex.height,
+                    (unsigned)tex.pixelFormat);
+        }
         retained = (__bridge_retained void *)tex;
     }
     pthread_mutex_unlock(&s_front_framebuffer_lock);
@@ -2372,6 +2417,28 @@ uint64_t pgraph_mtl_surface_cache_entries(void)
 uint64_t pgraph_mtl_surface_graph_dumps(void)
 {
     return atomic_load(&s_graph_dumps);
+}
+
+/* M2 diagnostic (2026-06-04): set the flip-stall ordinal for
+ * publish diagnostic logging. */
+void pgraph_mtl_surface_set_flip_ordinal(uint64_t ordinal)
+{
+    s_flip_ordinal = ordinal;
+}
+
+/* M2 diagnostic (2026-06-04): return the vram_addr of the last
+ * published front-fb surface (the CRTC address used at publish
+ * time). */
+uint32_t pgraph_mtl_surface_get_last_publish_vram_addr(void)
+{
+    return s_last_publish_source_vram_addr;
+}
+/* M2 diagnostic (2026-06-04): return the CRTC address of the last
+ * published front-fb surface.
+ */
+uint32_t pgraph_mtl_surface_get_last_publish_crtc_addr(void)
+{
+    return s_last_publish_crtc_addr;
 }
 
 /* Tool 1 (2026-05-19): structured per-flip dump of every cache binding.

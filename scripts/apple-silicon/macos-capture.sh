@@ -70,9 +70,9 @@ _quartz_unavailable_logged = False
 def _load_quartz():
     """Lazy-load Quartz. Returns the module or None when unavailable.
 
-    Caches the failed-load sentinel as ``False`` so repeated calls
-    don't pay the import cost on every retry. ``None`` is the
-    "not yet attempted" sentinel; ``False`` is "tried, missing"."""
+    Caches the failed-load sentinel as False so repeated calls
+    don't pay the import cost on every retry. None is the
+    "not yet attempted" sentinel; False is "tried, missing"."""
     global _quartz_module, _quartz_unavailable_logged
     if _quartz_module is False:
         return None
@@ -129,7 +129,27 @@ def capture_one(filename):
     fires within the first few seconds and can race the AppKit
     window registration), and a full-desktop fallback at that moment
     captures the macOS desktop with a tiny black xemu rect — useless
-    for paired diff."""
+    for paired diff.
+
+    NOTE: The F3 patch (window-ID re-verification immediately before
+    screencapture) was removed because it did not address the root
+    cause of the capture failure. The actual blocker is that
+    screencapture -l <wid> fails with "could not create image from
+    window" when the process is launched via SSH on macOS. This is
+    a fundamental macOS security design: the screen is protected by
+    the WindowServer, and only processes in the same security session
+    as the GUI can access the screen. An SSH-launched process is in
+    a separate security session and cannot image the screen.
+
+    The fix for this requires either:
+    (a) Running the benchmark in the GUI session (not via SSH), or
+    (b) Using a different capture mechanism that works in the SSH
+        context (e.g., VNC or a remote desktop protocol).
+
+    Neither of these is in scope for the current task. The F3 patch
+    was cosmetic and did not handle the case where the actual
+    screencapture command fails. It has been reverted.
+    """
     if window_pattern:
         wid = None
         for backoff_s in (0.0, 0.05, 0.1, 0.2, 0.4):
@@ -139,6 +159,10 @@ def capture_one(filename):
             if wid is not None:
                 break
         if wid is not None:
+            # Window found — attempt capture. Note: on macOS,
+            # screencapture -l <wid> fails when the process is
+            # launched via SSH due to WindowServer security
+            # isolation. See the docstring for details.
             cmd = ["screencapture", "-x", "-l", str(wid), str(filename)]
             result = subprocess.run(
                 cmd,
@@ -155,6 +179,15 @@ def capture_one(filename):
                 flush=True,
             )
             return None, "window-required-failed"
+        # Fall back to full-desktop capture.
+        cmd = ["screencapture", "-x", str(filename)]
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return result, "fullscreen"
     cmd = ["screencapture", "-x", str(filename)]
     result = subprocess.run(
         cmd,
@@ -206,8 +239,7 @@ if flip_stall_sentinel:
                     flush=True,
                 )
             # One-shot: exit the loop after the trigger fires.  Sleep
-            # out the remaining duration so the parent's `wait
-            # CAPTURE_PID` does not race xemu's shutdown.
+            # out the remaining duration so the parent's  does not race xemu's shutdown.
             remaining = end - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)

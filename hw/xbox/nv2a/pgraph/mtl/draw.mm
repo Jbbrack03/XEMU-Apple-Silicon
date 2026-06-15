@@ -289,17 +289,6 @@ get_depth_stencil_state(uint32_t control_0, uint32_t control_1,
                         uint32_t control_2, bool has_depth_attachment,
                         bool has_stencil_attachment)
 {
-    for (unsigned int i = 0; i < s_depth_stencil_cache_count; i++) {
-        MtlDepthStencilCacheEntry *e = &s_depth_stencil_cache[i];
-        if (e->control_0 == control_0 &&
-            e->control_1 == control_1 &&
-            e->control_2 == control_2 &&
-            e->has_depth_attachment == has_depth_attachment &&
-            e->has_stencil_attachment == has_stencil_attachment) {
-            return e->state;
-        }
-    }
-
     bool force_no_depth_stencil =
         mtl_env_flag_enabled("XEMU_METAL_DEBUG_DISABLE_DEPTH_STENCIL");
     bool depth_test =
@@ -314,6 +303,41 @@ get_depth_stencil_state(uint32_t control_0, uint32_t control_1,
         has_stencil_attachment &&
         !force_no_depth_stencil &&
         (control_1 & NV_PGRAPH_CONTROL_1_STENCIL_TEST_ENABLE) != 0;
+
+    /* 50BB: unbounded diagnostic for z-enable/z-write/z-test state
+     * on every depth-stencil state application (not just creation).
+     * Logs the bound surface address, computed depth_test/depth_write
+     * state, and control register values on every call. Controlled by
+     * XEMU_METAL_DIAG_DEPTH_STATE=1. Only fires for depth attachments
+     * to keep output bounded. Replaces 50AX diagnostic which only
+     * fired on cache misses (state creation). */
+    static _Atomic uint32_t s_depth_state_diag_count = 0;
+    if (has_depth_attachment && getenv("XEMU_METAL_DIAG_DEPTH_STATE") &&
+        atomic_load(&s_depth_state_diag_count) < 256) {
+        atomic_fetch_add(&s_depth_state_diag_count, 1);
+        uint32_t bound_vram = pgraph_mtl_surface_get_depth_vram_addr();
+        fprintf(stderr,
+                "50BB DIAG: depth_stencil_state_apply "
+                "vram=0x%08x depth_test=%d depth_write=%d "
+                "stencil_test=%d "
+                "control_0=0x%08x control_1=0x%08x control_2=0x%08x "
+                "z_func=%u\n",
+                bound_vram, depth_test, depth_write, stencil_test,
+                control_0, control_1, control_2,
+                depth_test ?
+                    (mtl_get_mask(control_0, NV_PGRAPH_CONTROL_0_ZFUNC) & 7u) : 0);
+    }
+
+    for (unsigned int i = 0; i < s_depth_stencil_cache_count; i++) {
+        MtlDepthStencilCacheEntry *e = &s_depth_stencil_cache[i];
+        if (e->control_0 == control_0 &&
+            e->control_1 == control_1 &&
+            e->control_2 == control_2 &&
+            e->has_depth_attachment == has_depth_attachment &&
+            e->has_stencil_attachment == has_stencil_attachment) {
+            return e->state;
+        }
+    }
 
     MTLDepthStencilDescriptor *desc = [MTLDepthStencilDescriptor new];
     desc.depthCompareFunction = MTLCompareFunctionAlways;

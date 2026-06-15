@@ -224,6 +224,7 @@ void pgraph_mtl_release_framebuffer_metal_texture(void *texture);
  * repeated publishes for the same texture are deduped to one line.
  */
 bool pgraph_mtl_surface_publish_front_fb(uint32_t vram_addr,
+                                         uint32_t crtc_addr,
                                          const char *reason);
 bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
                                                  uint32_t display_width,
@@ -247,6 +248,20 @@ bool pgraph_mtl_surface_publish_display_front_fb(uint32_t vram_addr,
  * still valuable for screenshot/capture diagnostics. */
 bool pgraph_mtl_surface_publish_front_fb_pointer_only(uint32_t vram_addr,
                                                       const char *reason);
+
+/* M2 diagnostic (2026-06-04): set the flip-stall ordinal for the
+ * publish diagnostic log. Called from pgraph_mtl_flip_stall before
+ * any publish path so pgraph_mtl_surface_publish_front_fb and
+ * pgraph_mtl_surface_publish_display_front_fb can log the ordinal. */
+void pgraph_mtl_surface_set_flip_ordinal(uint64_t ordinal);
+
+/* M2 diagnostic (2026-06-04): return the vram_addr of the last
+ * published front-fb surface (the CRTC address used at publish
+ * time). Used by pgraph_mtl_get_framebuffer_metal_texture for
+ * correlation between publish and lookup. */
+uint32_t pgraph_mtl_surface_get_last_publish_vram_addr(void);
+/* M2 diagnostic (2026-06-04): CRTC address of last published front-fb. */
+uint32_t pgraph_mtl_surface_get_last_publish_crtc_addr(void);
 
 /*
  * Accessors for the currently-bound color / depth render targets.

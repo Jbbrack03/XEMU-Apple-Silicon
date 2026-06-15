@@ -9,8 +9,10 @@ MCPX="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/mcpx/mcpx_1.0.bin"
 BIOS="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/bios/Complex_4627.bin"
 HDD="/Users/jbbrack03/XEMU_MacOS/Xbox-Emulator-Files/hdd/xbox_hdd.qcow2"
 HDD_SOURCE="${XEMU_BENCH_HDD_SOURCE:-$HDD}"
-TEST_GAMES_DIR="${XEMU_TEST_GAMES_DIR:-/Users/jbbrack03/XEMU_MacOS/Test_Games}"
-ALT_TEST_GAMES_DIR="/Volumes/Final Cut Pro Libraries/Projects/XEMU_MacOS/Test_Games"
+# STORAGE POLICY: game ISOs live on the EXTERNAL disk, never internal.
+# The internal dir is fallback-only; do not download/rebuild ISOs into it.
+TEST_GAMES_DIR="${XEMU_TEST_GAMES_DIR:-/Volumes/Final Cut Pro Libraries/Projects/XEMU_MacOS/Test_Games}"
+ALT_TEST_GAMES_DIR="/Users/jbbrack03/XEMU_MacOS/Test_Games"
 
 find_test_disc() {
     local filename="$1"
@@ -25,7 +27,7 @@ find_test_disc() {
 
 usage() {
     cat <<EOF
-usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] [--metal-no-validate] [--metal-no-hud] crimson|rainbow|pgr2|sc2|halo|flat-tri-depth [input-script.csv] [duration-seconds]
+usage: $0 [--metal-capture <path>] [--metal-screenshot <path>] [--metal-screenshot-at-frame <N>] [--metal-no-validate] [--metal-no-hud] [--gl-screenshot <path>] crimson|rainbow|pgr2|sc2|halo|flat-tri-depth [input-script.csv] [duration-seconds]
 
 Runs xemu with the Apple Silicon scripted-input benchmark harness enabled.
 Outputs logs and a scratch HDD copy under benchmark-runs/.
@@ -64,6 +66,19 @@ Options:
                            present) at which --metal-screenshot fires.
                            Default 60. Maps to
                            XEMU_METAL_SCREENSHOT_AT_FRAME=<N>.
+  --gl-screenshot <path>
+                           F2d (2026-06-02): programmatic PNG screenshot
+                           for the GL renderer. Sets
+                           XEMU_GL_SCREENSHOT_PATH=<path> for the run;
+                           the GL renderer captures the front display
+                           buffer at the next guest flip-stall and
+                           writes it as a PNG. Works with
+                           --capture-at-vblank <N> for deterministic
+                           guest-vblank targeting. Compared with
+                           macOS screencapture, this path takes no
+                           Screen-Recording permission dialog and
+                           never occludes the xemu window.
+                           Requires the GL renderer to be active.
   --metal-no-validate      W1 (2026-05-04) — opt out of the auto-on
                            XEMU_METAL_VALIDATION=1 export that
                            run-benchmark.sh applies whenever
@@ -122,6 +137,47 @@ Options:
                            Log: SKIPPED (isolation predicate) instead of
                            SKIPPED (dim mismatch). Diagnostic field:
                            isolation_breach instead of dim_mismatch.
+  --capture-at-vblank <N>  F2a (2026-06-02): guest-vblank-indexed
+                           capture trigger. Sets
+                           XEMU_METAL_SCREENSHOT_AT_VBLANK=<N> so the
+                           Metal renderer captures at the Nth guest
+                           flip-stall ordinal (1-indexed) instead of
+                           relying on host-side frame counting.
+                           Provides deterministic targeting independent
+                           of macOS presentation behavior.
+  --icount-shift <N>       F2b (2026-06-02): deterministic icount mode.
+                           Adds -icount shift=N to the xemu launch
+                           command. N is the icount shift factor
+                           (default 9 = ~512 instructions per tick
+                           at 500 MHz CPU clock). When set, the
+                           guest CPU runs under integer-only
+                           instruction-counting mode so that the
+                           same savestate + input sequence produces
+                           the same guest-vblank count across runs.
+                           Requires the xemu binary to be built with
+                           icount support (default in QEMU-derived
+                           builds).
+  --replay-mode <mode>     F2b (2026-06-02): record-and-replay mode.
+                           Accepts 'record' or 'replay'. When
+                           'record', adds rr=record,rrfile=<path>
+                           to the icount args so the run writes a
+                           binary replay trace. When 'replay', adds
+                           rr=replay,rrfile=<path> so the run
+                           replays a previously recorded trace.
+                           Requires --icount-shift to be set.
+                           The rrfile path defaults to $RUN_DIR/replay.rr if not specified via
+                           XEMU_BENCH_RRFILE.
+  --hardware-replay <csv>  F2b (2026-06-02): OGX360 hardware controller
+                           replay after savestate restore. Accepts
+                           a path to an xemu-record-input CSV file.
+                           After the loadvm snapshot restore
+                           completes, the harness invokes
+                           controller-replay-hardware.py to replay
+                           the fixed OGX360 hardware input sequence
+                           through the Pro Micro bridge. Requires
+                           --loadvm-tag to be set (hardware replay
+                           is meaningless without a deterministic
+                           restore point).
 EOF
 }
 
@@ -131,12 +187,20 @@ METAL_CAPTURE_PATH=""
 METAL_SCREENSHOT_PATH=""
 METAL_SCREENSHOT_AT_FRAME=""
 METAL_NO_VALIDATE=0
+GL_SCREENSHOT_PATH=""
 METAL_NO_HUD=0
 METAL_SIBLING_SYNC=0
 METAL_SIBLING_SYNC_DEPTH=0
 METAL_SIBLING_SYNC_DEPTH_ONLY=0
 METAL_SIBLING_SYNC_DEPTH_SKIP_DIM_MISMATCH=0
 METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=0
+CAPTURE_AT_VBLANK=""
+
+# F2b: deterministic icount + hardware replay
+ICOUNT_SHIFT=""
+REPLAY_MODE=""
+REPLAY_RRFILE=""
+HARDWARE_REPLAY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --metal-capture)
@@ -173,6 +237,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --metal-screenshot-at-frame=*)
             METAL_SCREENSHOT_AT_FRAME="${1#--metal-screenshot-at-frame=}"
+            shift
+            ;;
+        --gl-screenshot)
+            if [[ $# -lt 2 ]]; then
+                echo "--gl-screenshot requires a path argument" >&2
+                exit 2
+            fi
+            GL_SCREENSHOT_PATH="$2"
+            shift 2
+            ;;
+        --gl-screenshot=*)
+            GL_SCREENSHOT_PATH="${1#--gl-screenshot=}"
             shift
             ;;
         --metal-no-validate)
@@ -213,6 +289,54 @@ while [[ $# -gt 0 ]]; do
             METAL_SIBLING_SYNC_DEPTH_ISOLATION_PREDICATE=1
             shift
             ;;
+        --capture-at-vblank)
+            if [[ $# -lt 2 ]]; then
+                echo "--capture-at-vblank requires a frame number argument" >&2
+                exit 2
+            fi
+            CAPTURE_AT_VBLANK="$2"
+            shift 2
+            ;;
+        --capture-at-vblank=*)
+            CAPTURE_AT_VBLANK="${1#--capture-at-vblank=}"
+            shift
+            ;;
+        --icount-shift)
+            if [[ $# -lt 2 ]]; then
+                echo "--icount-shift requires an integer argument" >&2
+                exit 2
+            fi
+            ICOUNT_SHIFT="$2"
+            shift 2
+            ;;
+        --icount-shift=*)
+            ICOUNT_SHIFT="${1#--icount-shift=}"
+            shift
+            ;;
+        --replay-mode)
+            if [[ $# -lt 2 ]]; then
+                echo "--replay-mode requires 'record' or 'replay'" >&2
+                exit 2
+            fi
+            REPLAY_MODE="$2"
+            shift 2
+            ;;
+        --replay-mode=*)
+            REPLAY_MODE="${1#--replay-mode=}"
+            shift
+            ;;
+        --hardware-replay)
+            if [[ $# -lt 2 ]]; then
+                echo "--hardware-replay requires a CSV path argument" >&2
+                exit 2
+            fi
+            HARDWARE_REPLAY="$2"
+            shift 2
+            ;;
+        --hardware-replay=*)
+            HARDWARE_REPLAY="${1#--hardware-replay=}"
+            shift
+            ;;
         --)
             shift
             break
@@ -230,6 +354,12 @@ done
 
 if [[ $# -lt 1 || $# -gt 3 ]]; then
     usage >&2
+    exit 2
+fi
+
+# F2c: --replay-mode requires --icount-shift
+if [[ -n "$REPLAY_MODE" && -z "$ICOUNT_SHIFT" ]]; then
+    echo "error: --replay-mode requires --icount-shift to be set" >&2
     exit 2
 fi
 
@@ -285,7 +415,7 @@ HDD_IN_PLACE="${XEMU_BENCH_HDD_IN_PLACE:-0}"
 SCRATCH_HDD="${RUN_DIR}/xbox_hdd.qcow2"
 LOG_FILE="${RUN_DIR}/xemu.log"
 META_FILE="${RUN_DIR}/metadata.txt"
-QMP_SOCKET="${RUN_DIR}/qmp.sock"
+QMP_SOCKET="/tmp/qmp-${STAMP}-${GAME_NAME}.sock"
 CONFIG_FILE="${RUN_DIR}/xemu.toml"
 SCREENSHOT_DIR="${RUN_DIR}/screenshots"
 CAPTURE_LOG="${RUN_DIR}/capture.log"
@@ -308,6 +438,23 @@ LOADVM_TAG="${XEMU_BENCH_LOADVM_TAG:-}"
 LOADVM_AT="${XEMU_BENCH_LOADVM_AT:-2}"
 SNAPSHOT_NO_THUMBNAIL="${XEMU_BENCH_SNAPSHOT_NO_THUMBNAIL:-1}"
 EXTRA_QEMU_ARGS="${XEMU_BENCH_EXTRA_QEMU_ARGS:-}"
+
+# F2b: icount + record-and-replay args.
+# icount provides deterministic CPU timing via integer instruction counting.
+# rr=record writes a binary trace; rr=replay replays one.
+# rrfile defaults to $RUN_DIR/replay.rr if not specified.
+F2B_ICOUNT_ARGS=""
+if [[ -n "$ICOUNT_SHIFT" ]]; then
+    F2B_ICOUNT_ARGS="-icount shift=${ICOUNT_SHIFT}"
+    if [[ -n "$REPLAY_MODE" ]]; then
+        RRFILE="${XEMU_BENCH_RRFILE:-${RUN_DIR}/replay.rr}"
+        F2B_ICOUNT_ARGS="${F2B_ICOUNT_ARGS},rr=${REPLAY_MODE},rrfile=${RRFILE}"
+        if [[ "$REPLAY_MODE" == "record" ]]; then
+            # rrsnapshot saves a snapshot after the trace is complete
+            F2B_ICOUNT_ARGS="${F2B_ICOUNT_ARGS},rrsnapshot=f2b-rr-complete"
+        fi
+    fi
+fi
 PORT1_BINDING="keyboard"
 if [[ -n "$RECORD_INPUT" || "$LIVE_INPUT" == "1" ]]; then
     PORT1_BINDING=""
@@ -394,6 +541,18 @@ fi
 # color sync is disabled by default (unset). We do NOT set
 # XEMU_METAL_RTT_SIBLING_SYNC=0 because xemu treats "0" as disabled.
 
+# F2a/F2d: propagate guest-vblank capture target from calling environment
+# so the Metal renderer can use the guest-side flip-stall count for
+# deterministic frame targeting.
+# F2d: also export XEMU_CAPTURE_AT_FLIP_STALL so the GL renderer
+# (which uses the shared flip-stall mechanism) receives the same
+# guest-vblank targeting contract.
+if [[ -n "$CAPTURE_AT_VBLANK" ]]; then
+    export XEMU_METAL_SCREENSHOT_AT_VBLANK="$CAPTURE_AT_VBLANK"
+    export XEMU_CAPTURE_AT_FLIP_STALL="$CAPTURE_AT_VBLANK"
+    echo "Guest-vblank capture: XEMU_METAL_SCREENSHOT_AT_VBLANK=$CAPTURE_AT_VBLANK XEMU_CAPTURE_AT_FLIP_STALL=$CAPTURE_AT_VBLANK"
+fi
+
 # Default to 2 so the per-run config matches the Apple Silicon system
 # build's first-run default (1080p-class, ~7 % renderer-cost growth on
 # PGR2 vs scale 1; see docs/apple-silicon/benchmarks/2026-05-01-gl-vs-metal-decision.md).
@@ -463,6 +622,10 @@ EOF
     echo "loadvm_at_seconds: ${LOADVM_TAG:+$LOADVM_AT}"
     echo "snapshot_no_thumbnail: $SNAPSHOT_NO_THUMBNAIL"
     echo "extra_qemu_args: ${EXTRA_QEMU_ARGS:-none}"
+    echo "f2b_icount_shift: ${ICOUNT_SHIFT:-none}"
+    echo "f2b_replay_mode: ${REPLAY_MODE:-none}"
+    echo "f2b_rrfile: ${XEMU_BENCH_RRFILE:-${RUN_DIR}/replay.rr}"
+    echo "f2b_hardware_replay: ${HARDWARE_REPLAY:-none}"
     echo "surface_scale: $SURFACE_SCALE"
     echo "env_XEMU_BENCH_SURFACE_SCALE: ${XEMU_BENCH_SURFACE_SCALE:-unset}"
     echo "env_XEMU_DISPLAY_SCALE: ${XEMU_DISPLAY_SCALE:-unset}"
@@ -478,6 +641,7 @@ EOF
     echo "env_XEMU_METAL_CAPTURE: ${XEMU_METAL_CAPTURE:-unset}"
     echo "env_XEMU_METAL_CAPTURE_FRAMES: ${XEMU_METAL_CAPTURE_FRAMES:-unset}"
     echo "metal_screenshot_path: ${METAL_SCREENSHOT_PATH:-none}"
+    echo "gl_screenshot_path: ${GL_SCREENSHOT_PATH:-none}"
     echo "metal_screenshot_at_frame: ${METAL_SCREENSHOT_AT_FRAME:-default(180)}"
     echo "env_XEMU_METAL_SCREENSHOT_PATH: ${XEMU_METAL_SCREENSHOT_PATH:-unset}"
     echo "env_XEMU_METAL_SCREENSHOT_AT_FRAME: ${XEMU_METAL_SCREENSHOT_AT_FRAME:-unset}"
@@ -495,6 +659,9 @@ EOF
     sw_vers || true
     uname -m || true
     echo "env_XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ONLY: ${XEMU_METAL_RTT_SIBLING_SYNC_DEPTH_ONLY:-unset}"
+    echo "env_XEMU_METAL_SCREENSHOT_AT_VBLANK: ${XEMU_METAL_SCREENSHOT_AT_VBLANK:-unset}"
+    echo "env_XEMU_CAPTURE_AT_FLIP_STALL: ${XEMU_CAPTURE_AT_FLIP_STALL:-unset}"
+    echo "env_XEMU_GL_SCREENSHOT_PATH: ${XEMU_GL_SCREENSHOT_PATH:-unset}"
     sysctl -n machdep.cpu.brand_string 2>/dev/null || true
     git -C "$ROOT_DIR" rev-parse HEAD || true
     git -C "$ROOT_DIR" status --short || true
@@ -525,6 +692,11 @@ cleanup() {
     if [[ -n "${LOADVM_PID:-}" ]] && kill -0 "$LOADVM_PID" 2>/dev/null; then
         kill "$LOADVM_PID" 2>/dev/null || true
         wait "$LOADVM_PID" 2>/dev/null || true
+    fi
+
+    # F2b: wait for hardware replay to complete
+    if [[ -n "${HARDWARE_REPLAY_PID:-}" ]] && kill -0 "$HARDWARE_REPLAY_PID" 2>/dev/null; then
+        wait "$HARDWARE_REPLAY_PID" 2>/dev/null || true
     fi
 
     RUN_XEMU_PIDS="${XEMU_PID:-}"
@@ -638,7 +810,7 @@ if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
     fi
     # 2026-05-31: depth-only lane — use depth screenshot source
     if [[ "${METAL_SIBLING_SYNC_DEPTH_ONLY:-0}" == "1" ]]; then
-        export XEMU_METAL_SCREENSHOT_SOURCE="depth"
+        export XEMU_METAL_SCREENSHOT_SOURCE="depth_vram:0x038e0000"
     else
         export XEMU_METAL_SCREENSHOT_SOURCE="${XEMU_METAL_SCREENSHOT_SOURCE:-nv2a}"
     fi
@@ -646,6 +818,26 @@ if [[ -n "$METAL_SCREENSHOT_PATH" ]]; then
     # Append screenshot source to metadata (written before screenshot block)
     echo "metal_screenshot_source: ${XEMU_METAL_SCREENSHOT_SOURCE}" >> "$META_FILE"
 fi
+
+# F2d: GL renderer programmatic PNG screenshot. Mirrors the Metal
+# --metal-screenshot path but targets the GL frontend. Sets
+# XEMU_GL_SCREENSHOT_PATH so the GL renderer captures the front
+# display buffer at the next guest flip-stall and writes it as a
+# PNG. Works with --capture-at-vblank <N> for deterministic
+# guest-vblank targeting.
+if [[ -n "$GL_SCREENSHOT_PATH" ]]; then
+    # Convert relative path to absolute (resolved against ROOT_DIR)
+    if [[ "$GL_SCREENSHOT_PATH" != /* ]]; then
+        GL_SCREENSHOT_PATH="${ROOT_DIR}/$GL_SCREENSHOT_PATH"
+    fi
+    # Ensure the screenshot directory exists before xemu tries to write
+    mkdir -p "$(dirname "$GL_SCREENSHOT_PATH")"
+    export XEMU_GL_SCREENSHOT_PATH="$GL_SCREENSHOT_PATH"
+    echo "GL screenshot: $GL_SCREENSHOT_PATH (guest-vblank targeting via XEMU_CAPTURE_AT_FLIP_STALL)"
+    # Append GL screenshot source to metadata
+    echo "gl_screenshot_path: ${GL_SCREENSHOT_PATH}" >> "$META_FILE"
+fi
+
 
 # Tool 2 (2026-05-19): temporal capture mode — every-frame PNG output
 # suitable for `temporal-flicker-analyze.py`. Forces Metal renderer-
@@ -693,22 +885,26 @@ if [[ -n "$RECORD_INPUT" ]]; then
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    XEMU_METAL_DIAG_FRONT_FB=1 \
     ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
       ${EXTRA_QEMU_ARGS} \
+      ${F2B_ICOUNT_ARGS} \
       > "$LOG_FILE" 2>&1 &
 elif [[ "$LIVE_INPUT" == "1" ]]; then
     echo "Using live controller input without recording"
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    XEMU_METAL_DIAG_FRONT_FB=1 \
     ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
       ${EXTRA_QEMU_ARGS} \
+      ${F2B_ICOUNT_ARGS} \
       > "$LOG_FILE" 2>&1 &
 else
     XEMU_SCRIPTED_INPUT="$INPUT_SCRIPT" \
@@ -716,11 +912,13 @@ else
     XEMU_PERF_LOG=1 \
     XEMU_PERF_LOG_INTERVAL_MS="$PERF_LOG_INTERVAL_MS" \
     XEMU_SNAPSHOT_NO_THUMBNAIL="$SNAPSHOT_NO_THUMBNAIL" \
+    XEMU_METAL_DIAG_FRONT_FB=1 \
     ${LAUNCHER_PREFIX} \
     "$XEMU" \
       -config_path "$CONFIG_FILE" \
       -qmp "unix:${QMP_SOCKET},server=on,wait=off" \
       ${EXTRA_QEMU_ARGS} \
+      ${F2B_ICOUNT_ARGS} \
       > "$LOG_FILE" 2>&1 &
 fi
 
@@ -785,6 +983,40 @@ else
     : > "$SNAPSHOT_LOG"
 fi
 
+# F2b: hardware replay after savestate restore.
+# After the loadvm completes, replay a fixed OGX360 hardware input
+# sequence through the Pro Micro bridge. This ensures the same
+# controller state is injected after every deterministic restore.
+HARDWARE_REPLAY_PID=""
+if [[ -n "$HARDWARE_REPLAY" && -n "$LOADVM_TAG" ]]; then
+    HARDWARE_REPLAY_CSV="$HARDWARE_REPLAY"
+    # Resolve relative paths against ROOT_DIR
+    if [[ "$HARDWARE_REPLAY_CSV" != /* ]]; then
+        HARDWARE_REPLAY_CSV="${ROOT_DIR}/${HARDWARE_REPLAY_CSV}"
+    fi
+    if [[ ! -e "$HARDWARE_REPLAY_CSV" ]]; then
+        echo "WARNING: hardware replay CSV not found: $HARDWARE_REPLAY_CSV" >&2
+        HARDWARE_REPLAY_PID=""
+    else
+        HARDWARE_REPLAY_LOG="${RUN_DIR}/hardware-replay.log"
+        (
+            # Wait for loadvm to complete first
+            if [[ -n "${LOADVM_PID:-}" ]]; then
+                wait "$LOADVM_PID" 2>/dev/null || true
+            fi
+            echo "replaying hardware input: $HARDWARE_REPLAY_CSV"
+            python3 "${ROOT_DIR}/scripts/apple-silicon/ogx360-bridge/mac-side/controller-replay-hardware.py" \
+              "$HARDWARE_REPLAY_CSV" \
+              --clear-on-start \
+              --neutral-on-exit \
+              --time-origin zero \
+              > "$HARDWARE_REPLAY_LOG" 2>&1
+        ) &
+        HARDWARE_REPLAY_PID=$!
+        echo "Hardware replay PID: $HARDWARE_REPLAY_PID"
+    fi
+fi
+
 if [[ -n "$SAVEVM_AT" ]]; then
     (
         sleep "$SAVEVM_AT"
@@ -805,6 +1037,10 @@ if [[ -n "${LOADVM_PID:-}" ]]; then
 fi
 if [[ -n "${SAVEVM_PID:-}" ]]; then
     wait "$SAVEVM_PID" 2>/dev/null || true
+fi
+# F2b: wait for hardware replay to complete after the run duration
+if [[ -n "${HARDWARE_REPLAY_PID:-}" ]]; then
+    wait "$HARDWARE_REPLAY_PID" 2>/dev/null || true
 fi
 cleanup
 trap - EXIT INT TERM

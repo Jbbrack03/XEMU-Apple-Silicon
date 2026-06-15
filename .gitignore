@@ -26,6 +26,8 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+*.bak*
+*-bak
 
 build.log
 /dist

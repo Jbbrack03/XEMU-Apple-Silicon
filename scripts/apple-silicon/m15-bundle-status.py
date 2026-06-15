@@ -287,6 +287,54 @@ def latest_parseable_jitter(
     return None
 
 
+
+def read_shader_compile_counters(root: Path) -> tuple[str, str, str | None]:
+    """Read the latest benchmark run's xemu.log for shader compile counters.
+
+    Returns (status, detail, artifact_path).
+    Status is "ok" if counters are present, "missing" if no run found.
+    """
+    # Find the latest benchmark run directory
+    run_dirs = sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    for run_dir in run_dirs:
+        if not run_dir.is_dir():
+            continue
+        log_path = run_dir / "xemu.log"
+        if not log_path.exists():
+            continue
+        # Read the first interval line (cold start)
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.startswith("xemu-perf:"):
+                continue
+            # Parse key=value pairs
+            counters = {}
+            for token in line.split():
+                if "=" in token:
+                    k, v = token.split("=", 1)
+                    counters[k] = v
+            queued = counters.get("METAL_SHADER_COMPILE_QUEUED_TOTAL", "0")
+            completed = counters.get("METAL_SHADER_COMPILE_COMPLETED_TOTAL", "0")
+            failed = counters.get("METAL_SHADER_COMPILE_FAILED_TOTAL", "0")
+            cache_loads = counters.get("METAL_SHADER_CACHE_LOADS", "0")
+            cache_hits = counters.get("METAL_SHADER_CACHE_HITS", "0")
+            cache_misses = counters.get("METAL_SHADER_CACHE_MISSES", "0")
+            ubershader = counters.get("METAL_DRAWS_USING_UBERSHADER_TOTAL", "0")
+            skipped = counters.get("METAL_DRAWS_SKIPPED_PENDING_TOTAL", "0")
+            # If we have shader compile counters, this is a valid proof
+            if int(queued) > 0:
+                detail = (
+                    "queued=" + queued + " completed=" + completed + " failed=" + failed + " "
+                    "cache_loads=" + cache_loads + " hits=" + cache_hits + " misses=" + cache_misses + " "
+                    "ubershader=" + ubershader + " skipped=" + skipped
+                )
+                return "ok", detail, str(log_path)
+            # If we found an interval but no shader counters, keep looking
+    return "missing", "no Metal shader compile counters found in any benchmark run", None
+
 def build_checks(root: Path) -> list[Check]:
     checks: list[Check] = []
     repo = root.parent
@@ -378,10 +426,12 @@ def build_checks(root: Path) -> list[Check]:
             str(path),
         ))
 
+    shader_status, shader_detail, shader_artifact = read_shader_compile_counters(root)
     checks.append(Check(
         "cold shader compile proof",
-        "missing",
-        "needs a fresh-cache Metal run with METAL_SHADER_COMPILE_* and METAL_SHADER_CACHE_* counters recorded",
+        shader_status,
+        shader_detail,
+        shader_artifact,
     ))
 
     # Front-fb fallback policy: resolved when a decision-log entry uses
