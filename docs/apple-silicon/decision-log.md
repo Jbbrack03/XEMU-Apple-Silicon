@@ -1,5 +1,18 @@
 # Decision Log
 
+## 2026-06-15 (Codex validation decommissioned + Hermes orchestration archived — Claude Code operates solo)
+
+**Decision.** Stop using Codex as the checks-and-balances / second-opinion validator and stop using Hermes as the orchestration layer. All of those roles revert to Claude Code working solo: Claude owns implementation, validation, orchestration, and handoffs directly. Codex tooling is removed; the Hermes orchestration framework is archived as inactive (not deleted) for possible future revival, potentially with a different agent.
+
+**Rationale.** Per the user (2026-06-15): the project is no longer using Codex or Hermes. Keeping the `/codex-validate` skill, its two Stop/PostToolUse hooks, and the Hermes orchestration scaffolding active would mean the documented workflow no longer matches how the project actually operates (rule #4 no-drift). The Hermes framework is archived rather than deleted because it may be revived later.
+
+**Outcome.**
+- **Removed (Codex active systems):** `.claude/skills/codex-validate/`, `.claude/hooks/check-codex-validate.sh`, `.claude/hooks/remind-codex-validate-plan.sh`, their registration in `.claude/settings.json` (only `check-doc-sync.sh` Stop hook remains), and the `feedback_codex_validate.md` auto-memory + its `MEMORY.md` index line.
+- **CLAUDE.md:** rule #15 repurposed from "Validate non-trivial work via Codex" to "Self-validate non-trivial work before stopping" (Claude owns checks-and-balances directly; rule numbering preserved so #16/#17 references stay valid). Skills list trimmed to four; Stop-hooks section reduced to one hook; the `orchestration-workflow.md` reference dropped from the doc index.
+- **Archived (Hermes orchestration):** `orchestration-workflow.md` and `orchestration-state/` moved to `docs/apple-silicon/_archive/hermes-orchestration/` with an INACTIVE banner + archive `README.md`. README.md doc-catalog entry updated to point at the archive.
+- **Living docs/rules scrubbed of forward-looking Codex/Hermes procedure** (handoff.md top banner; metal-porting-workflow.md operating loop; benchmarking.md; tooling-gap-plan.md; metal-renderer-plan.md TODOs; diagnostic-xbe-plan.md §6/§7/§9 cadence; nv2a-feature-surface-research.md §6/§8.1 cadence; `.claude/rules/renderer-state.md` + `oracle-and-xbe.md`).
+- **Deliberately left intact as accurate historical records:** source-code provenance comments ("Codex review … finding", "Hermes cycle N"); all `benchmark-runs/*` and `.claude/state/*` run artifacts (incl. `repo-root-hermes-archive/`); `.bak` files; and the append-only cycle narrative in `handoff.md` / earlier `decision-log.md` entries. These describe how past work was done and are not current procedure.
+
 ## 2026-06-02 (reliability re-architecture + autonomous real-Xbox oracle loop)
 
 **Decision.** Re-align the Hermes orchestration off the 252-task PGR2 "50-series" micro-hypothesis spiral and back onto the plan backbone, deploy the missing reliability + correctness mechanisms, and prove the headless real-Xbox autonomous game-test loop.

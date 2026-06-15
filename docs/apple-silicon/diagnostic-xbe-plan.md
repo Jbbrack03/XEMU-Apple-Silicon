@@ -301,10 +301,11 @@ for the diagnostic-XBE library.
 - **Don't re-validate closed default-on flags (rule #11):** the
   existing `flat-tri-depth` XBE is **left untouched**. New XBEs
   go in new directories. Resolves Codex finding #10.
-- **Codex-validate the plan and the changes (rule #15):** this v2
-  plan goes through `/codex-validate plan` before any new nxdk
-  source is written; every batch of new XBEs goes through
-  `/codex-validate changes` before commit.
+- **Self-review the plan and the changes (rule #15):** this v2
+  plan gets a deliberate Claude self-review pass before any new
+  nxdk source is written; every batch of new XBEs gets a
+  self-review pass before commit. Claude owns checks-and-balances
+  directly; there is no external validator.
 
 ## 3. Shared infrastructure
 
@@ -967,7 +968,7 @@ Approximate total: ~70 XBEs.
 
 1. **Design review.** Source-file header completed (math, citations,
    tier, oracle priority). Manifest validated against schema. Diff
-   passes `/codex-validate plan` (XBE source header + manifest
+   passes a self-review pass per rule #15 (XBE source header + manifest
    are the inline plan).
 2. **Build.** `make` produces `bin/default.xbe` + `<xbe>.iso`.
    Build order: `lib/` first, then `lib-smoke/`, then per-XBE.
@@ -975,7 +976,7 @@ Approximate total: ~70 XBEs.
    `expected_fail` entry. Two consecutive runs: byte-identical
    after applying mask.
 4. **Self-test on xemu-Metal.** Same criteria.
-5. **Math audit.** Independent reviewer (or Codex) reads the XBE
+5. **Math audit.** A deliberate independent self-review reads the XBE
    header derivation against the catalog; reads paired `expected.py`;
    confirms they say the same thing. This is the step that prevents
    "XBE built against a guess."
@@ -1000,21 +1001,21 @@ Approximate total: ~70 XBEs.
   NOT touch `flat-tri-depth/` (Codex finding #10).
 - Build harness skeleton (`xbe-orchestrator.py` + per-renderer
   backends). xemu-GL and xemu-Metal backends first.
-- Codex-validate the harness + lib API as `changes` mode batch.
+- Self-review (rule #15) the harness + lib API as a batch.
 
 **Phase 1 — first 3 priority XBEs (Day 4-7).**
 
 - `mirror`, `color-channel`, `depth-floor`.
-- Codex-validate as `changes` batch.
+- Self-review (rule #15) as a batch.
 - Run on xemu-GL + xemu-Metal; confirm SC2-bug-class detection
   works as designed.
 - If catalog or contract needs revision based on what the first 3
-  reveal, revise + re-Codex-validate before continuing.
+  reveal, revise + re-review before continuing.
 
 **Phase 2 — rest of first wave (Week 2).**
 
 - XBEs 4-16 in priority order.
-- Codex-validate in batches of 3-4.
+- Self-review (rule #15) in batches of 3-4.
 - Each addition runs the regression rotation immediately to catch
   coupling bugs early.
 
@@ -1031,7 +1032,7 @@ user retrieves Xbox).**
 **Phase 4 — second wave (Week 4-6).**
 
 - ~50 XBEs covering remaining catalog sections.
-- Codex-validate per batch.
+- Self-review (rule #15) per batch.
 - Real-Xbox reference captures as XBEs come online (if hardware
   is up).
 
@@ -1074,21 +1075,21 @@ Codex resolved most v1 open questions; new ones for v2:
    want to ship without controller-injection automation and just
    manually drive games to canonical states?
 
-## 9. Codex-validation cadence
+## 9. Self-validation cadence
 
-Per project rule #15 + catalog §8.1 + this plan §2.8:
+Per project rule #15 + catalog §8.1 + this plan §2.8. Claude owns
+checks-and-balances directly; there is no external validator. A
+deliberate self-review pass per rule #15 lands at each of these
+points:
 
-- **This v2 plan** goes through `/codex-validate plan
-  docs/apple-silicon/diagnostic-xbe-plan.md` BEFORE any new nxdk
-  source is written. (Pending; v1 Codex-validation returned
-  BLOCKING; v2 should resolve all 12 findings; re-validation
-  gates the next step.)
-- **`xbe-tests/lib/` API** goes through `/codex-validate changes`
-  after Phase 0 build.
-- **Each XBE batch** (typically 3-4) goes through
-  `/codex-validate changes` before commit.
-- **Catalog updates** that motivate XBE additions go through
-  `/codex-validate plan` per catalog §8.1.
+- **This v2 plan** gets a self-review pass per rule #15 BEFORE any
+  new nxdk source is written.
+- **`xbe-tests/lib/` API** gets a self-review pass per rule #15
+  after Phase 0 build, before commit.
+- **Each XBE batch** (typically 3-4) gets a self-review pass per
+  rule #15 before commit.
+- **Catalog updates** that motivate XBE additions get a self-review
+  pass per rule #15 per catalog §8.1.
 
 ## 10. Summary of what changed from v1 (Codex BLOCKING resolution)
 

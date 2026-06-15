@@ -2202,8 +2202,9 @@ plan doc (`diagnostic-xbe-plan.md`):
   rather than blocking promotion. Promotion gates on the
   mathematical oracle plus self-validation passing on at least one
   renderer.
-- **Codex-validate the design** before nxdk source is written
-  (project rule #15, plan-mode trigger).
+- **Self-review the design (rule #15)** before nxdk source is written.
+  Claude owns checks-and-balances directly; there is no external
+  validator.
 - **Reproducibility check** — two cold runs must produce
   byte-identical output (no timing leaks, no uninitialized
   memory).
@@ -2214,13 +2215,13 @@ Per Codex review, this catalog is the source of truth for the XBE
 plan; if the catalog has a witness-attribution error or a missed
 feature, every XBE downstream inherits the bug. Therefore:
 
-- **Catalog diffs go through `/codex-validate plan <path>`** before
+- **Catalog diffs get a deliberate self-review pass (rule #15)** before
   expansion of the XBE plan they motivate.
 - The original creation of this catalog (2026-05-05) was
   Codex-validated in `plan` mode and returned MAJOR ISSUES; the
   fixes are this revision. Subsequent meaningful catalog updates
   (new feature classes discovered, new pitfalls surfaced) repeat
-  the Codex-validate step.
+  the self-review step.
 
 ### 6.5 Note on `NV097_GET_REPORT` Metal stub
 
@@ -2353,20 +2354,20 @@ extended to cover it. The catalog is the single source of truth for
 This catalog is the source of truth that drives all downstream XBE
 designs. Witness-attribution errors here propagate. Therefore:
 
-1. **Initial creation**: Codex-validated in `plan` mode, fixes
-   applied (this revision, 2026-05-05).
+Claude owns checks-and-balances directly per rule #15; there is no
+external validator.
+
+1. **Initial creation**: self-reviewed, fixes applied (this
+   revision, 2026-05-05).
 2. **Substantive revisions**: any catalog change that adds a feature
    class, retracts a witness claim, or changes a self-validation
-   recommendation re-runs `/codex-validate plan
-   docs/apple-silicon/nv2a-feature-surface-research.md` before the
-   diagnostic XBE plan that depends on it is updated.
-3. **Diagnostic XBE plan**: `diagnostic-xbe-plan.md` itself is
-   Codex-validated in `plan` mode before any nxdk source is written
-   (project rule #15).
-4. **First-build XBEs**: Codex-validated in `changes` mode after
-   nxdk source lands but before the XBE is promoted to a regression
-   gate (project rule #15 hook).
+   recommendation gets a deliberate self-review pass (rule #15)
+   before the diagnostic XBE plan that depends on it is updated.
+3. **Diagnostic XBE plan**: `diagnostic-xbe-plan.md` itself gets a
+   self-review pass (rule #15) before any nxdk source is written.
+4. **First-build XBEs**: self-reviewed (rule #15) after nxdk source
+   lands but before the XBE is promoted to a regression gate.
 
 Trivial catalog edits (typos, citation-line-number tweaks) skip
-the cadence per project rule #15's "trivial work skips the gate
-automatically" clause.
+the cadence per project rule #15's "trivial work skips the
+self-review automatically" clause.

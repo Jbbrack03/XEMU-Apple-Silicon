@@ -12,7 +12,7 @@ decision-log "2026-05-19 (night)"). Prior 2026-05-11: M15 checklist
 and paired-capture finding.
 
 This note records the feedback gaps that matter for the Metal backend and how
-to close them without turning every Codex session into a pile of background
+to close them without turning every session into a pile of background
 tools. The rule of thumb is simple: prefer tools that produce repeatable
 artifacts under `benchmark-runs/`, and keep interactive tools opt-in.
 
@@ -22,7 +22,7 @@ Status:
 
 - Xcode's `mcpbridge` is installed at
   `/Applications/Xcode.app/Contents/Developer/usr/bin/mcpbridge`.
-- Codex has an `[mcp_servers.xcode]` entry, but it is globally disabled.
+- The Xcode MCP server can be wired into an agent's MCP config, but it is kept globally disabled.
 - The main xemu tree is not an Xcode project. It builds through the existing
   Meson/CMake/app-bundle path (`./build.sh -a arm64`).
 - The in-tree Swift component is `tools/xemu-capture/Package.swift`; that is
@@ -31,7 +31,7 @@ Status:
 Policy:
 
 - Do not enable Xcode MCP globally for this project. It previously caused
-  unwanted Xcode activity at every Codex start.
+  unwanted Xcode activity at every agent/session start.
 - Use Xcode MCP only for a targeted task that genuinely needs Xcode project
   semantics: Swift Package work in `tools/xemu-capture/`, Xcode previews in a
   future UI project, or explicit GPU trace inspection.

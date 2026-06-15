@@ -1,3 +1,12 @@
+> **ARCHIVED / INACTIVE as of 2026-06-15.** This document describes the
+> decommissioned Hermes orchestration model and the Codex external-validation
+> step. Neither is in use. The project now operates with **Claude Code working
+> solo** — Claude owns implementation, validation, orchestration, and handoffs
+> directly (CLAUDE.md rule #15). Preserved as a reference design only; it may be
+> revived in future, potentially with a different agent. Do not treat anything
+> below as a current operating procedure. See `../../handoff.md` for current
+> state.
+
 # Claude Code Orchestration Workflow
 
 Last updated: 2026-05-21 (Hermes supervision model formalized for the Apple

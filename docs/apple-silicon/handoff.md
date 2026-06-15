@@ -1,5 +1,15 @@
 # Handoff
 
+> **Workflow note (2026-06-15):** The project now operates with **Claude Code
+> working solo.** The Codex external-validation step has been decommissioned
+> (checks-and-balances are Claude's own responsibility per CLAUDE.md rule #15),
+> and the Hermes multi-agent orchestration layer has been archived as inactive
+> under `_archive/hermes-orchestration/` (may be revived in future, possibly
+> with a different agent). All cycle entries below predate this change and are
+> preserved verbatim as historical records — their references to "Codex" passes
+> and "Hermes"-supervised cycles describe how that work was done at the time and
+> are **not** current procedure.
+
 Last updated: 2026-05-26 (cycle 45B oracle-agent JSON diagnostics review-fix closed on the root branch; the next active slice is cycle 45C, a bounded strategic-checkpoint scout to rank the best consumer-side adoption of the new JSON diagnostics.)
 
 Latest cycle-45B closure note: cycle 45B oracle-agent JSON diagnostics review-fix closeout — **CLOSED on `apple-silicon-performance`**; bounded Codex fallback + review-fix continuation landed on the root branch after the continuation result artifact and updated review both confirmed the two remaining issues were resolved. The bounded source diff stays in `scripts/apple-silicon/xbe-tests/oracle-agent/commands.c`: JSON-mode error responses now use the same top-level envelope discipline as JSON-mode success responses, and `runxbe path=... --json` now strips a trailing standalone `--json` token before copying the XBE path. Supervisor-owned `git diff --check -- scripts/apple-silicon/xbe-tests/oracle-agent/commands.c` and the bounded oracle-agent build smoke both passed. No live worker remains for 45B, so the ACTIVE state was stale and has been closed. Recommended next slice: cycle 45C strategic-checkpoint scout — a bounded read-heavy pass that ranks the best post-45B consumer-side adoption of the new JSON diagnostics so the workflow gains practical robustness rather than stopping at producer-side support alone.

@@ -442,7 +442,7 @@ Initial tools:
 
 - xemu HUD/statistics if available.
 - `scripts/apple-silicon/run-benchmark.sh` for scripted-input benchmark runs.
-- Computer Use screenshots for live route verification when running from Codex.
+- Screenshots for live route verification when running from a headless/sandboxed session.
 - macOS Activity Monitor / `powermetrics` for high-level CPU/GPU pressure.
 - Xcode Instruments:
   - Time Profiler
@@ -466,7 +466,7 @@ Automation notes:
   - `XEMU_BENCH_SAVEVM_TAG`
   - `XEMU_BENCH_LOADVM_TAG`
   - `XEMU_BENCH_HDD_SOURCE`
-- Use `XEMU_BENCH_SCREENSHOT_BACKEND=none` when tuning routes from Codex; QMP
+- Use `XEMU_BENCH_SCREENSHOT_BACKEND=none` when tuning routes from a headless/sandboxed session; QMP
   framebuffer capture has crashed Apple OpenGL-on-Metal, and macOS
   `screencapture` may not have display access in this environment.
 - `scripts/apple-silicon/extract-perf-summary.sh` summarizes a run directory or

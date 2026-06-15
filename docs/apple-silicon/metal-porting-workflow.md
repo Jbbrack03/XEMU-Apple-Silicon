@@ -584,8 +584,9 @@ Phase 1 sessions that change Metal renderer code must:
    and run `/sync-docs` before ending the session
    (project rule #4).
 
-3. Run `/codex-validate changes` per project rule #15 if the
-   uncommitted Metal-side diff exceeds 30 lines.
+3. Do a deliberate self-review pass per project rule #15 if the
+   uncommitted Metal-side diff exceeds 30 lines (Claude owns
+   checks-and-balances directly; there is no external validator).
 
 ---
 
@@ -1225,4 +1226,5 @@ subset; the §7.1 primary path is sufficient until then.
 - workspace `CLAUDE.md` "Working rules" (loaded automatically via
   the directory-walk from this fork) — project rules #1 (no
   guessing), #4 (no doc drift), #5 (build tools when blocked), #15
-  (Codex-validate triggers) directly bind the workflow above.
+  (self-validate non-trivial work before stopping) directly bind the
+  workflow above.
