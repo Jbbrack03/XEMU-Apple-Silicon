@@ -174,14 +174,27 @@ static const OpCell k_cells[GRID_CELLS] = {
                       { 1.0f, 0.0f, 0.0f } },  /* RED (reused) */
 };
 
-#define TRI_VERTS_PER_QUAD 6
+/* Per-cell: 2 quads (op + probe) × 6 verts per quad = 12 verts per cell.
+ * Total = 8 cells × 12 = 96 verts. The op and probe quads share identical
+ * geometry but carry DIFFERENT colors (op = BLACK, probe = cell color), so
+ * they MUST occupy distinct 6-vert slots — they cannot be collapsed to a
+ * single 6-vert quad. The whole buffer is written ONCE before the render
+ * loop and never overwritten mid-stream; the previous single-quad,
+ * overwrite-in-place layout raced the host's lazy vertex fetch (the renderer
+ * reads vertices from live guest VRAM at flush), so every cell decoded the
+ * last-written cell's geometry. See blend-matrix/main.c for the same
+ * write-once idiom. */
+#define VERTS_PER_QUAD  6
+#define QUADS_PER_CELL  2  /* op then probe */
+#define VERTS_PER_CELL  (VERTS_PER_QUAD * QUADS_PER_CELL)
+#define VERTS_TOTAL     (GRID_CELLS * VERTS_PER_CELL)
+
 typedef struct {
     float pos[3];
     float color[3];
 } __attribute__((packed)) ColoredVertex;
 
-/* Buffer for a single quad's 6 verts; we re-issue per cell per pass. */
-static ColoredVertex s_quad_verts[TRI_VERTS_PER_QUAD];
+static ColoredVertex s_verts[VERTS_TOTAL];
 static ColoredVertex *s_alloc_verts;
 
 static inline void mk_vert(ColoredVertex *v, int x_w, int y_w,
@@ -195,17 +208,41 @@ static inline void mk_vert(ColoredVertex *v, int x_w, int y_w,
     v->color[2] = b;
 }
 
-/* Emit a single quad as 6 verts (two triangles, A-B-C / A-C-D). All
- * 6 verts carry the same color so smooth interpolation is uniform. */
-static void build_quad(int x0, int y0, int x1, int y1,
-                       float r, float g, float b)
+/* Emit a single quad as 6 verts (two triangles, A-B-C / A-C-D) into
+ * out[0..5]. All 6 verts carry the same color so smooth interpolation is
+ * uniform. */
+static void emit_quad(ColoredVertex *out, int x0, int y0, int x1, int y1,
+                      float r, float g, float b)
 {
-    mk_vert(&s_quad_verts[0], x0, y0, r, g, b);
-    mk_vert(&s_quad_verts[1], x1, y0, r, g, b);
-    mk_vert(&s_quad_verts[2], x1, y1, r, g, b);
-    mk_vert(&s_quad_verts[3], x0, y0, r, g, b);
-    mk_vert(&s_quad_verts[4], x1, y1, r, g, b);
-    mk_vert(&s_quad_verts[5], x0, y1, r, g, b);
+    mk_vert(&out[0], x0, y0, r, g, b);
+    mk_vert(&out[1], x1, y0, r, g, b);
+    mk_vert(&out[2], x1, y1, r, g, b);
+    mk_vert(&out[3], x0, y0, r, g, b);
+    mk_vert(&out[4], x1, y1, r, g, b);
+    mk_vert(&out[5], x0, y1, r, g, b);
+}
+
+/* Build all 96 verts ONCE before the render loop. Per cell, slot
+ * [idx*12 + 0..5] holds the op quad (BLACK) and [idx*12 + 6..11] holds the
+ * probe quad (cell color); both cover the cell rect exactly. */
+static void build_geometry(void)
+{
+    for (int row = 0; row < GRID_ROWS; row++) {
+        for (int col = 0; col < GRID_COLS; col++) {
+            const int idx = row * GRID_COLS + col;
+            const int x0 = col * CELL_W;
+            const int y0 = row * CELL_H;
+            const int x1 = x0 + CELL_W;
+            const int y1 = y0 + CELL_H;
+            ColoredVertex *cell = &s_verts[idx * VERTS_PER_CELL];
+            /* op quad: opaque BLACK (probe FAIL leaves the cell black). */
+            emit_quad(&cell[0], x0, y0, x1, y1, 0.0f, 0.0f, 0.0f);
+            /* probe quad: the cell's EXPECTED color. */
+            emit_quad(&cell[VERTS_PER_QUAD], x0, y0, x1, y1,
+                      k_cells[idx].rgb[0], k_cells[idx].rgb[1],
+                      k_cells[idx].rgb[2]);
+        }
+    }
 }
 
 static void enforce_common_state(void)
@@ -285,29 +322,26 @@ static void bind_attribs(void)
 
 static void render_cell(int col, int row, const OpCell *cell)
 {
+    const int idx = row * GRID_COLS + col;
     const int x0 = col * CELL_W;
     const int y0 = row * CELL_H;
-    const int x1 = x0 + CELL_W;
-    const int y1 = y0 + CELL_H;
+    const int base = idx * VERTS_PER_CELL;
 
     /* Step 1: clear stencil for this cell area to INITIAL_STENCIL. */
     clear_stencil_rect(x0, y0, CELL_W, CELL_H, INITIAL_STENCIL);
 
-    /* Step 2: op pass — draw the cell area with the op applied; color
-     * is BLACK so a probe-pass FAIL leaves the cell black. */
+    /* Step 2: op pass — draw the cell area with the op applied; the op
+     * quad's color is BLACK so a probe-pass FAIL leaves the cell black.
+     * Geometry is prebuilt in s_alloc_verts[base .. base+5]. */
     issue_op_pass(cell->op);
-    build_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f);
-    memcpy(s_alloc_verts, s_quad_verts, sizeof(s_quad_verts));
-    bind_attribs();
-    xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, 0, TRI_VERTS_PER_QUAD);
+    xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, base, VERTS_PER_QUAD);
 
-    /* Step 3: probe pass — stencil test EQUAL expected; color =
-     * EXPECTED if it passes. */
+    /* Step 3: probe pass — stencil test EQUAL expected; the probe quad's
+     * color = EXPECTED if it passes. Geometry is prebuilt in
+     * s_alloc_verts[base+6 .. base+11]. */
     issue_probe_pass(cell->expected_stencil);
-    build_quad(x0, y0, x1, y1, cell->rgb[0], cell->rgb[1], cell->rgb[2]);
-    memcpy(s_alloc_verts, s_quad_verts, sizeof(s_quad_verts));
-    bind_attribs();
-    xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES, 0, TRI_VERTS_PER_QUAD);
+    xbed_draw_arrays(NV097_SET_BEGIN_END_OP_TRIANGLES,
+                     base + VERTS_PER_QUAD, VERTS_PER_QUAD);
 }
 
 static void render_one(uint32_t frame_idx, void *ctx)
@@ -318,6 +352,7 @@ static void render_one(uint32_t frame_idx, void *ctx)
     xbed_clear_color_argb(0xFF000000);
     xbed_load_viewport_matrix();
     enforce_common_state();
+    bind_attribs();
 
     for (int row = 0; row < GRID_ROWS; row++) {
         for (int col = 0; col < GRID_COLS; col++) {
@@ -335,8 +370,10 @@ int main(void)
     xbed_set_default_render_state();
     xbed_load_default_shaders();
 
+    build_geometry();
+
     s_alloc_verts = MmAllocateContiguousMemoryEx(
-        sizeof(s_quad_verts), 0, 0x3ffb000, 0,
+        sizeof(s_verts), 0, 0x3ffb000, 0,
         PAGE_READWRITE | PAGE_WRITECOMBINE);
     if (!s_alloc_verts) {
         debugPrint("MmAllocateContiguousMemoryEx failed\n");
@@ -344,6 +381,7 @@ int main(void)
         HalReturnToFirmware(HalRebootRoutine);
         return 1;
     }
+    memcpy(s_alloc_verts, s_verts, sizeof(s_verts));
 
     xbed_render_loop_then_capture(
         render_one, NULL, /*n_frames=*/300,
