@@ -1,0 +1,41 @@
+{
+  "id": "alpha-test",
+  "title": "8 NV2A alpha-test (func, ref) combinations",
+  "purpose": "Render an 8-cell 4x2 grid isolating the NV2A alpha-test ROP gate (NV097_SET_ALPHA_TEST_ENABLE 0x0300 + NV097_SET_ALPHA_FUNC 0x033C + NV097_SET_ALPHA_REF 0x0340). Per cell: an alpha-test-OFF BLUE background quad is drawn, then an alpha-test-ON RED quad (per-cell alpha A) with the cell's (func, ref=0x80). RED survives only if the alpha test passes; otherwise it is discarded and BLUE shows through. Captured cell = RED (pass) or BLUE (discard); both saturated 0/255 endpoints so byte-exact across renderers. Funcs use the raw 0-indexed PshAlphaFunc enum (NEVER=0,LESS=1,EQUAL=2,LEQUAL=3,GREATER=4,NOTEQUAL=5,GEQUAL=6,ALWAYS=7), verified against hw/xbox/nv2a/pgraph/psh_regs.h:162 and the no-remap path in pgraph.c SET_ALPHA_FUNC. Cells: (0) NEVER A=0xFF discard; (1) ALWAYS A=0x00 pass; (2) LESS A=0x40 pass; (3) LESS A=0xC0 discard; (4) GEQUAL A=0x80 pass; (5) GREATER A=0x80 discard; (6) EQUAL A=0x80 pass; (7) NOTEQUAL A=0x80 discard. Cells 4-7 are A==ref boundary discriminators for >= vs > and == vs != off-by-ones and the 0-indexed func decode. Blend/depth/stencil OFF so alpha test is the only variable; foreground RGB opaque, only its ALPHA drives the test. LEQUAL and non-128 ref sweeps + mid-range fractional alpha are second-wave follow-ups.",
+  "catalog_ref": "§F.2",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\alpha-test-capture.bin",
+      "ftp_path": "/E/Apps/alpha-test/alpha-test-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\alpha-test-done.txt",
+      "ftp_path": "/E/Apps/alpha-test/alpha-test-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": []
+}
