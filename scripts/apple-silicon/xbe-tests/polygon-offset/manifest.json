@@ -1,0 +1,41 @@
+{
+  "id": "polygon-offset",
+  "title": "8 NV2A polygon offset / depth bias combinations",
+  "purpose": "Render an 8-cell 4x2 grid isolating the NV2A polygon-offset / depth-bias path (NV097_SET_POLY_OFFSET_FILL_ENABLE 0x0338 + NV097_SET_POLYGON_OFFSET_SCALE_FACTOR 0x0384 -> NV_PGRAPH_ZOFFSETFACTOR + NV097_SET_POLYGON_OFFSET_BIAS 0x0388 -> NV_PGRAPH_ZOFFSETBIAS). Per cell: a polygon-offset-OFF GREEN base quad is drawn at clip z=0.5, then a RED quad (same plane) with the cell's polygon-offset config, under LEQUAL depth test. RED survives only when its biased depth wins LEQUAL; otherwise GREEN shows through. In this fork (PR #2240 / XEMU_NATIVE_TRI_DEPTH) polygon offset is applied in the FRAGMENT SHADER (shared glsl/psh.c: zvalue += depthOffset; zvalue += depthFactor*nativeTriMZ), NOT via glPolygonOffset/setDepthBias; Metal consumes the same generated GLSL, so GL and Metal MUST agree. clipRange.y = 16777215 for the pbkit default fixed-point Z24S8 zeta, so units (depthOffset) is added in window-depth units. Cells: (0) offset OFF -> RED tie; (1) ON units=factor=0 -> RED tie; (2) ON +100000 units -> GREEN; (3) ON -100000 units -> RED; (4) ON +8000000 units -> GREEN; (5) ON -8000000 units -> RED; (6) ON +10 factor on a sloped quad -> GREEN; (7) ON -10 factor on a sloped quad -> RED. Cells 0/1 are the offset-machinery-off and zero-magnitude controls; 2-5 sweep the units (bias) sign and magnitude; 6-7 exercise the factor (slope) term and its sign. Blend/stencil/cull OFF; depth test + polygon offset are the only variables; saturated 0/255 endpoints for byte-exact cross-renderer compare. POINT/LINE offset enables and the w-buffer (z_perspective) factor path are second-wave follow-ups.",
+  "catalog_ref": "§C.3",
+  "self_validation_tier": 1,
+  "oracle_priority": ["real-xbox", "math-derived"],
+  "duration_seconds": 6,
+  "capture_at_flip_stall_ordinal": null,
+  "non_deterministic_regions": [],
+  "requires_flags": [
+    "XEMU_DISPLAY_SCALE=1",
+    "XEMU_METAL_HUD=0"
+  ],
+  "artifacts": {
+    "capture_blob": {
+      "xbox_path": "D:\\polygon-offset-capture.bin",
+      "ftp_path": "/E/Apps/polygon-offset/polygon-offset-capture.bin",
+      "format": "XOSS+raw-bgrx",
+      "stride_bytes_per_row": 2560,
+      "width": 640,
+      "height": 480
+    },
+    "done_marker": {
+      "xbox_path": "D:\\polygon-offset-done.txt",
+      "ftp_path": "/E/Apps/polygon-offset/polygon-offset-done.txt"
+    }
+  },
+  "compare_overrides": {
+    "max_changed_pct": 3.0,
+    "min_signal_match_pct": 97.0
+  },
+  "expected_results": {
+    "any/any/any": {
+      "kind": "math-derived",
+      "generator": "expected.py:default",
+      "tolerance": "exact"
+    }
+  },
+  "expected_fail_renderers": ["xemu/metal"]
+}
