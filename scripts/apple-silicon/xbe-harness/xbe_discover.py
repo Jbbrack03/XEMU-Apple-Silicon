@@ -105,6 +105,24 @@ class XbeManifest:
         return self.dir / "expected.py"
 
     @property
+    def is_tier4_capture_blob(self) -> bool:
+        """True for a Tier-4 visual-only XBE whose authoritative oracle
+        is the XOSS `capture_blob` it writes to D:\\ (e.g. pipeline-smoke).
+
+        Such an XBE CPU-paints the front buffer and reboots; it does NOT
+        exercise the NV2A pgraph pipeline. The drawable-screenshot board
+        cannot validate it on xemu: (a) the front-buffer paint+reboot
+        completes before the board's at-frame=30 capture, so the
+        selector lands on a post-reboot dashboard frame, and (b) the
+        XOSS blob is written to D:\\ which on xemu is the read-only DVD,
+        so it can't be pulled the way the real-Xbox FTP path pulls it.
+        Its only valid oracle is the real-Xbox run-diag/XOSS path
+        (see xbe_renderers.run_real_xbox). Routed accordingly by the
+        orchestrator's matrix runner."""
+        return (self.self_validation_tier == 4 and
+                "capture_blob" in (self.artifacts or {}))
+
+    @property
     def real_xbox_reference_dir(self) -> Path:
         """Where canonical real-Xbox reference frames live for this XBE.
         Created on demand by `xbe-harness capture-reference`."""

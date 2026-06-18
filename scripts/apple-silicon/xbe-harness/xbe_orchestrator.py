@@ -158,6 +158,36 @@ def run_matrix(xbe_ids: List[str], renderers: List[str], out_root: Path,
                 })
                 continue
 
+            # Tier-4 capture_blob XBEs (e.g. pipeline-smoke) are
+            # validated by the XOSS blob they write to D:\ (byte-exact
+            # vs expected.py), NOT by the drawable-screenshot board.
+            # On a xemu renderer the board can't validate them: the XBE
+            # CPU-paints the front buffer and reboots before the
+            # at-frame=30 capture fires, so the frame selector lands on
+            # a post-reboot dashboard frame (METAL_SPURIOUS) and FAILs
+            # spuriously; and the D:\ blob is unreachable on xemu (D:\
+            # is the read-only DVD). Skip the xemu drawable comparison
+            # and let the real-xbox leg (xbe_renderers.run_real_xbox,
+            # which FTP-pulls + decodes the XOSS blob) be the oracle.
+            #
+            # Follow-up (separate, deferred): tiny-signal frame-selector
+            # hardening so a happenstance single-white-pixel dashboard
+            # frame can't score signal=100; that is NOT this change.
+            if (m.is_tier4_capture_blob and
+                    renderer.lower() not in
+                    ("real-xbox", "real_xbox", "xbox")):
+                print(f"[xbe-harness] skipping {m.id} on {renderer} "
+                      f"(tier-4 capture_blob: validated via real-xbox "
+                      f"XOSS oracle, not the drawable board)", flush=True)
+                report["results"].append({
+                    "xbe": m.id, "renderer": renderer,
+                    "status": "skip",
+                    "notes": ("tier4_capture_blob: validated via "
+                              "real-xbox XOSS run-diag oracle, not the "
+                              "drawable-screenshot board"),
+                })
+                continue
+
             # Build the per-(xbe, renderer) recipe variant list.
             # The first variant is always the canonical recipe (label
             # "canonical"). Metal renderer additionally picks up

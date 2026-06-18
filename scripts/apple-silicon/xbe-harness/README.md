@@ -136,6 +136,25 @@ PNG (either `real-xbox-capture` from
    140 to tolerate BOX-downsample boundary AA). See
    `xbe_compare.compare`.
 
+### Tier-4 `capture_blob` XBEs skip the drawable board
+
+A Tier-4 visual-only XBE that declares an `artifacts.capture_blob`
+oracle (`self_validation_tier == 4` + `capture_blob` in `artifacts`,
+e.g. `pipeline-smoke`) is **skipped on the xemu GL/Metal drawable
+board** (`status=skip`) and validated only via the real-xbox
+`run-diag`/XOSS path. The xemu drawable board cannot validate it:
+the XBE CPU-paints the front buffer and reboots before the
+`at-frame=30` capture fires (so the frame selector lands on a
+post-reboot dashboard frame and FAILs spuriously), and the XOSS
+blob it writes to `D:\` is unreachable on xemu (`D:\` is the
+read-only DVD). The authoritative oracle is the real-xbox leg, which
+FTP-pulls + decodes the XOSS blob and compares it byte-exact against
+`expected.py` (`xbe_renderers.run_real_xbox` → `decode_xoss_to_png`
+→ `compare`). Gated by `XbeManifest.is_tier4_capture_blob`.
+Non-Tier-4 (screenshot-validated) XBEs are unaffected. Deferred
+follow-up: tiny-signal frame-selector hardening so a happenstance
+single-white-pixel dashboard frame can't score `signal=100`.
+
 ### Counter-based path-activation assertion (required_counters_min)
 
 A manifest may declare per-renderer min-counter thresholds. Choose
