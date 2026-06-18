@@ -1208,18 +1208,36 @@ and stack:
   (in progress, not closed).
 - `XEMU_METAL_NO_CLEAR_SYNC={0,1}` (**2026-05-20 late evening**, default
   **OFF**, i.e. clear-sync IS on by default) — opt-out for the task #14
-  residual fix: the cross-queue race between `pgraph_mtl_surface_clear`
-  (runs on `s_render_queue`) and per-cell draws (run on `s_draw_queue`)
-  is closed by appending `[cmd waitUntilCompleted]` to every clear's
-  command-buffer commit. Validated by the §4.10 stencil-ops XBE
-  (8/8 cells PASS deterministic with sync vs 1-3/8 cells under
-  encodeWaitForEvent alone). The companion cross-queue fence
-  (`s_clear_done_event` signal in `surface.mm` + `mtl_draw_wait_clear_fence`
-  in `draw.mm`'s `open_pass_ensure`) is in place too but proved
-  insufficient on Apple Silicon by itself. Perf cost is bounded:
-  retail games issue ~2-4 clears per frame so the per-frame CPU stall
-  is sub-millisecond. Set `XEMU_METAL_NO_CLEAR_SYNC=1` to disable the
-  sync (diagnostic only — reproduces the race).
+  clear→draw cross-queue synchronization in `pgraph_mtl_surface_clear`
+  (runs on `s_render_queue`) vs per-cell draws (run on `s_draw_queue`),
+  closed by appending `[cmd waitUntilCompleted]` to every clear's
+  command-buffer commit. **This sync governs BOTH the full-surface clear
+  path AND the `SET_CLEAR_RECT` sub-rect (scissored) clear path** — both
+  flow through `pgraph_mtl_surface_clear`, so the `METAL_CLEAR_SYNC_*`
+  counters below cover sub-rect clears too. The companion cross-queue
+  fence (`s_clear_done_event` signal in `surface.mm` +
+  `mtl_draw_wait_clear_fence` in `draw.mm`'s `open_pass_ensure`) is in
+  place too but proved insufficient on Apple Silicon by itself. Perf cost
+  is bounded: retail games issue ~2-4 clears per frame so the per-frame
+  CPU stall is sub-millisecond. Set `XEMU_METAL_NO_CLEAR_SYNC=1` to
+  disable the sync (diagnostic / perf-comparison only). **Note (task #10,
+  2026-06-18):** the clear-sync is correct and retained, but the
+  stencil-ops failure it was once credited with fixing was actually a
+  guest-side XBE vertex-buffer-reuse race (fixed in the XBE with a
+  write-once buffer; renderer unchanged). The clear-sync only widened the
+  timing window that exposed that latent guest bug; `SET_CLEAR_RECT` is
+  correct. See decision-log 2026-06-18.
+- `METAL_CLEAR_SYNC_US_TOTAL` (**task #14**) — per-interval sum of host
+  wall time (µs) spent blocked in the synchronous clear-sync
+  `[cmd waitUntilCompleted]` inside `pgraph_mtl_surface_clear`. Only
+  accumulated when the sync actually runs (i.e. `XEMU_METAL_NO_CLEAR_SYNC`
+  is unset). This is the single biggest previously-unmeasured cost on the
+  Metal frame thread. Weak-symbol-falls-back to 0 when the surface
+  manager isn't loaded.
+- `METAL_CLEAR_SYNC_COUNT` (**task #14**) — per-interval count of
+  synchronous clears that incurred the `[cmd waitUntilCompleted]` wait.
+  Divide `METAL_CLEAR_SYNC_US_TOTAL` by this to get the average per-clear
+  stall.
 - `METAL_FLAT_QUAD_PROPAGATIONS` (**2026-05-20 late evening, task #13**) —
   per-interval delta count of FLAT-shaded `OP_QUADS` draws routed
   through the new CPU-side flat-color propagation path in
@@ -4929,7 +4947,25 @@ production-readiness gate.
    on the canonical Metal cell (with `XEMU_METAL_MSAA=4` exercised as
    an `additional_metal_recipes` variant `msaa4`).
    Drawable remains the default for XBEs whose cells use only 0/255
-   endpoints (gamma neutral: gamma(0)=0, gamma(1)=1). See
+   endpoints (gamma neutral: gamma(0)=0, gamma(1)=1).
+   **Tier-4 `capture_blob` routing (2026-06-18):** a Tier-4
+   visual-only XBE that declares an `artifacts.capture_blob` oracle
+   (`self_validation_tier == 4` + `capture_blob` in `artifacts`, e.g.
+   `pipeline-smoke`) is **skipped on the xemu (GL/Metal) drawable
+   board** and validated only via the real-Xbox `run-diag`/XOSS path.
+   Rationale: such an XBE CPU-paints the front buffer and reboots
+   before the board's `at-frame=30` capture fires (so the frame
+   selector lands on a post-reboot dashboard frame and FAILs
+   spuriously — a board-scoping defect, not a regression), and the
+   XOSS blob it writes to `D:\` is unreachable on xemu (`D:\` is the
+   read-only DVD). The xemu cell is recorded `skip`
+   (`notes=tier4_capture_blob: validated via real-xbox XOSS run-diag
+   oracle …`), which does not gate the rotation; the authoritative
+   oracle is the real-xbox leg's byte-exact XOSS-vs-`expected.py`
+   compare. Non-Tier-4 (screenshot-validated) XBEs are unaffected.
+   Gated by `XbeManifest.is_tier4_capture_blob`. (Follow-up, deferred:
+   tiny-signal frame-selector hardening so a happenstance
+   single-white-pixel dashboard frame can't score `signal=100`.) See
    `scripts/apple-silicon/xbe-harness/README.md` for full layout,
    render-loop pattern, and per-XBE add-new-XBE recipe.
 

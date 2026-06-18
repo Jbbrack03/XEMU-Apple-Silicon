@@ -936,6 +936,38 @@ DMA-channel address translation.)
 follows the same template and validation tier. Build queue
 ordered by `(priority, complexity)`:
 
+> **SHIPPED (M-I second wave):**
+> - **§F.2 alpha test — `alpha-test` SHIPPED + PASS, 2026-06-18.** 8-cell
+>   func/ref grid isolating the ROP alpha-test gate
+>   (`NV097_SET_ALPHA_TEST_ENABLE` + `ALPHA_FUNC` + `ALPHA_REF`; 0-indexed
+>   PshAlphaFunc decode, A==ref boundary discriminators). **PASS 8/8 on
+>   Metal** across 2 cold runs (`benchmark-runs/alpha-test-metal-run{1,2}`),
+>   math-derived `expected.py` oracle independently validated, **no renderer
+>   change** — a genuine coverage win (matrix 53→52 uncovered). This is the
+>   first M-I second-wave slice. LEQUAL + non-128 ref sweeps + mid-range
+>   fractional-alpha cells remain a v0.2 follow-up.
+> - **§C.3 polygon offset / depth bias — `polygon-offset` SHIPPED (v0.2),
+>   2026-06-18.** Tier-1, 8-cell 4×2 grid isolating the NV2A polygon-offset /
+>   depth-bias path (`NV097_SET_POLY_OFFSET_FILL_ENABLE` 0x0338 +
+>   `SET_POLYGON_OFFSET_SCALE_FACTOR` 0x0384 → `NV_PGRAPH_ZOFFSETFACTOR` +
+>   `SET_POLYGON_OFFSET_BIAS` 0x0388 → `NV_PGRAPH_ZOFFSETBIAS`). GREEN base quad
+>   at clip z=0.5 overdrawn by a RED offset quad under LEQUAL; RED survives iff
+>   biased depth wins. **Metal gap CONFIRMED:** the offset-dependent cells
+>   misrender because `depthOffset` / `depthFactor` reach the Metal fragment
+>   shader as **0 at runtime** (GL applies them correctly); 5/8 signal_match
+>   across `benchmark-runs/polygon-offset-metal-run{1,2}`. Manifest declares
+>   `expected_fail_renderers: ["xemu/metal"]`; matrix records §C.3 as
+>   covered-but-Metal-xfail. **Fix tracked as task #10** (decisive diagnostic:
+>   add `depthOffset`/`depthFactor` to the `metal_psh_uniform_diag` print at
+>   `mtl/uniform.c:374-391` to distinguish the PSH gate `glsl/psh.c:1764-1778`
+>   from the staging path `mtl/uniform.c:348-416`; fix must preserve the
+>   PR #2240 fragment-shader depth path — rule #6). **v0.2 limitation:** cells
+>   3/5 are clip-cull rather than true bias discriminators, and the GL leg has a
+>   FLIP_STALL capture gap — **v0.3 redesign tracked as task #11.**
+> - **Next candidate:** the next M-I second-wave pick from the §5 queue below
+>   (e.g. §A.1 vertex shader, §A.2 FFP, §E.8 palettized, §F.5 dithering — by
+>   `(priority, complexity)` order).
+
 - §A.1 vertex shader instruction set — one XBE per MAC + ILU op
   (~20 XBEs total).
 - §A.2 fixed-function: 8-light, fog modes, texgen, skinning,
@@ -943,6 +975,9 @@ ordered by `(priority, complexity)`:
 - §B.4 ingestion paths — one per (inline buffer, inline elements
   16/32-bit, inline arrays, draw_arrays).
 - §C.1 polygon mode (point/line/fill per face).
+- §C.3 polygon offset / depth bias — **`polygon-offset` SHIPPED v0.2
+  2026-06-18; Metal gap CONFIRMED (depthOffset/Factor=0 on Metal); fix task #10,
+  v0.3 redesign task #11.** See the SHIPPED block at the top of §5.
 - §C.6 edge flags + line stipple — confirms whether xemu silently
   no-ops these (§3a.2/§3a.3 catalog disagreement resolution).
 - §C.7.4 point sprites — experimental probe; iterates flag
