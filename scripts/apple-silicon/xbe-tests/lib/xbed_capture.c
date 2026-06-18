@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
+#include <nxdk/mount.h>
 #include <xboxkrnl/xboxkrnl.h>
 
 struct xoss_header {
@@ -154,12 +155,57 @@ void xbed_render_loop_then_capture(xbed_frame_fn fn, void *ctx,
     xbed_capture_and_reboot(xoss_path, done_path, xbe_id);
 }
 
+/* Mount E: (FATX Partition1 — persistent and FTP-accessible) and ensure
+ * E:\Apps\<xbe_id>\ exists, then build the capture + done-marker paths
+ * there. The legacy callers pass D:\ paths, but under the UnleashX
+ * `SITE EXEC` chainload D:\ is the read-only launch mount, so
+ * fopen(...,"wb") fails and no capture blob lands for the orchestrator to
+ * FTP-pull from /E/Apps/<id>/ (the real-Xbox Tier-1 capture blocker,
+ * 2026-06-15). Mirrors the proven idiom in image-blit/main.c and
+ * oracle-agent/controller.c (verified writable on this console under
+ * chainload). Returns 1 on success (paths written), 0 if xbe_id is
+ * NULL/empty or E: is unavailable, in which case the caller keeps its
+ * passed-in (legacy D:\) paths. */
+static int xbed_ensure_e_capture_paths(const char *xbe_id,
+                                       char *xoss_out, size_t xoss_n,
+                                       char *done_out, size_t done_n)
+{
+    if (!xbe_id || !xbe_id[0]) {
+        return 0;
+    }
+    if (!nxIsDriveMounted('E')) {
+        if (!nxMountDrive('E', "\\Device\\Harddisk0\\Partition1")) {
+            return 0;
+        }
+    }
+    /* On real Xbox the harness FTP-uploads default.xbe to E:\Apps\<id>\
+     * before chainload, so the dir already exists (CreateDirectoryA is a
+     * no-op). On local xemu the scratch HDD has no such dir, so create it.
+     * Idempotent. */
+    char dir[96];
+    CreateDirectoryA("E:\\Apps", NULL);
+    snprintf(dir, sizeof dir, "E:\\Apps\\%s", xbe_id);
+    CreateDirectoryA(dir, NULL);
+    snprintf(xoss_out, xoss_n, "%s\\%s-capture.bin", dir, xbe_id);
+    snprintf(done_out, done_n, "%s\\%s-done.txt", dir, xbe_id);
+    return 1;
+}
+
 void xbed_capture_and_reboot(const char *xoss_path,
                              const char *done_path,
                              const char *xbe_id)
 {
     VIDEO_MODE vm = XVideoGetMode();
     uint32_t stride = (uint32_t)vm.width * (uint32_t)((vm.bpp + 7) / 8);
+
+    /* Redirect the capture + done-marker from the caller's legacy D:\
+     * paths to the writable, FTP-collected E:\Apps\<id>\ partition. */
+    char e_xoss[128], e_done[128];
+    if (xbed_ensure_e_capture_paths(xbe_id, e_xoss, sizeof e_xoss,
+                                    e_done, sizeof e_done)) {
+        xoss_path = e_xoss;
+        done_path = e_done;
+    }
 
     /* Hold pattern visible briefly so a human watching the TV can
      * spot-check before the reboot. Same 1.5 s pipeline-smoke uses. */

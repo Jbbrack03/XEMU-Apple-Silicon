@@ -1,6 +1,6 @@
 // cgc version 3.1.0013, build date Apr 18 2012
 // command line args: -profile vp20
-// source file: /Users/jbbrack03/XEMU_MacOS/xemu-fork/scripts/apple-silicon/xbe-tests/blend-matrix/../lib/xbed_tex_vs.vs.cg
+// source file: /Users/jbbrack03/XEMU_MacOS/xemu-fork/scripts/apple-silicon/xbe-tests/stencil-ops/../lib/xbed_tex_vs.vs.cg
 //vendor NVIDIA Corporation
 //version 3.1.0.13
 //profile vp20
