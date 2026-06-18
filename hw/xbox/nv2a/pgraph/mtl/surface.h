@@ -176,10 +176,26 @@ void pgraph_mtl_surface_ensure_depth(uint32_t width, uint32_t height,
  *                vs `glClear(GL_STENCIL_BUFFER_BIT)` semantics in
  *                `gl/draw.c::pgraph_gl_clear_surface`.
  * If a binding is nil, that aspect of the clear is silently skipped.
+ *
+ * full_clear:    true when the NV2A clear rectangle covers the whole
+ *                bound surface (the overwhelmingly common per-frame
+ *                case). When set, the fast-path full-attachment
+ *                MTLLoadActionClear is used and rect_x/rect_y/rect_w/
+ *                rect_h are ignored.
+ * rect_x/rect_y/rect_w/rect_h: the clear rectangle in SCALED host-texture
+ *                space (anti-aliasing factor then surface-scale factor
+ *                already applied, matching gl/draw.c). Used only when
+ *                full_clear is false: a Metal load-action clear cannot be
+ *                scissored, so a scissored quad is drawn over the
+ *                attachment writing the clear color and/or depth/stencil
+ *                value.
  */
 void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                               bool write_depth, float depth,
-                              bool write_stencil, int stencil);
+                              bool write_stencil, int stencil,
+                              bool full_clear,
+                              uint32_t rect_x, uint32_t rect_y,
+                              uint32_t rect_w, uint32_t rect_h);
 
 /*
  * Returns 1 if a front framebuffer texture is available, else 0.

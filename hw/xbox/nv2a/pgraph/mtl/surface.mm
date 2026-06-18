@@ -346,6 +346,190 @@ static NSString *const k_display_msl =
     @"    return tex.sample(samp, tex_coord);\n"
     @"}\n";
 
+/* 2026-06-15: sub-rect clear-quad shader. A Metal load-action clear cannot
+ * be scissored, so a strict sub-rect clear is implemented by drawing a
+ * fullscreen triangle with loadAction=Load over the attachment, scissored
+ * to the clear rectangle. The clear color is passed as a vertex/fragment
+ * constant; depth/stencil are written via the depth-stencil state + the
+ * vertex-emitted clip-space Z. The fragment writes all color channels
+ * unconditionally; per-channel NV097_CLEAR_SURFACE_R/G/B/A masking is NOT
+ * honored, consistent with the full-clear MTLLoadActionClear path and the
+ * M2-deferred per-channel-clear gap noted in renderer.c. */
+static NSString *const k_clear_quad_msl =
+    @"#include <metal_stdlib>\n"
+    @"using namespace metal;\n"
+    @"struct ClearVOut {\n"
+    @"    float4 pos [[position]];\n"
+    @"};\n"
+    @"struct ClearUniforms {\n"
+    @"    float4 color;\n"
+    @"    float  depth;\n"
+    @"    float  _pad0;\n"
+    @"    float  _pad1;\n"
+    @"    float  _pad2;\n"
+    @"};\n"
+    @"vertex ClearVOut xemu_clear_vs(uint vid [[vertex_id]],\n"
+    @"                               constant ClearUniforms &u [[buffer(0)]]) {\n"
+    @"    float2 p = float2((vid == 2) ? 3.0 : -1.0,\n"
+    @"                      (vid == 0) ? -3.0 :  1.0);\n"
+    @"    ClearVOut o;\n"
+    @"    o.pos = float4(p, u.depth, 1.0);\n"
+    @"    return o;\n"
+    @"}\n"
+    @"fragment float4 xemu_clear_fs(ClearVOut in [[stage_in]],\n"
+    @"                              constant ClearUniforms &u [[buffer(0)]]) {\n"
+    @"    return u.color;\n"
+    @"}\n";
+
+/* Uniform block uploaded to the clear-quad VS/FS at buffer index 0. Layout
+ * must match `ClearUniforms` in k_clear_quad_msl above. */
+typedef struct MtlClearQuadUniforms {
+    float color[4];
+    float depth;
+    float _pad[3];
+} MtlClearQuadUniforms;
+
+/* Cache of clear-quad render pipeline states. Keyed by the attachment
+ * formats + sample count, because a Metal render pipeline state binds the
+ * color/depth/stencil pixel formats at creation time. Small fixed cap: the
+ * set of distinct clear pipelines a title uses is tiny (a handful of RT
+ * formats). */
+typedef struct MtlClearQuadPipeline {
+    bool                       valid;
+    uint32_t                   color_fmt;     /* MTLPixelFormat or 0 */
+    uint32_t                   depth_fmt;     /* MTLPixelFormat or 0 */
+    uint32_t                   sample_count;
+    id<MTLRenderPipelineState> state;
+} MtlClearQuadPipeline;
+
+static id<MTLLibrary>       s_clear_quad_library = nil;
+static id<MTLFunction>      s_clear_quad_vs      = nil;
+static id<MTLFunction>      s_clear_quad_fs      = nil;
+static MtlClearQuadPipeline s_clear_quad_pipelines[16];
+static unsigned int         s_clear_quad_pipeline_count = 0;
+
+static void release_clear_quad_pipelines(void)
+{
+    for (unsigned int i = 0; i < s_clear_quad_pipeline_count; i++) {
+        s_clear_quad_pipelines[i].state = nil;
+        s_clear_quad_pipelines[i].valid = false;
+    }
+    s_clear_quad_pipeline_count = 0;
+    s_clear_quad_vs = nil;
+    s_clear_quad_fs = nil;
+    s_clear_quad_library = nil;
+}
+
+static bool build_clear_quad_functions_if_needed(id<MTLDevice> device)
+{
+    if (s_clear_quad_vs != nil && s_clear_quad_fs != nil) {
+        return true;
+    }
+    NSError *err = nil;
+    s_clear_quad_library =
+        [device newLibraryWithSource:k_clear_quad_msl options:nil error:&err];
+    if (s_clear_quad_library == nil) {
+        fprintf(stderr,
+                "xemu-metal: clear-quad MSL compile failed: %s\n",
+                [[err localizedDescription] UTF8String] ?: "(unknown)");
+        return false;
+    }
+    s_clear_quad_vs = [s_clear_quad_library newFunctionWithName:@"xemu_clear_vs"];
+    s_clear_quad_fs = [s_clear_quad_library newFunctionWithName:@"xemu_clear_fs"];
+    return s_clear_quad_vs != nil && s_clear_quad_fs != nil;
+}
+
+/* Return (building + caching on first use) a clear-quad pipeline state for
+ * the given attachment formats / sample count. Passing color_fmt==0 builds a
+ * depth/stencil-only clear pipeline (no color attachment); depth_fmt==0
+ * builds a color-only clear pipeline. Returns nil on failure. */
+static id<MTLRenderPipelineState>
+get_clear_quad_pipeline(id<MTLDevice> device, uint32_t color_fmt,
+                        uint32_t depth_fmt, uint32_t sample_count)
+{
+    for (unsigned int i = 0; i < s_clear_quad_pipeline_count; i++) {
+        MtlClearQuadPipeline *e = &s_clear_quad_pipelines[i];
+        if (e->valid && e->color_fmt == color_fmt &&
+            e->depth_fmt == depth_fmt &&
+            e->sample_count == sample_count) {
+            return e->state;
+        }
+    }
+
+    if (!build_clear_quad_functions_if_needed(device)) {
+        return nil;
+    }
+
+    MTLRenderPipelineDescriptor *desc =
+        [[MTLRenderPipelineDescriptor alloc] init];
+    desc.label = @"xemu.metal.clear_quad";
+    desc.vertexFunction = s_clear_quad_vs;
+    desc.fragmentFunction = s_clear_quad_fs;
+    desc.rasterSampleCount = sample_count > 1 ? sample_count : 1;
+    if (color_fmt != 0) {
+        desc.colorAttachments[0].pixelFormat = (MTLPixelFormat)color_fmt;
+        desc.colorAttachments[0].blendingEnabled = NO;
+        desc.colorAttachments[0].writeMask = MTLColorWriteMaskAll;
+    }
+    if (depth_fmt != 0) {
+        MTLPixelFormat dfmt = (MTLPixelFormat)depth_fmt;
+        desc.depthAttachmentPixelFormat = dfmt;
+        if (dfmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
+            dfmt == MTLPixelFormatDepth32Float_Stencil8 ||
+            dfmt == MTLPixelFormatStencil8) {
+            desc.stencilAttachmentPixelFormat = dfmt;
+        }
+    }
+
+    NSError *err = nil;
+    id<MTLRenderPipelineState> state =
+        [device newRenderPipelineStateWithDescriptor:desc error:&err];
+    if (state == nil) {
+        fprintf(stderr,
+                "xemu-metal: clear-quad pipeline build failed: %s\n",
+                [[err localizedDescription] UTF8String] ?: "(unknown)");
+        return nil;
+    }
+
+    if (s_clear_quad_pipeline_count <
+        sizeof(s_clear_quad_pipelines) / sizeof(s_clear_quad_pipelines[0])) {
+        MtlClearQuadPipeline *slot =
+            &s_clear_quad_pipelines[s_clear_quad_pipeline_count++];
+        slot->valid        = true;
+        slot->color_fmt    = color_fmt;
+        slot->depth_fmt    = depth_fmt;
+        slot->sample_count = sample_count;
+        slot->state        = state;
+    }
+    return state;
+}
+
+/* Depth-stencil state for a sub-rect clear: depth compare ALWAYS with depth
+ * writes gated on `write_depth`; when `write_stencil`, stencil compare
+ * ALWAYS with op REPLACE (the clear stencil value is the encoder's stencil
+ * reference) and writeMask 0xFF. Built fresh each sub-rect clear (sub-rect
+ * clears are rare relative to draws, so no cache is warranted). */
+static id<MTLDepthStencilState>
+build_clear_quad_depth_stencil_state(id<MTLDevice> device,
+                                     bool write_depth, bool write_stencil)
+{
+    MTLDepthStencilDescriptor *desc = [[MTLDepthStencilDescriptor alloc] init];
+    desc.depthCompareFunction = MTLCompareFunctionAlways;
+    desc.depthWriteEnabled = write_depth ? YES : NO;
+    if (write_stencil) {
+        MTLStencilDescriptor *st = [[MTLStencilDescriptor alloc] init];
+        st.stencilCompareFunction    = MTLCompareFunctionAlways;
+        st.stencilFailureOperation   = MTLStencilOperationReplace;
+        st.depthFailureOperation     = MTLStencilOperationReplace;
+        st.depthStencilPassOperation = MTLStencilOperationReplace;
+        st.readMask  = 0xFF;
+        st.writeMask = 0xFF;
+        desc.frontFaceStencil = st;
+        desc.backFaceStencil  = st;
+    }
+    return [device newDepthStencilStateWithDescriptor:desc];
+}
+
 /* Diagnostic counters. */
 static _Atomic(uint64_t) s_clear_count          = 0;
 static _Atomic(uint64_t) s_front_fb_publishes   = 0;
@@ -359,6 +543,12 @@ static _Atomic(uint64_t) s_vram_upload_bytes    = 0;
 static _Atomic(uint64_t) s_surface_downloads    = 0;
 static _Atomic(uint64_t) s_surface_download_bytes = 0;
 static _Atomic(uint64_t) s_surface_download_us_total = 0;
+/* Task #14 (2026-05-20 late evening): wall time + count of the
+ * synchronous clear-sync [cmd waitUntilCompleted] in
+ * pgraph_mtl_surface_clear. This is the single biggest unmeasured
+ * cost on the Metal frame thread; opt-out via XEMU_METAL_NO_CLEAR_SYNC. */
+static _Atomic(uint64_t) s_clear_sync_us_total  = 0;
+static _Atomic(uint64_t) s_clear_sync_count     = 0;
 
 static inline int64_t mtl_now_us(void)
 {
@@ -1348,6 +1538,7 @@ bool pgraph_mtl_surface_init(void)
     release_display_textures();
     s_display_pipeline = nil;
     s_display_sampler = nil;
+    release_clear_quad_pipelines();
     atomic_store(&s_front_framebuffer_texture, (void *)NULL);
     atomic_store(&s_clear_count, (uint64_t)0);
     atomic_store(&s_front_fb_publishes, (uint64_t)0);
@@ -1358,6 +1549,8 @@ bool pgraph_mtl_surface_init(void)
     atomic_store(&s_surface_downloads, (uint64_t)0);
     atomic_store(&s_surface_download_bytes, (uint64_t)0);
     atomic_store(&s_surface_download_us_total, (uint64_t)0);
+    atomic_store(&s_clear_sync_us_total, (uint64_t)0);
+    atomic_store(&s_clear_sync_count, (uint64_t)0);
 
     s_initialized = true;
     return true;
@@ -1376,6 +1569,7 @@ void pgraph_mtl_surface_finalize(void)
     release_display_textures();
     s_display_pipeline = nil;
     s_display_sampler = nil;
+    release_clear_quad_pipelines();
     cache_drop_all();
     s_render_queue = nil;
     s_initialized = false;
@@ -2188,9 +2382,237 @@ bool pgraph_mtl_surface_publish_latest_draw_fallback(uint32_t display_width,
 
 /* ---------------------------------------------------------------- */
 
+/* 2026-06-15: sub-rect clear. A Metal load-action clear cannot be
+ * scissored, so when the NV2A clear rectangle is a strict sub-rect of the
+ * bound surface we open a render pass with loadAction=Load and draw a
+ * scissored fullscreen triangle that writes the clear color (color write
+ * mask) and/or the depth/stencil clear value (depth-stencil state). The
+ * scissor rect is in scaled host-texture space and matches the binding's
+ * MTLTexture dims (renderer.c creates the texture at AA-then-scaling-applied
+ * size; Metal MSAA is sampleCount-based, so dims are unchanged). Per-aspect
+ * Z/STENCIL gating and the cross-queue clear<->draw fences mirror the
+ * full-clear fast path below. */
+static void clear_surface_sub_rect(bool have_color_target,
+                                   const float rgba[4],
+                                   bool have_depth_target,
+                                   bool write_depth, float depth,
+                                   bool write_stencil, int stencil,
+                                   uint32_t rect_x, uint32_t rect_y,
+                                   uint32_t rect_w, uint32_t rect_h)
+{
+    id<MTLDevice> device = (__bridge id<MTLDevice>)xemu_metal_get_device();
+    if (device == nil) {
+        return;
+    }
+
+    bool have_msaa_color =
+        have_color_target && s_color_binding->msaa_texture != NULL &&
+        s_color_binding->msaa_sample_count > 1;
+    bool have_msaa_depth =
+        have_depth_target && s_depth_binding->msaa_texture != NULL &&
+        s_depth_binding->msaa_sample_count > 1;
+
+    /* Determine attachment formats / sample count / dims for the pipeline
+     * and scissor clamp. Color and depth share a render pass; their
+     * dimensions match (same bound surface shape). */
+    uint32_t color_fmt = 0;
+    uint32_t depth_fmt = 0;
+    uint32_t sample_count = 1;
+    uint32_t tex_w = 0, tex_h = 0;
+    if (have_color_target) {
+        color_fmt = s_color_binding->mtl_pixel_format;
+        tex_w = s_color_binding->width;
+        tex_h = s_color_binding->height;
+        if (have_msaa_color) {
+            sample_count = s_color_binding->msaa_sample_count;
+        }
+    }
+    if (have_depth_target) {
+        depth_fmt = s_depth_binding->mtl_pixel_format;
+        if (tex_w == 0) {
+            tex_w = s_depth_binding->width;
+            tex_h = s_depth_binding->height;
+        }
+        if (have_msaa_depth) {
+            sample_count = s_depth_binding->msaa_sample_count;
+        }
+    }
+    if (tex_w == 0 || tex_h == 0) {
+        return;
+    }
+
+    /* Whether the stencil aspect actually gets cleared (format must carry
+     * stencil). Mirrors the full-clear fast path's format check. */
+    MTLPixelFormat dfmt = (MTLPixelFormat)depth_fmt;
+    bool format_has_stencil =
+        (dfmt == MTLPixelFormatDepth24Unorm_Stencil8 ||
+         dfmt == MTLPixelFormatDepth32Float_Stencil8 ||
+         dfmt == MTLPixelFormatStencil8);
+    bool clear_stencil = write_stencil && have_depth_target && format_has_stencil;
+    bool clear_depth   = write_depth && have_depth_target;
+
+    id<MTLRenderPipelineState> pipeline =
+        get_clear_quad_pipeline(device, color_fmt,
+                                (clear_depth || clear_stencil) ? depth_fmt : 0,
+                                sample_count);
+    if (pipeline == nil) {
+        return;
+    }
+    id<MTLDepthStencilState> ds =
+        (clear_depth || clear_stencil)
+            ? build_clear_quad_depth_stencil_state(device, clear_depth,
+                                                   clear_stencil)
+            : nil;
+
+    @autoreleasepool {
+        MTLRenderPassDescriptor *desc =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+
+        if (have_color_target) {
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)s_color_binding->texture;
+            if (have_msaa_color) {
+                /*
+                 * KNOWN LATENT HAZARD (task #10 re-gate, 2026-06-18): the
+                 * multisample resolve below is whole-attachment, NOT bounded by
+                 * the scissor rect. For a strict sub-rect color clear, pixels
+                 * OUTSIDE the rect get resolved from `ms` into `tex`; if `ms`
+                 * was left stale relative to `tex` by a prior path that wrote
+                 * `tex` without updating `ms` (CPU/linear RT upload, blit copy),
+                 * out-of-rect color can be corrupted. This branch is currently
+                 * DEAD under all XBE/recipe coverage (no XBE issues a SET_CLEAR_
+                 * RECT sub-rect color clear under MSAA; stencil-ops is MSAA=0 and
+                 * never enters the color branch). Per rule #17 a renderer fix
+                 * must be XBE-isolated, so it is deliberately NOT patched blind
+                 * here — fix when the isolating "MSAA + SET_CLEAR_RECT sub-rect
+                 * color clear" XBE exists (filed follow-up). The full-surface
+                 * clear path uses loadAction=Clear and is unaffected.
+                 */
+                id<MTLTexture> ms =
+                    (__bridge id<MTLTexture>)s_color_binding->msaa_texture;
+                desc.colorAttachments[0].texture        = ms;
+                desc.colorAttachments[0].resolveTexture = tex;
+                desc.colorAttachments[0].loadAction     = MTLLoadActionLoad;
+                desc.colorAttachments[0].storeAction    =
+                    MTLStoreActionStoreAndMultisampleResolve;
+            } else {
+                desc.colorAttachments[0].texture     = tex;
+                desc.colorAttachments[0].loadAction  = MTLLoadActionLoad;
+                desc.colorAttachments[0].storeAction = MTLStoreActionStore;
+            }
+        }
+
+        if (clear_depth || clear_stencil) {
+            id<MTLTexture> tex =
+                (__bridge id<MTLTexture>)s_depth_binding->texture;
+            id<MTLTexture> ms = have_msaa_depth ?
+                (__bridge id<MTLTexture>)s_depth_binding->msaa_texture : nil;
+            /* Attach both aspects that the pipeline declares (Metal binds
+             * the depth+stencil texture once). loadAction=Load preserves
+             * the aspect we are NOT clearing; the depth-stencil state +
+             * scissor restrict the write to the cleared aspect + rect. */
+            desc.depthAttachment.texture     = ms ? ms : tex;
+            desc.depthAttachment.loadAction  = MTLLoadActionLoad;
+            desc.depthAttachment.storeAction = MTLStoreActionStore;
+            if (format_has_stencil) {
+                desc.stencilAttachment.texture     = ms ? ms : tex;
+                desc.stencilAttachment.loadAction  = MTLLoadActionLoad;
+                desc.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+        }
+
+        id<MTLCommandBuffer> cmd = [s_render_queue commandBuffer];
+        cmd.label = @"xemu.metal.clear_rect";
+
+        /* Same cross-queue fence as the full-clear fast path: wait for
+         * prior draws on s_draw_queue to finish so this clear sees their
+         * depth/stencil/color contents (loadAction=Load) and does not race. */
+        void *event_handle = NULL;
+        uint64_t event_value = 0;
+        pgraph_mtl_draw_get_done_event_state(&event_handle, &event_value);
+        if (event_handle != NULL && event_value > 0) {
+            id<MTLSharedEvent> ev =
+                (__bridge id<MTLSharedEvent>)event_handle;
+            [cmd encodeWaitForEvent:ev value:event_value];
+        }
+
+        id<MTLRenderCommandEncoder> enc =
+            [cmd renderCommandEncoderWithDescriptor:desc];
+        enc.label = @"xemu.metal.clear_rect_enc";
+
+        /* Clamp the scissor to the texture bounds (the rect was derived
+         * from guest registers; defensively avoid an out-of-bounds rect). */
+        uint32_t sx = rect_x < tex_w ? rect_x : tex_w;
+        uint32_t sy = rect_y < tex_h ? rect_y : tex_h;
+        uint32_t sw = (sx + rect_w > tex_w) ? (tex_w - sx) : rect_w;
+        uint32_t sh = (sy + rect_h > tex_h) ? (tex_h - sy) : rect_h;
+
+        if (sw == 0 || sh == 0) {
+            [enc endEncoding];
+            [cmd commit];
+            return;
+        }
+
+        MTLViewport vp = { 0.0, 0.0, (double)tex_w, (double)tex_h, 0.0, 1.0 };
+        [enc setViewport:vp];
+        MTLScissorRect sc = { sx, sy, sw, sh };
+        [enc setScissorRect:sc];
+        [enc setRenderPipelineState:pipeline];
+        if (ds != nil) {
+            [enc setDepthStencilState:ds];
+            if (clear_stencil) {
+                [enc setStencilReferenceValue:(uint32_t)(stencil & 0xFF)];
+            }
+        }
+
+        MtlClearQuadUniforms u;
+        memset(&u, 0, sizeof(u));
+        if (have_color_target) {
+            u.color[0] = rgba[0];
+            u.color[1] = rgba[1];
+            u.color[2] = rgba[2];
+            u.color[3] = rgba[3];
+        }
+        /* Clip-space Z for the depth write (NV2A clear depth is already in
+         * the 0..1 range Metal expects). */
+        u.depth = clear_depth ? depth : 0.0f;
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+        [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+
+        [enc drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+        [enc endEncoding];
+
+        /* Signal the clear-done event so the draw queue's next
+         * open_pass_ensure waits for this clear before its loadAction=Load
+         * picks up the (now-cleared) contents. Mirrors the full-clear path. */
+        if (s_clear_done_event != nil) {
+            uint64_t v = atomic_fetch_add(&s_clear_done_value, 1) + 1;
+            [cmd encodeSignalEvent:s_clear_done_event value:v];
+        }
+
+        [cmd commit];
+
+        /* Same synchronous wait as the full-clear fast path (validated
+         * necessary by the stencil-ops XBE); opt-out via the same env var. */
+        if (!getenv("XEMU_METAL_NO_CLEAR_SYNC")) {
+            int64_t clear_sync_start_us = mtl_now_us();
+            [cmd waitUntilCompleted];
+            mtl_add_elapsed_us(&s_clear_sync_us_total, clear_sync_start_us);
+            atomic_fetch_add(&s_clear_sync_count, 1);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+
 void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                               bool write_depth, float depth,
-                              bool write_stencil, int stencil)
+                              bool write_stencil, int stencil,
+                              bool full_clear,
+                              uint32_t rect_x, uint32_t rect_y,
+                              uint32_t rect_w, uint32_t rect_h)
 {
     if (!s_initialized) {
         return;
@@ -2210,6 +2632,23 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
                              s_depth_binding != NULL &&
                              s_depth_binding->texture != NULL;
     if (!have_color_target && !have_depth_target) {
+        return;
+    }
+
+    /* 2026-06-15: honor the NV2A clear rectangle. When the rect covers the
+     * whole surface (full_clear, the common per-frame case) fall through to
+     * the existing MTLLoadActionClear fast path below -- byte-identical
+     * behavior for normal titles. Only a strict sub-rect takes the
+     * scissored quad path, which a load-action clear cannot express. */
+    if (!full_clear && rect_w > 0 && rect_h > 0) {
+        clear_surface_sub_rect(have_color_target, rgba,
+                               have_depth_target, write_depth, depth,
+                               write_stencil, stencil,
+                               rect_x, rect_y, rect_w, rect_h);
+        atomic_fetch_add(&s_clear_count, 1);
+        if (have_color_target) {
+            s_color_binding->last_use_seq = ++s_use_seq;
+        }
         return;
     }
 
@@ -2362,7 +2801,10 @@ void pgraph_mtl_surface_clear(bool write_color, const float rgba[4],
          * as a soft guarantee in case the wait-for-completion is
          * later removed. */
         if (!getenv("XEMU_METAL_NO_CLEAR_SYNC")) {
+            int64_t clear_sync_start_us = mtl_now_us();
             [cmd waitUntilCompleted];
+            mtl_add_elapsed_us(&s_clear_sync_us_total, clear_sync_start_us);
+            atomic_fetch_add(&s_clear_sync_count, 1);
         }
     }
 
@@ -3750,6 +4192,16 @@ uint64_t pgraph_mtl_surface_download_bytes(void)
 extern "C" uint64_t pgraph_mtl_surface_download_us_total(void)
 {
     return atomic_load(&s_surface_download_us_total);
+}
+
+extern "C" uint64_t pgraph_mtl_clear_sync_us_total(void)
+{
+    return atomic_load(&s_clear_sync_us_total);
+}
+
+extern "C" uint64_t pgraph_mtl_clear_sync_count(void)
+{
+    return atomic_load(&s_clear_sync_count);
 }
 
 /* Compute the effective host-space rectangle for a given guest-space

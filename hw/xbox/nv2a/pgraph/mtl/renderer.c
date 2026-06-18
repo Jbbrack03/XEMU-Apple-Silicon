@@ -1000,9 +1000,9 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
         pgraph_get_clear_depth_stencil_value(pg, &depth, &stencil);
     }
 
-    /* M2 ignores the per-channel write mask in NV097_CLEAR_SURFACE_R/G/B/A
-     * and the clear-rect scissor (renders the full surface). The exit
-     * gate for M2 is "the game's cleared color is visible in the
+    /* M2 ignored the per-channel write mask in NV097_CLEAR_SURFACE_R/G/B/A
+     * and the clear-rect scissor (rendered the full surface). The exit
+     * gate for M2 was "the game's cleared color is visible in the
      * window"; per-channel and per-rect refinement land with M3+ when
      * the render-pass machinery is reused for draws.
      *
@@ -1011,11 +1011,52 @@ static void pgraph_mtl_clear_surface(NV2AState *d, uint32_t parameter)
      * stencil aspects of a combined depth+stencil format were always
      * cleared together whenever either bit was set, which diverged from
      * gl/draw.c::pgraph_gl_clear_surface (which gates each via the
-     * corresponding bit independently). */
+     * corresponding bit independently).
+     *
+     * 2026-06-15: honor the NV2A clear rectangle (SET_CLEAR_RECT). The
+     * Metal clear used to always issue a full-attachment
+     * MTLLoadActionClear, which wiped the whole surface even when the
+     * guest requested a sub-rect clear -- breaking the stencil-ops XBE's
+     * per-cell stencil clears. Mirror gl/draw.c::pgraph_gl_clear_surface:
+     * read NV_PGRAPH_CLEARRECTX/Y, apply the anti-aliasing factor then
+     * the scaling factor, and compute the `full_clear` flag. The rect is
+     * in scaled host-texture space (matches the MtlSurfaceBinding's
+     * texture dims, which renderer.c creates at AA-then-scaling-applied
+     * size; Metal MSAA uses sampleCount, not larger dimensions, so the
+     * scissor coords are unaffected). When full_clear is set (every
+     * normal per-frame clear) the surface clear keeps the existing
+     * MTLLoadActionClear fast path; only a strict sub-rect triggers the
+     * scissored region clear. */
+    unsigned int xmin =
+        GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTX),
+                 NV_PGRAPH_CLEARRECTX_XMIN);
+    unsigned int xmax =
+        GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTX),
+                 NV_PGRAPH_CLEARRECTX_XMAX);
+    unsigned int ymin =
+        GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTY),
+                 NV_PGRAPH_CLEARRECTY_YMIN);
+    unsigned int ymax =
+        GET_MASK(pgraph_reg_r(pg, NV_PGRAPH_CLEARRECTY),
+                 NV_PGRAPH_CLEARRECTY_YMAX);
+
+    unsigned int scissor_width = xmax - xmin + 1,
+                 scissor_height = ymax - ymin + 1;
+    pgraph_apply_anti_aliasing_factor(pg, &xmin, &ymin);
+    pgraph_apply_anti_aliasing_factor(pg, &scissor_width, &scissor_height);
+
+    bool full_clear = !xmin && !ymin &&
+                      scissor_width >= pg->surface_binding_dim.width &&
+                      scissor_height >= pg->surface_binding_dim.height;
+
+    pgraph_apply_scaling_factor(pg, &xmin, &ymin);
+    pgraph_apply_scaling_factor(pg, &scissor_width, &scissor_height);
 
     pgraph_mtl_surface_clear(write_color, rgba,
                              write_depth, depth,
-                             write_stencil, stencil);
+                             write_stencil, stencil,
+                             full_clear, xmin, ymin,
+                             scissor_width, scissor_height);
 
     pg->surface_color.draw_dirty |= write_color;
     pg->surface_zeta.draw_dirty  |= write_zeta;

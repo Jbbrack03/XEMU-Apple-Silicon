@@ -54,6 +54,9 @@ static uint64_t s_baseline_draw_pass_flushes;
 static uint64_t s_baseline_open_pass_flush_us_total;
 static uint64_t s_baseline_tex_upload_us_total;
 static uint64_t s_baseline_surface_download_us_total;
+/* Task #14 — synchronous clear-sync stall wall time + count. */
+static uint64_t s_baseline_clear_sync_us_total;
+static uint64_t s_baseline_clear_sync_count;
 /* M7.1 — translated-pipeline encode + uniform staging + fallback. */
 static uint64_t s_baseline_draw_translated;
 static uint64_t s_baseline_pipeline_fallbacks;
@@ -455,6 +458,14 @@ __attribute__((weak)) uint64_t pgraph_mtl_surface_download_us_total(void)
 {
     return 0;
 }
+__attribute__((weak)) uint64_t pgraph_mtl_clear_sync_us_total(void)
+{
+    return 0;
+}
+__attribute__((weak)) uint64_t pgraph_mtl_clear_sync_count(void)
+{
+    return 0;
+}
 
 /* 2026-05-03 magenta-RT diagnostic — cache shape-mismatch recreate. */
 __attribute__((weak)) uint64_t
@@ -587,6 +598,9 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     uint64_t surface_download_bytes_total = pgraph_mtl_surface_download_bytes();
     uint64_t surface_download_us_total =
         pgraph_mtl_surface_download_us_total();
+    /* Task #14 — synchronous clear-sync stall counters. */
+    uint64_t clear_sync_us_total = pgraph_mtl_clear_sync_us_total();
+    uint64_t clear_sync_count    = pgraph_mtl_clear_sync_count();
     /* W4 — per-draw color RT dump counter. */
     uint64_t draw_rt_dumps_total = pgraph_mtl_draw_rt_dumps_count();
     /* Tool 1 (2026-05-19) — surface-graph dump counter. */
@@ -730,6 +744,11 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                                             s_baseline_surface_download_bytes;
     uint64_t surface_download_us_delta = surface_download_us_total -
                                          s_baseline_surface_download_us_total;
+    /* Task #14 — synchronous clear-sync stall deltas. */
+    uint64_t clear_sync_us_delta = clear_sync_us_total -
+                                   s_baseline_clear_sync_us_total;
+    uint64_t clear_sync_count_delta = clear_sync_count -
+                                      s_baseline_clear_sync_count;
     /* W4 — per-draw color RT dump delta. */
     uint64_t draw_rt_dumps_delta = draw_rt_dumps_total -
                                    s_baseline_draw_rt_dumps;
@@ -805,6 +824,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
     s_baseline_surface_downloads        = surface_downloads_total;
     s_baseline_surface_download_bytes   = surface_download_bytes_total;
     s_baseline_surface_download_us_total = surface_download_us_total;
+    s_baseline_clear_sync_us_total       = clear_sync_us_total;
+    s_baseline_clear_sync_count          = clear_sync_count;
     s_baseline_draw_rt_dumps             = draw_rt_dumps_total;
     s_baseline_surface_graph_dumps       = surface_graph_dumps_total;
     s_baseline_sibling_syncs             = sibling_syncs_total;
@@ -850,6 +871,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
                            surface_downloads_delta |
                            surface_download_bytes_delta |
                            surface_download_us_delta |
+                           clear_sync_us_delta |
+                           clear_sync_count_delta |
                            draw_rt_dumps_delta |
                            surface_graph_dumps_delta |
                            sibling_syncs_delta |
@@ -923,6 +946,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             " METAL_SURFACE_DOWNLOADS=%llu"
             " METAL_SURFACE_DOWNLOAD_BYTES=%llu"
             " METAL_SURFACE_DOWNLOAD_US_TOTAL=%llu"
+            " METAL_CLEAR_SYNC_US_TOTAL=%llu"
+            " METAL_CLEAR_SYNC_COUNT=%llu"
             " METAL_DRAW_RT_DUMPS=%llu"
             " METAL_SURFACE_GRAPH_DUMPS=%llu"
             " METAL_SIBLING_SYNCS=%llu"
@@ -997,6 +1022,8 @@ void xemu_metal_perf_emit_and_reset(FILE *out)
             (unsigned long long)surface_downloads_delta,
             (unsigned long long)surface_download_bytes_delta,
             (unsigned long long)surface_download_us_delta,
+            (unsigned long long)clear_sync_us_delta,
+            (unsigned long long)clear_sync_count_delta,
             (unsigned long long)draw_rt_dumps_delta,
             (unsigned long long)surface_graph_dumps_delta,
             (unsigned long long)sibling_syncs_delta,
