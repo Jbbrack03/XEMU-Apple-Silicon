@@ -28,6 +28,7 @@
 #include "qemu/timer.h"
 #ifdef __ANDROID__
 #include <android/log.h>
+#include <pthread.h>
 #endif
 #include "qemu/config-file.h"
 
@@ -89,6 +90,35 @@ typedef struct XemuScriptedInput {
 } XemuScriptedInput;
 
 static XemuScriptedInput scripted_input;
+
+/* ---- XR live gamepad forwarding ----------------------------------------
+ * In XR/immersive mode the OpenXR NativeActivity (the XR shell) holds Android
+ * input focus, not the SDLActivity, so SDL's Android gamepad path never sees a
+ * paired Bluetooth controller. The XR shell forwards raw Android gamepad state
+ * to the emulator via the exported xemu_xr_set_gamepad_state() below (resolved
+ * by dlsym from libxemu.so, mirroring the frame-feed bridge). We own a
+ * synthetic pad on port 1 (created only in XR mode when no scripted pad claimed
+ * the port) and copy the forwarded state onto it each input update.
+ * Thread-safe: the setter runs on the Android input thread, the apply on the
+ * emulator input thread. Static-initialized mutex => no init-order race. */
+static pthread_mutex_t xr_pad_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    bool active;                        /* synthetic pad created + bound */
+    uint16_t buttons;
+    int16_t axis[CONTROLLER_AXIS__COUNT];
+    ControllerState *con;
+} xr_pad;
+
+__attribute__((visibility("default")))
+void xemu_xr_set_gamepad_state(uint16_t buttons, const int16_t *axis, int naxis)
+{
+    pthread_mutex_lock(&xr_pad_lock);
+    xr_pad.buttons = buttons;
+    for (int i = 0; i < CONTROLLER_AXIS__COUNT && i < naxis; i++) {
+        xr_pad.axis[i] = axis[i];
+    }
+    pthread_mutex_unlock(&xr_pad_lock);
+}
 
 typedef struct XemuInputButtonName { const char *name; int mask; } XemuInputButtonName;
 typedef struct XemuInputAxisName { const char *name; int index; } XemuInputAxisName;
@@ -569,6 +599,31 @@ void xemu_input_init(void)
         fprintf(stderr, "xemu: scripted controller bound to port %d\n",
                 scripted_input.port + 1);
     }
+
+    /* XR live gamepad: in immersive mode SDL can't see a paired pad (the XR
+     * NativeActivity holds focus), so create a synthetic pad on port 0 that the
+     * XR shell drives via xemu_xr_set_gamepad_state(). Only when no scripted pad
+     * already owns the port. */
+    if (!scripted_input.enabled && !xr_pad.active &&
+        getenv("XEMU_ANDROID_XR_MODE")) {
+        ControllerState *xc = malloc(sizeof(ControllerState));
+        memset(xc, 0, sizeof(ControllerState));
+        xc->type = INPUT_DEVICE_SDL_KEYBOARD; /* no SDL handle needed */
+        xc->name = "XR Gamepad";
+        xc->bound = -1;
+        xc->peripheral_types[0] = PERIPHERAL_NONE;
+        xc->peripheral_types[1] = PERIPHERAL_NONE;
+        pthread_mutex_lock(&xr_pad_lock);
+        xr_pad.con = xc;
+        xr_pad.active = true;
+        pthread_mutex_unlock(&xr_pad_lock);
+        QTAILQ_INSERT_TAIL(&available_controllers, xc, entry);
+        xemu_input_bind(0, xc, 0);
+        xemu_input_rebind_xmu(0);
+        fprintf(stderr, "xemu: XR gamepad synthetic pad bound to port 1\n");
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "XR gamepad forwarding active (port 1)");
+    }
 }
 
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
@@ -766,6 +821,16 @@ void xemu_input_update_controller(ControllerState *state)
     /* Scripted pad overrides real input for its bound port. */
     if (scripted_input.enabled && state == scripted_input.con) {
         xemu_scripted_input_apply(state);
+        state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        return;
+    }
+
+    /* XR-forwarded live gamepad drives its synthetic pad. */
+    if (xr_pad.active && state == xr_pad.con) {
+        pthread_mutex_lock(&xr_pad_lock);
+        state->buttons = xr_pad.buttons;
+        memcpy(state->axis, xr_pad.axis, sizeof(state->axis));
+        pthread_mutex_unlock(&xr_pad_lock);
         state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         return;
     }

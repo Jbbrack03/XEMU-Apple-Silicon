@@ -22,6 +22,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
+#include <android/keycodes.h>
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -81,6 +82,13 @@ typedef struct {
     /* Emulator frame feed (Spike B). Resolved from libxemu.so at runtime;
      * NULL until the emulator process side is up. */
     struct AHardwareBuffer *(*acquire_ahb)(uint64_t *seq);
+
+    /* Gamepad forwarding: SDL can't see a paired pad while the XR NativeActivity
+     * has focus, so we translate Android gamepad events and push them to the
+     * emulator via this resolved setter. pad_* accumulate current state. */
+    void (*set_gamepad)(uint16_t buttons, const int16_t *axis, int naxis);
+    uint16_t pad_buttons;
+    int16_t pad_axis[6];  /* LTRIG,RTRIG,LSTICK_X,LSTICK_Y,RSTICK_X,RSTICK_Y */
     uint64_t last_seq;
     /* Per-AHB EGLImage/texture cache (AHBs are a small stable ring). */
     struct {
@@ -231,17 +239,26 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
 /* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
 static void resolve_emulator_feed(XrShell *s)
 {
-    if (s->acquire_ahb) {
+    if (s->acquire_ahb && s->set_gamepad) {
         return;
     }
     void *h = dlopen("libxemu.so", RTLD_NOLOAD | RTLD_LAZY);
     if (!h) {
         return;
     }
-    s->acquire_ahb = (struct AHardwareBuffer *(*)(uint64_t *))
-        dlsym(h, "xemu_xr_acquire_display_ahb");
-    if (s->acquire_ahb) {
-        LOGI("emulator frame feed resolved");
+    if (!s->acquire_ahb) {
+        s->acquire_ahb = (struct AHardwareBuffer *(*)(uint64_t *))
+            dlsym(h, "xemu_xr_acquire_display_ahb");
+        if (s->acquire_ahb) {
+            LOGI("emulator frame feed resolved");
+        }
+    }
+    if (!s->set_gamepad) {
+        s->set_gamepad = (void (*)(uint16_t, const int16_t *, int))
+            dlsym(h, "xemu_xr_set_gamepad_state");
+        if (s->set_gamepad) {
+            LOGI("emulator gamepad forwarding resolved");
+        }
     }
 }
 
@@ -841,22 +858,110 @@ static void xr_poll_events(XrShell *s)
     }
 }
 
-/* Decisive input experiment: do gamepad events reach the NativeActivity
- * while immersive? Every key/motion event is logged with its source. */
+/* Emulator controller button masks (must match ui/xemu-input.h). LB/RB map to
+ * the Original Xbox Duke's White/Black buttons (standard xemu mapping). */
+#define GP_A (1u<<0)
+#define GP_B (1u<<1)
+#define GP_X (1u<<2)
+#define GP_Y (1u<<3)
+#define GP_DL (1u<<4)
+#define GP_DU (1u<<5)
+#define GP_DR (1u<<6)
+#define GP_DD (1u<<7)
+#define GP_BACK (1u<<8)
+#define GP_START (1u<<9)
+#define GP_WHITE (1u<<10)
+#define GP_BLACK (1u<<11)
+#define GP_LS (1u<<12)
+#define GP_RS (1u<<13)
+#define GP_GUIDE (1u<<14)
+/* axis indices (CONTROLLER_AXIS_*): LTRIG,RTRIG,LX,LY,RX,RY */
+#define AX_LTRIG 0
+#define AX_RTRIG 1
+#define AX_LX 2
+#define AX_LY 3
+#define AX_RX 4
+#define AX_RY 5
+
+static uint16_t gp_keycode_mask(int32_t code)
+{
+    switch (code) {
+    case AKEYCODE_BUTTON_A:      return GP_A;
+    case AKEYCODE_BUTTON_B:      return GP_B;
+    case AKEYCODE_BUTTON_X:      return GP_X;
+    case AKEYCODE_BUTTON_Y:      return GP_Y;
+    case AKEYCODE_BUTTON_L1:     return GP_WHITE;
+    case AKEYCODE_BUTTON_R1:     return GP_BLACK;
+    case AKEYCODE_BUTTON_THUMBL: return GP_LS;
+    case AKEYCODE_BUTTON_THUMBR: return GP_RS;
+    case AKEYCODE_BUTTON_START:  return GP_START;
+    case AKEYCODE_BUTTON_SELECT: return GP_BACK;
+    case AKEYCODE_BUTTON_MODE:   return GP_GUIDE;
+    case AKEYCODE_DPAD_UP:       return GP_DU;
+    case AKEYCODE_DPAD_DOWN:     return GP_DD;
+    case AKEYCODE_DPAD_LEFT:     return GP_DL;
+    case AKEYCODE_DPAD_RIGHT:    return GP_DR;
+    default:                     return 0;
+    }
+}
+
+static int16_t gp_axf(float v)  /* stick: -1..1 -> int16 (SDL/Xbox convention) */
+{
+    if (v > 1.f) v = 1.f; else if (v < -1.f) v = -1.f;
+    return (int16_t)(v * 32767.f);
+}
+static int16_t gp_axt(float v)  /* trigger: 0..1 -> 0..32767 */
+{
+    if (v > 1.f) v = 1.f; else if (v < 0.f) v = 0.f;
+    return (int16_t)(v * 32767.f);
+}
+
+/* Translate Android gamepad input and forward it to the emulator (SDL can't see
+ * the pad while the XR NativeActivity holds focus). */
 static int32_t on_input(struct android_app *app, AInputEvent *event)
 {
+    XrShell *s = (XrShell *)app->userData;
     int32_t type = AInputEvent_getType(event);
     int32_t src = AInputEvent_getSource(event);
-    if (type == AINPUT_EVENT_TYPE_KEY) {
-        LOGI("INPUT key code=%d source=0x%x action=%d",
-             AKeyEvent_getKeyCode(event), src, AKeyEvent_getAction(event));
-        return 0; /* don't consume; observe only */
+
+    if (type == AINPUT_EVENT_TYPE_KEY &&
+        (src & (AINPUT_SOURCE_GAMEPAD | AINPUT_SOURCE_JOYSTICK |
+                AINPUT_SOURCE_DPAD))) {
+        uint16_t mask = gp_keycode_mask(AKeyEvent_getKeyCode(event));
+        if (!mask) return 0;
+        int32_t action = AKeyEvent_getAction(event);
+        if (action == AKEY_EVENT_ACTION_DOWN) s->pad_buttons |= mask;
+        else if (action == AKEY_EVENT_ACTION_UP) s->pad_buttons &= ~mask;
+        if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
+        static int gp_key_log = 0;
+        if (gp_key_log++ < 12) {
+            LOGI("XR gamepad key: code=%d action=%d -> buttons=0x%04x fwd=%d",
+                 AKeyEvent_getKeyCode(event), action, s->pad_buttons,
+                 s->set_gamepad != NULL);
+        }
+        return 1; /* consume gamepad keys */
     }
-    if (type == AINPUT_EVENT_TYPE_MOTION &&
-        (src & AINPUT_SOURCE_JOYSTICK)) {
-        LOGI("INPUT joystick motion source=0x%x lx=%.2f",
-             src, AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_X, 0));
-        return 0;
+
+    if (type == AINPUT_EVENT_TYPE_MOTION && (src & AINPUT_SOURCE_JOYSTICK)) {
+        s->pad_axis[AX_LX] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_X, 0));
+        s->pad_axis[AX_LY] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Y, 0));
+        s->pad_axis[AX_RX] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Z, 0));
+        s->pad_axis[AX_RY] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RZ, 0));
+        float lt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_LTRIGGER, 0);
+        float rt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RTRIGGER, 0);
+        if (lt == 0.f) lt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_BRAKE, 0);
+        if (rt == 0.f) rt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_GAS, 0);
+        s->pad_axis[AX_LTRIG] = gp_axt(lt);
+        s->pad_axis[AX_RTRIG] = gp_axt(rt);
+        float hx = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_HAT_X, 0);
+        float hy = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_HAT_Y, 0);
+        s->pad_buttons &= ~(GP_DL | GP_DR | GP_DU | GP_DD);
+        if (hx < -0.5f) s->pad_buttons |= GP_DL;
+        else if (hx > 0.5f) s->pad_buttons |= GP_DR;
+        if (hy < -0.5f) s->pad_buttons |= GP_DU;
+        else if (hy > 0.5f) s->pad_buttons |= GP_DD;
+        if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
+        return 1;
     }
     return 0;
 }
