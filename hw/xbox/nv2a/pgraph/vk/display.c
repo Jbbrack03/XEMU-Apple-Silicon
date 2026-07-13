@@ -172,7 +172,7 @@ static void xemu_dump_frame_if_requested(struct AHardwareBuffer *ahb)
     if (!dump_dir || !ahb) {
         return;
     }
-    if ((frame_ctr++ % (uint64_t)every) != 0 || written >= 20) {
+    if ((frame_ctr++ % (uint64_t)every) != 0 || written >= 30) {
         return;
     }
     AHardwareBuffer_Desc d;
