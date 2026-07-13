@@ -130,13 +130,12 @@ class LauncherActivity : Activity() {
       Toast.makeText(this, R.string.frontend_launch_unresolved, Toast.LENGTH_LONG).show()
     }
 
-    // All-files access (MANAGE_EXTERNAL_STORAGE) lets the picker auto-discover
-    // games from well-known folders without a SAF grant, so it satisfies the
-    // games-folder requirement for routing to the library.
-    val hasAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-      android.os.Environment.isExternalStorageManager()
-    val needsSetup = !setupComplete || !hasMcpx || !hasFlash || !hasHdd ||
-      (!hasGamesFolder && !hasAllFiles)
+    // Once the BIOS/HDD are set up, land on the game picker. It auto-discovers
+    // games from the app-specific external dir (needs NO permission), plus
+    // shared folders when all-files access is granted, and handles the
+    // "no games yet / grant access / pick a folder" UX itself — so no SAF
+    // folder grant is required to reach it.
+    val needsSetup = !setupComplete || !hasMcpx || !hasFlash || !hasHdd
     val next = if (needsSetup) SetupWizardActivity::class.java else GameLibraryActivity::class.java
 
     startActivity(Intent(this, next))

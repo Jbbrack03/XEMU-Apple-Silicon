@@ -216,44 +216,18 @@ class GameLibraryActivity : AppCompatActivity() {
     btnViewGrid.setOnClickListener { setDisplayMode(true) }
     updateConvertButtonState()
 
-    // Zero-setup discovery: if we have all-files access, load directly from
-    // well-known folders without requiring a SAF grant. Otherwise, offer the
-    // all-files permission first (a single toggle), and only fall back to the
-    // SAF folder picker if that isn't available/granted.
-    if (hasAllFilesAccess()) {
-      loadGames()
-      return
-    }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !allFilesRequested) {
-      allFilesRequested = true
-      try {
-        val intent = android.content.Intent(
-          android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-          Uri.parse("package:$packageName"),
-        )
-        startActivity(intent)
-        Toast.makeText(this, "Allow All files access to auto-list games, or pick a folder.", Toast.LENGTH_LONG).show()
-      } catch (_: Exception) {
-      }
-    }
-    if (!isFolderReady(gamesFolderUri)) {
-      Toast.makeText(this, getString(R.string.setup_pick_disc), Toast.LENGTH_SHORT).show()
-      pickGamesFolder.launch(gamesFolderUri)
-      return
-    }
-
+    // Zero-setup discovery: ALWAYS scan. The app-specific external dir
+    // (/sdcard/Android/data/<pkg>/files/games) needs NO permission, so games
+    // dropped there show immediately with no grant; shared folders are added
+    // when all-files access is granted. Non-blocking — no forced settings jump.
     loadGames()
   }
-
-  private var allFilesRequested = false
 
   override fun onResume() {
     super.onResume()
     OrientationLocker(this).enable()
-    // Re-scan when returning (e.g. after granting all-files access).
-    if (hasAllFilesAccess()) {
-      loadGames()
-    }
+    // Re-scan when returning (new games dropped in / access granted).
+    loadGames()
   }
 
   override fun onDestroy() {
@@ -562,13 +536,6 @@ class GameLibraryActivity : AppCompatActivity() {
   private fun loadGames() {
     val folderUri = gamesFolderUri
     val hasSaf = isFolderReady(folderUri)
-    val hasAllFiles = hasAllFilesAccess()
-    if (!hasSaf && !hasAllFiles) {
-      setLoading(false)
-      currentGames = emptyList()
-      renderGames()
-      return
-    }
 
     setLoading(true, getString(R.string.library_loading_games))
 
@@ -576,9 +543,10 @@ class GameLibraryActivity : AppCompatActivity() {
     Thread {
       loadDiscFormatCacheIfNeeded()
       val safGames = if (hasSaf && folderUri != null) scanFolderForGames(folderUri) else emptyList()
-      // Zero-setup path: auto-discover games in well-known folders via direct
-      // filesystem access (MANAGE_EXTERNAL_STORAGE) so no SAF grant is needed.
-      val fixedGames = if (hasAllFiles) scanFixedFoldersForGames() else emptyList()
+      // Zero-setup path: always scan the app-specific external dirs (need NO
+      // permission) plus, if all-files access is granted, well-known shared
+      // folders — so games auto-list with no SAF grant.
+      val fixedGames = scanFixedFoldersForGames()
       val merged = (safGames + fixedGames)
         .distinctBy { it.relativePath.lowercase(Locale.ROOT) }
       runOnUiThread {
@@ -604,16 +572,28 @@ class GameLibraryActivity : AppCompatActivity() {
    * file:// GameEntry items that launchGame() routes via dvdPath.
    */
   private fun scanFixedFoldersForGames(): List<GameEntry> {
-    val roots = listOf(
+    val roots = ArrayList<File>()
+    // App-specific external dirs need NO permission at all — a truly zero-setup
+    // drop point (e.g. /sdcard/Android/data/<pkg>/files/games).
+    getExternalFilesDirs(null).forEach { base ->
+      if (base != null) {
+        roots.add(File(base, "games"))
+        roots.add(File(base, "Games"))
+        roots.add(base)
+      }
+    }
+    // Well-known shared folders (need all-files access).
+    roots.addAll(listOf(
       File("/sdcard/Games"),
       File("/sdcard/Download/xemu-games"),
       File("/sdcard/Xbox"),
       File("/sdcard/Roms/Xbox"),
       File(android.os.Environment.getExternalStorageDirectory(), "Games"),
-    ).distinctBy { it.absolutePath }
+    ))
+    val distinctRoots = roots.distinctBy { it.absolutePath }
     val out = ArrayList<GameEntry>()
     val seen = HashSet<String>()
-    for (root in roots) {
+    for (root in distinctRoots) {
       if (!root.isDirectory) continue
       val stack = ArrayDeque<File>()
       stack.add(root)
