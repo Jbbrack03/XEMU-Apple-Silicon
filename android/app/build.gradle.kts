@@ -109,6 +109,10 @@ android {
     jniLibs.keepDebugSymbols += setOf("**/*.so")
   }
 
+  buildFeatures {
+    prefab = true
+  }
+
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
@@ -117,6 +121,8 @@ android {
 }
 
 dependencies {
+  // OpenXR loader (prefab) for the XR shell spike (docs/openxr-shell-design.md)
+  implementation("org.khronos.openxr:openxr_loader_for_android:1.1.42")
   implementation("androidx.core:core-ktx:1.15.0")
   implementation("androidx.appcompat:appcompat:1.7.0")
   implementation("androidx.constraintlayout:constraintlayout:2.1.4")

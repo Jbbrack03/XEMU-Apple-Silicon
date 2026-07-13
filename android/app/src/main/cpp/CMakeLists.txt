@@ -1263,3 +1263,29 @@ target_link_libraries(xemu PRIVATE
   $<$<BOOL:${XEMU_ENABLE_VULKAN}>:SPIRV>
   ${zlib-lib}
 )
+
+# ---------------------------------------------------------------------------
+# xr_shell — OpenXR shell spike (docs/openxr-shell-design.md, Spike A).
+# Immersive NativeActivity with passthrough + quad test pattern.
+# OpenXR loader comes from the org.khronos.openxr prefab AAR.
+# ---------------------------------------------------------------------------
+find_package(OpenXR REQUIRED CONFIG)
+
+add_library(android_native_app_glue STATIC
+  ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+target_include_directories(android_native_app_glue PUBLIC
+  ${ANDROID_NDK}/sources/android/native_app_glue)
+
+add_library(xr_shell SHARED
+  ${CMAKE_CURRENT_LIST_DIR}/xr_shell/xr_shell_main.c)
+target_link_libraries(xr_shell
+  android_native_app_glue
+  OpenXR::openxr_loader
+  ${log-lib}
+  ${android-lib}
+  ${egl-lib}
+  ${glesv3-lib}
+)
+# native_app_glue needs this to keep ANativeActivity_onCreate
+set_property(TARGET xr_shell APPEND_STRING PROPERTY
+  LINK_FLAGS " -u ANativeActivity_onCreate")
