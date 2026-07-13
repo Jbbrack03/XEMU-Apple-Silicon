@@ -12,3 +12,4 @@ app/.cxx/
 # OS
 .DS_Store
 Thumbs.db
+key.properties

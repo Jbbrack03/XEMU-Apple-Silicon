@@ -77,6 +77,9 @@ android {
           arguments += listOf("-DXEMU_ENABLE_LTO=ON")
         }
       }
+      // Dev convenience: keep run-as/adb data access working with the
+      // optimized native build. Flip off for end-user distribution.
+      isDebuggable = true
       isMinifyEnabled = false
       proguardFiles(
         getDefaultProguardFile("proguard-android-optimize.txt"),
