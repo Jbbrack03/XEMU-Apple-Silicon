@@ -3,6 +3,7 @@ package com.izzy2lost.x1box
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import java.io.File
@@ -129,7 +130,13 @@ class LauncherActivity : Activity() {
       Toast.makeText(this, R.string.frontend_launch_unresolved, Toast.LENGTH_LONG).show()
     }
 
-    val needsSetup = !setupComplete || !hasMcpx || !hasFlash || !hasHdd || !hasGamesFolder
+    // All-files access (MANAGE_EXTERNAL_STORAGE) lets the picker auto-discover
+    // games from well-known folders without a SAF grant, so it satisfies the
+    // games-folder requirement for routing to the library.
+    val hasAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+      android.os.Environment.isExternalStorageManager()
+    val needsSetup = !setupComplete || !hasMcpx || !hasFlash || !hasHdd ||
+      (!hasGamesFolder && !hasAllFiles)
     val next = if (needsSetup) SetupWizardActivity::class.java else GameLibraryActivity::class.java
 
     startActivity(Intent(this, next))

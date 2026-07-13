@@ -4,6 +4,7 @@ import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.text.SpannableStringBuilder
@@ -215,6 +216,26 @@ class GameLibraryActivity : AppCompatActivity() {
     btnViewGrid.setOnClickListener { setDisplayMode(true) }
     updateConvertButtonState()
 
+    // Zero-setup discovery: if we have all-files access, load directly from
+    // well-known folders without requiring a SAF grant. Otherwise, offer the
+    // all-files permission first (a single toggle), and only fall back to the
+    // SAF folder picker if that isn't available/granted.
+    if (hasAllFilesAccess()) {
+      loadGames()
+      return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !allFilesRequested) {
+      allFilesRequested = true
+      try {
+        val intent = android.content.Intent(
+          android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+          Uri.parse("package:$packageName"),
+        )
+        startActivity(intent)
+        Toast.makeText(this, "Allow All files access to auto-list games, or pick a folder.", Toast.LENGTH_LONG).show()
+      } catch (_: Exception) {
+      }
+    }
     if (!isFolderReady(gamesFolderUri)) {
       Toast.makeText(this, getString(R.string.setup_pick_disc), Toast.LENGTH_SHORT).show()
       pickGamesFolder.launch(gamesFolderUri)
@@ -224,9 +245,15 @@ class GameLibraryActivity : AppCompatActivity() {
     loadGames()
   }
 
+  private var allFilesRequested = false
+
   override fun onResume() {
     super.onResume()
     OrientationLocker(this).enable()
+    // Re-scan when returning (e.g. after granting all-files access).
+    if (hasAllFilesAccess()) {
+      loadGames()
+    }
   }
 
   override fun onDestroy() {
@@ -534,29 +561,83 @@ class GameLibraryActivity : AppCompatActivity() {
 
   private fun loadGames() {
     val folderUri = gamesFolderUri
-    if (!isFolderReady(folderUri)) {
+    val hasSaf = isFolderReady(folderUri)
+    val hasAllFiles = hasAllFilesAccess()
+    if (!hasSaf && !hasAllFiles) {
       setLoading(false)
       currentGames = emptyList()
       renderGames()
       return
     }
-    val readyFolderUri = folderUri ?: return
 
     setLoading(true, getString(R.string.library_loading_games))
 
     val generation = ++scanGeneration
     Thread {
       loadDiscFormatCacheIfNeeded()
-      val games = scanFolderForGames(readyFolderUri)
+      val safGames = if (hasSaf && folderUri != null) scanFolderForGames(folderUri) else emptyList()
+      // Zero-setup path: auto-discover games in well-known folders via direct
+      // filesystem access (MANAGE_EXTERNAL_STORAGE) so no SAF grant is needed.
+      val fixedGames = if (hasAllFiles) scanFixedFoldersForGames() else emptyList()
+      val merged = (safGames + fixedGames)
+        .distinctBy { it.relativePath.lowercase(Locale.ROOT) }
       runOnUiThread {
         if (generation != scanGeneration) {
           return@runOnUiThread
         }
         setLoading(false)
-        currentGames = games
+        currentGames = merged
         renderGames()
       }
     }.start()
+  }
+
+  private fun hasAllFilesAccess(): Boolean {
+    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+      android.os.Environment.isExternalStorageManager()
+  }
+
+  /*
+   * Zero-setup game discovery: scan well-known folders directly (requires
+   * MANAGE_EXTERNAL_STORAGE, granted on a sideloaded app) so a user can just
+   * drop ISOs in a folder and see them — no per-folder SAF grant. Produces
+   * file:// GameEntry items that launchGame() routes via dvdPath.
+   */
+  private fun scanFixedFoldersForGames(): List<GameEntry> {
+    val roots = listOf(
+      File("/sdcard/Games"),
+      File("/sdcard/Download/xemu-games"),
+      File("/sdcard/Xbox"),
+      File("/sdcard/Roms/Xbox"),
+      File(android.os.Environment.getExternalStorageDirectory(), "Games"),
+    ).distinctBy { it.absolutePath }
+    val out = ArrayList<GameEntry>()
+    val seen = HashSet<String>()
+    for (root in roots) {
+      if (!root.isDirectory) continue
+      val stack = ArrayDeque<File>()
+      stack.add(root)
+      while (stack.isNotEmpty()) {
+        val dir = stack.removeLast()
+        val children = dir.listFiles() ?: continue
+        for (child in children) {
+          if (child.isDirectory) { stack.add(child); continue }
+          val name = child.name
+          if (!child.isFile || !isSupportedGame(name)) continue
+          if (!seen.add(child.absolutePath.lowercase(Locale.ROOT))) continue
+          out.add(
+            GameEntry(
+              title = toGameTitle(name),
+              uri = Uri.fromFile(child),
+              relativePath = name,
+              sizeBytes = child.length(),
+              discImageFormat = DiscImageFormat.UNKNOWN_ISO,
+            )
+          )
+        }
+      }
+    }
+    return out
   }
 
   private fun syncDisplayModeUi() {
@@ -1378,7 +1459,10 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchGame(game: GameEntry) {
-    persistUriPermission(game.uri)
+    val isFile = game.uri.scheme.equals("file", ignoreCase = true)
+    if (!isFile) {
+      persistUriPermission(game.uri)
+    }
     // MainActivity runs in :xemu, so the disc selection must be flushed before
     // the other process reads SharedPreferences during startup.
     val launchEditor = prefs.edit()
@@ -1387,9 +1471,17 @@ class GameLibraryActivity : AppCompatActivity() {
       editor = launchEditor,
       relativePath = game.relativePath,
     )
+    if (isFile) {
+      // Direct-filesystem game (zero-setup path): the emulator reads dvdPath.
+      launchEditor
+        .putString("dvdPath", game.uri.path)
+        .remove("dvdUri")
+    } else {
+      launchEditor
+        .putString("dvdUri", game.uri.toString())
+        .remove("dvdPath")
+    }
     launchEditor
-      .putString("dvdUri", game.uri.toString())
-      .remove("dvdPath")
       .putBoolean("skip_game_picker", false)
       .commit()
 
