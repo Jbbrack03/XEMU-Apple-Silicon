@@ -1072,19 +1072,33 @@ static bool check_surface_to_texture_compatiblity(const SurfaceBinding *surface,
                                                   const TextureShape *shape)
 {
     if (surface->width != shape->width ||
-        surface->height != shape->height ||
-        shape->cubemap ||
-        shape->levels > 1) {
+        surface->height != shape->height) {
+        OPT_STAT_INC(s2t_fail_dim);
+        return false;
+    }
+    if (shape->cubemap) {
+        OPT_STAT_INC(s2t_fail_cubemap);
+        return false;
+    }
+    if (shape->levels > 1) {
+        OPT_STAT_INC(s2t_fail_levels);
         return false;
     }
 
     if (!surface->color) {
+        OPT_STAT_INC(s2t_ok);
         return true;
     }
 
     VkColorFormatInfo tex_vkf = kelvin_color_format_vk_map[shape->color_format];
-    return tex_vkf.vk_format &&
+    bool ok = tex_vkf.vk_format &&
            surface->host_fmt.host_bytes_per_pixel == vk_format_texel_size(tex_vkf.vk_format);
+    if (ok) {
+        OPT_STAT_INC(s2t_ok);
+    } else {
+        OPT_STAT_INC(s2t_fail_fmt);
+    }
+    return ok;
 }
 
 static void create_dummy_texture(PGRAPHState *pg)

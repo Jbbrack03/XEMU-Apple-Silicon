@@ -157,6 +157,13 @@ struct OptBisectStats {
     int stall_batched;
     int stall_skipped_empty;
     int predownload_hits;
+    /* Why a render-target-as-texture read fell to the download stall path
+     * (check_surface_to_texture_compatiblity failure reasons). */
+    int s2t_ok;
+    int s2t_fail_dim;
+    int s2t_fail_cubemap;
+    int s2t_fail_levels;
+    int s2t_fail_fmt;
 };
 extern struct OptBisectStats g_opt_stats;
 #if NV2A_PERF_LOG
@@ -1001,7 +1008,7 @@ typedef struct PGRAPHVkState {
     VmaAllocator allocator;
     uint32_t allocator_last_submit_index;
 
-#define NUM_SUBMIT_FRAMES 3
+#define NUM_SUBMIT_FRAMES 4
     int num_active_frames;
     VkQueue queue;
     VkCommandPool command_pool;

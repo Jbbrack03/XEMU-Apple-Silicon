@@ -993,7 +993,13 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "frame skip: %s", frame_skip ? "ON" : "OFF");
 
-  int submit_frames = GetPrefInt(env, activity, "submit_frames", 2);
+  // Pipeline depth (frames in flight). Default was 2 (shallow: 1 frame of
+  // headroom), which stalled the guest on the frame-rotation GPU fence
+  // (measured ~5ms/frame on Halo). Depth 3 gives 2 frames of headroom, nearly
+  // eliminating that wait (Halo 17->20fps, Fen 5.4->1.0ms); depths 4-5 add
+  // nothing (fence already hidden). Output is identical (timing-only change).
+  // Costs one extra frame of latency + one command-buffer/framebuffer set.
+  int submit_frames = GetPrefInt(env, activity, "submit_frames", 3);
   xemu_set_submit_frames(submit_frames);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "submit frames: %d", submit_frames);

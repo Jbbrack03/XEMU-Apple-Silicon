@@ -186,6 +186,13 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.buf_stg_full,
                 g_opt_stats.buf_compute_full,
                 g_opt_stats.buf_vtx_full);
+        __android_log_print(ANDROID_LOG_INFO, "hakuX-s2t",
+                "RTasTex: ok%d fail[dim%d cube%d levels%d fmt%d]",
+                g_opt_stats.s2t_ok,
+                g_opt_stats.s2t_fail_dim,
+                g_opt_stats.s2t_fail_cubemap,
+                g_opt_stats.s2t_fail_levels,
+                g_opt_stats.s2t_fail_fmt);
         {
             extern struct FPUProfileCounters {
                 int x87_arith, x87_load_store, x87_transcendental, x87_stack;
