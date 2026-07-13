@@ -1175,6 +1175,15 @@ extern "C" int xemu_android_main(int argc, char** argv) {
   return rc;
 }
 
+static bool xemu_android_pref_contains_env(const char *needle) {
+  JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+  if (!env) return false;
+  jobject activity = GetActivity(env);
+  if (!activity) return false;
+  std::string ev = GetPrefString(env, activity, "env_vars");
+  return ev.find(needle) != std::string::npos;
+}
+
 extern "C" int SDL_main(int argc, char* argv[]) {
   (void)argc;
   (void)argv;
@@ -1185,6 +1194,20 @@ extern "C" int SDL_main(int argc, char* argv[]) {
                           SDL_HINT_OVERRIDE);
   SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
   SDL_DisableScreenSaver();
+
+  /* XR shell mode: SDL chooses its pump function (blocking vs non-blocking
+   * on pause) at SDL_Init time, so the block-on-pause hint MUST be set
+   * before SDL_Init. The XR flag lives in the app prefs; read it directly
+   * here (the env_vars pref that also carries it is only applied later in
+   * SyncSetupFiles). */
+  if (xemu_android_pref_contains_env("XEMU_ANDROID_XR_MODE=1")) {
+    SDL_SetHintWithPriority(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0",
+                            SDL_HINT_OVERRIDE);
+    SDL_SetHintWithPriority(SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO, "0",
+                            SDL_HINT_OVERRIDE);
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "XR mode: SDL block-on-pause disabled (pre-Init)");
+  }
 
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
     __android_log_print(ANDROID_LOG_ERROR, kLogTag, "SDL_Init failed: %s", SDL_GetError());
@@ -1198,21 +1221,6 @@ extern "C" int SDL_main(int argc, char* argv[]) {
   auto t_sync_end = SDL_GetTicks();
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "SyncSetupFiles took %u ms", t_sync_end - t_sync_start);
-
-  // XR shell mode (Spike B): SDL must not block its main thread when the
-  // SDL activity backgrounds (the OpenXR activity takes the foreground and
-  // consumes frames via xemu_xr_acquire_display_ahb).
-  {
-    const char *xr = getenv("XEMU_ANDROID_XR_MODE");
-    if (xr && xr[0] == '1') {
-      SDL_SetHintWithPriority(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0",
-                              SDL_HINT_OVERRIDE);
-      SDL_SetHintWithPriority(SDL_HINT_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO, "0",
-                              SDL_HINT_OVERRIDE);
-      __android_log_print(ANDROID_LOG_INFO, "xemu-android",
-                          "XR mode: SDL block-on-pause disabled");
-    }
-  }
 
   // Apply user's audio driver preference (overrides the default set above)
   if (!setup.audio_driver.empty()) {

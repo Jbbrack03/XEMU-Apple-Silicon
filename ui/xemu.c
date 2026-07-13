@@ -1652,64 +1652,77 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         return;
     }
 #endif
-    bool xr_surfaceless = false;
 #ifdef __ANDROID__
-    /* XR presentation mode: never touch the SDL window surface. The window
-     * surface teardown during activity backgrounding can block MakeCurrent/
-     * SwapWindow indefinitely; the XR quad is the only presentation target,
-     * so run the whole consumer chain on a surfaceless current from the
-     * start (EGL_KHR_surfaceless_context; Adreno supports it). */
+    /* XR presentation mode: the OpenXR quad is the only present target, so
+     * the SDL window surface/context is never used here. Crucially, the
+     * Vulkan renderer's AHB->GL interop runs on its OWN offscreen context
+     * (pgraph/vk/renderer.c g_gl_context), so this loop only has to KICK
+     * frame production — nv2a_get_framebuffer_surface() drives the render
+     * thread (which publishes the frame's AHB via xemu_xr_publish_frame)
+     * and needs no GL context current on this thread. Touching SDL's
+     * winctx here is what stalled after the activity backgrounded (SDL
+     * backs up + unbinds its context on pause); avoid it entirely. */
     if (g_android_xr_mode) {
-        EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                           (EGLContext)scon->winctx)) {
-            xr_surfaceless = true;
-            static uint32_t sl_log2;
-            if ((sl_log2++ % 600) == 0) {
-                __android_log_print(ANDROID_LOG_INFO, "xemu-android",
-                                    "xr-mode: surfaceless refresh #%u",
-                                    sl_log2);
-            }
-        } else {
-            static uint32_t sl_fail_log;
-            if ((sl_fail_log++ % 600) == 0) {
-                __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
-                                    "xr-mode: surfaceless MakeCurrent failed 0x%x",
-                                    eglGetError());
-            }
-            SDL_Delay(16);
-            return;
+        /* Pace the kick loop to the frame limit (default 72 Hz; overshoots
+         * the guest's own rate so no frame is missed, but stops the
+         * ~2800 Hz free-spin that burned CPU/power). The OpenXR side
+         * presents the latest published AHB on its own 120 Hz clock and
+         * reprojects, so this only governs frame *production*, not display
+         * cadence. */
+        static uint64_t xr_next_ns;
+        static uint32_t xr_kick_log;
+        uint64_t now_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        int target = g_android_target_fps > 0 ? g_android_target_fps : 72;
+        uint64_t period_ns = 1000000000ULL / (uint64_t)target;
+        if (xr_next_ns == 0) {
+            xr_next_ns = now_ns;
         }
+        if (now_ns < xr_next_ns) {
+            uint64_t sleep_ns = xr_next_ns - now_ns;
+            if (sleep_ns > period_ns) {
+                sleep_ns = period_ns; /* clamp after a stall */
+            }
+            SDL_Delay((Uint32)(sleep_ns / 1000000ULL));
+        }
+        xr_next_ns += period_ns;
+        if (xr_next_ns < now_ns) {
+            xr_next_ns = now_ns + period_ns; /* resync after a long stall */
+        }
+        if ((xr_kick_log++ % 600) == 0) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                                "xr-mode: paced kick #%u @%d fps", xr_kick_log,
+                                target);
+        }
+        nv2a_get_framebuffer_surface();
+        nv2a_release_framebuffer_surface();
+        /* VGA update + vblank so guest timing/present flags advance. */
+        qemu_mutex_lock_main_loop();
+        bql_lock();
+        graphic_hw_update(scon->dcl.con);
+        if (scon->updates && scon->surface) {
+            scon->updates = 0;
+        }
+        sdl2_poll_events(scon);
+        bql_unlock();
+        qemu_mutex_unlock_main_loop();
+        return;
     }
-    if (!xr_surfaceless)
 #endif
     if (SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0 ||
         SDL_GL_GetCurrentContext() == NULL) {
 #ifdef __ANDROID__
-        if (!xr_surfaceless) {
         __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
                             "sdl2_gl_refresh: make current failed: %s",
                             SDL_GetError());
-        if (!g_android_xr_mode) {
-            g_android_paused = true;
-        }
-        qemu_mutex_lock_main_loop();
-        bql_lock();
-        sdl2_poll_events(scon);
-        bql_unlock();
-        qemu_mutex_unlock_main_loop();
-        SDL_Delay(16);
-        return;
-        } /* !xr_surfaceless */
-#else
-        qemu_mutex_lock_main_loop();
-        bql_lock();
-        sdl2_poll_events(scon);
-        bql_unlock();
-        qemu_mutex_unlock_main_loop();
-        SDL_Delay(16);
-        return;
+        g_android_paused = true;
 #endif
+        qemu_mutex_lock_main_loop();
+        bql_lock();
+        sdl2_poll_events(scon);
+        bql_unlock();
+        qemu_mutex_unlock_main_loop();
+        SDL_Delay(16);
+        return;
     }
 #ifdef __ANDROID__
     android_log_gl_error("refresh-makecurrent");
@@ -1842,7 +1855,6 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     nv2a_release_framebuffer_surface();
 #ifdef __ANDROID__
     android_log_gl_error("refresh-finish");
-    if (!xr_surfaceless)
 #endif
     SDL_GL_SwapWindow(scon->real_window);
 #ifdef __ANDROID__
