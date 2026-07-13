@@ -299,7 +299,16 @@ static inline double nds_round_rc(double a, float_status *s)
     case float_round_up:      return ceil(a);
     case float_round_to_zero: return trunc(a);
     case float_round_nearest_even:
-    default:                  return a - remainder(a, 1.0);
+    default: {
+        /* remainder(+/-inf, 1.0) is NaN — pass non-finite through, matching
+         * rint()/x87 FRNDINT. */
+        if (!isfinite(a)) {
+            return a;
+        }
+        double r = a - remainder(a, 1.0);
+        /* Keep the sign of zero (x87/rint: FRNDINT(-0.3) = -0.0). */
+        return r == 0.0 ? copysign(r, a) : r;
+    }
     }
 }
 
