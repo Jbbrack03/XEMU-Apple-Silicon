@@ -28,6 +28,10 @@
 
 static bool g_xemu_fast_fences = false;
 static bool g_xemu_skip_empty_report_stalls = false;
+static bool g_xemu_pipeline_deferred = false;
+/* Diagnostic: force the original pure busy-spin submit wait (for A/B isolation
+ * of the adaptive spin-then-sleep change). Set via env XEMU_BUSY_SPIN_WAIT. */
+static bool g_xemu_busy_spin_wait = false;
 static bool g_xemu_draw_reorder = false;
 static bool g_xemu_draw_merge = false;
 static bool g_xemu_bindless_textures = false;
@@ -231,6 +235,21 @@ void xemu_set_skip_empty_report_stalls(bool enable)
 bool xemu_get_skip_empty_report_stalls(void)
 {
     return g_xemu_skip_empty_report_stalls;
+}
+
+void xemu_set_pipeline_deferred(bool enable)
+{
+    g_xemu_pipeline_deferred = enable;
+}
+
+bool xemu_get_pipeline_deferred(void)
+{
+    return g_xemu_pipeline_deferred;
+}
+
+void xemu_set_busy_spin_wait(bool enable)
+{
+    g_xemu_busy_spin_wait = enable;
 }
 
 void xemu_set_draw_reorder(bool enable)
@@ -2421,14 +2440,31 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
             pgraph_vk_render_thread_enqueue(r, cmd);
 
-            if (deferred) {
-                /* Spin-wait for render thread to complete vkQueueSubmit.
-                 * Faster than QemuEvent (no futex/eventfd syscall overhead).
-                 * Typically completes in <100μs. */
+            if (deferred && !g_xemu_pipeline_deferred) {
+                /* Wait for the render thread to complete vkQueueSubmit.
+                 * Light titles submit in <100μs, so spin briefly (syscall-free
+                 * fast path). Heavy titles' submits take several ms (large
+                 * command buffer -> long Turnip/KGSL submit); busy-spinning the
+                 * CPU-bound guest thread the whole time wastes a full core at
+                 * 2.36GHz and generates heat that thermally throttles all
+                 * cores. After the spin budget, sleep in short increments to
+                 * release the core. Semantically identical to the old busy-spin
+                 * (still waits for the submit to complete). */
+                int64_t spin_t0 = nv2a_clock_ns();
                 while (!qatomic_read(&r->frame_submitted[deferred_frame])) {
-                    sched_yield();
+                    if (g_xemu_busy_spin_wait ||
+                        nv2a_clock_ns() - spin_t0 < 150000) {
+                        sched_yield();
+                    } else {
+                        g_usleep(80);
+                    }
                 }
             }
+            /* When g_xemu_pipeline_deferred is set we do NOT wait here: the
+             * finish is truly deferred and the guest runs ahead. The 3-slot
+             * frame rotation below (frame_enqueued/frame_submitted headroom
+             * check) throttles the guest to <=2 frames ahead of the GPU, which
+             * is the existing pipeline design this spin was defeating. */
 
             if (!deferred) {
                 qemu_event_wait(&finish_event);
@@ -2494,8 +2530,13 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
              * triggers since there's 2 frames of pipeline headroom. */
             if (r->frame_enqueued[next_frame] &&
                 !qatomic_read(&r->frame_submitted[next_frame])) {
+                int64_t rot_t0 = nv2a_clock_ns();
                 while (!qatomic_read(&r->frame_submitted[next_frame])) {
-                    sched_yield();
+                    if (nv2a_clock_ns() - rot_t0 < 150000) {
+                        sched_yield();
+                    } else {
+                        g_usleep(80);
+                    }
                 }
             }
             r->frame_enqueued[next_frame] = false;

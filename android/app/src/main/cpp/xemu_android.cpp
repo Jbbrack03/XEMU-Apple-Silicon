@@ -35,6 +35,9 @@ extern "C" void xemu_set_fast_fences(bool enable);
 extern "C" bool xemu_get_fast_fences(void);
 extern "C" void xemu_set_skip_empty_report_stalls(bool enable);
 extern "C" bool xemu_get_skip_empty_report_stalls(void);
+extern "C" void xemu_set_pipeline_deferred(bool enable);
+extern "C" bool xemu_get_pipeline_deferred(void);
+extern "C" void xemu_set_busy_spin_wait(bool enable);
 extern "C" void xemu_set_fp_jit(bool enable);
 extern "C" bool xemu_get_fp_jit(void);
 extern "C" void xemu_set_draw_reorder(bool enable);
@@ -946,6 +949,24 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "skip empty report stalls: %s",
                       skip_empty_stalls ? "ON" : "OFF");
+
+  // True-async deferred finishes: the guest does NOT block waiting for its own
+  // just-enqueued vkQueueSubmit; it runs ahead and the 3-slot frame rotation
+  // provides backpressure. Lets the CPU-bound guest thread overlap with the
+  // multi-ms GPU submit (heavy titles) instead of stalling on it. Default OFF
+  // pending on-device A/B + frame-dump correctness verification.
+  bool pipeline_deferred =
+      GetPrefBool(env, activity, "pipeline_deferred", false);
+  xemu_set_pipeline_deferred(pipeline_deferred);
+  __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                      "pipeline deferred finishes: %s",
+                      pipeline_deferred ? "ON" : "OFF");
+
+  // Diagnostic A/B: force the original pure busy-spin submit wait.
+  bool busy_spin = GetPrefBool(env, activity, "busy_spin_wait", false);
+  xemu_set_busy_spin_wait(busy_spin);
+  __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                      "busy spin wait (diag): %s", busy_spin ? "ON" : "OFF");
 
   bool draw_reorder = GetPrefBool(env, activity, "draw_reorder", true);
   xemu_set_draw_reorder(draw_reorder);
