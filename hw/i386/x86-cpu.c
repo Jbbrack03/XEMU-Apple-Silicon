@@ -30,6 +30,7 @@
 #include "hw/intc/i8259.h"
 #include "hw/irq.h"
 #include "system/kvm.h"
+#include "system/runstate.h"
 
 /*
  * Ported perf fork (V9), Android/aarch64 variant: RDTSC fast-path.
@@ -64,6 +65,37 @@ static bool xemu_fast_rdtsc_enabled;
 static bool xemu_fast_rdtsc_init_done;
 static uint64_t xemu_cntfrq;
 
+/*
+ * Android correction to the source fork's "VM never pauses mid-run"
+ * assumption: on Quest/Android the app vm_stops on EVERY panel focus
+ * loss, so an uncorrected raw counter would jump the guest TSC forward
+ * by the full wall-clock pause (minutes/hours), which guest frame-delta
+ * and network-timeout logic can observe. Track cumulative paused ticks
+ * via a VM change-state handler and subtract them, restoring
+ * QEMU_CLOCK_VIRTUAL pause semantics at the cost of one atomic load.
+ * The handler runs in the main loop while vCPUs are quiesced on both
+ * edges, so plain atomics are sufficient.
+ */
+static uint64_t xemu_tsc_pause_offset;  /* cntvct ticks spent paused */
+static uint64_t xemu_tsc_paused_at;
+static bool xemu_tsc_paused;
+
+static inline uint64_t cntvct_now(void);
+
+static void xemu_fast_rdtsc_vm_state_change(void *opaque, bool running,
+                                            RunState state)
+{
+    if (!running && !xemu_tsc_paused) {
+        xemu_tsc_paused_at = cntvct_now();
+        xemu_tsc_paused = true;
+    } else if (running && xemu_tsc_paused) {
+        qatomic_set(&xemu_tsc_pause_offset,
+                    xemu_tsc_pause_offset +
+                        (cntvct_now() - xemu_tsc_paused_at));
+        xemu_tsc_paused = false;
+    }
+}
+
 static inline uint64_t cntvct_now(void)
 {
     uint64_t v;
@@ -97,6 +129,10 @@ static void xemu_fast_rdtsc_init(void)
         enabled = false;
     }
 
+    if (enabled) {
+        qemu_add_vm_change_state_handler(xemu_fast_rdtsc_vm_state_change,
+                                         NULL);
+    }
     xemu_fast_rdtsc_enabled = enabled;
     xemu_fast_rdtsc_init_done = true;
 
@@ -117,7 +153,8 @@ uint64_t cpu_get_tsc(CPUX86State *env)
         xemu_fast_rdtsc_init();
     }
     if (xemu_fast_rdtsc_enabled) {
-        return muldiv64(cntvct_now(), 733333333, xemu_cntfrq);
+        uint64_t v = cntvct_now() - qatomic_read(&xemu_tsc_pause_offset);
+        return muldiv64(v, 733333333, xemu_cntfrq);
     }
 # endif
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 733333333,
@@ -153,6 +190,12 @@ static void pic_irq_request(void *opaque, int irq, int level)
 
 qemu_irq x86_allocate_cpu_irq(void)
 {
+#if defined(XBOX) && defined(__ANDROID__) && defined(__aarch64__)
+    /* Main-thread, board-init-time hook: resolve the fast-RDTSC gate and
+     * register the pause-offset VM state handler here rather than lazily
+     * from a vCPU thread (handler-list append assumes BQL). */
+    xemu_fast_rdtsc_init();
+#endif
     return qemu_allocate_irq(pic_irq_request, NULL, 0);
 }
 
