@@ -1022,8 +1022,21 @@ static bool do_tb_phys_invalidate(TranslationBlock *tb,
         return false;
     }
 
-    qht_insert(&tb_ctx.inv_htable, tb, h, &existing);
-    g_assert(existing == NULL);
+#ifdef XBOX
+    /*
+     * Superblocks are NOT recyclable. Their ihash covers only A's guest
+     * bytes (tb->size is truncated to A's range so the QHT hash matches
+     * normal lookups), so the inv_htable recycle guard cannot detect a
+     * modification of B's bytes — recycling would silently re-execute a
+     * stale translation of B. Drop them here; re-entry at A's pc will
+     * retranslate fresh.
+     */
+    if (tb->superblock == NULL)
+#endif
+    {
+        qht_insert(&tb_ctx.inv_htable, tb, h, &existing);
+        g_assert(existing == NULL);
+    }
 
     /* remove the TB from the page list */
     if (rm_from_page_list) {

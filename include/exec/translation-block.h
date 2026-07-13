@@ -179,6 +179,15 @@ struct TranslationBlock {
     uint8_t  tier_pad[1];   /* Alignment padding */
     uint32_t chain_count[2]; /* How many times each exit was taken */
     SuperblockInfo *superblock; /* Non-NULL if this is a merged superblock */
+    /*
+     * Guest virtual pc of this TB's last exec-loop dispatch. Under
+     * CF_PCREL (always set for system-mode x86) tb->pc is never
+     * written, so this is the only guest-pc handle the tier-1 /
+     * superblock machinery has. 0 = never dispatched. Must be
+     * validated against tb_page_addr0 before use (a stale virtual
+     * alias fails that check).
+     */
+    vaddr entry_pc;
 #endif
 };
 

@@ -412,6 +412,18 @@ struct TCGContext {
     void *hot_arena_start;
     void *hot_arena_end;
     void *hot_arena_ptr;
+    /*
+     * Saved main code-gen pointers while a hot-arena swap is active in
+     * tb_gen_code. Kept in the context (not locals) so a translation
+     * fault that longjmps out via cpu->jmp_env can restore them in
+     * cpu_exec_longjmp_cleanup — otherwise the tiny hot arena silently
+     * becomes the global code buffer and all later translation thrashes.
+     */
+    bool  hot_swap_active;
+    void *hot_swap_saved_ptr;
+    void *hot_swap_saved_buf;
+    size_t hot_swap_saved_size;
+    void *hot_swap_saved_hw;
 #endif
 
     /* Track which vCPU triggers events */
@@ -731,6 +743,9 @@ static inline bool tcg_op_buf_full(void)
 void *tcg_malloc_internal(TCGContext *s, int size);
 void tcg_pool_reset(TCGContext *s);
 TranslationBlock *tcg_tb_alloc(TCGContext *s);
+#ifdef XBOX
+void tcg_hot_swap_restore(TCGContext *s);
+#endif
 #ifdef XBOX
 TranslationBlock *tcg_tb_alloc_hot(TCGContext *s);
 #endif

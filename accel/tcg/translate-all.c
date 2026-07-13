@@ -304,6 +304,26 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
+#ifdef XBOX
+/*
+ * Undo the hot-arena code-buffer swap. Idempotent; also called from
+ * cpu_exec_longjmp_cleanup so a translation fault that longjmps out of
+ * tb_gen_code cannot leave the hot arena installed as the global
+ * code-gen buffer.
+ */
+void tcg_hot_swap_restore(TCGContext *s)
+{
+    if (!s->hot_swap_active) {
+        return;
+    }
+    s->code_gen_ptr         = s->hot_swap_saved_ptr;
+    s->code_gen_buffer      = s->hot_swap_saved_buf;
+    s->code_gen_buffer_size = s->hot_swap_saved_size;
+    s->code_gen_highwater   = s->hot_swap_saved_hw;
+    s->hot_swap_active = false;
+}
+#endif
+
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 {
@@ -374,8 +394,17 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 
 #ifdef XBOX
     bool hot_alloc = false;
-    void *saved_cgp = NULL, *saved_cgb = NULL, *saved_cghw = NULL;
-    size_t saved_cgbs = 0;
+
+    /*
+     * Consume any pending tier-1 promotion request BEFORE allocation:
+     * the hot-arena branch below tests s.cflags & CF_TIER1, so the
+     * flag must be set here (it used to be consumed only after
+     * tcg_tb_alloc, which meant promoted TBs never used the hot
+     * arena). Runs once — a buffer_overflow retry keeps the flag in
+     * s.cflags without re-consuming.
+     */
+    int tier1_saved_exec = tier1_consume_request(s.pc, s.cs_base, s.flags,
+                                                 &s.cflags);
 #endif
 
  buffer_overflow:
@@ -386,10 +415,11 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         tb = tcg_tb_alloc_hot(tcg_ctx);
         if (tb) {
             hot_alloc = true;
-            saved_cgp  = tcg_ctx->code_gen_ptr;
-            saved_cgb  = tcg_ctx->code_gen_buffer;
-            saved_cgbs = tcg_ctx->code_gen_buffer_size;
-            saved_cghw = tcg_ctx->code_gen_highwater;
+            tcg_ctx->hot_swap_active     = true;
+            tcg_ctx->hot_swap_saved_ptr  = tcg_ctx->code_gen_ptr;
+            tcg_ctx->hot_swap_saved_buf  = tcg_ctx->code_gen_buffer;
+            tcg_ctx->hot_swap_saved_size = tcg_ctx->code_gen_buffer_size;
+            tcg_ctx->hot_swap_saved_hw   = tcg_ctx->code_gen_highwater;
             tcg_ctx->code_gen_ptr         = tcg_ctx->hot_arena_ptr;
             tcg_ctx->code_gen_buffer      = tcg_ctx->hot_arena_start;
             tcg_ctx->code_gen_buffer_size = tcg_ctx->hot_arena_end
@@ -434,18 +464,13 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     tb->chain_count[0] = 0;
     tb->chain_count[1] = 0;
     tb->superblock = NULL;
+    tb->entry_pc = 0;
 
-    /* Check if this PC has a pending tier-1 promotion request. */
-    {
-        uint32_t tier1_cflags = tb->cflags;
-        int saved_exec = tier1_consume_request(s.pc, s.cs_base, s.flags,
-                                               &tier1_cflags);
-        if (saved_exec >= 0) {
-            tb->cflags = tier1_cflags;
-            s.cflags = tier1_cflags;
-            tb->tier = 1;
-            tb->exec_count = (uint32_t)saved_exec;
-        }
+    /* Apply the tier-1 promotion consumed before allocation above.
+     * tb->cflags already carries CF_TIER1 via s.cflags. */
+    if (tier1_saved_exec >= 0) {
+        tb->tier = 1;
+        tb->exec_count = (uint32_t)tier1_saved_exec;
     }
 #endif
     tb_set_page_addr0(tb, phys_pc);
@@ -481,13 +506,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
             tb_unlock_pages(tb);
             tcg_ctx->gen_tb = NULL;
 #ifdef XBOX
-            if (hot_alloc) {
-                tcg_ctx->code_gen_ptr         = saved_cgp;
-                tcg_ctx->code_gen_buffer      = saved_cgb;
-                tcg_ctx->code_gen_buffer_size = saved_cgbs;
-                tcg_ctx->code_gen_highwater   = saved_cghw;
-                hot_alloc = false;
-            }
+            tcg_hot_swap_restore(tcg_ctx);
+            hot_alloc = false;
 #endif
             goto buffer_overflow;
 
@@ -629,10 +649,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         tcg_ctx->hot_arena_ptr = (void *)
             ROUND_UP((uintptr_t)gen_code_buf + gen_code_size + search_size,
                      CODE_GEN_ALIGN);
-        tcg_ctx->code_gen_ptr         = saved_cgp;
-        tcg_ctx->code_gen_buffer      = saved_cgb;
-        tcg_ctx->code_gen_buffer_size = saved_cgbs;
-        tcg_ctx->code_gen_highwater   = saved_cghw;
+        tcg_hot_swap_restore(tcg_ctx);
     } else
 #endif
     {
@@ -978,7 +995,8 @@ static void sb_reattach_exitreq(TCGContext *s,
  */
 TranslationBlock *tb_gen_superblock(CPUState *cpu,
                                      TranslationBlock *tb_a,
-                                     int dominant_exit)
+                                     int dominant_exit,
+                                     vaddr pc_a, vaddr pc_b)
 {
     CPUArchState *env = cpu_env(cpu);
     TranslationBlock *tb, *existing_tb;
@@ -995,11 +1013,49 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
         return NULL;
     }
     TranslationBlock *tb_b = (TranslationBlock *)dest;
+    /*
+     * Re-check validity on this (later) read: a device-thread DMA write
+     * can invalidate B between the trigger's lock-free checks and here —
+     * system-mode mmap_lock() is a no-op, NOT a lock.
+     */
+    if (qatomic_read(&tb_b->cflags) & CF_INVALID) {
+        return NULL;
+    }
 
-    /* Resolve physical addresses and host pointers. */
-    phys_pc_a = get_page_addr_code_hostp(env, tb_a->pc, &host_pc_a);
-    phys_pc_b = get_page_addr_code_hostp(env, tb_b->pc, &host_pc_b);
+    /*
+     * Resolve physical addresses and host pointers from the REAL guest
+     * pcs passed in (tb->pc is unset under CF_PCREL — never read it
+     * here; resolving a garbage pc can even longjmp with mmap_lock
+     * held). Then VALIDATE each resolved phys against the TB's own
+     * physical identity: under CF_PCREL the TB is keyed by full
+     * physical address (tb_page_addr0), so a stale virtual alias or a
+     * remap shows up as a mismatch — bail before anything destructive.
+     */
+    phys_pc_a = get_page_addr_code_hostp(env, pc_a, &host_pc_a);
+    phys_pc_b = get_page_addr_code_hostp(env, pc_b, &host_pc_b);
     if (phys_pc_a == -1 || phys_pc_b == -1) {
+        return NULL;
+    }
+    if (phys_pc_a != tb_page_addr0(tb_a) || phys_pc_b != tb_page_addr0(tb_b)) {
+        return NULL;
+    }
+
+    /*
+     * Co-page only (must hold before we destroy A below): a cross-page
+     * superblock is unreachable by tb_lookup_cmp and poisons A's hot
+     * lookup path — see the candidate check in cpu-exec.c.
+     */
+    if ((phys_pc_a ^ phys_pc_b) & TARGET_PAGE_MASK) {
+        return NULL;
+    }
+
+    /*
+     * Refuse unknown instruction counts: falling back to TCG_MAX_INSNS
+     * per side could overflow gen_insn_end_off[TCG_MAX_INSNS] when the
+     * two sides are combined.
+     */
+    if (tb_a->icount == 0 || tb_b->icount == 0 ||
+        tb_a->icount + tb_b->icount > TCG_MAX_INSNS) {
         return NULL;
     }
 
@@ -1015,12 +1071,15 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     /* Allocate a new TB for the superblock. */
     tb = tcg_tb_alloc(tcg_ctx);
     if (!tb) {
+        SB_LOG("bail: dest-gone");
         return NULL;
     }
 
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = tcg_splitwx_to_rx(gen_code_buf);
-    tb->pc = tb_a->pc;
+    if (!(tb_a->cflags & CF_PCREL)) {
+        tb->pc = pc_a;
+    }
     tb->cs_base = tb_a->cs_base;
     tb->flags = tb_a->flags;
     tb->cflags = (tb_a->cflags & ~(CF_COUNT_MASK | CF_INVALID | CF_TIER1))
@@ -1030,12 +1089,22 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     tb->chain_count[0] = 0;
     tb->chain_count[1] = 0;
     tb->superblock = NULL;
+    tb->entry_pc = pc_a;
     tb_set_page_addr0(tb, phys_pc_a);
-    tb_set_page_addr1(tb, (phys_pc_a != phys_pc_b) ? phys_pc_b : -1);
+    /*
+     * Co-page is enforced above, so the superblock is a single-page TB:
+     * page_addr1 MUST stay -1. The old code compared full addresses
+     * (phys_pc_a != phys_pc_b — true for any B at a different offset on
+     * the SAME page) and stored phys_pc_b in page_addr1, which made
+     * every formed superblock unreachable: tb_lookup_cmp interprets
+     * page_addr1 as the contiguous page after A and never matched, so A
+     * was retranslated, re-promoted and re-formed forever, colliding
+     * with the orphaned superblock at tb_link_page. SMC invalidation is
+     * unaffected: B's bytes live on page0, and the XBOX invalidation
+     * path kills every TB on a written page.
+     */
+    tb_set_page_addr1(tb, -1);
     tb_lock_page0(phys_pc_a);
-    if (phys_pc_a != phys_pc_b) {
-        tb_lock_page1(phys_pc_a, phys_pc_b);
-    }
 
     tcg_ctx->gen_tb = tb;
     tcg_ctx->addr_type = target_long_bits() == 32 ? TCG_TYPE_I32 : TCG_TYPE_I64;
@@ -1044,9 +1113,16 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     /* Step 1: Translate A's instruction range (standard path). */
     int ret = sigsetjmp(tcg_ctx->jmp_trans, 0);
     if (ret != 0) {
-        /* Translation error -- bail out. */
+        /*
+         * Translation error -- bail out. B's translation can land here
+         * with superblock_append still set; reset all tcg_ctx state we
+         * touched so the next normal translation starts clean.
+         */
         tb_unlock_pages(tb);
+        tcg_ctx->superblock_append = false;
         tcg_ctx->gen_tb = NULL;
+        tcg_ctx->cpu = NULL;
+        SB_LOG("bail: phys-resolve");
         return NULL;
     }
 
@@ -1058,7 +1134,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
         max_insns = TCG_MAX_INSNS;
     }
 
-    cpu->cc->tcg_ops->translate_code(cpu, tb, &max_insns, tb_a->pc, host_pc_a);
+    cpu->cc->tcg_ops->translate_code(cpu, tb, &max_insns, pc_a, host_pc_a);
 
     int a_insns = tb->icount;
     int a_size = tb->size;
@@ -1069,6 +1145,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
         tb_unlock_pages(tb);
         tcg_ctx->gen_tb = NULL;
         tcg_ctx->cpu = NULL;
+        SB_LOG("bail: copage");
         return NULL;
     }
 
@@ -1081,7 +1158,34 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
         tb_unlock_pages(tb);
         tcg_ctx->gen_tb = NULL;
         tcg_ctx->cpu = NULL;
+        SB_LOG("bail: icount");
         return NULL;
+    }
+
+    /*
+     * The dominant exit must be the PHYSICALLY-LAST exit in the op
+     * stream: B is reached by fall-through at the op-list tail, so if
+     * any other goto_tb/exit_tb followed the removed pair, the dominant
+     * path would fall into that other exit and B would be unreachable
+     * (silent wrong control flow). With the slot-0-only candidate
+     * policy this always holds for this front-end; verify positionally
+     * so a front-end emission-order change fails safe instead of
+     * corrupting guest execution.
+     */
+    {
+        TCGOp *after;
+        for (after = QTAILQ_NEXT(dom_exit, link); after;
+             after = QTAILQ_NEXT(after, link)) {
+            if (after->opc == INDEX_op_goto_tb ||
+                after->opc == INDEX_op_exit_tb) {
+                sb_reattach_exitreq(tcg_ctx, exitreq_label, exitreq_exit, tb);
+                tb_unlock_pages(tb);
+                tcg_ctx->gen_tb = NULL;
+                tcg_ctx->cpu = NULL;
+                SB_LOG("bail: longjmp");
+                return NULL;
+            }
+        }
     }
 
     /* Remove the dominant exit ops. */
@@ -1106,7 +1210,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
 #ifdef CONFIG_DEBUG_TCG
     tcg_ctx->goto_tb_issue_mask = 0;
 #endif
-    cpu->cc->tcg_ops->translate_code(cpu, tb, &b_max, tb_b->pc, host_pc_b);
+    cpu->cc->tcg_ops->translate_code(cpu, tb, &b_max, pc_b, host_pc_b);
     tcg_ctx->superblock_append = false;
 
     int b_insns = tb->icount;  /* translate_code updates tb->icount */
@@ -1146,13 +1250,14 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     tb->icount = a_insns + b_insns;
     (void)b_size;  /* b_size tracked in SuperblockInfo */
 
-    gen_code_size = tcg_gen_code(tcg_ctx, tb, tb_a->pc);
+    gen_code_size = tcg_gen_code(tcg_ctx, tb, pc_a);
     tcg_ctx->cpu = NULL;
     tcg_ctx->gen_tb = NULL;
 
     if (gen_code_size < 0) {
         /* Code generation failed -- clean up. */
         tb_unlock_pages(tb);
+        SB_LOG("bail: ir-surgery");
         return NULL;
     }
 
@@ -1160,6 +1265,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     if (search_size < 0) {
         tb_unlock_pages(tb);
         tcg_ctx->gen_tb = NULL;
+        SB_LOG("bail: gen-code");
         return NULL;
     }
     tb->tc.size = gen_code_size;
@@ -1188,7 +1294,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
      * This allows proper TB recycling if the superblock is later
      * invalidated and re-requested.
      */
-    tb->ihash = tb_code_hash_func(env, tb->pc, tb->size);
+    tb->ihash = tb_code_hash_func(env, pc_a, tb->size);
 
     /*
      * Strip CF_TIER1 | CF_SUPERBLOCK BEFORE insertion so the QHT hash
@@ -1209,6 +1315,18 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     assert_no_pages_locked();
 
     if (existing_tb != tb) {
+        TranslationBlock *ex = existing_tb;
+        SB_LOG("bail: existing-tb pc_a=0x%" PRIx64
+               " ours(cf=0x%x p0=0x%" PRIx64 " p1=0x%" PRIx64 ")"
+               " ex(cf=0x%x p0=0x%" PRIx64 " p1=0x%" PRIx64
+               " tier=%d sb=%d inv=%d)",
+               (uint64_t)pc_a,
+               tb->cflags, (uint64_t)tb_page_addr0(tb),
+               (uint64_t)tb_page_addr1(tb),
+               ex->cflags, (uint64_t)tb_page_addr0(ex),
+               (uint64_t)tb_page_addr1(ex),
+               ex->tier, ex->superblock != NULL,
+               !!(ex->cflags & CF_INVALID));
         tcg_tb_remove(tb);
         return NULL;
     }
@@ -1217,7 +1335,7 @@ fill_superblock_info:
     ; /* empty statement to satisfy C99 label-before-declaration rule */
     /* Step 9: Fill in SuperblockInfo. */
     SuperblockInfo *sbi = g_malloc0(sizeof(SuperblockInfo));
-    sbi->pc_b = tb_b->pc;
+    sbi->pc_b = pc_b;
     sbi->size_b = tb_b->size;
     sbi->icount_b = b_insns;
     sbi->phys_pc_b = phys_pc_b;
@@ -1225,7 +1343,7 @@ fill_superblock_info:
 
     SB_LOG("formed A=0x%" PRIx64 " + B=0x%" PRIx64
            ", combined %d insns, pages=%s",
-           (uint64_t)tb_a->pc, (uint64_t)tb_b->pc,
+           (uint64_t)pc_a, (uint64_t)pc_b,
            a_insns + b_insns,
            (phys_pc_a != phys_pc_b) ? "2" : "1");
 

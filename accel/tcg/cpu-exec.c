@@ -58,7 +58,7 @@
 
 #ifdef XBOX
 
-#define TIER1_PROMOTION_BUDGET   8    /* Max promotions per budget window */
+#define TIER1_PROMOTION_BUDGET   32   /* Max promotions per budget window */
 #define TIER1_BUDGET_INTERVAL_MS 10   /* Reset budget every N ms */
 
 static int tier1_promotion_budget = TIER1_PROMOTION_BUDGET;
@@ -128,6 +128,8 @@ bool tier1_has_pending_request(vaddr pc, uint64_t cs_base, uint32_t flags)
     return false;
 }
 
+static uint64_t g_tier1_consumed;  /* diagnostics: requests consumed */
+
 int tier1_consume_request(vaddr pc, uint64_t cs_base, uint32_t flags,
                           uint32_t *cflags_out)
 {
@@ -140,15 +142,26 @@ int tier1_consume_request(vaddr pc, uint64_t cs_base, uint32_t flags,
             if (cflags_out) {
                 *cflags_out |= CF_TIER1;
             }
+            g_tier1_consumed++;
             return (int)tier1_requests[i].exec_count;
         }
     }
     return -1;
 }
 
-static void tb_request_tier1_promotion(CPUState *cpu, TranslationBlock *tb)
+static void tb_request_tier1_promotion(CPUState *cpu, TranslationBlock *tb,
+                                       vaddr pc)
 {
-    /* Record the request for deferred tier-1 retranslation. */
+    /*
+     * Record the request for deferred tier-1 retranslation.
+     *
+     * The key must be the REAL guest pc passed in from the exec loop
+     * (s.pc), NOT tb->pc: x86 system-mode always sets CF_PCREL
+     * (target/i386/cpu.c), and under CF_PCREL tb->pc is never written
+     * (tb_gen_code skips it), so keying on tb->pc recorded garbage and
+     * tier1_consume_request never matched — no tier-1 TB was ever
+     * created, while the invalidation below still churned hot TBs.
+     */
     int slot = -1;
     for (int i = 0; i < TIER1_REQUEST_SLOTS; i++) {
         if (!tier1_requests[i].valid) {
@@ -156,13 +169,19 @@ static void tb_request_tier1_promotion(CPUState *cpu, TranslationBlock *tb)
             break;
         }
     }
-    if (slot >= 0) {
-        tier1_requests[slot].pc         = tb->pc;
-        tier1_requests[slot].cs_base    = tb->cs_base;
-        tier1_requests[slot].flags      = tb->flags;
-        tier1_requests[slot].exec_count = tb->exec_count;
-        tier1_requests[slot].valid      = true;
+    if (slot < 0) {
+        /*
+         * Request table full: do NOT invalidate — the old code kept
+         * invalidating the hot TB anyway, churning retranslation with
+         * no promotion possible.
+         */
+        return;
     }
+    tier1_requests[slot].pc         = pc;
+    tier1_requests[slot].cs_base    = tb->cs_base;
+    tier1_requests[slot].flags      = tb->flags;
+    tier1_requests[slot].exec_count = tb->exec_count;
+    tier1_requests[slot].valid      = true;
 
     /*
      * Invalidate the old TB.  Pass -1 so tb_phys_invalidate removes
@@ -177,13 +196,38 @@ static void tb_request_tier1_promotion(CPUState *cpu, TranslationBlock *tb)
  * Check if a TB should be promoted to Tier 1 and do so if budget allows.
  * Called from cpu_exec_loop after execution counting.
  */
-static inline void tier1_maybe_promote(CPUState *cpu, TranslationBlock *tb)
+/*
+ * Runtime gate for tier-1 promotion (XEMU_TIER1=1 to enable, default
+ * OFF). Historically promotion was always-on but silently broken: it
+ * keyed requests on tb->pc, which is never written under CF_PCREL
+ * (always set for system-mode x86), so requests never matched and no
+ * tier-1 TB was ever created — promotion only invalidate-churned hot
+ * TBs. Now that the keying is fixed the tier-1 codegen path actually
+ * runs for the first time, so it must be opt-in until validated.
+ * OFF means no promotions at all (less churn than the old behavior).
+ */
+static int g_tier1_enabled = -1;
+
+static inline bool tier1_enabled(void)
 {
+    if (g_tier1_enabled < 0) {
+        const char *env = getenv("XEMU_TIER1");
+        g_tier1_enabled = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    }
+    return g_tier1_enabled != 0;
+}
+
+static inline void tier1_maybe_promote(CPUState *cpu, TranslationBlock *tb,
+                                       vaddr pc)
+{
+    if (!tier1_enabled()) {
+        return;
+    }
     if (tb->tier == 0 && tb->exec_count >= (uint32_t)g_tier1_threshold) {
         if (tier1_promotion_budget > 0) {
             tier1_promotion_budget--;
             g_tier1_promotions_total++;
-            tb_request_tier1_promotion(cpu, tb);
+            tb_request_tier1_promotion(cpu, tb, pc);
         } else {
             g_tier1_promotions_dropped++;
         }
@@ -195,102 +239,188 @@ static inline void tier1_maybe_promote(CPUState *cpu, TranslationBlock *tb)
 /* ------------------------------------------------------------------ */
 
 /*
- * Threshold for superblock candidacy: one exit must dominate with
- * >95% of all exit traffic, and the TB must have been executed enough.
+ * Superblock candidacy (adversarial-review hardened, 2026-07-13).
+ *
+ * The original chain_count dominance test was dead code: chain_count
+ * increments only when tb_add_jump claims a previously-NULL jmp_dest
+ * slot, i.e. once per relink cycle — it counts LINK events, not exit
+ * traversals, so stable hot code never reached MIN_CHAINS=128.
+ *
+ * Replacement heuristic (observable at loop-surfacing time):
+ *  - only exit slot 0. In this front-end slot 0 is the LAST-emitted
+ *    exit (unconditional jumps, straight-line continuation TBs, and
+ *    the TAKEN side of conditionals — see gen_conditional_jump_labels
+ *    in target/i386/tcg/translate.c). The IR surgery reaches B by
+ *    physical fall-through at the op-list tail, which is only correct
+ *    when the removed exit is physically last. Merging on slot 1
+ *    (fall-through-dominant conditionals) would misroute the hot path
+ *    into the taken exit — silent wrong control flow. Never do it.
+ *  - dominance proxy: if a slot-1 exit exists, it must never have been
+ *    chained (jmp_dest[1] NULL ⇒ that path never surfaced in the loop).
+ *    Dominance is a perf heuristic only — a mispredicted merge still
+ *    executes correctly via the retained side-exit.
+ *  - hotness: exec_count at its cap (counts loop surfacings, which are
+ *    interrupt-sampled and thus biased toward genuinely hot blocks).
  */
-#define SUPERBLOCK_DOMINANCE_PCT 95
-#define SUPERBLOCK_MIN_CHAINS    128
-
-/*
- * Check if a Tier 1 TB has a dominant single-successor exit.
- * Returns the exit index (0 or 1) or -1 if no dominant exit.
- */
-static inline int tb_dominant_exit(const TranslationBlock *tb)
-{
-    uint32_t c0 = tb->chain_count[0];
-    uint32_t c1 = tb->chain_count[1];
-    uint32_t total = c0 + c1;
-
-    if (total < SUPERBLOCK_MIN_CHAINS) {
-        return -1;
-    }
-
-    if (c0 * 100 / total >= SUPERBLOCK_DOMINANCE_PCT) {
-        return 0;
-    }
-    if (c1 * 100 / total >= SUPERBLOCK_DOMINANCE_PCT) {
-        return 1;
-    }
-    return -1;
-}
 
 /*
  * Forward-declare the superblock formation function (defined in
  * translate-all.c).  Returns the new superblock TB or NULL on failure.
+ * pc_a/pc_b are the REAL guest pcs of A and B (tb->pc is unset under
+ * CF_PCREL); both are re-validated against the TBs' physical identity
+ * inside before anything destructive happens.
  */
 TranslationBlock *tb_gen_superblock(CPUState *cpu,
                                      TranslationBlock *tb_a,
-                                     int dominant_exit);
+                                     int dominant_exit,
+                                     vaddr pc_a, vaddr pc_b);
 
-#define SUPERBLOCK_BUDGET 4  /* Max superblock formations per budget cycle */
+#define SUPERBLOCK_BUDGET 32  /* Max superblock formations per budget cycle */
 static int superblock_budget = SUPERBLOCK_BUDGET;
+
+/*
+ * Runtime gate for superblock (2-block trace) formation.
+ *
+ * Experimental — default OFF. Set XEMU_SUPERBLOCK=1 (or any non-"0" value)
+ * to enable; XEMU_SUPERBLOCK=0 or unset keeps it disabled. Consulted once
+ * at first use and cached, so it is a predictable hot-path branch. Keeping
+ * the formation body compiled (not #ifdef'd out) means the build always
+ * validates it. A/B on device by launching with/without the env var.
+ */
+static int g_superblock_enabled = -1;
+
+static inline bool superblock_enabled(void)
+{
+    if (g_superblock_enabled < 0) {
+        const char *env = getenv("XEMU_SUPERBLOCK");
+        g_superblock_enabled = (env && env[0] && strcmp(env, "0") != 0) ? 1 : 0;
+    }
+    return g_superblock_enabled != 0;
+}
 
 /*
  * Check if a Tier 1 TB is a superblock candidate and attempt formation.
  * Called from cpu_exec_loop after tier1 promotion, with budget rate limiting.
- *
- * XBOX_SUPERBLOCK_ENABLED: Set to 1 to enable runtime superblock formation.
- * Currently disabled (0) while the lookup/invalidation integration is
- * being finalised.  The detection infrastructure (chain_count, dominant
- * exit) and formation engine (tb_gen_superblock) are fully implemented
- * and compile-tested; only the trigger is gated.
  */
-#define XBOX_SUPERBLOCK_ENABLED 0
+/* Rejection-reason diagnostics, logged periodically when enabled. */
+enum {
+    SB_REJ_TIER, SB_REJ_HOT, SB_REJ_SLOT1, SB_REJ_BUDGET, SB_REJ_DEST,
+    SB_REJ_B, SB_REJ_PAGE, SB_REJ_COPAGE, SB_REJ_ICOUNT,
+    SB_FORMED, SB_FAILED, SB_STAT_MAX
+};
+static uint32_t sb_stats[SB_STAT_MAX];
 
 static inline void tier1_maybe_form_superblock(CPUState *cpu,
-                                                TranslationBlock *tb)
+                                                TranslationBlock *tb,
+                                                vaddr pc)
 {
-#if !XBOX_SUPERBLOCK_ENABLED
-    return;
-#else
+    if (!superblock_enabled()) {
+        return;
+    }
+
     /* Only Tier 1+ TBs, not already a superblock. */
     if (tb->tier < 1 || tb->superblock != NULL) {
+        sb_stats[SB_REJ_TIER]++;
         return;
     }
     if (tb->cflags & CF_SUPERBLOCK) {
+        sb_stats[SB_REJ_TIER]++;
         return;
     }
 
-    int dom = tb_dominant_exit(tb);
-    if (dom < 0) {
+    /* Hotness: exec_count must have reached its cap. */
+    if (tb->exec_count < (uint32_t)g_tier1_threshold * 2) {
+        sb_stats[SB_REJ_HOT]++;
+        return;
+    }
+
+    /*
+     * Slot 0 only (see block comment above). If a slot-1 exit exists
+     * and has ever been chained, both paths are live — skip.
+     */
+    if (tb->jmp_reset_offset[1] != TB_JMP_OFFSET_INVALID &&
+        qatomic_read(&tb->jmp_dest[1]) != (uintptr_t)NULL) {
+        sb_stats[SB_REJ_SLOT1]++;
         return;
     }
 
     /* Check budget. */
     if (superblock_budget <= 0) {
+        sb_stats[SB_REJ_BUDGET]++;
         return;
     }
 
     /* Verify successor exists and is valid. */
-    uintptr_t dest = qatomic_read(&tb->jmp_dest[dom]);
+    uintptr_t dest = qatomic_read(&tb->jmp_dest[0]);
     if (dest == (uintptr_t)NULL || (dest & 1)) {
+        sb_stats[SB_REJ_DEST]++;
         return;
     }
     TranslationBlock *tb_b = (TranslationBlock *)dest;
     if (tb_b->cflags & (CF_INVALID | CF_SUPERBLOCK)) {
+        sb_stats[SB_REJ_B]++;
+        return;
+    }
+    if (tb_b->superblock != NULL) {
+        sb_stats[SB_REJ_B]++;
         return;
     }
 
     /* Both must be single-page TBs. */
     if (tb_page_addr1(tb) != -1 || tb_page_addr1(tb_b) != -1) {
+        sb_stats[SB_REJ_PAGE]++;
+        return;
+    }
+
+    /*
+     * B's guest pc: tb->pc is unset under CF_PCREL, so use the pc
+     * stamped at B's last dispatch (any chained-into TB was a dispatch
+     * entry at chain time, so a live B is always stamped). 0 = never
+     * dispatched — refuse. Also refuse virtual-page mismatch with A.
+     */
+    vaddr pc_b = tb_b->entry_pc;
+    if (pc_b == 0 || ((pc ^ pc_b) & TARGET_PAGE_MASK)) {
+        sb_stats[SB_REJ_DEST]++;
+        return;
+    }
+
+    /*
+     * Co-page only: A and B must live on the same physical page.
+     * A cross-page superblock records page_addr1 = B's page, which
+     * tb_lookup_cmp validates as if it were the page virtually
+     * following A (contiguous-TB assumption) — the merged block would
+     * be unreachable AND every hot lookup of A would walk the guest
+     * page tables for a page the guest never touched (spurious A-bit,
+     * possible spurious #PF). Co-page keeps page_addr1 == -1 so the
+     * normal lookup and SMC invalidation paths apply unchanged.
+     */
+    if ((tb_page_addr0(tb) & TARGET_PAGE_MASK) !=
+        (tb_page_addr0(tb_b) & TARGET_PAGE_MASK)) {
+        sb_stats[SB_REJ_COPAGE]++;
+        return;
+    }
+
+    /*
+     * Bound the merged instruction count: tcg_gen_code writes
+     * gen_insn_end_off[0 .. icount-1], a fixed uint16_t[TCG_MAX_INSNS]
+     * array. An unchecked a+b (each up to 512) overflows it, corrupting
+     * TCGContext and the fault-unwind search data. Also refuse icount
+     * of 0 — formation would fall back to TCG_MAX_INSNS per side.
+     */
+    if (tb->icount == 0 || tb_b->icount == 0 ||
+        tb->icount + tb_b->icount > TCG_MAX_INSNS) {
+        sb_stats[SB_REJ_ICOUNT]++;
         return;
     }
 
     superblock_budget--;
     mmap_lock();
-    tb_gen_superblock(cpu, tb, dom);
+    if (tb_gen_superblock(cpu, tb, 0, pc, pc_b)) {
+        sb_stats[SB_FORMED]++;
+    } else {
+        sb_stats[SB_FAILED]++;
+    }
     mmap_unlock();
-#endif /* XBOX_SUPERBLOCK_ENABLED */
 }
 
 /*
@@ -301,7 +431,7 @@ static inline void tier1_maybe_form_superblock(CPUState *cpu,
 static uint32_t tier1_budget_counter;
 
 static uint32_t tier1_log_counter;
-#define TIER1_LOG_INTERVAL 50
+#define TIER1_LOG_INTERVAL 5  /* TEMP: 50→5 for superblock diagnosis */
 
 static inline void tier1_maybe_reset_budget(void)
 {
@@ -315,6 +445,23 @@ static inline void tier1_maybe_reset_budget(void)
                         g_tier1_threshold,
                         (unsigned long)g_tier1_promotions_total,
                         (unsigned long)g_tier1_promotions_dropped);
+#if defined(__ANDROID__)
+            if (superblock_enabled() || tier1_enabled()) {
+                __android_log_print(ANDROID_LOG_INFO, "superblock",
+                    "stats: promo=%lu drop=%lu consumed=%lu "
+                    "tier=%u hot=%u slot1=%u budget=%u dest=%u "
+                    "b=%u page=%u copage=%u icount=%u FORMED=%u failed=%u",
+                    (unsigned long)g_tier1_promotions_total,
+                    (unsigned long)g_tier1_promotions_dropped,
+                    (unsigned long)g_tier1_consumed,
+                    sb_stats[SB_REJ_TIER], sb_stats[SB_REJ_HOT],
+                    sb_stats[SB_REJ_SLOT1], sb_stats[SB_REJ_BUDGET],
+                    sb_stats[SB_REJ_DEST], sb_stats[SB_REJ_B],
+                    sb_stats[SB_REJ_PAGE], sb_stats[SB_REJ_COPAGE],
+                    sb_stats[SB_REJ_ICOUNT], sb_stats[SB_FORMED],
+                    sb_stats[SB_FAILED]);
+            }
+#endif
         }
     }
 }
@@ -834,6 +981,16 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
         tb_unlock_pages(tcg_ctx->gen_tb);
         tcg_ctx->gen_tb = NULL;
     }
+#ifdef XBOX
+    /*
+     * A translation fault can longjmp out of tb_gen_code while the
+     * hot-arena code-buffer swap is active; without this restore the
+     * tiny hot arena would silently become the global code-gen buffer
+     * (constant flush/retranslate thrash, overlapping host-PC ranges).
+     */
+    tcg_hot_swap_restore(tcg_ctx);
+    tcg_ctx->superblock_append = false;
+#endif
 #endif
     if (bql_locked()) {
         bql_unlock();
@@ -1336,8 +1493,10 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 if (c < (uint32_t)g_tier1_threshold * 2) {
                     tb->exec_count = c + 1;
                 }
-                tier1_maybe_promote(cpu, tb);
-                tier1_maybe_form_superblock(cpu, tb);
+                /* Stamp the real guest pc (tb->pc is unset under CF_PCREL). */
+                tb->entry_pc = s.pc;
+                tier1_maybe_promote(cpu, tb, s.pc);
+                tier1_maybe_form_superblock(cpu, tb, s.pc);
                 tier1_maybe_reset_budget();
 
                 if (tb->cflags & CF_INVALID) {
