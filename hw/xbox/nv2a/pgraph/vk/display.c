@@ -148,11 +148,67 @@ static pthread_mutex_t g_xr_frame_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct AHardwareBuffer *g_xr_frame_ahb;
 static uint64_t g_xr_frame_seq;
 
+/*
+ * Frame dumper (visual verification without a headset). When
+ * XEMU_DUMP_FRAMES=<dir> is set, every Nth published display AHB is
+ * CPU-locked (R8G8B8A8_UNORM) and written as a .ppm to <dir>. This is the
+ * exact rendered game image — NOT the passthrough compositor view — so it
+ * can validate AA and renderer changes without a wearer. N via
+ * XEMU_DUMP_FRAMES_EVERY (default 120).
+ */
+static void xemu_dump_frame_if_requested(struct AHardwareBuffer *ahb)
+{
+    static int checked;
+    static const char *dump_dir;
+    static int every = 120;
+    static uint64_t frame_ctr;
+    static int written;
+    if (!checked) {
+        checked = 1;
+        dump_dir = getenv("XEMU_DUMP_FRAMES");
+        const char *e = getenv("XEMU_DUMP_FRAMES_EVERY");
+        if (e && e[0]) every = atoi(e) > 0 ? atoi(e) : 120;
+    }
+    if (!dump_dir || !ahb) {
+        return;
+    }
+    if ((frame_ctr++ % (uint64_t)every) != 0 || written >= 20) {
+        return;
+    }
+    AHardwareBuffer_Desc d;
+    AHardwareBuffer_describe(ahb, &d);
+    void *pixels = NULL;
+    if (AHardwareBuffer_lock(ahb, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1,
+                             NULL, &pixels) != 0 || !pixels) {
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/frame_%04d_%ux%u.ppm", dump_dir,
+             written, d.width, d.height);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fprintf(f, "P6\n%u %u\n255\n", d.width, d.height);
+        const uint8_t *row = (const uint8_t *)pixels;
+        for (uint32_t y = 0; y < d.height; y++) {
+            const uint8_t *px = row + (size_t)y * d.stride * 4;
+            for (uint32_t x = 0; x < d.width; x++) {
+                fwrite(px + x * 4, 1, 3, f); /* RGB, drop A */
+            }
+        }
+        fclose(f);
+        written++;
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "dumped frame %s", path);
+    }
+    AHardwareBuffer_unlock(ahb, NULL);
+}
+
 static void xemu_xr_publish_frame(struct AHardwareBuffer *ahb)
 {
     if (!ahb) {
         return;
     }
+    xemu_dump_frame_if_requested(ahb);
     pthread_mutex_lock(&g_xr_frame_lock);
     AHardwareBuffer_acquire(ahb);
     if (g_xr_frame_ahb) {
@@ -832,13 +888,19 @@ static bool create_single_display_image_resources(PGRAPHState *pg,
 
 #if HAVE_EXTERNAL_MEMORY && defined(__ANDROID__)
     if (use_external_memory) {
+        uint64_t ahb_usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                             AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT;
+        /* Add CPU-read only when frame dumping is requested — it can force
+         * linear tiling and cost GPU perf, so keep it out of the default. */
+        if (getenv("XEMU_DUMP_FRAMES")) {
+            ahb_usage |= AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN;
+        }
         AHardwareBuffer_Desc ahb_desc = {
             .width = width,
             .height = height,
             .layers = 1,
             .format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM,
-            .usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
-                     AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT,
+            .usage = ahb_usage,
         };
         int ret = AHardwareBuffer_allocate(&ahb_desc, &img->ahb);
         if (ret != 0) {
