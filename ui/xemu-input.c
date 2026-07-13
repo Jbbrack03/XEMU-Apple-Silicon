@@ -26,6 +26,9 @@
 #include "qobject/qdict.h"
 #include "qemu/option.h"
 #include "qemu/timer.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "qemu/config-file.h"
 
 #include "xemu-input.h"
@@ -49,6 +52,180 @@
 #define XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US  2500
 #define XEMU_INPUT_MIN_RUMBLE_UPDATE_INTERVAL_US 2500
 #define XEMU_INPUT_MIN_BUTTON_HOLD_US            50000
+
+/*
+ * Scripted controller input (ported from the Apple Silicon fork).
+ * XEMU_SCRIPTED_INPUT=path.csv replays timed controller events into a
+ * synthetic pad bound to XEMU_SCRIPTED_INPUT_PORT (default 0). CSV rows:
+ *   time_ms,control,value
+ * control = a button name (a, b, x, y, dpad_left/up/right/down, start, back,
+ * white, black, guide, lstick_btn, rstick_btn) or an axis name
+ * (ltrigger, rtrigger, lstick_x, lstick_y, rstick_x, rstick_y); value is
+ * 0/1 for buttons and -32768..32767 (0..32767 for triggers) for axes.
+ * Purpose on Quest: validate the input->Duke path with no physical pad and
+ * drive games into gameplay for framerate measurement.
+ */
+typedef enum XemuScriptedInputKind {
+    XEMU_SCRIPTED_INPUT_BUTTON,
+    XEMU_SCRIPTED_INPUT_AXIS,
+} XemuScriptedInputKind;
+
+typedef struct XemuScriptedInputEvent {
+    int64_t time_us;
+    XemuScriptedInputKind kind;
+    int index;   /* button mask, or axis index */
+    int value;
+} XemuScriptedInputEvent;
+
+typedef struct XemuScriptedInput {
+    bool enabled;
+    int port;
+    int64_t start_us;
+    size_t next_event;
+    GArray *events;
+    uint16_t buttons;
+    int16_t axis[CONTROLLER_AXIS__COUNT];
+    ControllerState *con;   /* synthetic controller we own */
+} XemuScriptedInput;
+
+static XemuScriptedInput scripted_input;
+
+typedef struct XemuInputButtonName { const char *name; int mask; } XemuInputButtonName;
+typedef struct XemuInputAxisName { const char *name; int index; } XemuInputAxisName;
+
+static const XemuInputButtonName xemu_input_button_names[] = {
+    { "a", CONTROLLER_BUTTON_A }, { "b", CONTROLLER_BUTTON_B },
+    { "x", CONTROLLER_BUTTON_X }, { "y", CONTROLLER_BUTTON_Y },
+    { "dpad_left", CONTROLLER_BUTTON_DPAD_LEFT },
+    { "dpad_up", CONTROLLER_BUTTON_DPAD_UP },
+    { "dpad_right", CONTROLLER_BUTTON_DPAD_RIGHT },
+    { "dpad_down", CONTROLLER_BUTTON_DPAD_DOWN },
+    { "back", CONTROLLER_BUTTON_BACK }, { "start", CONTROLLER_BUTTON_START },
+    { "white", CONTROLLER_BUTTON_WHITE }, { "black", CONTROLLER_BUTTON_BLACK },
+    { "lstick_btn", CONTROLLER_BUTTON_LSTICK },
+    { "rstick_btn", CONTROLLER_BUTTON_RSTICK },
+    { "guide", CONTROLLER_BUTTON_GUIDE },
+};
+static const XemuInputAxisName xemu_input_axis_names[] = {
+    { "ltrigger", CONTROLLER_AXIS_LTRIG }, { "rtrigger", CONTROLLER_AXIS_RTRIG },
+    { "lstick_x", CONTROLLER_AXIS_LSTICK_X }, { "lstick_y", CONTROLLER_AXIS_LSTICK_Y },
+    { "rstick_x", CONTROLLER_AXIS_RSTICK_X }, { "rstick_y", CONTROLLER_AXIS_RSTICK_Y },
+};
+
+static bool xemu_scripted_input_parse_control(const char *name,
+                                              XemuScriptedInputKind *kind,
+                                              int *index)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(xemu_input_button_names); i++) {
+        if (strcmp(name, xemu_input_button_names[i].name) == 0) {
+            *kind = XEMU_SCRIPTED_INPUT_BUTTON;
+            *index = xemu_input_button_names[i].mask;
+            return true;
+        }
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(xemu_input_axis_names); i++) {
+        if (strcmp(name, xemu_input_axis_names[i].name) == 0) {
+            *kind = XEMU_SCRIPTED_INPUT_AXIS;
+            *index = xemu_input_axis_names[i].index;
+            return true;
+        }
+    }
+    return false;
+}
+
+static int xemu_scripted_input_event_compare(const void *a, const void *b)
+{
+    int64_t ta = ((const XemuScriptedInputEvent *)a)->time_us;
+    int64_t tb = ((const XemuScriptedInputEvent *)b)->time_us;
+    return (ta > tb) - (ta < tb);
+}
+
+static void xemu_scripted_input_load(void)
+{
+    const char *path = getenv("XEMU_SCRIPTED_INPUT");
+    if (!path || !path[0]) {
+        return;
+    }
+    const char *port_env = getenv("XEMU_SCRIPTED_INPUT_PORT");
+    scripted_input.port = port_env ? atoi(port_env) : 0;
+    if (scripted_input.port < 0 || scripted_input.port > 3) {
+        scripted_input.port = 0;
+    }
+
+    gchar *contents = NULL;
+    gsize len = 0;
+    GError *err = NULL;
+    if (!g_file_get_contents(path, &contents, &len, &err)) {
+        fprintf(stderr, "xemu: failed to read scripted input '%s': %s\n",
+                path, err ? err->message : "?");
+        if (err) g_error_free(err);
+        return;
+    }
+    scripted_input.events = g_array_new(FALSE, FALSE,
+                                        sizeof(XemuScriptedInputEvent));
+    gchar **lines = g_strsplit(contents, "\n", -1);
+    for (int li = 0; lines[li]; li++) {
+        gchar *line = g_strstrip(lines[li]);
+        if (line[0] == '\0' || line[0] == '#') continue;
+        gchar **tok = g_strsplit(line, ",", 3);
+        int nt = 0; while (tok[nt]) nt++;
+        if (nt < 3) { g_strfreev(tok); continue; }
+        XemuScriptedInputEvent ev;
+        ev.time_us = (int64_t)(g_ascii_strtoll(g_strstrip(tok[0]), NULL, 10)) * 1000;
+        XemuScriptedInputKind kind; int index;
+        if (!xemu_scripted_input_parse_control(g_strstrip(tok[1]), &kind, &index)) {
+            fprintf(stderr, "xemu: scripted input unknown control '%s'\n", tok[1]);
+            g_strfreev(tok); continue;
+        }
+        int value = (int)g_ascii_strtoll(g_strstrip(tok[2]), NULL, 10);
+        ev.kind = kind; ev.index = index; ev.value = value;
+        g_array_append_val(scripted_input.events, ev);
+        g_strfreev(tok);
+    }
+    g_strfreev(lines);
+    g_free(contents);
+
+    if (scripted_input.events->len == 0) {
+        g_array_unref(scripted_input.events);
+        scripted_input.events = NULL;
+        return;
+    }
+    qsort(scripted_input.events->data, scripted_input.events->len,
+          sizeof(XemuScriptedInputEvent), xemu_scripted_input_event_compare);
+    scripted_input.enabled = true;
+    scripted_input.start_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "scripted input: %u events from %s for port %d",
+                        scripted_input.events->len, path, scripted_input.port + 1);
+#endif
+    fprintf(stderr, "xemu: loaded %u scripted input events from '%s' port %d\n",
+            scripted_input.events->len, path, scripted_input.port + 1);
+}
+
+static void xemu_scripted_input_apply(ControllerState *state)
+{
+    if (!scripted_input.enabled || state->bound != scripted_input.port) {
+        return;
+    }
+    int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    int64_t elapsed = now - scripted_input.start_us;
+    while (scripted_input.next_event < scripted_input.events->len) {
+        XemuScriptedInputEvent *ev = &g_array_index(
+            scripted_input.events, XemuScriptedInputEvent,
+            scripted_input.next_event);
+        if (ev->time_us > elapsed) break;
+        if (ev->kind == XEMU_SCRIPTED_INPUT_BUTTON) {
+            if (ev->value) scripted_input.buttons |= ev->index;
+            else scripted_input.buttons &= ~ev->index;
+        } else {
+            scripted_input.axis[ev->index] = (int16_t)ev->value;
+        }
+        scripted_input.next_event++;
+    }
+    state->buttons = scripted_input.buttons;
+    memcpy(state->axis, scripted_input.axis, sizeof(state->axis));
+}
 
 #if 0
 static void xemu_input_print_controller_state(ControllerState *state)
@@ -372,6 +549,26 @@ void xemu_input_init(void)
     }
 
     QTAILQ_INSERT_TAIL(&available_controllers, new_con, entry);
+
+    /* Scripted input: create a synthetic pad bound to the target port so
+     * games can be driven with no physical controller (validation + gameplay
+     * framerate measurement). Runs even if a real pad connects later. */
+    xemu_scripted_input_load();
+    if (scripted_input.enabled) {
+        ControllerState *sc = malloc(sizeof(ControllerState));
+        memset(sc, 0, sizeof(ControllerState));
+        sc->type = INPUT_DEVICE_SDL_KEYBOARD; /* no SDL handle needed */
+        sc->name = "Scripted";
+        sc->bound = -1;
+        sc->peripheral_types[0] = PERIPHERAL_NONE;
+        sc->peripheral_types[1] = PERIPHERAL_NONE;
+        scripted_input.con = sc;
+        QTAILQ_INSERT_TAIL(&available_controllers, sc, entry);
+        xemu_input_bind(scripted_input.port, sc, 0);
+        xemu_input_rebind_xmu(scripted_input.port);
+        fprintf(stderr, "xemu: scripted controller bound to port %d\n",
+                scripted_input.port + 1);
+    }
 }
 
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start)
@@ -563,6 +760,13 @@ void xemu_input_update_controller(ControllerState *state)
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
     if (ABS(now - state->last_input_updated_ts) <
         XEMU_INPUT_MIN_INPUT_UPDATE_INTERVAL_US) {
+        return;
+    }
+
+    /* Scripted pad overrides real input for its bound port. */
+    if (scripted_input.enabled && state == scripted_input.con) {
+        xemu_scripted_input_apply(state);
+        state->last_input_updated_ts = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         return;
     }
 
