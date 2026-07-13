@@ -39,6 +39,9 @@
 #include "hw/sysbus.h"
 #include "system/arch_init.h"
 #include "system/memory.h"
+#ifdef XBOX
+#include "tcg/tcg.h"  /* xbox_ram_fp / xbox_ram_size fastmem globals */
+#endif
 #include "system/address-spaces.h"
 #include "cpu.h"
 
@@ -196,6 +199,31 @@ static void xbox_memory_init(PCMachineState *pcms,
 
     *ram_memory = ram;
     memory_region_add_subregion(system_memory, 0, ram);
+
+#ifdef XBOX
+    /* Fastmem (default OFF; enable with env XEMU_FASTMEM=1). Publishing
+     * xbox_ram_size arms the TCG cached-RAM-window fast path at codegen; the
+     * per-TB preamble only takes it once xbox_ram_fp.active is set, which is
+     * flipped on after the GPU is up (see the renderer) so early-boot paging is
+     * settled. Loads only, 0x80000000 cached window. See task #15. */
+    if (getenv("XEMU_FASTMEM")) {
+        /* Window math relies on ram_size being a power of two. */
+        assert((machine->ram_size & (machine->ram_size - 1)) == 0);
+        xbox_ram_fp.host_base = (uintptr_t)memory_region_get_ram_ptr(ram);
+        xbox_ram_fp.vram_pci_base = 0;   /* renderer may publish later */
+        xbox_ram_fp.active = 0;          /* armed after boot settles */
+        xbox_ram_fp.cb_count = 0;
+        /* Per-4KB-page watch bitmap (uint8 refcount). Surface dirty-tracking
+         * callbacks mark their pages here so fastmem excludes them (they must
+         * go slow to trigger GPU<->RAM sync). +1 slack page. */
+        xbox_ram_fp.watch_base =
+            (uintptr_t)g_malloc0((machine->ram_size >> 12) + 1);
+        xbox_ram_size = machine->ram_size;  /* set LAST: gates codegen */
+        fprintf(stderr, "xbox: fastmem armed (ram=0x%llx host_base=%p)\n",
+                (unsigned long long)machine->ram_size,
+                (void *)xbox_ram_fp.host_base);
+    }
+#endif
 
     xbox_flash_init(machine, rom_memory);
     pc_system_flash_cleanup_unused(pcms);

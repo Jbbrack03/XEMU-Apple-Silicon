@@ -1752,25 +1752,59 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
                 ram_mask &= 0xFFFFFFFFULL;
             }
 
-            tcg_insn_unit *label_bne;
+            tcg_insn_unit *label_bne, *label_watch_cbnz;
 
             /* 1. CBZ X26, →tlb  (X26=0 means preamble disabled fast path) */
             tcg_insn_unit *label_gate_cbz = s->code_ptr;
             tcg_out_insn(s, 3201, CBZ, 1, TCG_REG_XBOX_HOST_BASE, 0);
 
-            /* 2. TST addr, #~(ram_size-1): zero if addr within RAM */
-            tcg_out_logicali(s, I3404_ANDSI, addr_type,
-                             TCG_REG_XZR, addr_reg, ram_mask);
+            /*
+             * Cached-RAM window fast path. The Xbox kernel maps contiguous
+             * physical RAM at virtual 0x80000000 (cached alias); phys =
+             * vaddr - 0x80000000. This is NOT an identity low mapping — the low
+             * region (<0x80000000) is demand-paged and MUST fall to the TLB.
+             * Mirror the (correct) VRAM subtract-base pattern below, with the
+             * window base as a materialized constant instead of a struct load.
+             */
+            /* 2. TMP0 = window base (0x80000000). */
+            tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_TMP0, 0x80000000ull);
 
-            /* 3. B.NE →vram_check  (addr outside RAM range) */
+            /* 3. SUB TMP2 = addr - window_base  (candidate phys offset). */
+            tcg_out_insn(s, 3502, SUB, 1,
+                         TCG_REG_TMP2, addr_reg, TCG_REG_TMP0);
+
+            /* 4. TST offset, #~(ram_size-1): zero iff offset in [0, ram_size). */
+            tcg_out_logicali(s, I3404_ANDSI, addr_type,
+                             TCG_REG_XZR, TCG_REG_TMP2, ram_mask);
+
+            /* 5. B.NE →vram_check  (addr not in the cached RAM window). */
             label_bne = s->code_ptr;
             tcg_out_insn(s, 3202, B_C, TCG_COND_NE, 0);
 
-            /* 4. MOV TMP1, X26  (X26 holds host_base from preamble) */
-            tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_TMP1,
-                        TCG_REG_XBOX_HOST_BASE);
+            /* 6. TMP1 = X26 - window_base, so host = TMP1 + addr
+             *    = host_base + (addr - window_base) = host_base + phys. */
+            tcg_out_insn(s, 3502, SUB, 1, TCG_REG_TMP1,
+                         TCG_REG_XBOX_HOST_BASE, TCG_REG_TMP0);
 
-            /* 5. B →done  (skip TLB code) */
+            /* 6b. Watch check: a page covered by a surface dirty-tracking
+             *     callback MUST go slow (to trigger GPU<->RAM sync on CPU
+             *     read/write), so exclude it from fastmem. Reuses TMP0 (window
+             *     base no longer needed) and TMP2 (phys offset). watch_base is
+             *     always allocated when the fast path is emitted. */
+            /* LDR TMP0 = xbox_ram_fp.watch_base */
+            tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_TMP0, TCG_REG_XBOX_RAM_BASE,
+                       offsetof(XboxRamFPState, watch_base));
+            /* TMP2 = phys >> TARGET_PAGE_BITS  (page index). LSR = UBFM #b,#63 */
+            tcg_out_ubfm(s, TCG_TYPE_I64, TCG_REG_TMP2, TCG_REG_TMP2,
+                         TARGET_PAGE_BITS, 63);
+            /* LDRB TMP0 = watch_base[page]  (byte, register offset) */
+            tcg_out_ldst_r(s, I3312_LDRB, TCG_REG_TMP0, TCG_REG_TMP0,
+                           TCG_TYPE_I64, TCG_REG_TMP2);
+            /* CBNZ TMP0, →tlb  (page watched: fall to the slow path) */
+            label_watch_cbnz = s->code_ptr;
+            tcg_out_insn(s, 3201, CBNZ, 1, TCG_REG_TMP0, 0);
+
+            /* 7. B →done  (skip TLB code) */
             xbox_fast_done = s->code_ptr;
             tcg_out_insn(s, 3206, B, 0);
 
@@ -1814,6 +1848,7 @@ static TCGLabelQemuLdst *prepare_host_addr(TCGContext *s, HostAddress *h,
 
             /* Patch fallback branches to TLB start */
             reloc_pc19(label_gate_cbz,   tcg_splitwx_to_rx(s->code_ptr));
+            reloc_pc19(label_watch_cbnz, tcg_splitwx_to_rx(s->code_ptr));
             reloc_pc19(label_vram_cbz,   tcg_splitwx_to_rx(s->code_ptr));
             reloc_pc19(label_vram_bne,   tcg_splitwx_to_rx(s->code_ptr));
         }
@@ -4349,19 +4384,20 @@ static void tcg_out_tb_start(TCGContext *s)
          * so goto_tb chaining works.  X26 = host_base when the fast
          * path is usable, 0 otherwise.
          */
-        tcg_insn_unit *label_no_fp, *label_no_fp2, *label_end;
+        tcg_insn_unit *label_no_fp, *label_end;
 
+        /*
+         * X26 = host_base when the fast path is usable, else 0. Gating is just
+         * `active` now: per-page exclusion of surface-callback pages is handled
+         * by the watch bitmap in the per-load fast path (the old global
+         * cb_count gate kept fastmem permanently off, since surface callbacks
+         * are always registered).
+         */
         tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_TMP0,
                    TCG_REG_XBOX_RAM_BASE,
                    offsetof(XboxRamFPState, active));
         label_no_fp = s->code_ptr;
         tcg_out_insn(s, 3201, CBZ, 0, TCG_REG_TMP0, 0);
-
-        tcg_out_ld(s, TCG_TYPE_I32, TCG_REG_TMP0,
-                   TCG_REG_XBOX_RAM_BASE,
-                   offsetof(XboxRamFPState, cb_count));
-        label_no_fp2 = s->code_ptr;
-        tcg_out_insn(s, 3201, CBNZ, 0, TCG_REG_TMP0, 0);
 
         tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_XBOX_HOST_BASE,
                    TCG_REG_XBOX_RAM_BASE,
@@ -4372,7 +4408,6 @@ static void tcg_out_tb_start(TCGContext *s)
 
         /* .no_fp: X26 = 0 signals per-load fast path is disabled */
         reloc_pc19(label_no_fp, tcg_splitwx_to_rx(s->code_ptr));
-        reloc_pc19(label_no_fp2, tcg_splitwx_to_rx(s->code_ptr));
         tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_XBOX_HOST_BASE, 0);
 
         /* .end_preamble: */

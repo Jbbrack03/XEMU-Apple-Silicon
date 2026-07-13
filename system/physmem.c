@@ -39,6 +39,9 @@
 #include "exec/cputlb.h"
 #include "exec/page-protection.h"
 #include "exec/target_page.h"
+#ifdef XBOX
+#include "tcg/tcg.h"  /* xbox_ram_fp fastmem watch bitmap */
+#endif
 #include "exec/translation-block.h"
 #include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
@@ -870,11 +873,45 @@ int mem_access_callback_address_matches(CPUState *cpu, hwaddr addr, hwaddr len)
     return ret;
 }
 
+#ifdef XBOX
+/*
+ * Maintain the fastmem per-page watch bitmap (uint8 refcount). Runs only on the
+ * vCPU thread (both callers are async_safe_run_on_cpu deferred callbacks), so no
+ * atomics are needed and it can't race the vCPU's fastmem reads. Indexed by the
+ * physical RAM offset (offset within the callback's MR), which matches the
+ * fastmem index phys = guest_vaddr - 0x80000000.
+ */
+static void xbox_fastmem_watch_update(MemAccessCallback *cb, int delta)
+{
+    if (!xbox_ram_fp.watch_base || !xbox_ram_size) {
+        return;
+    }
+    /* cb->addr = ram_addr(mr) + offset; recover the physical RAM offset. */
+    ram_addr_t off = cb->addr - memory_region_get_ram_addr(cb->mr);
+    if (off >= xbox_ram_size) {
+        return;  /* watched range not in the fastmem RAM window */
+    }
+    ram_addr_t end = off + cb->len;
+    if (end > xbox_ram_size) {
+        end = xbox_ram_size;
+    }
+    uint8_t *w = (uint8_t *)xbox_ram_fp.watch_base;
+    for (ram_addr_t p = off >> TARGET_PAGE_BITS;
+         p <= (end - 1) >> TARGET_PAGE_BITS; p++) {
+        int v = (int)w[p] + delta;
+        w[p] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+    }
+}
+#endif
+
 static void do_mem_access_callback_insert(CPUState *cpu, run_on_cpu_data data)
 
 {
     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
     QTAILQ_INSERT_TAIL(&cpu->mem_access_callbacks, cb, entry);
+#ifdef XBOX
+    xbox_fastmem_watch_update(cb, +1);
+#endif
 }
 
 MemAccessCallback *mem_access_callback_insert(CPUState *cpu, MemoryRegion *mr,
@@ -914,6 +951,9 @@ static void do_mem_access_callback_remove_by_ref(CPUState *cpu,
 {
     MemAccessCallback *cb = (MemAccessCallback *)data.host_ptr;
     QTAILQ_REMOVE(&cpu->mem_access_callbacks, cb, entry);
+#ifdef XBOX
+    xbox_fastmem_watch_update(cb, -1);
+#endif
     g_free(cb);
 }
 

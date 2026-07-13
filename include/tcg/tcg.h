@@ -512,6 +512,9 @@ typedef struct {
     volatile int32_t active;      /* offset 8: 1 = fast path usable (boot done, no callbacks) */
     volatile int32_t cb_count;    /* offset 12: >0 when mem-access callbacks active */
     uintptr_t vram_pci_base;     /* offset 16: NV2A VRAM PCI BAR address, 0 = not configured */
+    uintptr_t watch_base;        /* offset 24: per-4KB-page uint8 refcount bitmap;
+                                  * page is watched by a surface callback (must go
+                                  * slow, not fastmem) iff its byte is nonzero. */
 } XboxRamFPState;
 
 extern XboxRamFPState xbox_ram_fp;
