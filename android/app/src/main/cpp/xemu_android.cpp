@@ -871,9 +871,13 @@ static SetupFiles SyncSetupFiles() {
   int tbSize = GetPrefInt(env, activity, "tcg_tb_size", 256);
 
   DisplaySettings ds;
+  /* Default surface_scale = 2 (2x supersampled antialiasing). The Adreno
+   * 740 renders Xbox-era 640x480 scenes at ~17-28% GPU even at 2x, and the
+   * guest is CPU-bound so SSAA is nearly free here; 2x also maps 1:1 into
+   * the 1280x960 XR quad. Users can lower to 1 or raise to 4. */
   ds.surface_scale = GetPrefInt(
       env, activity, "setting_surface_scale",
-      GetPrefInt(env, activity, "surface_scale", 1));
+      GetPrefInt(env, activity, "surface_scale", 2));
   if (ds.surface_scale < 1) ds.surface_scale = 1;
   if (ds.surface_scale > 4) ds.surface_scale = 4;
   ds.vsync = GetPrefBool(
