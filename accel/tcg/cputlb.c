@@ -38,6 +38,9 @@
 #include "qemu/error-report.h"
 #include "exec/log.h"
 #include "exec/helper-proto-common.h"
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 #include "exec/tlb-flags.h"
 #include "qemu/atomic.h"
 #include "qemu/atomic128.h"
@@ -201,6 +204,32 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
  * high), since otherwise we are likely to have a significant amount of
  * conflict misses.
  */
+/*
+ * Runtime cap on dynamic TLB growth (XEMU_TLB_MAX_BITS env, default = the
+ * compile-time CPU_TLB_DYN_MAX_BITS). tlb_reset_dirty scans EVERY entry of
+ * every mode's table per dirty-clear; texture-streaming titles clear dirty
+ * ranges constantly, so an over-grown table turns each clear into a storm
+ * (measured: 18% of the vCPU thread + 23% of the render thread in Crimson
+ * Skies free flight). The Xbox guest has only 16K physical pages of RAM, so
+ * capping the per-mode table costs little in miss rate.
+ */
+static size_t tlb_dyn_max_entries(void)
+{
+    static size_t max;
+    if (unlikely(max == 0)) {
+        int bits = CPU_TLB_DYN_MAX_BITS;
+        const char *s = getenv("XEMU_TLB_MAX_BITS");
+        if (s) {
+            int v = atoi(s);
+            if (v >= CPU_TLB_DYN_MIN_BITS && v <= CPU_TLB_DYN_MAX_BITS) {
+                bits = v;
+            }
+        }
+        max = (size_t)1 << bits;
+    }
+    return max;
+}
+
 static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
                                   int64_t now)
 {
@@ -217,7 +246,14 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
     rate = desc->window_max_entries * 100 / old_size;
 
     if (rate > 70) {
-        new_size = MIN(old_size << 1, 1 << CPU_TLB_DYN_MAX_BITS);
+        new_size = MIN(old_size << 1, tlb_dyn_max_entries());
+        new_size = MAX(new_size, old_size); /* never shrink on this branch */
+#if defined(__ANDROID__)
+        if (new_size > old_size && new_size >= (1 << 12)) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-tlb",
+                                "mmu tlb grew to %zu entries", new_size);
+        }
+#endif
     } else if (rate < 30 && window_expired) {
         size_t ceil = pow2ceil(desc->window_max_entries);
         size_t expected_rate = desc->window_max_entries * 100 / ceil;

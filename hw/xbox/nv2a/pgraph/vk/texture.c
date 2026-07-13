@@ -29,6 +29,7 @@
 #include "qemu/fast-hash.h"
 #include "qemu/lru.h"
 #include "renderer.h"
+#include "system/physmem.h"
 
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
 static bool image_pool_acquire(PGRAPHVkState *r, const TextureImageConfig *config,
@@ -489,6 +490,41 @@ void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
     }
 }
 
+/*
+ * Read-only peek at the NV2A_TEX dirty bitmap (same pattern as
+ * has_dirty_vertex_pages in draw.c). memory_region_test_and_clear_dirty is
+ * NOT cheap when it finds dirty bits: the clear triggers tlb_reset_dirty,
+ * which sweeps every entry of all 22 MMU modes' TLBs under the vCPU's TLB
+ * lock (measured 18% of the vCPU thread + 23% of the render thread in
+ * texture-streaming scenes). Most bound textures per frame are static, so
+ * peeking first skips the whole storm for the clean majority. A bit set
+ * concurrently between peek and return is caught next frame — identical
+ * semantics to test_and_clear observing the pre-write bitmap.
+ */
+static bool texture_dirty_peek(NV2AState *d, hwaddr addr, hwaddr end)
+{
+    ram_addr_t ram_base = memory_region_get_ram_addr(d->vram);
+
+    RCU_READ_LOCK_GUARD();
+    DirtyMemoryBlocks *blocks =
+        qatomic_rcu_read(&ram_list.dirty_memory[DIRTY_MEMORY_NV2A_TEX]);
+
+    unsigned long page = (ram_base + addr) >> TARGET_PAGE_BITS;
+    unsigned long end_page = (ram_base + end) >> TARGET_PAGE_BITS;
+
+    while (page < end_page) {
+        unsigned long idx = page / DIRTY_MEMORY_BLOCK_SIZE;
+        unsigned long ofs = page % DIRTY_MEMORY_BLOCK_SIZE;
+        unsigned long num = MIN(end_page - page,
+                                DIRTY_MEMORY_BLOCK_SIZE - ofs);
+        if (find_next_bit(blocks->blocks[idx], ofs + num, ofs) < ofs + num) {
+            return true;
+        }
+        page += num;
+    }
+    return false;
+}
+
 static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
 {
     hwaddr vram_size = memory_region_size(d->vram);
@@ -506,6 +542,9 @@ static bool check_texture_dirty(NV2AState *d, hwaddr addr, hwaddr size)
         end = vram_size;
     }
     if (end <= addr) {
+        return false;
+    }
+    if (!texture_dirty_peek(d, addr, end)) {
         return false;
     }
     return memory_region_test_and_clear_dirty(d->vram, addr, end - addr,
