@@ -29,6 +29,7 @@
 #include "xemu-settings.h"
 #include "hw/xbox/nv2a/debug.h"
 
+extern "C" void perf_enable_perfmap(void);
 extern "C" void xemu_set_fp_safe(bool enable);
 extern "C" bool xemu_get_fp_safe(void);
 extern "C" void xemu_set_fast_fences(bool enable);
@@ -1157,6 +1158,21 @@ extern "C" int xemu_android_main(int argc, char** argv) {
     LogError("xemu core not linked; qemu_main missing");
     return 1;
   }
+
+  /* JIT profiling: write a perf-<pid>.map of TCG-generated code (one entry
+   * per guest instruction, named guest-0x<pc>) into app internal storage so
+   * simpleperf samples inside the JIT can be symbolized offline. Enabled
+   * BEFORE qemu_init so the earliest translations are captured. Default off. */
+  if (SDL_getenv("XEMU_PERFMAP")) {
+    const char* storage = SDL_AndroidGetInternalStoragePath();
+    if (storage) {
+      setenv("XEMU_PERFMAP_DIR", storage, 1);
+    }
+    perf_enable_perfmap();
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "perfmap: enabled, dir=%s", storage ? storage : "/tmp");
+  }
+
   LogInfo("xemu_android_main: qemu_init");
   auto t_init_start = SDL_GetTicks();
   qemu_init(argc, argv);

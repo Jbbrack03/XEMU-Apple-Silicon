@@ -48,9 +48,12 @@ static FILE *perfmap;
 
 void perf_enable_perfmap(void)
 {
-    char map_file[32];
+    char map_file[PATH_MAX];
+    /* Android has no /tmp; the launcher points this at app storage. */
+    const char *dir = getenv("XEMU_PERFMAP_DIR");
 
-    snprintf(map_file, sizeof(map_file), "/tmp/perf-%d.map", getpid());
+    snprintf(map_file, sizeof(map_file), "%s/perf-%d.map",
+             dir ? dir : "/tmp", getpid());
     perfmap = safe_fopen_w(map_file);
     if (perfmap == NULL) {
         warn_report("Could not open %s: %s, proceeding without perfmap",
@@ -108,6 +111,13 @@ static void write_perfmap_entry(const void *start, size_t insn,
     get_host_pc_size(&host_pc, &host_size, start, insn);
     fprintf(perfmap, "%"PRIxPTR" %"PRIx16" %s\n",
             host_pc, host_size, pretty_symbol(q, NULL));
+
+    /* Android force-stop never runs perf_exit; bound the buffered tail. */
+    static int unflushed;
+    if (++unflushed >= 256) {
+        unflushed = 0;
+        fflush(perfmap);
+    }
 }
 
 static FILE *jitdump;
