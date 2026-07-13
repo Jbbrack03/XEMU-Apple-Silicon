@@ -130,7 +130,13 @@ static void toggle_full_screen(struct sdl2_console *scon);
 #ifdef __ANDROID__
 static bool g_android_gl_bgra_supported = true;
 static bool g_android_force_finish_before_swap = false;
+#include <EGL/egl.h>
 static bool g_android_paused = false;
+/* XR shell mode (Spike B): when set via XEMU_ANDROID_XR_MODE=1, losing the
+ * SDL window/surface must NOT idle the display loop — the OpenXR activity
+ * (same process) consumes frames via xemu_xr_acquire_display_ahb() and the
+ * SDL panel is intentionally backgrounded. */
+static bool g_android_xr_mode = false;
 static bool g_android_should_quit = false;
 static volatile bool g_android_qemu_thread_finished = false;
 static volatile bool g_android_vm_pause_requested = false;
@@ -207,6 +213,16 @@ void xemu_android_request_exit(void)
 void xemu_android_set_qemu_thread_finished(bool finished)
 {
     g_android_qemu_thread_finished = finished;
+}
+
+static void xemu_android_refresh_xr_mode_from_env(void)
+{
+    const char *xr = SDL_getenv("XEMU_ANDROID_XR_MODE");
+    g_android_xr_mode = (xr && xr[0] == '1');
+    if (g_android_xr_mode) {
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "android: XR mode ON (display loop ignores minimize)");
+    }
 }
 
 static void xemu_android_refresh_frame_limit_from_env(void)
@@ -1385,6 +1401,7 @@ void xemu_android_display_loop(void)
     }
 #ifdef __ANDROID__
     xemu_android_refresh_frame_limit_from_env();
+    xemu_android_refresh_xr_mode_from_env();
     SDL_GL_SetSwapInterval(g_config.display.window.vsync ? 1 : 0);
     xemu_hud_init(m_window, m_context);
 #endif
@@ -1426,7 +1443,7 @@ void xemu_android_display_loop(void)
             bql_unlock();
             qemu_mutex_unlock_main_loop();
         }
-        if (g_android_paused || sdl2_console[0].hidden) {
+        if ((g_android_paused || sdl2_console[0].hidden) && !g_android_xr_mode) {
             qemu_mutex_lock_main_loop();
             bql_lock();
             sdl2_poll_events(&sdl2_console[0]);
@@ -1618,7 +1635,7 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     if (!sdl2_is_render_thread()) {
         return;
     }
-    if (g_android_paused || scon->hidden) {
+    if ((g_android_paused || scon->hidden) && !g_android_xr_mode) {
         if ((g_android_frame_counter++ % 120) == 0) {
             __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                                 "refresh paused: hidden=%d paused=%d runstate=%d",
@@ -1635,14 +1652,47 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         return;
     }
 #endif
+    bool xr_surfaceless = false;
+#ifdef __ANDROID__
+    /* XR presentation mode: never touch the SDL window surface. The window
+     * surface teardown during activity backgrounding can block MakeCurrent/
+     * SwapWindow indefinitely; the XR quad is the only presentation target,
+     * so run the whole consumer chain on a surfaceless current from the
+     * start (EGL_KHR_surfaceless_context; Adreno supports it). */
+    if (g_android_xr_mode) {
+        EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                           (EGLContext)scon->winctx)) {
+            xr_surfaceless = true;
+            static uint32_t sl_log2;
+            if ((sl_log2++ % 600) == 0) {
+                __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                                    "xr-mode: surfaceless refresh #%u",
+                                    sl_log2);
+            }
+        } else {
+            static uint32_t sl_fail_log;
+            if ((sl_fail_log++ % 600) == 0) {
+                __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
+                                    "xr-mode: surfaceless MakeCurrent failed 0x%x",
+                                    eglGetError());
+            }
+            SDL_Delay(16);
+            return;
+        }
+    }
+    if (!xr_surfaceless)
+#endif
     if (SDL_GL_MakeCurrent(scon->real_window, scon->winctx) != 0 ||
         SDL_GL_GetCurrentContext() == NULL) {
 #ifdef __ANDROID__
+        if (!xr_surfaceless) {
         __android_log_print(ANDROID_LOG_ERROR, "xemu-android",
                             "sdl2_gl_refresh: make current failed: %s",
                             SDL_GetError());
-        g_android_paused = true;
-#endif
+        if (!g_android_xr_mode) {
+            g_android_paused = true;
+        }
         qemu_mutex_lock_main_loop();
         bql_lock();
         sdl2_poll_events(scon);
@@ -1650,6 +1700,16 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         qemu_mutex_unlock_main_loop();
         SDL_Delay(16);
         return;
+        } /* !xr_surfaceless */
+#else
+        qemu_mutex_lock_main_loop();
+        bql_lock();
+        sdl2_poll_events(scon);
+        bql_unlock();
+        qemu_mutex_unlock_main_loop();
+        SDL_Delay(16);
+        return;
+#endif
     }
 #ifdef __ANDROID__
     android_log_gl_error("refresh-makecurrent");
@@ -1782,6 +1842,7 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     nv2a_release_framebuffer_surface();
 #ifdef __ANDROID__
     android_log_gl_error("refresh-finish");
+    if (!xr_surfaceless)
 #endif
     SDL_GL_SwapWindow(scon->real_window);
 #ifdef __ANDROID__

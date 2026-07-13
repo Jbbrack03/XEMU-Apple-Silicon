@@ -132,6 +132,64 @@ bool pgraph_vk_gl_external_memory_available(void)
 #endif /* __ANDROID__ */
 #endif /* HAVE_EXTERNAL_MEMORY */
 
+#ifdef __ANDROID__
+/*
+ * XR shell frame export (Spike B, docs/openxr-shell-design.md).
+ * The render thread publishes the just-completed display AHardwareBuffer;
+ * the XR presentation thread (same process, different EGL context) acquires
+ * the latest one and imports it via EGLImage. AHBs are refcounted across
+ * the hand-off so display-image recreation (resize) can't free a buffer
+ * the XR side still reads. Dimensions travel with the AHB itself
+ * (AHardwareBuffer_describe on the consumer side).
+ */
+#include <pthread.h>
+
+static pthread_mutex_t g_xr_frame_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct AHardwareBuffer *g_xr_frame_ahb;
+static uint64_t g_xr_frame_seq;
+
+static void xemu_xr_publish_frame(struct AHardwareBuffer *ahb)
+{
+    if (!ahb) {
+        return;
+    }
+    pthread_mutex_lock(&g_xr_frame_lock);
+    AHardwareBuffer_acquire(ahb);
+    if (g_xr_frame_ahb) {
+        AHardwareBuffer_release(g_xr_frame_ahb);
+    }
+    g_xr_frame_ahb = ahb;
+    g_xr_frame_seq++;
+    pthread_mutex_unlock(&g_xr_frame_lock);
+}
+
+__attribute__((visibility("default")))
+struct AHardwareBuffer *xemu_xr_acquire_display_ahb(uint64_t *seq_out)
+{
+    struct AHardwareBuffer *ahb = NULL;
+    pthread_mutex_lock(&g_xr_frame_lock);
+    if (g_xr_frame_ahb) {
+        ahb = g_xr_frame_ahb;
+        AHardwareBuffer_acquire(ahb); /* caller owns one ref */
+    }
+    if (seq_out) {
+        *seq_out = g_xr_frame_seq;
+    }
+    pthread_mutex_unlock(&g_xr_frame_lock);
+    return ahb;
+}
+
+__attribute__((visibility("default")))
+uint64_t xemu_xr_display_frame_seq(void)
+{
+    uint64_t seq;
+    pthread_mutex_lock(&g_xr_frame_lock);
+    seq = g_xr_frame_seq;
+    pthread_mutex_unlock(&g_xr_frame_lock);
+    return seq;
+}
+#endif /* __ANDROID__ */
+
 static uint8_t *convert_texture_data__CR8YB8CB8YA8(uint8_t *data_out,
                                                    const uint8_t *data_in,
                                                    unsigned int width,
@@ -1616,6 +1674,9 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     disp->display_idx = disp->render_idx;
     disp->render_idx = (disp->render_idx + 1) % NUM_DISPLAY_IMAGES;
+#ifdef __ANDROID__
+    xemu_xr_publish_frame(img->ahb);
+#endif
 #ifdef __ANDROID__
     {
         static int render_count = 0;

@@ -363,8 +363,14 @@ class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
     onScreenController?.resetAllInputs()
     controllerBridge?.reset()
     resumeEmulationOnMenuDismiss = false
-    suspendedByLifecycle = true
-    nativePauseEmulation()
+    // XR shell mode: the OpenXR activity (same process) takes over the
+    // foreground while the emulator keeps running; do not stop the VM.
+    val xrMode = getSharedPreferences("x1box_prefs", MODE_PRIVATE)
+      .getString("env_vars", "")?.contains("XEMU_ANDROID_XR_MODE=1") == true
+    if (!xrMode) {
+      suspendedByLifecycle = true
+      nativePauseEmulation()
+    }
     super.onPause()
   }
 

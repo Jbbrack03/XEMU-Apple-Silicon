@@ -20,6 +20,9 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#include <android/hardware_buffer.h>
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,7 +77,131 @@ typedef struct {
     PFN_xrGetDisplayRefreshRateFB get_refresh;
 
     uint64_t frame_no;
+
+    /* Emulator frame feed (Spike B). Resolved from libxemu.so at runtime;
+     * NULL until the emulator process side is up. */
+    struct AHardwareBuffer *(*acquire_ahb)(uint64_t *seq);
+    uint64_t last_seq;
+    /* Per-AHB EGLImage/texture cache (AHBs are a small stable ring). */
+    struct {
+        struct AHardwareBuffer *ahb;
+        EGLImageKHR image;
+        GLuint tex;
+    } ahb_cache[8];
+    GLuint blit_prog;
+    GLuint blit_vao;
 } XrShell;
+
+static PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC p_eglGetNativeClientBufferANDROID;
+static PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR;
+static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC p_glEGLImageTargetTexture2DOES;
+
+static const char *BLIT_VS =
+    "#version 300 es\n"
+    "out vec2 uv;\n"
+    "void main() {\n"
+    "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  uv = vec2(p.x, 1.0 - p.y);\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+static const char *BLIT_FS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "uniform sampler2D tex;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag;\n"
+    "void main() { frag = vec4(texture(tex, uv).rgb, 1.0); }\n";
+
+static GLuint compile_prog(const char *vs_src, const char *fs_src)
+{
+    GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &vs_src, NULL);
+    glCompileShader(vs);
+    GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &fs_src, NULL);
+    glCompileShader(fs);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetProgramInfoLog(prog, sizeof(log), NULL, log);
+        LOGE("blit prog link failed: %s", log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+}
+
+static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
+{
+    for (int i = 0; i < 8; i++) {
+        if (s->ahb_cache[i].ahb == ahb) {
+            return s->ahb_cache[i].tex;
+        }
+    }
+    int slot = -1;
+    for (int i = 0; i < 8; i++) {
+        if (!s->ahb_cache[i].ahb) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) { /* ring rolled (resize); reset cache */
+        for (int i = 0; i < 8; i++) {
+            glDeleteTextures(1, &s->ahb_cache[i].tex);
+            /* EGLImages leak here in the spike; bounded by resizes. */
+            memset(&s->ahb_cache[i], 0, sizeof(s->ahb_cache[i]));
+        }
+        slot = 0;
+    }
+    EGLClientBuffer cb = p_eglGetNativeClientBufferANDROID(ahb);
+    static const EGLint attrs[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
+                                    EGL_NONE };
+    EGLImageKHR img = p_eglCreateImageKHR(s->egl_display, EGL_NO_CONTEXT,
+                                          EGL_NATIVE_BUFFER_ANDROID, cb,
+                                          attrs);
+    if (img == EGL_NO_IMAGE_KHR) {
+        LOGE("eglCreateImageKHR failed for AHB %p (0x%x)", ahb,
+             eglGetError());
+        return 0;
+    }
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)img);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    s->ahb_cache[slot].ahb = ahb;
+    s->ahb_cache[slot].image = img;
+    s->ahb_cache[slot].tex = tex;
+    AHardwareBuffer_Desc desc;
+    AHardwareBuffer_describe(ahb, &desc);
+    LOGI("imported emulator AHB %p as tex %u (%ux%u)", ahb, tex,
+         desc.width, desc.height);
+    return tex;
+}
+
+/* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
+static void resolve_emulator_feed(XrShell *s)
+{
+    if (s->acquire_ahb) {
+        return;
+    }
+    void *h = dlopen("libxemu.so", RTLD_NOLOAD | RTLD_LAZY);
+    if (!h) {
+        return;
+    }
+    s->acquire_ahb = (struct AHardwareBuffer *(*)(uint64_t *))
+        dlsym(h, "xemu_xr_acquire_display_ahb");
+    if (s->acquire_ahb) {
+        LOGI("emulator frame feed resolved");
+    }
+}
 
 static void egl_init(XrShell *s)
 {
@@ -99,6 +226,17 @@ static void egl_init(XrShell *s)
     eglMakeCurrent(s->egl_display, s->egl_pbuffer, s->egl_pbuffer,
                    s->egl_context);
     LOGI("EGL ready: %s", glGetString(GL_VERSION));
+
+    p_eglGetNativeClientBufferANDROID =
+        (PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC)eglGetProcAddress(
+            "eglGetNativeClientBufferANDROID");
+    p_eglCreateImageKHR =
+        (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    p_glEGLImageTargetTexture2DOES =
+        (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
+            "glEGLImageTargetTexture2DOES");
+    s->blit_prog = compile_prog(BLIT_VS, BLIT_FS);
+    glGenVertexArrays(1, &s->blit_vao);
 }
 
 static void xr_create_instance(XrShell *s)
@@ -339,7 +477,37 @@ static void xr_frame(XrShell *s)
             .timeout = XR_INFINITE_DURATION
         };
         OXR(xrWaitSwapchainImage(s->swapchain, &wi));
-        draw_test_pattern(s, s->fbos[idx]);
+
+        resolve_emulator_feed(s);
+        GLuint emu_tex = 0;
+        if (s->acquire_ahb) {
+            uint64_t seq = 0;
+            struct AHardwareBuffer *ahb = s->acquire_ahb(&seq);
+            if (ahb) {
+                emu_tex = ahb_to_texture(s, ahb);
+                if (seq != s->last_seq && (seq % 600) == 0) {
+                    LOGI("emulator frame seq %llu",
+                         (unsigned long long)seq);
+                }
+                s->last_seq = seq;
+                AHardwareBuffer_release(ahb); /* cache holds its own ref via EGLImage */
+            }
+        }
+        if (emu_tex) {
+            glBindFramebuffer(GL_FRAMEBUFFER, s->fbos[idx]);
+            glViewport(0, 0, s->quad_w, s->quad_h);
+            glDisable(GL_SCISSOR_TEST);
+            glUseProgram(s->blit_prog);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, emu_tex);
+            glBindVertexArray(s->blit_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        } else {
+            draw_test_pattern(s, s->fbos[idx]);
+        }
         glFinish();
         XrSwapchainImageReleaseInfo ri = {
             .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO
