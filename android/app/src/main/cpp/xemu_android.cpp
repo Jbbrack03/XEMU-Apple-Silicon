@@ -610,7 +610,10 @@ struct DisplaySettings {
   bool unlock_framerate = true;
   bool validation_layers = false;
   bool skip_boot_anim = true;
-  bool fp_jit = true;
+  /* Hard-FPU (native double). Default OFF on aarch64: double arithmetic does
+   * not reproduce x87 extended-precision semantics (Fable-class equality
+   * bugs). Per-game opt-in until broadly validated. */
+  bool fp_jit = false;
   bool use_dsp = false;
   bool use_dsp_jit = true;
   bool hrtf = false;
@@ -920,7 +923,7 @@ static SetupFiles SyncSetupFiles() {
                       "FP safe (native arithmetic): %s", fp_safe ? "ON" : "OFF");
 
   bool fp_jit = GetPrefBool(env, activity, "setting_hard_fpu",
-                             GetPrefBool(env, activity, "fp_jit", true));
+                             GetPrefBool(env, activity, "fp_jit", false));
   ds.fp_jit = fp_jit;
   xemu_set_fp_jit(fp_jit);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",

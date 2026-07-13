@@ -37,6 +37,17 @@
 
 static int g_use_fp_jit;
 
+/*
+ * The fp_jit mode all translated code uses, LATCHED at tcg init. Runtime
+ * representation decisions (FXSAVE/XSAVE conversion) must read this — not
+ * the live g_config.perf.fp_jit, which a settings toggle can change
+ * mid-session without retranslation.
+ */
+bool xemu_fp_jit_active(void)
+{
+    return g_use_fp_jit;
+}
+
 #if defined(XBOX)
 struct FPUProfileCounters {
     int x87_arith;
@@ -53,7 +64,7 @@ struct FPUProfileCounters g_fpu_profile;
 int g_fpu_helper_calls;
 #endif
 
-#if defined(XBOX) && defined(__x86_64__)
+#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #include "ui/xemu-settings.h"
 #define MAP_GEN_HELPER_SOFT_HARD(name) \
     (g_use_fp_jit ? gen_helper_##name##__hard : gen_helper_##name##__soft)
@@ -1831,7 +1842,14 @@ static void gen_flush_fp(DisasContext *s)
 #define BISECT_GRP_LOAD_FT 1  /* flds_FT0, fldl_FT0 (load to FT0, no push) */
 #define BISECT_GRP_LOAD_ST 1  /* flds_ST0, fldl_ST0 (push + load to ST0) */
 #define BISECT_GRP_LOAD_I  1  /* fildl_FT0/ST0, fildll_ST0, fld1, fldz (int loads + constants) */
-#define BISECT_GRP_STORE   1  /* fsts_*, fstl_*, fistl_*, fistll_* */
+#define BISECT_GRP_STORE   1  /* fsts_*, fstl_* */
+/* fistl/fistll must honor the guest rounding control. The aarch64 backend
+ * lowers cvt64f_i32/i64 as FRINTI (rounds per FPCR.RMode, programmed from
+ * guest RC by gen_flcr) + FCVTZS, so the inline path rounds correctly.
+ * Residual (documented): inline NaN/overflow saturates instead of writing
+ * the x87 integer indefinite; the helper path (used when this is 0) has
+ * full indefinite semantics. fisttp (truncate-by-design) uses helpers. */
+#define BISECT_GRP_FIST    1
 #define BISECT_GRP_UNARY   1  /* fchs, fabs, fsqrt */
 
 #define GEN_HELPER_FALLBACK_v_v(func, grp) do { \
@@ -1991,13 +2009,13 @@ static void gen_fstl_ST0(DisasContext *s, TCGv_i64 arg)
 
 static void gen_fistl_ST0(DisasContext *s, TCGv_i32 arg)
 {
-    GEN_HELPER_FALLBACK_T_v(fistl_ST0, arg, BISECT_GRP_STORE);
+    GEN_HELPER_FALLBACK_T_v(fistl_ST0, arg, BISECT_GRP_FIST);
     fp_pc_wrapper(gen_fistl_ST0)(s, arg);
 }
 
 static void gen_fistll_ST0(DisasContext *s, TCGv_i64 arg)
 {
-    GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg, BISECT_GRP_STORE);
+    GEN_HELPER_FALLBACK_T_v(fistll_ST0, arg, BISECT_GRP_FIST);
     fp_pc_wrapper(gen_fistll_ST0)(s, arg);
 }
 
@@ -3636,9 +3654,19 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
                     goto illegal_op;
                 }
                 op1 = fcmov_cc[op & 3] | (((op >> 3) & 1) ^ 1);
+                /* The inline FP cache lives in EBB temps, which die at the
+                 * mid-instruction label below (la_bb_end marks them dead
+                 * without a memory home). Commit the cache BEFORE the branch
+                 * and do the conditional move via the helper (env-based), so
+                 * no cached FP state crosses the label on either path. */
+                gen_flush_fp(s);
                 l1 = gen_new_label();
                 gen_jcc_noeob(s, op1, l1);
-                gen_fmov_ST0_STN(s, opreg);
+                if (g_use_fp_jit && HARD_FPU_HAS_TCG_FP_OPS) {
+                    gen_helper_fmov_ST0_STN(tcg_env, tcg_constant_i32(opreg));
+                } else {
+                    gen_fmov_ST0_STN(s, opreg);
+                }
                 gen_set_label(l1);
             }
             break;
@@ -4393,7 +4421,7 @@ void tcg_x86_init(void)
     fpstt = tcg_global_mem_new_i32(tcg_env,
                                    offsetof(CPUX86State, fpstt), "fpstt");
 
-#if defined(XBOX) && defined(__x86_64__)
+#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_fp_jit = g_config.perf.fp_jit;
 #endif
 }

@@ -669,6 +669,8 @@ typedef enum {
     I_FP1_FNEG_D    = 0x1e614000,
     I_FP1_FSQRT_D   = 0x1e61c000,
     I_FP1_FCVT_SD   = 0x1e624000,  /* FCVT Sd, Dn (double->single) */
+    I_FP1_FRINTI_S  = 0x1e27c000,  /* FRINTI Sd, Sn (round per FPCR.RMode) */
+    I_FP1_FRINTI_D  = 0x1e67c000,  /* FRINTI Dd, Dn (round per FPCR.RMode) */
 
     /* Scalar FP compare -- Rn, Rm */
     I_FPCMP_FCMP_S  = 0x1e202000,
@@ -3524,28 +3526,38 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
         break;
     case INDEX_op_cvt32f_i32:
 #if BISECT_FP_CVT
-        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_WS, a0, a1);
+        /* Same FRINTI-then-FCVTZS as the f64 cases: honor guest RC. */
+        tcg_out_fp1src(s, I_FP1_FRINTI_S, TCG_VEC_TMP0, a1);
+        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_WS, a0, TCG_VEC_TMP0);
 #else
         tcg_out32(s, I_FPMOV_W_S | (a1 & 0x1f) << 5 | (a0 & 0x1f));
 #endif
         break;
     case INDEX_op_cvt32f_i64:
 #if BISECT_FP_CVT
-        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_XS, a0, a1);
+        tcg_out_fp1src(s, I_FP1_FRINTI_S, TCG_VEC_TMP0, a1);
+        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_XS, a0, TCG_VEC_TMP0);
 #else
         tcg_out32(s, I_FPMOV_W_S | (a1 & 0x1f) << 5 | (a0 & 0x1f));
 #endif
         break;
     case INDEX_op_cvt64f_i32:
 #if BISECT_FP_CVT
-        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_WD, a0, a1);
+        /* x87 FIST honors the guest RC (already in FPCR via gen_flcr);
+         * FCVTZS alone always truncates. FRINTI rounds to integral per
+         * FPCR.RMode, then FCVTZS of the integral value is exact. Residual
+         * (documented): NaN/overflow saturate instead of writing the x87
+         * integer indefinite. */
+        tcg_out_fp1src(s, I_FP1_FRINTI_D, TCG_VEC_TMP0, a1);
+        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_WD, a0, TCG_VEC_TMP0);
 #else
         tcg_out32(s, I_FPMOV_W_S | (a1 & 0x1f) << 5 | (a0 & 0x1f));
 #endif
         break;
     case INDEX_op_cvt64f_i64:
 #if BISECT_FP_CVT
-        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_XD, a0, a1);
+        tcg_out_fp1src(s, I_FP1_FRINTI_D, TCG_VEC_TMP0, a1);
+        tcg_out_fpcvt(s, I_FPCVT_FCVTZS_XD, a0, TCG_VEC_TMP0);
 #else
         tcg_out32(s, I_FPMOV_X_D | (a1 & 0x1f) << 5 | (a0 & 0x1f));
 #endif

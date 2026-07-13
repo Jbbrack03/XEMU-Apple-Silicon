@@ -29,6 +29,18 @@
 #include "helper-tcg.h"
 #include "access.h"
 
+#if defined(XBOX) && defined(__aarch64__) && defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
+#if defined(XBOX) && defined(__aarch64__)
+/* The fp_jit mode LATCHED at tcg init (translate.c) — the representation all
+ * translated code actually uses. The soft TU's FXSAVE/XSAVE path must key
+ * off this, never the live pref (a mid-session toggle would desync the
+ * save-image representation from the register file). */
+extern bool xemu_fp_jit_active(void);
+#endif
+
 /* float macros */
 #if defined(USE_HARD_FPU) && defined(__aarch64__)
 #define USE_NATIVE_DOUBLE_STORAGE 1
@@ -167,6 +179,51 @@ static inline floatx80 f64_to_fx80(double d)
     return make_floatx80((sign << 15) | x_exp, low);
 }
 
+/*
+ * Lossless FP-slot serialization for fp_jit (native-double) register files,
+ * used by FXSAVE/XSAVE/FSAVE images. MMX writes the register file as raw
+ * integer bits aliasing native_d; numeric f64<->fx80 conversion mangles such
+ * patterns (and flushes denormals). Encode: values whose numeric conversion
+ * round-trips bit-exactly (all genuine FP, incl. NaNs) use the architectural
+ * 80-bit encoding; anything else stores its raw 64 bits under marker
+ * exponent NDS_RAW_EXP — unreachable from f64_to_fx80 (which emits biased
+ * exponents <= 0x43FE plus the 0x7FFF/0xFFFF family), so decode is
+ * unambiguous for images we wrote. Foreign images (real-hardware format,
+ * soft-mode writers) never contain the marker and take the numeric path.
+ */
+#define NDS_RAW_EXP 0x7777
+
+static inline uint64_t nds_f64_bits(double v)
+{
+    uint64_t b;
+    memcpy(&b, &v, sizeof(b));
+    return b;
+}
+
+static inline double nds_bits_f64(uint64_t b)
+{
+    double v;
+    memcpy(&v, &b, sizeof(v));
+    return v;
+}
+
+static inline floatx80 nds_encode_slot(double v)
+{
+    floatx80 x = f64_to_fx80(v);
+    if (nds_f64_bits(fx80_to_f64(x)) == nds_f64_bits(v)) {
+        return x;
+    }
+    return (floatx80){ .low = nds_f64_bits(v), .high = NDS_RAW_EXP };
+}
+
+static inline double nds_decode_slot(floatx80 x)
+{
+    if (x.high == NDS_RAW_EXP) {
+        return nds_bits_f64(x.low);
+    }
+    return fx80_to_f64(x);
+}
+
 static inline floatx80 pack_arm64(floatx80 v, float_status *status)
 {
     switch (status->floatx80_rounding_precision) {
@@ -230,6 +287,68 @@ static inline float64 floatx80_to_float64_nds(double a, float_status *s)
     return u.i;
 }
 
+/*
+ * Round to integral honoring the GUEST rounding control (fp_status), not the
+ * ambient host FPCR (helpers can run with FPCR in any state). The
+ * a - remainder(a, 1.0) identity is exact round-half-even independent of FPCR.
+ */
+static inline double nds_round_rc(double a, float_status *s)
+{
+    switch (s->float_rounding_mode) {
+    case float_round_down:    return floor(a);
+    case float_round_up:      return ceil(a);
+    case float_round_to_zero: return trunc(a);
+    case float_round_nearest_even:
+    default:                  return a - remainder(a, 1.0);
+    }
+}
+
+/*
+ * FIST-family conversions must honor RC and produce the x87 integer
+ * indefinite (INT_MIN) + invalid flag on NaN/overflow — a bare C cast is
+ * round-toward-zero with UB extremes (FCVTZS saturation on ARM), which
+ * silently biases every guest float->int (games run RC=nearest).
+ */
+static inline int32_t floatx80_to_int32_nds(double a, float_status *s)
+{
+    double r = nds_round_rc(a, s);
+    if (!(r >= -2147483648.0 && r <= 2147483647.0)) { /* false for NaN too */
+        float_raise(float_flag_invalid, s);
+        return INT32_MIN;
+    }
+    return (int32_t)r;
+}
+
+static inline int64_t floatx80_to_int64_nds(double a, float_status *s)
+{
+    double r = nds_round_rc(a, s);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) {
+        float_raise(float_flag_invalid, s);
+        return INT64_MIN;
+    }
+    return (int64_t)r;
+}
+
+static inline int32_t floatx80_to_int32_rtz_nds(double a, float_status *s)
+{
+    double r = trunc(a);
+    if (!(r >= -2147483648.0 && r <= 2147483647.0)) {
+        float_raise(float_flag_invalid, s);
+        return INT32_MIN;
+    }
+    return (int32_t)r;
+}
+
+static inline int64_t floatx80_to_int64_rtz_nds(double a, float_status *s)
+{
+    double r = trunc(a);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) {
+        float_raise(float_flag_invalid, s);
+        return INT64_MIN;
+    }
+    return (int64_t)r;
+}
+
 #define floatx80_add(a, b, s)          ((void)(s), (a) + (b))
 #define floatx80_sub(a, b, s)          ((void)(s), (a) - (b))
 #define floatx80_mul(a, b, s)          ((void)(s), (a) * (b))
@@ -242,10 +361,10 @@ static inline float64 floatx80_to_float64_nds(double a, float_status *s)
 #define floatx80_to_float64            floatx80_to_float64_nds
 #define int32_to_floatx80(a, s)        ((void)(s), (double)(a))
 #define int64_to_floatx80(a, s)        ((void)(s), (double)(a))
-#define floatx80_to_int32(a, s)        ((void)(s), (int32_t)(a))
-#define floatx80_to_int64(a, s)        ((void)(s), (int64_t)(a))
-#define floatx80_to_int32_round_to_zero(a, s) ((void)(s), (int32_t)(a))
-#define floatx80_to_int64_round_to_zero(a, s) ((void)(s), (int64_t)(a))
+#define floatx80_to_int32              floatx80_to_int32_nds
+#define floatx80_to_int64              floatx80_to_int64_nds
+#define floatx80_to_int32_round_to_zero floatx80_to_int32_rtz_nds
+#define floatx80_to_int64_round_to_zero floatx80_to_int64_rtz_nds
 
 #define floatx80_is_neg(a)             signbit(a)
 #define floatx80_is_zero(a)            ((a) == 0.0)
@@ -260,8 +379,11 @@ static inline float64 floatx80_to_float64_nds(double a, float_status *s)
 #define floatx80_abs(a)                fabs(a)
 #define floatx80_sqrt(a, s)            ((void)(s), sqrt(a))
 
-#define floatx80_round(a, s)           ((void)(s), rint(a))
-#define floatx80_round_to_int(a, s)    ((void)(s), rint(a))
+/* rint() follows the ambient host FPCR, which is only coincidentally the
+ * guest RC (set as a side effect of neighboring inline ops); honor the guest
+ * fp_status explicitly instead. */
+#define floatx80_round(a, s)           nds_round_rc((a), (s))
+#define floatx80_round_to_int(a, s)    nds_round_rc((a), (s))
 
 #undef floatx80_zero
 #undef floatx80_one
@@ -468,10 +590,12 @@ floatx80 int32_to_floatx80__hard(int32_t a, float_status *status)
 #define MAP_HELPER_SOFT_HARD(func) helper_ ## func ## __soft
 #endif
 
-#if defined(XBOX) && defined(__x86_64__)
+#if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
 #ifdef USE_HARD_FPU
+#undef MAP_HELPER_SOFT_HARD
 #define MAP_HELPER_SOFT_HARD(func) helper_ ## func ## __hard
 extern int g_fpu_helper_calls;
+#undef FPU_HELPER_COUNT
 #define FPU_HELPER_COUNT() (g_fpu_helper_calls++)
 #else
 #define MAP_HELPER_SOFT_HARD(func) helper_ ## func ## __soft
@@ -1311,6 +1435,20 @@ void update_fp_status(CPUX86State *env)
 
 void helper_fldcw(CPUX86State *env, uint32_t val)
 {
+#if defined(XBOX) && defined(__aarch64__) && defined(__ANDROID__)
+    /* Diagnostic: log the first few control-word changes so we know which
+     * x87 precision mode a title actually runs (PC=single means the hard-FPU
+     * double path is arithmetically exact for it). */
+    static int fpcw_logged;
+    if (fpcw_logged < 4 && env->fpuc != val) {
+        fpcw_logged++;
+        __android_log_print(ANDROID_LOG_INFO, "x87-fpcw",
+                            "fldcw 0x%03x (PC=%s RC=%u)", val,
+                            ((val >> 8) & 3) == 0 ? "single" :
+                            ((val >> 8) & 3) == 2 ? "double" : "extended",
+                            (val >> 10) & 3);
+    }
+#endif
     cpu_set_fpuc(env, val);
 }
 
@@ -3150,7 +3288,8 @@ static void do_fsave(X86Access *ac, target_ulong ptr, int data32)
 
     for (int i = 0; i < 8; i++) {
 #if USE_NATIVE_DOUBLE_STORAGE
-        do_fstt(ac, ptr, f64_to_fx80(ST(i)));
+        /* nds_encode_slot: raw-bit-preserving for MMX/integer patterns */
+        do_fstt(ac, ptr, nds_encode_slot(ST(i)));
 #else
         floatx80 tmp = ST(i);
         do_fstt(ac, ptr, tmp);
@@ -3179,7 +3318,7 @@ static void do_frstor(X86Access *ac, target_ulong ptr, int data32)
 
     for (int i = 0; i < 8; i++) {
 #if USE_NATIVE_DOUBLE_STORAGE
-        ST(i) = fx80_to_f64(do_fldt(ac, ptr));
+        ST(i) = nds_decode_slot(do_fldt(ac, ptr));
 #else
         floatx80 tmp = do_fldt(ac, ptr);
         ST(i) = tmp;
@@ -3226,7 +3365,20 @@ static void do_xsave_fpu(X86Access *ac, target_ulong ptr)
     addr = ptr + XO(legacy.fpregs);
 
     for (i = 0; i < 8; i++) {
-        floatx80 tmp = ST(i);
+        floatx80 tmp;
+#if defined(XBOX) && defined(__aarch64__)
+        /* With fp_jit the register file holds native doubles (the __hard
+         * helpers and inline TCG FP ops both use FPReg.native_d). FXSAVE/
+         * XSAVE exist only in this (soft) TU, so convert here or the guest
+         * kernel's context switches serialize garbage. nds_encode_slot
+         * preserves raw bits for MMX/integer patterns. */
+        if (xemu_fp_jit_active()) {
+            tmp = nds_encode_slot(env->fpregs[(env->fpstt + i) & 7].native_d);
+        } else
+#endif
+        {
+            tmp = ST(i);
+        }
         do_fstt(ac, addr, tmp);
         addr += 16;
     }
@@ -3446,7 +3598,16 @@ static void do_xrstor_fpu(X86Access *ac, target_ulong ptr)
 
     for (i = 0; i < 8; i++) {
         floatx80 tmp = do_fldt(ac, addr);
-        ST(i) = tmp;
+#if defined(XBOX) && defined(__aarch64__)
+        /* Mirror of do_xsave_fpu: with fp_jit the register file holds
+         * native doubles. */
+        if (xemu_fp_jit_active()) {
+            env->fpregs[(env->fpstt + i) & 7].native_d = nds_decode_slot(tmp);
+        } else
+#endif
+        {
+            ST(i) = tmp;
+        }
         addr += 16;
     }
 }
