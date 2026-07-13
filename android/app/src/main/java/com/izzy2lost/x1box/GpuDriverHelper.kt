@@ -24,6 +24,37 @@ object GpuDriverHelper {
     appContext = context.applicationContext
     File(driverInstallDir).mkdirs()
     File(driverStorageDir).mkdirs()
+    ensureBundledDriver()
+  }
+
+  /*
+   * Auto-install the bundled Turnip driver on first launch. The stock Adreno
+   * Vulkan driver on Horizon OS corrupts 3D textures in xemu (proven on-device:
+   * Soul Calibur 2's 3D stage renders as garbage on stock, pixel-perfect on
+   * this Turnip build). Turnip must be the default so games render correctly
+   * out of the box. Bundled at assets/bundled_driver/ (vulkan.ad07xx.so +
+   * meta.json). Users can still switch drivers via the GPU Driver Manager;
+   * we only seed when no driver is installed yet.
+   */
+  private fun ensureBundledDriver() {
+    try {
+      val installed = File(driverInstallDir, META_JSON)
+      if (installed.exists()) {
+        return // a driver is already installed; respect the user's choice
+      }
+      val assets = appContext.assets
+      val files = assets.list("bundled_driver") ?: return
+      if (files.isEmpty()) return
+      val dir = File(driverInstallDir).apply { mkdirs() }
+      for (name in files) {
+        assets.open("bundled_driver/$name").use { input ->
+          FileOutputStream(File(dir, name)).use { output -> input.copyTo(output) }
+        }
+      }
+      Log.i(TAG, "Seeded bundled GPU driver (Turnip) into $driverInstallDir")
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to seed bundled driver", e)
+    }
   }
 
   fun supportsCustomDriverLoading(): Boolean {
