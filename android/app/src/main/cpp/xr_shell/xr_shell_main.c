@@ -90,7 +90,49 @@ typedef struct {
     } ahb_cache[8];
     GLuint blit_prog;
     GLuint blit_vao;
+
+    /* 6DOF window state (task #9). Quad pose in local_space + world size. */
+    XrVector3f quad_pos;
+    XrQuaternionf quad_orient;
+    float quad_size_m;      /* width in meters; height derives from aspect */
+    float quad_aspect;      /* w/h */
+
+    /* Controller input */
+    XrActionSet action_set;
+    XrAction grab_action;   /* squeeze/grip: move the window */
+    XrAction resize_action; /* trigger: resize while held */
+    XrAction stick_action;  /* thumbstick: push/pull + scale */
+    XrAction aim_pose_action;
+    XrSpace aim_space[2];   /* 0=left, 1=right */
+    XrPath hand_path[2];
+    bool input_ready;
+
+    /* Grab drag state */
+    int grab_hand;          /* -1 none, else 0/1 */
+    XrVector3f grab_offset;  /* window pos relative to controller at grab */
+    bool resizing;
 } XrShell;
+
+/* --- minimal vec/quat math --- */
+static XrVector3f v3_sub(XrVector3f a, XrVector3f b)
+{
+    return (XrVector3f){ a.x - b.x, a.y - b.y, a.z - b.z };
+}
+static XrVector3f v3_add(XrVector3f a, XrVector3f b)
+{
+    return (XrVector3f){ a.x + b.x, a.y + b.y, a.z + b.z };
+}
+static XrVector3f q_rotate(XrQuaternionf q, XrVector3f v)
+{
+    /* v' = v + 2*cross(q.xyz, cross(q.xyz,v) + q.w*v) */
+    XrVector3f u = { q.x, q.y, q.z };
+    XrVector3f t = { u.y * v.z - u.z * v.y + q.w * v.x,
+                     u.z * v.x - u.x * v.z + q.w * v.y,
+                     u.x * v.y - u.y * v.x + q.w * v.z };
+    XrVector3f c = { u.y * t.z - u.z * t.y, u.z * t.x - u.x * t.z,
+                     u.x * t.y - u.y * t.x };
+    return (XrVector3f){ v.x + 2.0f * c.x, v.y + 2.0f * c.y, v.z + 2.0f * c.z };
+}
 
 static PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC p_eglGetNativeClientBufferANDROID;
 static PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR;
@@ -324,6 +366,200 @@ static void xr_create_instance(XrShell *s)
                           (PFN_xrVoidFunction *)&s->get_refresh);
 }
 
+/* Task #9: controller action set for 6DOF window move/resize. Touch
+ * controller profile. grip = grab-to-move, trigger = resize-mode,
+ * thumbstick = push/pull (Y) + scale (X while resizing). */
+static void xr_input_init(XrShell *s)
+{
+    XrActionSetCreateInfo asci = { .type = XR_TYPE_ACTION_SET_CREATE_INFO };
+    strcpy(asci.actionSetName, "window_controls");
+    strcpy(asci.localizedActionSetName, "Window Controls");
+    if (XR_FAILED(xrCreateActionSet(s->instance, &asci, &s->action_set))) {
+        LOGE("action set create failed; 6DOF controls disabled");
+        return;
+    }
+    xrStringToPath(s->instance, "/user/hand/left", &s->hand_path[0]);
+    xrStringToPath(s->instance, "/user/hand/right", &s->hand_path[1]);
+
+    XrActionCreateInfo aci = { .type = XR_TYPE_ACTION_CREATE_INFO };
+    aci.countSubactionPaths = 2;
+    aci.subactionPaths = s->hand_path;
+
+    aci.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+    strcpy(aci.actionName, "grab"); strcpy(aci.localizedActionName, "Grab");
+    xrCreateAction(s->action_set, &aci, &s->grab_action);
+    strcpy(aci.actionName, "resize"); strcpy(aci.localizedActionName, "Resize");
+    xrCreateAction(s->action_set, &aci, &s->resize_action);
+
+    aci.actionType = XR_ACTION_TYPE_VECTOR2F_INPUT;
+    strcpy(aci.actionName, "stick"); strcpy(aci.localizedActionName, "Stick");
+    xrCreateAction(s->action_set, &aci, &s->stick_action);
+
+    aci.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    strcpy(aci.actionName, "aim"); strcpy(aci.localizedActionName, "Aim");
+    xrCreateAction(s->action_set, &aci, &s->aim_pose_action);
+
+    XrPath p_grip_l, p_grip_r, p_trig_l, p_trig_r, p_stk_l, p_stk_r,
+        p_aim_l, p_aim_r;
+    xrStringToPath(s->instance, "/user/hand/left/input/squeeze/value", &p_grip_l);
+    xrStringToPath(s->instance, "/user/hand/right/input/squeeze/value", &p_grip_r);
+    xrStringToPath(s->instance, "/user/hand/left/input/trigger/value", &p_trig_l);
+    xrStringToPath(s->instance, "/user/hand/right/input/trigger/value", &p_trig_r);
+    xrStringToPath(s->instance, "/user/hand/left/input/thumbstick", &p_stk_l);
+    xrStringToPath(s->instance, "/user/hand/right/input/thumbstick", &p_stk_r);
+    xrStringToPath(s->instance, "/user/hand/left/input/aim/pose", &p_aim_l);
+    xrStringToPath(s->instance, "/user/hand/right/input/aim/pose", &p_aim_r);
+
+    XrActionSuggestedBinding b[] = {
+        { s->grab_action, p_grip_l }, { s->grab_action, p_grip_r },
+        { s->resize_action, p_trig_l }, { s->resize_action, p_trig_r },
+        { s->stick_action, p_stk_l }, { s->stick_action, p_stk_r },
+        { s->aim_pose_action, p_aim_l }, { s->aim_pose_action, p_aim_r },
+    };
+    XrPath profile;
+    xrStringToPath(s->instance,
+                   "/interaction_profiles/oculus/touch_controller", &profile);
+    XrInteractionProfileSuggestedBinding sug = {
+        .type = XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING,
+        .interactionProfile = profile,
+        .countSuggestedBindings = sizeof(b) / sizeof(b[0]),
+        .suggestedBindings = b,
+    };
+    if (XR_FAILED(xrSuggestInteractionProfileBindings(s->instance, &sug))) {
+        LOGE("suggest bindings failed; 6DOF controls disabled");
+        return;
+    }
+
+    for (int h = 0; h < 2; h++) {
+        XrActionSpaceCreateInfo asp = {
+            .type = XR_TYPE_ACTION_SPACE_CREATE_INFO,
+            .action = s->aim_pose_action,
+            .subactionPath = s->hand_path[h],
+            .poseInActionSpace = { .orientation = { 0, 0, 0, 1 } },
+        };
+        xrCreateActionSpace(s->session, &asp, &s->aim_space[h]);
+    }
+    s->grab_hand = -1;
+    s->input_ready = true;
+    LOGI("6DOF window controls ready (grip=move, trigger=resize, stick=push/scale)");
+}
+
+static void xr_attach_action_set(XrShell *s)
+{
+    if (!s->input_ready) {
+        return;
+    }
+    XrSessionActionSetsAttachInfo ai = {
+        .type = XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO,
+        .countActionSets = 1,
+        .actionSets = &s->action_set,
+    };
+    OXR(xrAttachSessionActionSets(s->session, &ai));
+}
+
+static float action_float(XrShell *s, XrAction a, int hand)
+{
+    XrActionStateGetInfo gi = { .type = XR_TYPE_ACTION_STATE_GET_INFO,
+                                .action = a,
+                                .subactionPath = s->hand_path[hand] };
+    XrActionStateFloat st = { .type = XR_TYPE_ACTION_STATE_FLOAT };
+    xrGetActionStateFloat(s->session, &gi, &st);
+    return st.isActive ? st.currentState : 0.0f;
+}
+
+static XrVector2f action_vec2(XrShell *s, XrAction a, int hand)
+{
+    XrActionStateGetInfo gi = { .type = XR_TYPE_ACTION_STATE_GET_INFO,
+                                .action = a,
+                                .subactionPath = s->hand_path[hand] };
+    XrActionStateVector2f st = { .type = XR_TYPE_ACTION_STATE_VECTOR2F };
+    xrGetActionStateVector2f(s->session, &gi, &st);
+    return st.isActive ? st.currentState : (XrVector2f){ 0, 0 };
+}
+
+/* Per-frame 6DOF window update. dt in seconds; predicted display time for
+ * the aim pose. Grip on either hand grabs the window and moves it rigidly
+ * with the controller (position + a follow of controller yaw). Trigger
+ * held = resize: thumbstick X scales, Y pushes/pulls along view. Stick Y
+ * without resize also nudges depth. */
+static void xr_update_window(XrShell *s, XrTime predicted, float dt)
+{
+    if (!s->input_ready) {
+        return;
+    }
+    XrActiveActionSet aas = { .actionSet = s->action_set,
+                              .subactionPath = XR_NULL_PATH };
+    XrActionsSyncInfo si = { .type = XR_TYPE_ACTIONS_SYNC_INFO,
+                             .countActiveActionSets = 1,
+                             .activeActionSets = &aas };
+    if (XR_FAILED(xrSyncActions(s->session, &si))) {
+        return;
+    }
+
+    /* Locate both controllers. */
+    XrSpaceLocation loc[2] = { { .type = XR_TYPE_SPACE_LOCATION },
+                               { .type = XR_TYPE_SPACE_LOCATION } };
+    for (int h = 0; h < 2; h++) {
+        if (s->aim_space[h]) {
+            xrLocateSpace(s->aim_space[h], s->local_space, predicted, &loc[h]);
+        }
+    }
+
+    /* Resize mode: either trigger held. */
+    bool resize = action_float(s, s->resize_action, 0) > 0.6f ||
+                  action_float(s, s->resize_action, 1) > 0.6f;
+
+    /* Grab: prefer a hand already grabbing; else whichever grip is pressed. */
+    int want = -1;
+    for (int h = 0; h < 2; h++) {
+        if (action_float(s, s->grab_action, h) > 0.6f &&
+            (loc[h].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
+            want = h;
+            if (h == s->grab_hand) {
+                break;
+            }
+        }
+    }
+    if (want >= 0) {
+        XrPosef cp = loc[want].pose;
+        if (s->grab_hand != want) {
+            /* Begin grab: record window offset in controller-local frame. */
+            XrQuaternionf inv = { -cp.orientation.x, -cp.orientation.y,
+                                  -cp.orientation.z, cp.orientation.w };
+            s->grab_offset = q_rotate(inv, v3_sub(s->quad_pos, cp.position));
+            s->grab_hand = want;
+        }
+        /* Move: window rides the controller. Orientation follows controller
+         * so the panel faces where you point. */
+        s->quad_pos = v3_add(cp.position, q_rotate(cp.orientation,
+                                                    s->grab_offset));
+        s->quad_orient = cp.orientation;
+    } else {
+        s->grab_hand = -1;
+    }
+
+    /* Thumbstick: use the right stick (fall back to left). */
+    XrVector2f stick = action_vec2(s, s->stick_action, 1);
+    if (stick.x == 0 && stick.y == 0) {
+        stick = action_vec2(s, s->stick_action, 0);
+    }
+    const float DEAD = 0.15f;
+    if (resize) {
+        if (stick.x > DEAD || stick.x < -DEAD) {
+            s->quad_size_m *= (1.0f + stick.x * 0.6f * dt);
+            if (s->quad_size_m < 0.3f) s->quad_size_m = 0.3f;
+            if (s->quad_size_m > 4.0f) s->quad_size_m = 4.0f;
+        }
+    }
+    if (stick.y > DEAD || stick.y < -DEAD) {
+        /* Push/pull along the window's forward (-Z) axis. */
+        XrVector3f fwd = q_rotate(s->quad_orient, (XrVector3f){ 0, 0, -1 });
+        float d = -stick.y * 0.8f * dt;
+        s->quad_pos = v3_add(s->quad_pos,
+                             (XrVector3f){ fwd.x * d, fwd.y * d, fwd.z * d });
+    }
+}
+
 static void xr_create_session(XrShell *s)
 {
     /* GLES requirements query is mandatory before session creation. */
@@ -354,6 +590,8 @@ static void xr_create_session(XrShell *s)
                                   .position = { 0, 0, 0 } },
     };
     OXR(xrCreateReferenceSpace(s->session, &rsci, &s->local_space));
+
+    xr_input_init(s);
 
     /* Passthrough */
     PFN_xrCreatePassthroughFB create_pt = NULL;
@@ -453,6 +691,10 @@ static void xr_frame(XrShell *s)
     XrFrameBeginInfo fbi = { .type = XR_TYPE_FRAME_BEGIN_INFO };
     OXR(xrBeginFrame(s->session, &fbi));
 
+    /* Drive 6DOF window move/resize from the controllers. */
+    xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
+
+    float qh = s->quad_size_m / (s->quad_aspect > 0 ? s->quad_aspect : 1.333f);
     XrCompositionLayerQuad quad = {
         .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
         .layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
@@ -461,9 +703,8 @@ static void xr_frame(XrShell *s)
         .subImage = { .swapchain = s->swapchain,
                       .imageRect = { .offset = { 0, 0 },
                                      .extent = { s->quad_w, s->quad_h } } },
-        .pose = { .orientation = { 0, 0, 0, 1 },
-                  .position = { 0.0f, 0.0f, -1.5f } },
-        .size = { 1.6f, 1.2f },
+        .pose = { .orientation = s->quad_orient, .position = s->quad_pos },
+        .size = { s->quad_size_m, qh },
     };
 
     if (fs.shouldRender) {
@@ -562,6 +803,7 @@ static void xr_poll_events(XrShell *s)
                         XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
                 };
                 OXR(xrBeginSession(s->session, &bi));
+                xr_attach_action_set(s);
                 s->session_running = true;
             } else if (sc->state == XR_SESSION_STATE_STOPPING) {
                 OXR(xrEndSession(s->session));
@@ -611,6 +853,13 @@ void android_main(struct android_app *app)
     app->userData = &shell;
     app->onAppCmd = on_app_cmd;
     app->onInputEvent = on_input;
+
+    /* Default window placement: 1.5 m ahead, 1.2 m wide, facing the user. */
+    shell.quad_pos = (XrVector3f){ 0.0f, 0.0f, -1.5f };
+    shell.quad_orient = (XrQuaternionf){ 0, 0, 0, 1 };
+    shell.quad_size_m = 1.2f;
+    shell.quad_aspect = 4.0f / 3.0f;
+    shell.grab_hand = -1;
 
     LOGI("xr_shell spike starting");
     egl_init(&shell);
