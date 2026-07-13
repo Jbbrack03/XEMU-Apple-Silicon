@@ -444,6 +444,31 @@ static void xr_input_init(XrShell *s)
     LOGI("6DOF window controls ready (grip=move, trigger=resize, stick=push/scale)");
 }
 
+/* Quest boots the CPU perf domain at SUSTAINED_LOW by default. Since the
+ * emulator is a sustained heavy CPU workload (TCG + Vulkan command recording on
+ * the guest thread), lift both domains to SUSTAINED_HIGH — the max *sustained*
+ * level (not the burst BOOST tier), which maximizes clocks without the thermal/
+ * battery risk of BOOST, matching the "performance while controlling power"
+ * goal. XR_EXT_performance_settings is already enabled at instance creation.
+ * Non-fatal if the runtime lacks the entry point. */
+static void xr_set_perf_levels(XrShell *s)
+{
+    PFN_xrPerfSettingsSetPerformanceLevelEXT set_level = NULL;
+    if (XR_FAILED(xrGetInstanceProcAddr(
+            s->instance, "xrPerfSettingsSetPerformanceLevelEXT",
+            (PFN_xrVoidFunction *)&set_level)) ||
+        set_level == NULL) {
+        LOGI("perf settings: entry point unavailable");
+        return;
+    }
+    XrResult rc = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
+                            XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    XrResult rg = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
+                            XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+    LOGI("perf settings: CPU/GPU -> SUSTAINED_HIGH (cpu rc=%d gpu rc=%d)",
+         (int)rc, (int)rg);
+}
+
 static void xr_attach_action_set(XrShell *s)
 {
     if (!s->input_ready) {
@@ -804,6 +829,7 @@ static void xr_poll_events(XrShell *s)
                 };
                 OXR(xrBeginSession(s->session, &bi));
                 xr_attach_action_set(s);
+                xr_set_perf_levels(s);
                 s->session_running = true;
             } else if (sc->state == XR_SESSION_STATE_STOPPING) {
                 OXR(xrEndSession(s->session));
