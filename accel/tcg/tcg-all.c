@@ -70,6 +70,32 @@ bool qemu_tcg_mttcg_enabled(void)
 }
 #endif /* !CONFIG_USER_ONLY */
 
+/*
+ * Ported perf fork (V2): resolve XEMU_TCG_JMP_CACHE_TARGETED.
+ *
+ * Default-on for Android system emulation: replace the full jmp-cache
+ * flush (CF_PCREL path in tb_jmp_cache_inval_tb) with one bucket per
+ * invalidated TB inside an SMC-driven burst. Correctness rests on the
+ * CF_INVALID + cflags-equality check in cpu-exec.c::tb_lookup; see the
+ * comment on tcg_jmp_cache_targeted_enabled in accel/tcg/tb-maint.c.
+ *
+ * Precedence: XEMU_TCG_JMP_CACHE_TARGETED=0 forces off (rollback for
+ * A/B testing or correctness regression triage); any other value (or
+ * unset) leaves the default on. The env var is consulted once at
+ * startup.
+ */
+extern bool tcg_jmp_cache_targeted_enabled;
+
+static bool tcg_resolve_jmp_cache_targeted_default(void)
+{
+    const char *env = getenv("XEMU_TCG_JMP_CACHE_TARGETED");
+    if (env && env[0] && strcmp(env, "0") == 0) {
+        return false;
+    }
+    /* Default on for Android; anything but "0" keeps it enabled. */
+    return true;
+}
+
 static void tcg_accel_instance_init(Object *obj)
 {
     TCGState *s = TCG_STATE(obj);
@@ -80,6 +106,8 @@ static void tcg_accel_instance_init(Object *obj)
 #else
     s->splitwx_enabled = 0;
 #endif
+
+    tcg_jmp_cache_targeted_enabled = tcg_resolve_jmp_cache_targeted_default();
 }
 
 bool one_insn_per_tb;

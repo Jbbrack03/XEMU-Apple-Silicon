@@ -31,10 +31,95 @@
 #include "hw/irq.h"
 #include "system/kvm.h"
 
+/*
+ * Ported perf fork (V9), Android/aarch64 variant: RDTSC fast-path.
+ * Reads the ARM generic timer (CNTVCT_EL0) directly instead of going
+ * through the QEMU clock abstraction (cpu_get_clock seqlock +
+ * cpu_get_clock_locked + get_clock + clock_gettime), a deep call chain
+ * that dominates RDTSC cost on titles whose Xbox kernel busy-waits on
+ * RDTSC deadline checks (Crimson Skies, suspected).
+ *
+ * The counter is converted straight into the Xbox 733.33 MHz TSC domain.
+ * The two-step conversion
+ *   ns  = muldiv64(v, NANOSECONDS_PER_SECOND, cntfrq)
+ *   tsc = muldiv64(ns, 733333333, NANOSECONDS_PER_SECOND)
+ * is folded into a single muldiv64(v, 733333333, cntfrq) to avoid
+ * double rounding.
+ *
+ * Semantics (accepted trade, same as the source fork): the raw generic
+ * timer does not pause when the VM stops, so a vm_stop/vm_start pair
+ * produces a one-time forward jump in the emulated TSC. xemu does not
+ * pause/resume the VM mid-execution in normal use, and the guest only
+ * cares about TSC deltas (KeQueryPerformanceCounter), not the absolute
+ * value, so a small one-time offset at boot is invisible to the guest.
+ *
+ * Gated on XEMU_FAST_RDTSC; default ON for Android. Set
+ * XEMU_FAST_RDTSC=0 to fall back to the legacy qemu_clock_get_ns path
+ * (rollback for A/B testing or correctness triage).
+ */
+#if defined(XBOX) && defined(__ANDROID__) && defined(__aarch64__)
+#include <android/log.h>
+
+static bool xemu_fast_rdtsc_enabled;
+static bool xemu_fast_rdtsc_init_done;
+static uint64_t xemu_cntfrq;
+
+static inline uint64_t cntvct_now(void)
+{
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+}
+
+static inline uint64_t cntfrq(void)
+{
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+}
+
+static void xemu_fast_rdtsc_init(void)
+{
+    if (xemu_fast_rdtsc_init_done) {
+        return;
+    }
+
+    /* Default ON for Android; only "0" disables. */
+    bool enabled = true;
+    const char *env = getenv("XEMU_FAST_RDTSC");
+    if (env && env[0] && strcmp(env, "0") == 0) {
+        enabled = false;
+    }
+
+    xemu_cntfrq = cntfrq();
+    if (xemu_cntfrq == 0) {
+        /* cntfrq_el0 unreadable/zero; force fallback to the QEMU path. */
+        enabled = false;
+    }
+
+    xemu_fast_rdtsc_enabled = enabled;
+    xemu_fast_rdtsc_init_done = true;
+
+    __android_log_print(ANDROID_LOG_INFO, "xemu-perf",
+                        "fast_rdtsc=%d source=%s cntfrq=%llu",
+                        (int)xemu_fast_rdtsc_enabled,
+                        (env && env[0]) ? "env" : "auto-default",
+                        (unsigned long long)xemu_cntfrq);
+}
+#endif /* XBOX && __ANDROID__ && __aarch64__ */
+
 /* TSC handling */
 uint64_t cpu_get_tsc(CPUX86State *env)
 {
 #ifdef XBOX
+# if defined(__ANDROID__) && defined(__aarch64__)
+    if (!xemu_fast_rdtsc_init_done) {
+        xemu_fast_rdtsc_init();
+    }
+    if (xemu_fast_rdtsc_enabled) {
+        return muldiv64(cntvct_now(), 733333333, xemu_cntfrq);
+    }
+# endif
     return muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 733333333,
                     NANOSECONDS_PER_SECOND);
 #else

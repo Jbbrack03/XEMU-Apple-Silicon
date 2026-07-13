@@ -46,6 +46,27 @@
 #endif
 #include "trace.h"
 
+/*
+ * Ported perf fork (V2): per-page-targeted jmp-cache invalidation gate.
+ *
+ * Default-on for Android system builds (resolved in
+ * accel/tcg/tcg-all.c::tcg_resolve_jmp_cache_targeted_default()).
+ * When true, an SMC-driven invalidation burst inside
+ * tb_invalidate_phys_page_range__locked clears one jmp-cache bucket
+ * per invalidated PCREL TB instead of zeroing all jmp-cache buckets per
+ * TB. Correctness rests on the existing CF_INVALID + cflags-equality
+ * check in cpu-exec.c::tb_lookup: do_tb_phys_invalidate sets CF_INVALID
+ * before removing the TB from tb_ctx.htable, so a stale tb* still
+ * sitting in some other bucket fails the cflags compare and falls
+ * through to tb_htable_lookup, which won't find the (already-removed)
+ * TB and translates fresh.
+ *
+ * Set XEMU_TCG_JMP_CACHE_TARGETED=0 to fall back to the upstream
+ * full-flush path (the rollback for A/B testing or correctness
+ * regression triage).
+ */
+bool tcg_jmp_cache_targeted_enabled;
+
 /* List iterators for lists of tagged pointers in TranslationBlock. */
 #define TB_FOR_EACH_TAGGED(head, tb, n, field)                          \
     for (n = (head) & 1, tb = (TranslationBlock *)((head) & ~1);        \
@@ -943,11 +964,43 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
 }
 
 /*
+ * V2: targeted single-bucket clear, used for the CF_PCREL path when
+ * tcg_jmp_cache_targeted_enabled is true. Mirrors the non-PCREL branch
+ * of tb_jmp_cache_inval_tb above. Correctness: the caller has already
+ * set CF_INVALID and removed the TB from tb_ctx.htable, so any stale
+ * tb* sitting in unrelated buckets fails the cflags compare in
+ * cpu-exec.c::tb_lookup and falls through to a fresh translation.
+ */
+static void tb_jmp_cache_inval_tb_targeted(TranslationBlock *tb)
+{
+    CPUState *cpu;
+    uint32_t h = tb_jmp_cache_hash_func(tb->pc);
+
+    CPU_FOREACH(cpu) {
+        CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+        if (qatomic_read(&jc->array[h].tb) == tb) {
+            qatomic_set(&jc->array[h].tb, NULL);
+        }
+    }
+}
+
+/*
  * In user-mode, call with mmap_lock held.
  * In !user-mode, if @rm_from_page_list is set, call with the TB's pages'
  * locks held.
+ *
+ * If @defer_jmp_cache is true (V2 batched-invalidation path), the
+ * caller is responsible for calling tb_jmp_cache_inval_tb_targeted(tb)
+ * after the invalidation burst completes. Returning true with
+ * @defer_jmp_cache=true guarantees CF_INVALID is set and the TB has
+ * been removed from tb_ctx.htable; both happen before the deferred-
+ * cache decision below. Returns false if the TB was already removed
+ * (qht_remove miss), in which case the caller must not queue it.
  */
-static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
+static bool do_tb_phys_invalidate(TranslationBlock *tb,
+                                  bool rm_from_page_list,
+                                  bool defer_jmp_cache)
 {
     uint32_t h;
     tb_page_addr_t phys_pc;
@@ -966,7 +1019,7 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
     h = tb_hash_func(phys_pc, (orig_cflags & CF_PCREL ? 0 : tb->pc),
                      tb->flags, tb->cs_base, orig_cflags);
     if (!qht_remove(&tb_ctx.htable, tb, h)) {
-        return;
+        return false;
     }
 
     qht_insert(&tb_ctx.inv_htable, tb, h, &existing);
@@ -977,8 +1030,11 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
         tb_remove(tb);
     }
 
-    /* remove the TB from the hash list */
-    tb_jmp_cache_inval_tb(tb);
+    /* remove the TB from the jmp-cache (V2: deferred to a targeted clear
+     * by the caller when @defer_jmp_cache is set) */
+    if (!defer_jmp_cache) {
+        tb_jmp_cache_inval_tb(tb);
+    }
 
     /* suppress this TB from the two jump lists */
     tb_remove_from_jmp_list(tb, 0);
@@ -1003,12 +1059,14 @@ static void do_tb_phys_invalidate(TranslationBlock *tb, bool rm_from_page_list)
         tb->superblock = NULL;
     }
 #endif
+
+    return true;
 }
 
 static void tb_phys_invalidate__locked(TranslationBlock *tb)
 {
     qemu_thread_jit_write();
-    do_tb_phys_invalidate(tb, true);
+    do_tb_phys_invalidate(tb, true, false);
     qemu_thread_jit_execute();
 }
 
@@ -1020,10 +1078,10 @@ void tb_phys_invalidate(TranslationBlock *tb, tb_page_addr_t page_addr)
 {
     if (page_addr == -1 && tb_page_addr0(tb) != -1) {
         tb_lock_pages(tb);
-        do_tb_phys_invalidate(tb, true);
+        do_tb_phys_invalidate(tb, true, false);
         tb_unlock_pages(tb);
     } else {
-        do_tb_phys_invalidate(tb, false);
+        do_tb_phys_invalidate(tb, false, false);
     }
 }
 
@@ -1155,6 +1213,17 @@ bool tb_invalidate_phys_page_unwind(CPUState *cpu, tb_page_addr_t addr,
  * (@cpu, @retaddr) may be (NULL, 0) outside of a cpu context,
  * in which case precise_smc need not be detected.
  */
+/*
+ * V2: deferred PCREL jmp-cache invalidation. The fast-path stack buffer
+ * holds the small/median burst case; the GArray fallback covers the
+ * worst case. The TBs are NOT executable after CF_INVALID is set +
+ * qht_remove completes inside do_tb_phys_invalidate(); they remain
+ * valid pointers because invalidated TBs live in tb_ctx.inv_htable
+ * until the next full tb_flush, so dereferencing them post-loop to
+ * compute their jmp-cache hash bucket is safe.
+ */
+#define TCG_JMP_CACHE_DEFER_STACK_THRESHOLD 32
+
 static void
 tb_invalidate_phys_page_range__locked(CPUState *cpu,
                                       struct page_collection *pages,
@@ -1166,6 +1235,13 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
     PageForEachNext n;
     bool current_tb_modified = false;
     TranslationBlock *current_tb = NULL;
+    bool defer_jmp_cache = qatomic_read(&tcg_jmp_cache_targeted_enabled);
+
+    /* Stack buffer for the deferred PCREL jmp-cache invalidation list.
+     * Falls back to a GArray if the burst grows past the threshold. */
+    TranslationBlock *defer_stack[TCG_JMP_CACHE_DEFER_STACK_THRESHOLD];
+    unsigned defer_stack_count = 0;
+    g_autoptr(GArray) defer_overflow = NULL;
 
     /* Range may not cross a page. */
     tcg_debug_assert(((start ^ last) & TARGET_PAGE_MASK) == 0);
@@ -1207,7 +1283,45 @@ tb_invalidate_phys_page_range__locked(CPUState *cpu,
                 current_tb_modified = true;
                 cpu_restore_state_from_tb(cpu, current_tb, retaddr);
             }
-            tb_phys_invalidate__locked(tb);
+
+            if (defer_jmp_cache && (tb_cflags(tb) & CF_PCREL)) {
+                /* V2 path: invalidate without touching the jmp-cache,
+                 * then queue for a single targeted bucket clear after
+                 * the loop. Only TBs whose qht_remove succeeded are
+                 * recorded so we don't double-clear or operate on a
+                 * concurrently-removed TB. */
+                qemu_thread_jit_write();
+                bool removed = do_tb_phys_invalidate(tb, true, true);
+                qemu_thread_jit_execute();
+                if (removed) {
+                    if (defer_stack_count
+                        < TCG_JMP_CACHE_DEFER_STACK_THRESHOLD) {
+                        defer_stack[defer_stack_count++] = tb;
+                    } else {
+                        if (defer_overflow == NULL) {
+                            defer_overflow = g_array_new(
+                                FALSE, FALSE, sizeof(TranslationBlock *));
+                        }
+                        g_array_append_val(defer_overflow, tb);
+                    }
+                }
+            } else {
+                tb_phys_invalidate__locked(tb);
+            }
+        }
+    }
+
+    /* V2: drain the deferred PCREL jmp-cache invalidations. Each call
+     * clears one bucket per CPU instead of flushing the whole jmp-cache,
+     * shrinking the per-burst jmp-cache cost from O(burst * NCPU * NBUCKET)
+     * to O(burst * NCPU). */
+    for (unsigned i = 0; i < defer_stack_count; i++) {
+        tb_jmp_cache_inval_tb_targeted(defer_stack[i]);
+    }
+    if (defer_overflow != NULL) {
+        for (unsigned i = 0; i < defer_overflow->len; i++) {
+            tb_jmp_cache_inval_tb_targeted(
+                g_array_index(defer_overflow, TranslationBlock *, i));
         }
     }
 
