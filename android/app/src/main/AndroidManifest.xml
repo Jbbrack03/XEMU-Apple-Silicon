@@ -50,6 +50,7 @@
 
     <activity
       android:name="android.app.NativeActivity"
+      android:process=":xemu"
       android:label="xemu XR spike"
       android:exported="true"
       android:excludeFromRecents="false"
