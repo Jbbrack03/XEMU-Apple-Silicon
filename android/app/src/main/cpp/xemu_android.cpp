@@ -920,7 +920,13 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "FP JIT (native storage + inline ops): %s", fp_jit ? "ON" : "OFF");
 
-  bool fast_fences = GetPrefBool(env, activity, "fast_fences", false);
+  // Default ON: defers GPU finishes on NV2A report/stall processing so the
+  // guest vCPU doesn't block on a full pipeline drain per render pass. On
+  // Quest this lifts RTT-heavy titles toward native framerate (Crimson Skies
+  // 25 -> 30 fps native) with rendering verified correct (SC2, Crimson). The
+  // fork's intended fast-path; per-game override "fast_fences" can disable it
+  // if a specific title regresses.
+  bool fast_fences = GetPrefBool(env, activity, "fast_fences", true);
   xemu_set_fast_fences(fast_fences);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "fast fences: %s", fast_fences ? "ON" : "OFF");
