@@ -943,10 +943,13 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
     }
 
     if (type == AINPUT_EVENT_TYPE_MOTION && (src & AINPUT_SOURCE_JOYSTICK)) {
+        /* Y axes are negated: Android reports stick-up as negative, but the
+         * emulator's convention (see keyboard map + SDL path's default
+         * invert_axis_*_y) is stick-up = POSITIVE. X and triggers match as-is. */
         s->pad_axis[AX_LX] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_X, 0));
-        s->pad_axis[AX_LY] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Y, 0));
+        s->pad_axis[AX_LY] = gp_axf(-AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Y, 0));
         s->pad_axis[AX_RX] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_Z, 0));
-        s->pad_axis[AX_RY] = gp_axf(AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RZ, 0));
+        s->pad_axis[AX_RY] = gp_axf(-AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RZ, 0));
         float lt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_LTRIGGER, 0);
         float rt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_RTRIGGER, 0);
         if (lt == 0.f) lt = AMotionEvent_getAxisValue(event, AMOTION_EVENT_AXIS_BRAKE, 0);
