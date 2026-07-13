@@ -155,6 +155,7 @@ struct OptBisectStats {
     int finish_stalled;
     int stall_deferred;
     int stall_batched;
+    int stall_skipped_empty;
     int predownload_hits;
 };
 extern struct OptBisectStats g_opt_stats;
@@ -1548,5 +1549,7 @@ void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd);
 
 // blit.c
 void pgraph_vk_image_blit(NV2AState *d);
+
+bool xemu_get_skip_empty_report_stalls(void);
 
 #endif

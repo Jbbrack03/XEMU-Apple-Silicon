@@ -27,6 +27,7 @@
 #include <math.h>
 
 static bool g_xemu_fast_fences = false;
+static bool g_xemu_skip_empty_report_stalls = false;
 static bool g_xemu_draw_reorder = false;
 static bool g_xemu_draw_merge = false;
 static bool g_xemu_bindless_textures = false;
@@ -137,7 +138,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d) InlClr:%d/%d PreDL:%d sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
+                "RPBreaks:%d Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d PreDL:%d sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.finish_calls,
                 g_opt_stats.finish_vtx_dirty,
@@ -151,6 +152,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.finish_stalled,
                 g_opt_stats.stall_deferred,
                 g_opt_stats.stall_batched,
+                g_opt_stats.stall_skipped_empty,
                 g_opt_stats.inline_clear_hits,
                 g_opt_stats.inline_clear_misses,
                 g_opt_stats.predownload_hits,
@@ -219,6 +221,16 @@ void xemu_set_fast_fences(bool enable)
 bool xemu_get_fast_fences(void)
 {
     return g_xemu_fast_fences;
+}
+
+void xemu_set_skip_empty_report_stalls(bool enable)
+{
+    g_xemu_skip_empty_report_stalls = enable;
+}
+
+bool xemu_get_skip_empty_report_stalls(void)
+{
+    return g_xemu_skip_empty_report_stalls;
 }
 
 void xemu_set_draw_reorder(bool enable)

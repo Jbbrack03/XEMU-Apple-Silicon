@@ -33,6 +33,8 @@ extern "C" void xemu_set_fp_safe(bool enable);
 extern "C" bool xemu_get_fp_safe(void);
 extern "C" void xemu_set_fast_fences(bool enable);
 extern "C" bool xemu_get_fast_fences(void);
+extern "C" void xemu_set_skip_empty_report_stalls(bool enable);
+extern "C" bool xemu_get_skip_empty_report_stalls(void);
 extern "C" void xemu_set_fp_jit(bool enable);
 extern "C" bool xemu_get_fp_jit(void);
 extern "C" void xemu_set_draw_reorder(bool enable);
@@ -930,6 +932,20 @@ static SetupFiles SyncSetupFiles() {
   xemu_set_fast_fences(fast_fences);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "fast fences: %s", fast_fences ? "ON" : "OFF");
+
+  // Skip the NV2A report/stall drain-finish when no occlusion report is
+  // actually queued (report_queue empty). Removes ~per-render-pass GPU
+  // submits that exist only as a latency flush; report-stall-heavy titles
+  // (Halo opening ~60 drains/frame) benefit. Semaphore/idle/surface reads
+  // self-finish and the per-frame flip submits accumulated work, so this is
+  // correctness-safe. Default OFF pending on-device A/B + frame-dump
+  // verification; per-game "skip_empty_report_stalls" pref can force it.
+  bool skip_empty_stalls =
+      GetPrefBool(env, activity, "skip_empty_report_stalls", false);
+  xemu_set_skip_empty_report_stalls(skip_empty_stalls);
+  __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                      "skip empty report stalls: %s",
+                      skip_empty_stalls ? "ON" : "OFF");
 
   bool draw_reorder = GetPrefBool(env, activity, "draw_reorder", true);
   xemu_set_draw_reorder(draw_reorder);

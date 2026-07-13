@@ -182,6 +182,23 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
 
     if (*dma_get == *dma_put && r->in_command_buffer) {
+        /* This preemptive drain-finish exists only to service pending
+         * occlusion reports: every finish runs process_pending_reports_
+         * internal(), and that is the only consumer that needs the GPU
+         * flushed here. When no report is queued the finish does no report
+         * work and is pure latency-flush overhead -- Halo's opening hits this
+         * ~60x/frame. Backend-semaphore release, WAIT_FOR_IDLE, and surface
+         * reads all self-finish (see pgraph.c BACK_END_WRITE_SEMAPHORE_RELEASE
+         * / WAIT_FOR_IDLE), and the per-frame flip (PRESENTING) submits any
+         * accumulated work regardless, so skipping is safe when no report is
+         * pending. The query-count guard keeps the occlusion pool from
+         * approaching its limit while finishes are deferred. */
+        if (xemu_get_skip_empty_report_stalls() &&
+            QSIMPLEQ_EMPTY(&r->report_queue) &&
+            r->num_queries_in_flight < (r->max_queries_in_flight / 2)) {
+            OPT_STAT_INC(stall_skipped_empty);
+            return;
+        }
         if (pg->draw_time != r->last_stall_draw_time) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
             r->last_stall_draw_time = pg->draw_time;
