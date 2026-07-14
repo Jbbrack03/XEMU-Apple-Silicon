@@ -237,8 +237,14 @@ static size_t texture_convert_size(int color_format, unsigned int width,
 // allocation and the full-texture memcpy that used to dominate the render
 // thread (__memmove ~15.6%). Rare formats that need pgraph_convert_texture_data
 // still use a scratch buffer since their expansion can't be done in place.
+// dst_capacity is the byte budget of dst (the total measured in the dst==NULL
+// pass); ignored when dst==NULL. Each level's offset+size is bounds-checked
+// against it BEFORE that level is written, so a shape change racing between the
+// measure and decode passes aborts cleanly instead of overrunning the staging
+// ring.
 static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
-                                  uint8_t *dst, TextureLayout *layout)
+                                  uint8_t *dst, size_t dst_capacity,
+                                  TextureLayout *layout)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     TextureShape s = pgraph_get_texture_shape(pg, texture_idx);
@@ -300,6 +306,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
             converted_size = texture_convert_size(s.color_format, adjusted_width,
                                                   adjusted_height, 1);
             if (dst) {
+                assert(total_size + converted_size <= dst_capacity);
                 size_t got;
                 uint8_t *converted = pgraph_convert_texture_data(
                     s, texture_data_ptr, palette_data_ptr, adjusted_width,
@@ -313,6 +320,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
             assert(adjusted_width <= s.width);
             converted_size = dst_stride * adjusted_height;
             if (dst) {
+                assert(total_size + converted_size <= dst_capacity);
                 memcpy_image(dst, texture_data_ptr,
                              adjusted_width * f.bytes_per_pixel, dst_stride,
                              adjusted_pitch, adjusted_height);
@@ -361,6 +369,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
 
                     size_t converted_size = width * height * 4;
                     if (dst) {
+                        assert(total_size + converted_size <= dst_capacity);
                         s3tc_decompress_2d_to(
                             level_dst,
                             kelvin_format_to_s3tc_format(s.color_format),
@@ -403,6 +412,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
                         converted_size = texture_convert_size(s.color_format,
                                                               width, height, 1);
                         if (dst) {
+                            assert(total_size + converted_size <= dst_capacity);
                             uint8_t *unswizzled = (uint8_t *)g_malloc(height * pitch);
                             unswizzle_rect(texture_data_ptr, width, height,
                                            unswizzled, pitch, f.bytes_per_pixel);
@@ -418,6 +428,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
                     } else {
                         converted_size = height * pitch;
                         if (dst) {
+                            assert(total_size + converted_size <= dst_capacity);
                             unswizzle_rect(texture_data_ptr, width, height,
                                            level_dst, pitch, f.bytes_per_pixel);
                         }
@@ -467,6 +478,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
 
                 size_t converted_size = width * height * depth * 4;
                 if (dst) {
+                    assert(total_size + converted_size <= dst_capacity);
                     s3tc_decompress_3d_to(
                         level_dst,
                         kelvin_format_to_s3tc_format(s.color_format),
@@ -497,6 +509,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
                     converted_size = texture_convert_size(s.color_format, width,
                                                           height, depth);
                     if (dst) {
+                        assert(total_size + converted_size <= dst_capacity);
                         uint8_t *unswizzled = g_malloc(unswizzled_size);
                         unswizzle_box(texture_data_ptr, width, height, depth,
                                       unswizzled, row_pitch, slice_pitch,
@@ -513,6 +526,7 @@ static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
                 } else {
                     converted_size = unswizzled_size;
                     if (dst) {
+                        assert(total_size + converted_size <= dst_capacity);
                         unswizzle_box(texture_data_ptr, width, height, depth,
                                       level_dst, row_pitch, slice_pitch,
                                       f.bytes_per_pixel);
@@ -683,7 +697,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     // Pass 1: measure the decoded texture data size without decoding or
     // allocating scratch. Guest VRAM is unchanged between here and the decode
     // pass below, so the sizes are identical (asserted after decode).
-    size_t texture_data_size = fill_texture_layout(pg, texture_idx, NULL, layout);
+    size_t texture_data_size =
+        fill_texture_layout(pg, texture_idx, NULL, 0, layout);
     assert(texture_data_size);
 
     VkDeviceSize staging_base = pgraph_vk_staging_alloc(pg, texture_data_size);
@@ -708,8 +723,11 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     uint8_t *mapped_memory_ptr = (uint8_t *)staging->mapped;
 
     // Pass 2: decode each level straight into the (host-cached) staging buffer.
+    // Every level is bounds-checked against texture_data_size before it is
+    // written, so a shape change between the passes can't overrun the ring.
     size_t decoded_total = fill_texture_layout(
-        pg, texture_idx, mapped_memory_ptr + staging_base, layout);
+        pg, texture_idx, mapped_memory_ptr + staging_base, texture_data_size,
+        layout);
     assert(decoded_total == texture_data_size);
 
     int num_regions = num_layers * state->levels;
