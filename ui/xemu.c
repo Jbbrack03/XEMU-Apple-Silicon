@@ -198,7 +198,10 @@ static void xemu_xr_drain_disc_request(void)
         return;
     }
     /* Same disc already mounted => the user re-picked the running game; treat as
-     * resume (no eject/reset) rather than needlessly rebooting it. */
+     * resume (no eject/reset) rather than needlessly rebooting it. NB: this is
+     * an exact-string compare against the mounted dvd_path, so a title booted
+     * via the 2D app-private copy (different path) will reboot rather than
+     * resume when picked here. Acceptable. */
     const char *cur = g_config.sys.files.dvd_path;
     if (cur && strcmp(cur, path) == 0) {
         __android_log_print(ANDROID_LOG_INFO, "xemu-android",
@@ -213,8 +216,9 @@ static void xemu_xr_drain_disc_request(void)
     xemu_load_disc(path, &err); /* eject + insert new medium, sets dvd_path */
     if (err) {
         error_report_err(err);
-        g_free(path);
-        return; /* don't reset into a failed mount */
+        /* xemu_load_disc ejects before the medium change, so on failure the
+         * tray is already open — reset anyway (dashboard tolerates an empty
+         * tray) rather than leaving the running title with its disc yanked. */
     }
     /* Cold-boot the guest into the freshly inserted disc; a bare medium swap
      * would leave the running title executing against the new ISO. */

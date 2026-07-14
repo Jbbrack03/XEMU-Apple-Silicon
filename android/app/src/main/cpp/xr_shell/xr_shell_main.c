@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define XR_USE_PLATFORM_ANDROID 1
 #define XR_USE_GRAPHICS_API_OPENGL_ES 1
@@ -153,7 +154,28 @@ typedef struct {
     /* Menu input edge state */
     int nav_latch;          /* -1/0/1: debounces stick/hat/dpad navigation */
     uint16_t pad_deferred;  /* START/BACK held but not yet forwarded (combo) */
+    uint16_t synth_buttons; /* synthetic START/BACK asserted to the guest */
+    int64_t synth_retract_ns; /* monotonic deadline to drop synth_buttons */
 } XrShell;
+
+static int64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* Forward the current pad to the emulator: physical buttons minus any deferred
+ * (undecided combo) bits, OR'd with synthetic bits held long enough to be
+ * sampled by the guest. */
+static void xr_forward_pad(XrShell *s)
+{
+    if (s->set_gamepad) {
+        uint16_t b = (uint16_t)((s->pad_buttons & ~s->pad_deferred) |
+                                s->synth_buttons);
+        s->set_gamepad(b, s->pad_axis, 6);
+    }
+}
 
 /* --- minimal vec/quat math --- */
 static XrVector3f v3_sub(XrVector3f a, XrVector3f b)
@@ -512,6 +534,7 @@ static void menu_open(XrShell *s)
     /* Release any held inputs so nothing sticks in the game while navigating. */
     s->pad_buttons = 0;
     s->pad_deferred = 0;
+    s->synth_buttons = 0;
     memset(s->pad_axis, 0, sizeof(s->pad_axis));
     if (s->set_gamepad) {
         s->set_gamepad(0, s->pad_axis, 6);
@@ -527,6 +550,7 @@ static void menu_close(XrShell *s)
      * activation press (e.g. A) from leaking into the resumed title. */
     s->pad_buttons = 0;
     s->pad_deferred = 0;
+    s->synth_buttons = 0;
     memset(s->pad_axis, 0, sizeof(s->pad_axis));
     if (s->set_gamepad) {
         s->set_gamepad(0, s->pad_axis, 6);
@@ -1084,6 +1108,12 @@ static void xr_frame(XrShell *s)
     XrFrameBeginInfo fbi = { .type = XR_TYPE_FRAME_BEGIN_INFO };
     OXR(xrBeginFrame(s->session, &fbi));
 
+    /* Retract an expired synthetic START/BACK tap (see on_input). */
+    if (s->synth_buttons && now_ns() >= s->synth_retract_ns) {
+        s->synth_buttons = 0;
+        xr_forward_pad(s);
+    }
+
     /* Drive 6DOF window move/resize from the controllers. */
     xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
 
@@ -1403,19 +1433,19 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
                 s->pad_deferred |= mask;
             } else if (action == AKEY_EVENT_ACTION_UP &&
                        (s->pad_deferred & mask)) {
+                /* Lone tap (combo never completed): assert a synthetic press
+                 * long enough to survive a guest poll (the XR pad path has no
+                 * MIN_BUTTON_HOLD auto-extend), retracted from the frame loop.
+                 * A momentary back-to-back pulse here is never sampled. */
                 s->pad_deferred &= ~mask;
-                if (s->set_gamepad) {
-                    uint16_t fwd = s->pad_buttons & ~s->pad_deferred;
-                    s->set_gamepad((uint16_t)(fwd | mask), s->pad_axis, 6);
-                    s->set_gamepad(fwd, s->pad_axis, 6);
-                }
+                s->synth_buttons |= mask;
+                s->synth_retract_ns = now_ns() + 60000000LL; /* 60 ms */
+                xr_forward_pad(s);
                 return 1;
             }
         }
 
-        if (s->set_gamepad)
-            s->set_gamepad((uint16_t)(s->pad_buttons & ~s->pad_deferred),
-                           s->pad_axis, 6);
+        xr_forward_pad(s);
         static int gp_key_log = 0;
         if (gp_key_log++ < 12) {
             LOGI("XR gamepad key: code=%d action=%d -> buttons=0x%04x fwd=%d",
@@ -1450,9 +1480,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
             menu_nav_eval(s);
             return 1; /* drive the menu; don't forward to the game */
         }
-        if (s->set_gamepad)
-            s->set_gamepad((uint16_t)(s->pad_buttons & ~s->pad_deferred),
-                           s->pad_axis, 6);
+        xr_forward_pad(s);
         return 1;
     }
     return 0;

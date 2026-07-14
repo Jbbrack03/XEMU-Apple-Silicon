@@ -33,7 +33,8 @@ class XrMenuBridge(context: Context) {
   private var selected = 0
   private var scrollTop = 0
   private var visibleRows = 1
-  private var dirty = true
+  // Written by the scan thread on completion, read/cleared on the frame thread.
+  @Volatile private var dirty = true
 
   // Running process's active FP JIT mode (pushed from native on open); lets us
   // flag per-game toggles that only take effect on the next cold launch.
