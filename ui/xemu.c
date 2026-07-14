@@ -139,6 +139,92 @@ static bool g_android_paused = false;
 static bool g_android_xr_mode = false;
 static bool g_android_should_quit = false;
 static volatile bool g_android_qemu_thread_finished = false;
+
+/* XR shell disc-swap bridge: the OpenXR NativeActivity (same process) picks a
+ * game from the in-VR menu on the Android input thread and requests a medium
+ * change here. The actual swap must run with the BQL held, so we only stash the
+ * path and let the display loop drain it (same context as the HUD load-disc
+ * action). Mirrors xemu_xr_set_gamepad_state's cross-thread hand-off. */
+static pthread_mutex_t g_xr_disc_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *g_xr_disc_pending; /* g_strdup'd path; NULL when nothing pending */
+static bool g_xr_quit_pending;  /* eject + guest reset -> Xbox dashboard */
+
+__attribute__((visibility("default")))
+void xemu_xr_request_load_disc(const char *path)
+{
+    if (!path || !path[0]) {
+        return;
+    }
+    pthread_mutex_lock(&g_xr_disc_lock);
+    g_free(g_xr_disc_pending);
+    g_xr_disc_pending = g_strdup(path);
+    pthread_mutex_unlock(&g_xr_disc_lock);
+}
+
+/* Quit the running game: eject the disc and reset the guest so it boots back
+ * to the Xbox dashboard. Same primitives as the HUD Eject + Reset actions. */
+__attribute__((visibility("default")))
+void xemu_xr_request_quit_to_dashboard(void)
+{
+    pthread_mutex_lock(&g_xr_disc_lock);
+    g_xr_quit_pending = true;
+    pthread_mutex_unlock(&g_xr_disc_lock);
+}
+
+/* Drain a pending XR disc/quit request. MUST be called with the BQL held. */
+static void xemu_xr_drain_disc_request(void)
+{
+    pthread_mutex_lock(&g_xr_disc_lock);
+    bool quit = g_xr_quit_pending;
+    g_xr_quit_pending = false;
+    char *path = g_xr_disc_pending;
+    g_xr_disc_pending = NULL;
+    pthread_mutex_unlock(&g_xr_disc_lock);
+
+    if (quit) {
+        /* Quit wins over any queued disc load. */
+        g_free(path);
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "xr-mode: quit to dashboard (eject + reset)");
+        Error *err = NULL;
+        xemu_eject_disc(&err);
+        if (err) {
+            error_report_err(err);
+        }
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        return;
+    }
+    if (!path) {
+        return;
+    }
+    /* Same disc already mounted => the user re-picked the running game; treat as
+     * resume (no eject/reset) rather than needlessly rebooting it. NB: this is
+     * an exact-string compare against the mounted dvd_path, so a title booted
+     * via the 2D app-private copy (different path) will reboot rather than
+     * resume when picked here. Acceptable. */
+    const char *cur = g_config.sys.files.dvd_path;
+    if (cur && strcmp(cur, path) == 0) {
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "xr-mode: disc %s already mounted; resuming", path);
+        g_free(path);
+        return;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "xr-mode: switching to disc %s (load + guest reset)",
+                        path);
+    Error *err = NULL;
+    xemu_load_disc(path, &err); /* eject + insert new medium, sets dvd_path */
+    if (err) {
+        error_report_err(err);
+        /* xemu_load_disc ejects before the medium change, so on failure the
+         * tray is already open — reset anyway (dashboard tolerates an empty
+         * tray) rather than leaving the running title with its disc yanked. */
+    }
+    /* Cold-boot the guest into the freshly inserted disc; a bare medium swap
+     * would leave the running title executing against the new ISO. */
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+    g_free(path);
+}
 static volatile bool g_android_vm_pause_requested = false;
 static volatile bool g_android_vm_resume_requested = false;
 static uint64_t g_android_frame_counter = 0;
@@ -1698,6 +1784,7 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         /* VGA update + vblank so guest timing/present flags advance. */
         qemu_mutex_lock_main_loop();
         bql_lock();
+        xemu_xr_drain_disc_request();
         graphic_hw_update(scon->dcl.con);
         if (scon->updates && scon->surface) {
             scon->updates = 0;
