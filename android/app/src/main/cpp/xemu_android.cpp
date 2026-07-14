@@ -922,8 +922,16 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "FP safe (native arithmetic): %s", fp_safe ? "ON" : "OFF");
 
+  /*
+   * Default ON (session 6): measured +38-80% on CPU-bound titles, zero
+   * visual/behavioral regressions across 12 titles (5 benched + 7 boot
+   * smokes, frame-dump verified). Per-game opt-out via setting_hard_fpu
+   * (XR menu FP JIT toggle). Residual: x87 PC=extended phases run at
+   * double precision — if a title misbehaves (esp. Insignia netplay
+   * determinism), toggle it off for that game.
+   */
   bool fp_jit = GetPrefBool(env, activity, "setting_hard_fpu",
-                             GetPrefBool(env, activity, "fp_jit", false));
+                             GetPrefBool(env, activity, "fp_jit", true));
   ds.fp_jit = fp_jit;
   xemu_set_fp_jit(fp_jit);
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
