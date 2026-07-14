@@ -31,6 +31,10 @@
 
 #include "swizzle.h"
 
+/* Test hook: when true, the NEON fast paths are bypassed so the self-test can
+ * compare scalar vs NEON output. Always false in normal operation. */
+bool swizzle_disable_neon = false;
+
 /*
  * Helpers for converting to and from swizzled (Z-ordered) texture formats.
  * Swizzled textures store pixels in a more cache-friendly layout for rendering
@@ -162,7 +166,8 @@ static inline void swizzle_box_internal(
     generate_swizzle_masks(width, height, depth, &mask_x, &mask_y, &mask_z);
 
 #ifdef __aarch64__
-    if (bytes_per_pixel == 4 && depth == 1 && width >= 2 && height >= 2) {
+    if (!swizzle_disable_neon && bytes_per_pixel == 4 && depth == 1 &&
+        width >= 2 && height >= 2) {
         swizzle_box_neon_2d_rgba8(src_buf, width, height, dst_buf, row_pitch,
                                   mask_x, mask_y);
         return;
@@ -216,7 +221,8 @@ static inline void unswizzle_box_internal(
     generate_swizzle_masks(width, height, depth, &mask_x, &mask_y, &mask_z);
 
 #ifdef __aarch64__
-    if (bytes_per_pixel == 4 && depth == 1 && width >= 2 && height >= 2) {
+    if (!swizzle_disable_neon && bytes_per_pixel == 4 && depth == 1 &&
+        width >= 2 && height >= 2) {
         unswizzle_box_neon_2d_rgba8(src_buf, width, height, dst_buf, row_pitch,
                                     mask_x, mask_y);
         return;

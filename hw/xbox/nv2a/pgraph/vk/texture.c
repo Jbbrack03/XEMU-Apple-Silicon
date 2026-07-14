@@ -189,15 +189,63 @@ static size_t get_cubemap_layer_size(PGRAPHState *pg, TextureShape s)
     return ROUND_UP(length, NV2A_CUBEMAP_FACE_ALIGNMENT);
 }
 
+// Formats that pgraph_convert_texture_data() expands/rewrites (everything else
+// is used as-is straight out of unswizzle/memcpy). Kept in sync with
+// pgraph_convert_texture_data() in pgraph/texture.c; texture_convert_size()
+// must match the size that function produces, and this is asserted in the
+// decode pass below.
+static bool texture_format_needs_convert(int color_format)
+{
+    switch (color_format) {
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_I8_A8R8G8B8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_YB8CR8YA8CB8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static size_t texture_convert_size(int color_format, unsigned int width,
+                                   unsigned int height, unsigned int depth)
+{
+    switch (color_format) {
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_I8_A8R8G8B8:
+        return (size_t)width * height * depth * 4;
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_CR8YB8CB8YA8:
+    case NV097_SET_TEXTURE_FORMAT_COLOR_LC_IMAGE_YB8CR8YA8CB8:
+        return (size_t)width * height * 4;
+    case NV097_SET_TEXTURE_FORMAT_COLOR_SZ_R6G5B5:
+        return (size_t)width * height * 3;
+    default:
+        return 0;
+    }
+}
+
 // FIXME: Move to common
 // FIXME: More refactoring
 // FIXME: Possible parallelization of decoding
 // FIXME: Bounds checking
-static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
+//
+// Two-mode texture decode. When dst == NULL, only the per-level dimensions and
+// decoded sizes are filled in (a cheap "measure" pass, no decoding, no
+// allocation) and the total decoded size is returned. When dst != NULL, each
+// level is decoded straight into dst at its computed offset (level->decoded_data
+// points into dst) and the same total is returned. Decoding directly into the
+// caller's (host-cached) staging buffer avoids the per-level scratch
+// allocation and the full-texture memcpy that used to dominate the render
+// thread (__memmove ~15.6%). Rare formats that need pgraph_convert_texture_data
+// still use a scratch buffer since their expansion can't be done in place.
+static size_t fill_texture_layout(PGRAPHState *pg, int texture_idx,
+                                  uint8_t *dst, TextureLayout *layout)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
     TextureShape s = pgraph_get_texture_shape(pg, texture_idx);
     BasicColorFormatInfo f = kelvin_color_format_info_map[s.color_format];
+
+    memset(layout, 0, sizeof(*layout));
+    size_t total_size = 0;
 
     NV2A_VK_DGROUP_BEGIN("Texture %d: cubemap=%d, dimensionality=%d, color_format=0x%x, levels=%d, width=%d, height=%d, depth=%d border=%d, min_mipmap_level=%d, max_mipmap_level=%d, pitch=%d",
         texture_idx,
@@ -243,36 +291,44 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
         adjusted_depth = MAX(16, s.depth * 2);
     }
 
-    TextureLayout *layout = g_malloc0(sizeof(TextureLayout));
-
     if (f.linear) {
         assert(s.pitch % f.bytes_per_pixel == 0 && "Can't handle strides unaligned to pixels");
+        assert(s.levels == 1);
 
         size_t converted_size;
-        uint8_t *converted = pgraph_convert_texture_data(
-            s, texture_data_ptr, palette_data_ptr, adjusted_width,
-            adjusted_height, 1, adjusted_pitch, 0, &converted_size);
-
-        if (!converted) {
+        if (texture_format_needs_convert(s.color_format)) {
+            converted_size = texture_convert_size(s.color_format, adjusted_width,
+                                                  adjusted_height, 1);
+            if (dst) {
+                size_t got;
+                uint8_t *converted = pgraph_convert_texture_data(
+                    s, texture_data_ptr, palette_data_ptr, adjusted_width,
+                    adjusted_height, 1, adjusted_pitch, 0, &got);
+                assert(converted && got == converted_size);
+                memcpy(dst, converted, converted_size);
+                g_free(converted);
+            }
+        } else {
             int dst_stride = adjusted_width * f.bytes_per_pixel;
             assert(adjusted_width <= s.width);
             converted_size = dst_stride * adjusted_height;
-            converted = g_malloc(converted_size);
-            memcpy_image(converted, texture_data_ptr, adjusted_width * f.bytes_per_pixel, dst_stride,
-                         adjusted_pitch, adjusted_height);
+            if (dst) {
+                memcpy_image(dst, texture_data_ptr,
+                             adjusted_width * f.bytes_per_pixel, dst_stride,
+                             adjusted_pitch, adjusted_height);
+            }
         }
 
-        assert(s.levels == 1);
         layout->layers[0].levels[0] = (TextureLevel){
             .width = adjusted_width,
             .height = adjusted_height,
             .depth = 1,
             .decoded_size = converted_size,
-            .decoded_data = converted,
+            .decoded_data = dst,
         };
 
         NV2A_VK_DGROUP_END();
-        return layout;
+        return converted_size;
     }
 
     bool is_compressed = pgraph_is_texture_format_compressed(pg, s.color_format);
@@ -296,6 +352,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
 
                 width = MAX(width, 1);
                 height = MAX(height, 1);
+                uint8_t *level_dst = dst ? dst + total_size : NULL;
                 if (is_compressed) {
                     // https://docs.microsoft.com/en-us/windows/win32/direct3d10/d3d10-graphics-programming-guide-resources-block-compression#virtual-size-versus-physical-size
                     unsigned int tex_width = width, tex_height = height;
@@ -303,10 +360,12 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                                  physical_height = (height + 3) & ~3;
 
                     size_t converted_size = width * height * 4;
-                    uint8_t *converted = s3tc_decompress_2d(
-                        kelvin_format_to_s3tc_format(s.color_format),
-                        texture_data_ptr, width, height);
-                    assert(converted);
+                    if (dst) {
+                        s3tc_decompress_2d_to(
+                            level_dst,
+                            kelvin_format_to_s3tc_format(s.color_format),
+                            texture_data_ptr, width, height);
+                    }
 
                     if (s.cubemap && adjusted_width != s.width) {
                         // FIXME: Consider preserving the border.
@@ -329,28 +388,39 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                         .height = tex_height,
                         .depth = 1,
                         .decoded_size = converted_size,
-                        .decoded_data = converted,
+                        .decoded_data = level_dst,
                     };
 
+                    total_size += converted_size;
                     texture_data_ptr +=
                         physical_width / 4 * physical_height / 4 * block_size;
                 } else {
                     unsigned int pitch = width * f.bytes_per_pixel;
                     unsigned int tex_width = width, tex_height = height;
+                    size_t converted_size;
 
-                    size_t converted_size = height * pitch;
-                    uint8_t *unswizzled = (uint8_t*)g_malloc(height * pitch);
-                    unswizzle_rect(texture_data_ptr, width, height,
-                                   unswizzled, pitch, f.bytes_per_pixel);
-
-                    uint8_t *converted = pgraph_convert_texture_data(
-                        s, unswizzled, palette_data_ptr, width, height, 1,
-                        pitch, 0, &converted_size);
-
-                    if (converted) {
-                        g_free(unswizzled);
+                    if (texture_format_needs_convert(s.color_format)) {
+                        converted_size = texture_convert_size(s.color_format,
+                                                              width, height, 1);
+                        if (dst) {
+                            uint8_t *unswizzled = (uint8_t *)g_malloc(height * pitch);
+                            unswizzle_rect(texture_data_ptr, width, height,
+                                           unswizzled, pitch, f.bytes_per_pixel);
+                            size_t got;
+                            uint8_t *converted = pgraph_convert_texture_data(
+                                s, unswizzled, palette_data_ptr, width, height,
+                                1, pitch, 0, &got);
+                            assert(converted && got == converted_size);
+                            memcpy(level_dst, converted, converted_size);
+                            g_free(converted);
+                            g_free(unswizzled);
+                        }
                     } else {
-                        converted = unswizzled;
+                        converted_size = height * pitch;
+                        if (dst) {
+                            unswizzle_rect(texture_data_ptr, width, height,
+                                           level_dst, pitch, f.bytes_per_pixel);
+                        }
                     }
 
                     if (s.cubemap && adjusted_width != s.width) {
@@ -370,9 +440,10 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                         .height = tex_height,
                         .depth = 1,
                         .decoded_size = converted_size,
-                        .decoded_data = converted,
+                        .decoded_data = level_dst,
                     };
 
+                    total_size += converted_size;
                     texture_data_ptr += width * height * f.bytes_per_pixel;
                 }
 
@@ -386,6 +457,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                      depth = adjusted_depth;
 
         for (int level = 0; level < s.levels; level++) {
+            uint8_t *level_dst = dst ? dst + total_size : NULL;
             if (is_compressed) {
                 width = MAX(width, 1);
                 height = MAX(height, 1);
@@ -394,19 +466,22 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                 depth = MAX(depth, 1);
 
                 size_t converted_size = width * height * depth * 4;
-                uint8_t *converted = s3tc_decompress_3d(
-                    kelvin_format_to_s3tc_format(s.color_format),
-                    texture_data_ptr, width, height, depth);
-                assert(converted);
+                if (dst) {
+                    s3tc_decompress_3d_to(
+                        level_dst,
+                        kelvin_format_to_s3tc_format(s.color_format),
+                        texture_data_ptr, width, height, depth);
+                }
 
                 layout->layers[0].levels[level] = (TextureLevel){
                     .width = width,
                     .height = height,
                     .depth = depth,
                     .decoded_size = converted_size,
-                    .decoded_data = converted,
+                    .decoded_data = level_dst,
                 };
 
+                total_size += converted_size;
                 texture_data_ptr += physical_width / 4 * physical_height / 4 * depth * block_size;
             } else {
                 width = MAX(width, 1);
@@ -415,23 +490,33 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
 
                 unsigned int row_pitch = width * f.bytes_per_pixel;
                 unsigned int slice_pitch = row_pitch * height;
-
                 size_t unswizzled_size = slice_pitch * depth;
-                uint8_t *unswizzled = g_malloc(unswizzled_size);
-                unswizzle_box(texture_data_ptr, width, height, depth,
-                              unswizzled, row_pitch, slice_pitch,
-                              f.bytes_per_pixel);
-
                 size_t converted_size;
-                uint8_t *converted = pgraph_convert_texture_data(
-                    s, unswizzled, palette_data_ptr, width, height, depth,
-                    row_pitch, slice_pitch, &converted_size);
 
-                if (converted) {
-                    g_free(unswizzled);
+                if (texture_format_needs_convert(s.color_format)) {
+                    converted_size = texture_convert_size(s.color_format, width,
+                                                          height, depth);
+                    if (dst) {
+                        uint8_t *unswizzled = g_malloc(unswizzled_size);
+                        unswizzle_box(texture_data_ptr, width, height, depth,
+                                      unswizzled, row_pitch, slice_pitch,
+                                      f.bytes_per_pixel);
+                        size_t got;
+                        uint8_t *converted = pgraph_convert_texture_data(
+                            s, unswizzled, palette_data_ptr, width, height,
+                            depth, row_pitch, slice_pitch, &got);
+                        assert(converted && got == converted_size);
+                        memcpy(level_dst, converted, converted_size);
+                        g_free(converted);
+                        g_free(unswizzled);
+                    }
                 } else {
-                    converted = unswizzled;
                     converted_size = unswizzled_size;
+                    if (dst) {
+                        unswizzle_box(texture_data_ptr, width, height, depth,
+                                      level_dst, row_pitch, slice_pitch,
+                                      f.bytes_per_pixel);
+                    }
                 }
 
                 layout->layers[0].levels[level] = (TextureLevel){
@@ -439,9 +524,10 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
                     .height = height,
                     .depth = depth,
                     .decoded_size = converted_size,
-                    .decoded_data = converted,
+                    .decoded_data = level_dst,
                 };
 
+                total_size += converted_size;
                 texture_data_ptr += width * height * depth * f.bytes_per_pixel;
             }
 
@@ -452,7 +538,7 @@ static TextureLayout *get_texture_layout(PGRAPHState *pg, int texture_idx)
     }
 
     NV2A_VK_DGROUP_END();
-    return layout;
+    return total_size;
 }
 
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d,
@@ -591,19 +677,14 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
 
     nv2a_profile_inc_counter(NV2A_PROF_TEX_UPLOAD);
 
-    g_autofree TextureLayout *layout = get_texture_layout(pg, texture_idx);
+    g_autofree TextureLayout *layout = g_malloc0(sizeof(TextureLayout));
     const int num_layers = state->cubemap ? 6 : 1;
 
-    // Calculate decoded texture data size
-    size_t texture_data_size = 0;
-    for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-        TextureLayer *layer = &layout->layers[layer_idx];
-        for (int level_idx = 0; level_idx < state->levels; level_idx++) {
-            size_t size = layer->levels[level_idx].decoded_size;
-            assert(size);
-            texture_data_size += size;
-        }
-    }
+    // Pass 1: measure the decoded texture data size without decoding or
+    // allocating scratch. Guest VRAM is unchanged between here and the decode
+    // pass below, so the sizes are identical (asserted after decode).
+    size_t texture_data_size = fill_texture_layout(pg, texture_idx, NULL, layout);
+    assert(texture_data_size);
 
     VkDeviceSize staging_base = pgraph_vk_staging_alloc(pg, texture_data_size);
     if (staging_base == VK_WHOLE_SIZE) {
@@ -626,6 +707,11 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     StorageBuffer *staging = get_staging_buffer(r, BUFFER_STAGING_SRC);
     uint8_t *mapped_memory_ptr = (uint8_t *)staging->mapped;
 
+    // Pass 2: decode each level straight into the (host-cached) staging buffer.
+    size_t decoded_total = fill_texture_layout(
+        pg, texture_idx, mapped_memory_ptr + staging_base, layout);
+    assert(decoded_total == texture_data_size);
+
     int num_regions = num_layers * state->levels;
     g_autofree VkBufferImageCopy *regions =
         g_malloc0_n(num_regions, sizeof(VkBufferImageCopy));
@@ -641,8 +727,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
             NV2A_VK_DPRINTF(" - Level %d, w=%d h=%d d=%d @ %08" HWADDR_PRIx,
                             level_idx, level->width, level->height,
                             level->depth, buffer_offset);
-            memcpy(mapped_memory_ptr + buffer_offset, level->decoded_data,
-                   level->decoded_size);
+            // Data was already decoded in place at this offset by pass 2.
+            assert(level->decoded_data == mapped_memory_ptr + buffer_offset);
             *region = (VkBufferImageCopy){
                 .bufferOffset = buffer_offset,
                 .bufferRowLength = 0, // Tightly packed
@@ -699,13 +785,8 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_nondraw_commands(pg, cmd);
 
-    // Release decoded texture data
-    for (int layer_idx = 0; layer_idx < num_layers; layer_idx++) {
-        TextureLayer *layer = &layout->layers[layer_idx];
-        for (int level_idx = 0; level_idx < state->levels; level_idx++) {
-            g_free(layer->levels[level_idx].decoded_data);
-        }
-    }
+    // No decoded-data cleanup: everything was written directly into the
+    // staging ring buffer, which the caller manages.
     NV2A_PHASE_TIMER_END(texture_upload);
 }
 
@@ -2304,6 +2385,13 @@ void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
 void pgraph_vk_init_textures(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (getenv("XEMU_TEX_SELFTEST")) {
+        int checks = 0, failures = 0;
+        bool ok = pgraph_texture_selftest(&checks, &failures);
+        VK_LOG_ERROR("texture decode self-test: %d/%d checks passed (%s)",
+                     checks - failures, checks, ok ? "PASS" : "FAIL");
+    }
 
     texture_cache_init(r);
     create_dummy_texture(pg);
