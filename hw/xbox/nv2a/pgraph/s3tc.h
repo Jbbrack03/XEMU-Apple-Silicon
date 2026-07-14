@@ -26,6 +26,10 @@
 #define HW_XBOX_NV2A_PGRAPH_S3TC_H
 
 #include <stdint.h>
+#include <stdbool.h>
+
+/* Test hook (see s3tc.c): force scalar path for NEON-vs-scalar self-test. */
+extern bool s3tc_disable_neon;
 
 enum S3TC_DECOMPRESS_FORMAT {
     S3TC_DECOMPRESS_FORMAT_DXT1,
@@ -40,5 +44,21 @@ uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
 uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
                             const uint8_t *data, unsigned int width,
                             unsigned int height);
+
+/* Decode directly into a caller-provided RGBA8 buffer (width*height*depth*4
+ * bytes), avoiding the intermediate allocation + copy on the upload path. */
+void s3tc_decompress_3d_to(uint8_t *out,
+                           enum S3TC_DECOMPRESS_FORMAT color_format,
+                           const uint8_t *data, unsigned int width,
+                           unsigned int height, unsigned int depth);
+
+void s3tc_decompress_2d_to(uint8_t *out,
+                           enum S3TC_DECOMPRESS_FORMAT color_format,
+                           const uint8_t *data, unsigned int width,
+                           unsigned int height);
+
+/* NEON-vs-scalar bit-exactness self-test (see s3tc.c). Returns true if all
+ * checks pass; optionally reports the number of checks/failures run. */
+bool pgraph_texture_selftest(int *out_checks, int *out_failures);
 
 #endif

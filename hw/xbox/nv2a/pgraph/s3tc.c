@@ -29,6 +29,11 @@
 #endif
 
 #include "s3tc.h"
+#include "swizzle.h"
+
+/* Test hook: when true, the NEON block writer is bypassed so the self-test can
+ * compare scalar vs NEON output. Always false in normal operation. */
+bool s3tc_disable_neon = false;
 
 static void decode_bc1_colors(uint16_t c0, uint16_t c1, uint8_t r[4],
                               uint8_t g[4], uint8_t b[4], uint8_t a[16],
@@ -162,7 +167,8 @@ static void write_block_to_texture(uint8_t *converted_data, uint32_t indices,
         y1 = y0 + 4;
 
 #ifdef __aarch64__
-    if (write_block_to_texture_neon(converted_data, indices, i, j, width,
+    if (!s3tc_disable_neon &&
+        write_block_to_texture_neon(converted_data, indices, i, j, width,
                                     height, z_pos_factor, r, g, b, a,
                                     separate_alpha)) {
         return;
@@ -260,9 +266,10 @@ static void decompress_dxt5_block(const uint8_t block_data[16],
                            r, g, b, a, true);
 }
 
-uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
-                            const uint8_t *data, unsigned int width,
-                            unsigned int height, unsigned int depth)
+void s3tc_decompress_3d_to(uint8_t *converted_data,
+                           enum S3TC_DECOMPRESS_FORMAT color_format,
+                           const uint8_t *data, unsigned int width,
+                           unsigned int height, unsigned int depth)
 {
     assert(width > 0);
     assert(height > 0);
@@ -272,7 +279,6 @@ uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
     int num_blocks_x = physical_width/4,
         num_blocks_y = physical_height/4,
         num_blocks_z = (depth + 3)/4;
-    uint8_t *converted_data = (uint8_t*)g_malloc(width * height * depth * 4);
     int cur_depth = 0;
     int sub_block_index = 0;
     for (int k = 0; k < num_blocks_z; k++) {
@@ -300,19 +306,28 @@ uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
         }
         cur_depth += block_depth;
     }
+}
+
+uint8_t *s3tc_decompress_3d(enum S3TC_DECOMPRESS_FORMAT color_format,
+                            const uint8_t *data, unsigned int width,
+                            unsigned int height, unsigned int depth)
+{
+    uint8_t *converted_data = (uint8_t *)g_malloc(width * height * depth * 4);
+    s3tc_decompress_3d_to(converted_data, color_format, data, width, height,
+                          depth);
     return converted_data;
 }
 
-uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
-                            const uint8_t *data, unsigned int width,
-                            unsigned int height)
+void s3tc_decompress_2d_to(uint8_t *converted_data,
+                           enum S3TC_DECOMPRESS_FORMAT color_format,
+                           const uint8_t *data, unsigned int width,
+                           unsigned int height)
 {
     assert(width > 0);
     assert(height > 0);
     unsigned int physical_width = (width + 3) & ~3,
                  physical_height = (height + 3) & ~3;
     int num_blocks_x = physical_width / 4, num_blocks_y = physical_height / 4;
-    uint8_t *converted_data = (uint8_t *)g_malloc(width * height * 4);
     for (int j = 0; j < num_blocks_y; j++) {
         for (int i = 0; i < num_blocks_x; i++) {
             int block_index = j * num_blocks_x + i;
@@ -330,5 +345,179 @@ uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
             }
         }
     }
+}
+
+uint8_t *s3tc_decompress_2d(enum S3TC_DECOMPRESS_FORMAT color_format,
+                            const uint8_t *data, unsigned int width,
+                            unsigned int height)
+{
+    uint8_t *converted_data = (uint8_t *)g_malloc(width * height * 4);
+    s3tc_decompress_2d_to(converted_data, color_format, data, width, height);
     return converted_data;
+}
+
+/*
+ * NEON-vs-scalar bit-exactness self-test for the texture decode paths
+ * (DXT1/3/5 block decode and swizzle/unswizzle). Also checks the new
+ * decode-into-caller-buffer variants against the malloc-returning ones.
+ * Deterministic (fixed PRNG) so results are reproducible. Trigger via the
+ * XEMU_TEX_SELFTEST env var at renderer init (see pgraph_vk_init_textures).
+ * Returns true if every check passed.
+ */
+static uint32_t selftest_rand(uint32_t *s)
+{
+    *s = *s * 1664525u + 1013904223u;
+    return *s;
+}
+
+bool pgraph_texture_selftest(int *out_checks, int *out_failures)
+{
+    uint32_t seed = 0x1234abcdu;
+    int checks = 0, failures = 0;
+
+    static const enum S3TC_DECOMPRESS_FORMAT fmts[] = {
+        S3TC_DECOMPRESS_FORMAT_DXT1,
+        S3TC_DECOMPRESS_FORMAT_DXT3,
+        S3TC_DECOMPRESS_FORMAT_DXT5,
+    };
+    static const struct { unsigned int w, h; } dims2d[] = {
+        { 4, 4 }, { 8, 8 }, { 16, 8 }, { 7, 5 }, { 13, 3 }, { 64, 64 }
+    };
+    static const struct { unsigned int w, h, d; } dims3d[] = {
+        { 4, 4, 4 }, { 8, 8, 2 }, { 16, 8, 5 }, { 7, 5, 3 }
+    };
+
+    for (size_t fi = 0; fi < ARRAY_SIZE(fmts); fi++) {
+        unsigned int block_bytes =
+            (fmts[fi] == S3TC_DECOMPRESS_FORMAT_DXT1) ? 8 : 16;
+
+        for (size_t di = 0; di < ARRAY_SIZE(dims2d); di++) {
+            unsigned int w = dims2d[di].w, h = dims2d[di].h;
+            unsigned int pw = (w + 3) & ~3u, ph = (h + 3) & ~3u;
+            size_t src_len = (size_t)(pw / 4) * (ph / 4) * block_bytes;
+            size_t out_len = (size_t)w * h * 4;
+            uint8_t *src = g_malloc(src_len);
+            for (size_t b = 0; b < src_len; b++) {
+                src[b] = selftest_rand(&seed) >> 24;
+            }
+
+            s3tc_disable_neon = false;
+            uint8_t *neon = s3tc_decompress_2d(fmts[fi], src, w, h);
+            s3tc_disable_neon = true;
+            uint8_t *scalar = s3tc_decompress_2d(fmts[fi], src, w, h);
+            s3tc_disable_neon = false;
+            uint8_t *into = g_malloc(out_len);
+            s3tc_decompress_2d_to(into, fmts[fi], src, w, h);
+
+            checks += 2;
+            if (memcmp(neon, scalar, out_len) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: DXT%d 2D %ux%u NEON!=scalar\n",
+                        fmts[fi] == S3TC_DECOMPRESS_FORMAT_DXT1 ? 1 :
+                        fmts[fi] == S3TC_DECOMPRESS_FORMAT_DXT3 ? 3 : 5, w, h);
+            }
+            if (memcmp(neon, into, out_len) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: DXT 2D %ux%u _to!=malloc\n", w, h);
+            }
+            g_free(neon);
+            g_free(scalar);
+            g_free(into);
+            g_free(src);
+        }
+
+        for (size_t di = 0; di < ARRAY_SIZE(dims3d); di++) {
+            unsigned int w = dims3d[di].w, h = dims3d[di].h, dd = dims3d[di].d;
+            unsigned int pw = (w + 3) & ~3u, ph = (h + 3) & ~3u;
+            size_t src_len =
+                (size_t)(pw / 4) * (ph / 4) * dd * block_bytes;
+            size_t out_len = (size_t)w * h * dd * 4;
+            uint8_t *src = g_malloc(src_len);
+            for (size_t b = 0; b < src_len; b++) {
+                src[b] = selftest_rand(&seed) >> 24;
+            }
+
+            s3tc_disable_neon = false;
+            uint8_t *neon = s3tc_decompress_3d(fmts[fi], src, w, h, dd);
+            s3tc_disable_neon = true;
+            uint8_t *scalar = s3tc_decompress_3d(fmts[fi], src, w, h, dd);
+            s3tc_disable_neon = false;
+            uint8_t *into = g_malloc(out_len);
+            s3tc_decompress_3d_to(into, fmts[fi], src, w, h, dd);
+
+            checks += 2;
+            if (memcmp(neon, scalar, out_len) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: DXT 3D %ux%ux%u NEON!=scalar\n",
+                        w, h, dd);
+            }
+            if (memcmp(neon, into, out_len) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: DXT 3D %ux%ux%u _to!=malloc\n",
+                        w, h, dd);
+            }
+            g_free(neon);
+            g_free(scalar);
+            g_free(into);
+            g_free(src);
+        }
+    }
+
+    /* swizzle / unswizzle: NEON vs scalar + round-trip identity. Dimensions
+     * must be powers of two (swizzle mask requirement). */
+    static const struct { unsigned int w, h; } swz[] = {
+        { 2, 2 }, { 4, 4 }, { 8, 4 }, { 16, 16 }, { 32, 8 }, { 64, 64 }
+    };
+    for (unsigned int bpp = 1; bpp <= 4; bpp++) {
+        for (size_t di = 0; di < ARRAY_SIZE(swz); di++) {
+            unsigned int w = swz[di].w, h = swz[di].h;
+            unsigned int pitch = w * bpp;
+            size_t n = (size_t)h * pitch;
+            uint8_t *lin = g_malloc(n);
+            for (size_t b = 0; b < n; b++) {
+                lin[b] = selftest_rand(&seed) >> 24;
+            }
+            uint8_t *sw_neon = g_malloc(n);
+            uint8_t *sw_scal = g_malloc(n);
+            uint8_t *us_neon = g_malloc(n);
+            uint8_t *us_scal = g_malloc(n);
+
+            swizzle_disable_neon = false;
+            swizzle_rect(lin, w, h, sw_neon, pitch, bpp);
+            swizzle_disable_neon = true;
+            swizzle_rect(lin, w, h, sw_scal, pitch, bpp);
+
+            swizzle_disable_neon = false;
+            unswizzle_rect(sw_neon, w, h, us_neon, pitch, bpp);
+            swizzle_disable_neon = true;
+            unswizzle_rect(sw_neon, w, h, us_scal, pitch, bpp);
+            swizzle_disable_neon = false;
+
+            checks += 3;
+            if (memcmp(sw_neon, sw_scal, n) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: swizzle %ux%u bpp%u NEON!=scalar\n",
+                        w, h, bpp);
+            }
+            if (memcmp(us_neon, us_scal, n) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: unswizzle %ux%u bpp%u NEON!=scalar\n",
+                        w, h, bpp);
+            }
+            if (memcmp(us_neon, lin, n) != 0) {
+                failures++;
+                fprintf(stderr, "tex_selftest: swizzle roundtrip %ux%u bpp%u\n",
+                        w, h, bpp);
+            }
+            g_free(lin);
+            g_free(sw_neon);
+            g_free(sw_scal);
+            g_free(us_neon);
+            g_free(us_scal);
+        }
+    }
+
+    if (out_checks) *out_checks = checks;
+    if (out_failures) *out_failures = failures;
+    return failures == 0;
 }

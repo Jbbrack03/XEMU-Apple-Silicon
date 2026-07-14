@@ -22,6 +22,10 @@
 #define HW_XBOX_NV2A_PGRAPH_SWIZZLE_H
 
 #include <stdint.h>
+#include <stdbool.h>
+
+/* Test hook (see swizzle.c): force scalar path for NEON-vs-scalar self-test. */
+extern bool swizzle_disable_neon;
 
 void swizzle_box(
     const uint8_t *src_buf,
