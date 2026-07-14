@@ -962,20 +962,31 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
         unsigned int i;
 
         /*
-         * n_used_entries only ever overcounts live entries (same-page
-         * refill increments without a matching decrement), so zero
-         * means the main table is empty — skip its scan. The Xbox
-         * workload populates only a few of the NB_MMU_MODES modes but
-         * this sweep runs at kHz rates during texture streaming
-         * (dirty-bitmap clears), so the skip is a large saving. The
-         * victim TLB is not counted by n_used_entries; always scan it.
+         * Skip modes whose c.dirty bit is clear: the bit is set (under
+         * this same lock) in tlb_set_page_full before any entry is
+         * written, and cleared only in tlb_flush_by_mmuidx_async_work
+         * immediately before tlb_flush_one_mmuidx_locked memsets BOTH
+         * the main and victim tables — so bit-clear implies both
+         * tables are empty. The Xbox workload populates only a few of
+         * the NB_MMU_MODES modes but this sweep runs at kHz rates
+         * during texture streaming (dirty-bitmap clears), so the skip
+         * is a large saving.
+         *
+         * Do NOT gate this on n_used_entries: it is a resize
+         * heuristic, not an occupancy count — victim_tlb_hit swaps
+         * main/victim entries without touching it while victim-flush
+         * paths decrement it, so it can reach 0 with a live main
+         * entry (adversarial review, session 6). A missed entry here
+         * means a missed TLB_NOTDIRTY re-arm = silent dirty-tracking
+         * loss.
          */
-        if (desc->n_used_entries) {
-            for (i = 0; i < n; i++) {
-                tlb_reset_dirty_range_locked(&desc->fulltlb[i],
-                                             &fast->table[i],
-                                             start, length);
-            }
+        if (!(cpu->neg.tlb.c.dirty & (1 << mmu_idx))) {
+            continue;
+        }
+
+        for (i = 0; i < n; i++) {
+            tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
+                                         start, length);
         }
 
         for (i = 0; i < CPU_VTLB_SIZE; i++) {
