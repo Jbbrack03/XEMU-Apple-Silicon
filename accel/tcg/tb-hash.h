@@ -28,27 +28,26 @@
 
 #ifdef CONFIG_SOFTMMU
 
-/* Only the bottom TB_JMP_PAGE_BITS of the jump cache hash bits vary for
-   addresses on the same page.  The top bits are the same.  This allows
-   TLB invalidation to quickly clear a subset of the hash table.  */
-#define TB_JMP_PAGE_BITS (TB_JMP_CACHE_BITS / 2)
-#define TB_JMP_PAGE_SIZE (1 << TB_JMP_PAGE_BITS)
-#define TB_JMP_ADDR_MASK (TB_JMP_PAGE_SIZE - 1)
-#define TB_JMP_PAGE_MASK (TB_JMP_CACHE_SIZE - TB_JMP_PAGE_SIZE)
+/* Only the bottom xemu_jc_geom.page_bits of the jump cache hash bits vary
+   for addresses on the same page.  The top bits are the same.  This allows
+   TLB invalidation to quickly clear a subset of the hash table.  Geometry
+   is runtime-latched (see tb-jmp-cache.h); the derived values below keep
+   the upstream structure with the constants replaced by fields. */
+#define TB_JMP_PAGE_SIZE (xemu_jc_geom.page_size)
 
 static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
 {
-    vaddr tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
-    return (tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK;
+    unsigned shift = TARGET_PAGE_BITS - xemu_jc_geom.page_bits;
+    vaddr tmp = pc ^ (pc >> shift);
+    return (tmp >> shift) & xemu_jc_geom.page_mask;
 }
 
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 {
-    vaddr tmp;
-    tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
-    return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
-           | (tmp & TB_JMP_ADDR_MASK));
+    unsigned shift = TARGET_PAGE_BITS - xemu_jc_geom.page_bits;
+    vaddr tmp = pc ^ (pc >> shift);
+    return (((tmp >> shift) & xemu_jc_geom.page_mask)
+           | (tmp & xemu_jc_geom.addr_mask));
 }
 
 #else
@@ -56,7 +55,7 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 /* In user-mode we can get better hashing because we do not have a TLB */
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 {
-    return (pc ^ (pc >> TB_JMP_CACHE_BITS)) & (TB_JMP_CACHE_SIZE - 1);
+    return (pc ^ (pc >> xemu_jc_geom.bits)) & (TB_JMP_CACHE_SIZE - 1);
 }
 
 #endif /* CONFIG_SOFTMMU */

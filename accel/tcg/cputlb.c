@@ -775,7 +775,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      * If the length is larger than the jump cache size, then it will take
      * longer to clear each entry individually than it will to clear it all.
      */
-    if (d.len >= (TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
+    if (d.len >= ((vaddr)TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
         tcg_flush_jmp_cache(cpu);
         return;
     }
@@ -961,9 +961,21 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
         unsigned int n = tlb_n_entries(fast);
         unsigned int i;
 
-        for (i = 0; i < n; i++) {
-            tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
-                                         start, length);
+        /*
+         * n_used_entries only ever overcounts live entries (same-page
+         * refill increments without a matching decrement), so zero
+         * means the main table is empty — skip its scan. The Xbox
+         * workload populates only a few of the NB_MMU_MODES modes but
+         * this sweep runs at kHz rates during texture streaming
+         * (dirty-bitmap clears), so the skip is a large saving. The
+         * victim TLB is not counted by n_used_entries; always scan it.
+         */
+        if (desc->n_used_entries) {
+            for (i = 0; i < n; i++) {
+                tlb_reset_dirty_range_locked(&desc->fulltlb[i],
+                                             &fast->table[i],
+                                             start, length);
+            }
         }
 
         for (i = 0; i < CPU_VTLB_SIZE; i++) {

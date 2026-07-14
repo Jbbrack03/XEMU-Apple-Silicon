@@ -13,7 +13,26 @@
 #include "exec/cpu-common.h"
 
 #define TB_JMP_CACHE_BITS 12
-#define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
+
+/*
+ * Runtime-sized jump cache (XEMU_JMP_CACHE_BITS, default
+ * TB_JMP_CACHE_BITS). The Xbox UMA workload generates hundreds of
+ * thousands of TBs; a fixed 4096-entry cache thrashes and every miss
+ * pays a qht walk in helper_lookup_tb_ptr. Geometry is latched once in
+ * tcg_exec_realizefn() before the (single) vCPU's cache is allocated
+ * and is read-only afterwards.
+ */
+typedef struct XemuJmpCacheGeom {
+    unsigned bits;       /* log2 total entries */
+    unsigned page_bits;  /* bits/2: low-order intra-page hash bits */
+    unsigned size;       /* 1 << bits */
+    unsigned page_size;  /* 1 << page_bits */
+    unsigned addr_mask;  /* page_size - 1 */
+    unsigned page_mask;  /* size - page_size */
+} XemuJmpCacheGeom;
+extern XemuJmpCacheGeom xemu_jc_geom;
+
+#define TB_JMP_CACHE_SIZE (xemu_jc_geom.size)
 
 /*
  * Invalidated in parallel; all accesses to 'tb' must be atomic.
@@ -27,7 +46,7 @@ typedef struct CPUJumpCache {
     struct {
         TranslationBlock *tb;
         vaddr pc;
-    } array[TB_JMP_CACHE_SIZE];
+    } array[];
 } CPUJumpCache;
 
 #endif /* ACCEL_TCG_TB_JMP_CACHE_H */

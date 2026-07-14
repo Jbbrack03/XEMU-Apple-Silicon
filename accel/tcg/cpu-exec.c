@@ -1468,19 +1468,19 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #ifdef XBOX
             {
                 static uint64_t cpu_heartbeat = 0;
-                cpu_heartbeat++;
-                if (cpu_heartbeat <= 20) {
+                if (unlikely(cpu_heartbeat < 20)) {
+                    cpu_heartbeat++;
                     error_report("[CPU-PRE]  tb#%lu pc=0x%lx size=%d",
                                  (unsigned long)cpu_heartbeat,
                                  (unsigned long)s.pc, tb->size);
-                }
 
-                cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
+                    cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
-                if (cpu_heartbeat <= 20) {
                     error_report("[CPU-POST] tb#%lu exit=%d last_tb=%p",
                                  (unsigned long)cpu_heartbeat,
                                  tb_exit, last_tb);
+                } else {
+                    cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
                 }
             }
 #else
@@ -1488,7 +1488,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #endif
 
 #ifdef XBOX
-            {
+            /*
+             * Tier-1/superblock bookkeeping only when the machinery is
+             * live: with both flags off the stores below (exec_count,
+             * entry_pc) would dirty the TB cacheline on every loop
+             * surfacing for nothing.
+             */
+            if (unlikely(tier1_enabled() || superblock_enabled())) {
                 uint32_t c = tb->exec_count;
                 if (c < (uint32_t)g_tier1_threshold * 2) {
                     tb->exec_count = c + 1;
@@ -1498,10 +1504,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tier1_maybe_promote(cpu, tb, s.pc);
                 tier1_maybe_form_superblock(cpu, tb, s.pc);
                 tier1_maybe_reset_budget();
-
-                if (tb->cflags & CF_INVALID) {
-                    last_tb = NULL;
-                }
+            }
+            /*
+             * Unconditional: promotion invalidates TBs mid-loop, but SMC
+             * can too — never chain into a CF_INVALID TB.
+             */
+            if (tb->cflags & CF_INVALID) {
+                last_tb = NULL;
             }
 #endif
 
@@ -1560,9 +1569,56 @@ int cpu_exec(CPUState *cpu)
     return ret;
 }
 
+/*
+ * Jump-cache geometry, latched once before the first vCPU's cache is
+ * allocated (single vCPU on Xbox). XEMU_JMP_CACHE_BITS overrides the
+ * upstream default of TB_JMP_CACHE_BITS (12); clamped so that
+ * page_bits never exceeds TARGET_PAGE_BITS (hash shift stays positive).
+ */
+XemuJmpCacheGeom xemu_jc_geom = {
+    .bits      = TB_JMP_CACHE_BITS,
+    .page_bits = TB_JMP_CACHE_BITS / 2,
+    .size      = 1u << TB_JMP_CACHE_BITS,
+    .page_size = 1u << (TB_JMP_CACHE_BITS / 2),
+    .addr_mask = (1u << (TB_JMP_CACHE_BITS / 2)) - 1,
+    .page_mask = (1u << TB_JMP_CACHE_BITS) - (1u << (TB_JMP_CACHE_BITS / 2)),
+};
+
+static void xemu_jc_geom_latch(void)
+{
+    static bool latched;
+    unsigned bits = TB_JMP_CACHE_BITS;
+    const char *env;
+
+    if (latched) {
+        return;
+    }
+    latched = true;
+
+    env = getenv("XEMU_JMP_CACHE_BITS");
+    if (env && env[0]) {
+        long v = strtol(env, NULL, 10);
+        if (v >= 10 && v <= 18) {
+            bits = (unsigned)v;
+        }
+    }
+    xemu_jc_geom.bits      = bits;
+    xemu_jc_geom.page_bits = bits / 2;
+    xemu_jc_geom.size      = 1u << bits;
+    xemu_jc_geom.page_size = 1u << (bits / 2);
+    xemu_jc_geom.addr_mask = (1u << (bits / 2)) - 1;
+    xemu_jc_geom.page_mask = (1u << bits) - (1u << (bits / 2));
+    if (bits != TB_JMP_CACHE_BITS) {
+        qemu_printf("jmp-cache: %u bits (%u entries)\n", bits,
+                    xemu_jc_geom.size);
+    }
+}
+
 bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
 {
     static bool tcg_target_initialized;
+
+    xemu_jc_geom_latch();
 
     if (!tcg_target_initialized) {
         /* Check mandatory TCGCPUOps handlers */
@@ -1580,7 +1636,9 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
         tcg_target_initialized = true;
     }
 
-    cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    cpu->tb_jmp_cache = g_malloc0(sizeof(CPUJumpCache) +
+                                  (size_t)xemu_jc_geom.size *
+                                  sizeof(cpu->tb_jmp_cache->array[0]));
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
