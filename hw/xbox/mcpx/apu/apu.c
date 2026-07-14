@@ -135,11 +135,49 @@ static void throttle(MCPXAPUState *d)
     }
 
 #ifdef __ANDROID__
-    /* Android scheduler granularity is often too coarse for the extra
-     * low-watermark pacing below and can make speech sound dragged out.
-     * Keep FIFO backpressure, but let the output callback set the pace.
-     */
-    d->next_frame_time_us = 0;
+    static int precise_pacing = -1;
+    if (precise_pacing < 0) {
+        const char *value = getenv("XEMU_ANDROID_APU_PACING");
+        precise_pacing = !value || !value[0] || strcmp(value, "0") != 0;
+    }
+    if (!precise_pacing) {
+        /* Legacy Android mode: keep FIFO backpressure, but let the output
+         * callback set the pace. */
+        d->next_frame_time_us = 0;
+        return;
+    }
+
+    /* Process each 256-sample EP frame at a steady 5.33 ms cadence instead
+     * of filling the FIFO in a burst and then sleeping until Android's large
+     * audio callback.  An absolute high-resolution sleep avoids the integer-
+     * millisecond rounding that made the generic pacing path unsuitable on
+     * Android, while dropping d->lock lets guest APU MMIO continue. */
+    if (queued_bytes > d->monitor.queued_bytes_low) {
+        int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        if (d->next_frame_time_us == 0 ||
+            now_us - d->next_frame_time_us > EP_FRAME_US) {
+            d->next_frame_time_us = now_us;
+        }
+        int64_t target_us = d->next_frame_time_us;
+        int mid = (d->monitor.queued_bytes_low +
+                   d->monitor.queued_bytes_high) / 2;
+        d->next_frame_time_us += EP_FRAME_US +
+                                 (queued_bytes > mid) -
+                                 (queued_bytes < mid);
+        if (target_us > now_us) {
+            struct timespec deadline = {
+                .tv_sec = target_us / 1000000,
+                .tv_nsec = (target_us % 1000000) * 1000,
+            };
+            qemu_mutex_unlock(&d->lock);
+            while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME,
+                                   &deadline, NULL) == EINTR) {
+            }
+            qemu_mutex_lock(&d->lock);
+        }
+    } else {
+        d->next_frame_time_us = start_us;
+    }
     return;
 #endif
 
