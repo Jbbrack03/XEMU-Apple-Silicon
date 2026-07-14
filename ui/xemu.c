@@ -139,6 +139,46 @@ static bool g_android_paused = false;
 static bool g_android_xr_mode = false;
 static bool g_android_should_quit = false;
 static volatile bool g_android_qemu_thread_finished = false;
+
+/* XR shell disc-swap bridge: the OpenXR NativeActivity (same process) picks a
+ * game from the in-VR menu on the Android input thread and requests a medium
+ * change here. The actual swap must run with the BQL held, so we only stash the
+ * path and let the display loop drain it (same context as the HUD load-disc
+ * action). Mirrors xemu_xr_set_gamepad_state's cross-thread hand-off. */
+static pthread_mutex_t g_xr_disc_lock = PTHREAD_MUTEX_INITIALIZER;
+static char *g_xr_disc_pending; /* g_strdup'd path; NULL when nothing pending */
+
+__attribute__((visibility("default")))
+void xemu_xr_request_load_disc(const char *path)
+{
+    if (!path || !path[0]) {
+        return;
+    }
+    pthread_mutex_lock(&g_xr_disc_lock);
+    g_free(g_xr_disc_pending);
+    g_xr_disc_pending = g_strdup(path);
+    pthread_mutex_unlock(&g_xr_disc_lock);
+}
+
+/* Drain a pending XR disc request. MUST be called with the BQL held. */
+static void xemu_xr_drain_disc_request(void)
+{
+    pthread_mutex_lock(&g_xr_disc_lock);
+    char *path = g_xr_disc_pending;
+    g_xr_disc_pending = NULL;
+    pthread_mutex_unlock(&g_xr_disc_lock);
+    if (!path) {
+        return;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "xr-mode: loading disc %s", path);
+    Error *err = NULL;
+    xemu_load_disc(path, &err);
+    if (err) {
+        error_report_err(err);
+    }
+    g_free(path);
+}
 static volatile bool g_android_vm_pause_requested = false;
 static volatile bool g_android_vm_resume_requested = false;
 static uint64_t g_android_frame_counter = 0;
@@ -1698,6 +1738,7 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
         /* VGA update + vblank so guest timing/present flags advance. */
         qemu_mutex_lock_main_loop();
         bql_lock();
+        xemu_xr_drain_disc_request();
         graphic_hw_update(scon->dcl.con);
         if (scon->updates && scon->surface) {
             scon->updates = 0;

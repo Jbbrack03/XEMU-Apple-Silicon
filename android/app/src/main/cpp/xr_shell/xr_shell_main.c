@@ -22,6 +22,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <android/hardware_buffer.h>
+#include <android/bitmap.h>
 #include <android/keycodes.h>
 #include <dlfcn.h>
 #include <stdbool.h>
@@ -119,6 +120,35 @@ typedef struct {
     int grab_hand;          /* -1 none, else 0/1 */
     XrVector3f grab_offset;  /* window pos relative to controller at grab */
     bool resizing;
+
+    /* Emulator disc-swap trigger (resolved from libxemu.so alongside the feed);
+     * NULL until the emulator side is up. */
+    void (*request_load_disc)(const char *path);
+
+    /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
+    bool menu_open;
+    XrSwapchain menu_swapchain;
+    uint32_t menu_swapchain_len;
+    XrSwapchainImageOpenGLESKHR *menu_images;
+    GLuint *menu_fbos;
+    int menu_w, menu_h;
+    GLuint menu_tex;        /* holds the latest uploaded menu bitmap */
+    bool menu_tex_ready;    /* menu_tex has valid contents to blit */
+    GLuint menu_blit_prog;  /* alpha-preserving blit (vs opaque blit_prog) */
+    XrVector3f menu_pos;
+    XrQuaternionf menu_orient;
+    float menu_size_m;
+
+    /* JNI bridge to XrMenuBridge (Kotlin owns the list + Canvas rendering). */
+    JavaVM *jvm;
+    JNIEnv *jni_env;        /* android_main thread, attached once */
+    jobject menu_bridge;    /* global ref, NULL if JNI init failed */
+    jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
+        m_activate;
+    bool jni_tried;
+
+    /* Menu input edge state */
+    int nav_latch;          /* -1/0/1: debounces stick/hat/dpad navigation */
 } XrShell;
 
 /* --- minimal vec/quat math --- */
@@ -161,6 +191,15 @@ static const char *BLIT_FS =
     "in vec2 uv;\n"
     "out vec4 frag;\n"
     "void main() { frag = vec4(texture(tex, uv).rgb, 1.0); }\n";
+/* Menu blit keeps the source alpha so transparent panel edges reveal the
+ * passthrough / emulator layers behind the quad. */
+static const char *MENU_BLIT_FS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "uniform sampler2D tex;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag;\n"
+    "void main() { frag = texture(tex, uv); }\n";
 
 static GLuint compile_prog(const char *vs_src, const char *fs_src)
 {
@@ -239,7 +278,7 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
 /* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
 static void resolve_emulator_feed(XrShell *s)
 {
-    if (s->acquire_ahb && s->set_gamepad) {
+    if (s->acquire_ahb && s->set_gamepad && s->request_load_disc) {
         return;
     }
     void *h = dlopen("libxemu.so", RTLD_NOLOAD | RTLD_LAZY);
@@ -260,6 +299,179 @@ static void resolve_emulator_feed(XrShell *s)
             LOGI("emulator gamepad forwarding resolved");
         }
     }
+    if (!s->request_load_disc) {
+        s->request_load_disc =
+            (void (*)(const char *))dlsym(h, "xemu_xr_request_load_disc");
+        if (s->request_load_disc) {
+            LOGI("emulator disc-swap bridge resolved");
+        }
+    }
+}
+
+/* Lazily attach the android_main thread to the JVM and construct the Kotlin
+ * XrMenuBridge (which owns the game list + Canvas rendering). App classes are
+ * not visible via FindClass on this native thread, so we load the class through
+ * the NativeActivity's own ClassLoader. Runs once; the menu is simply disabled
+ * if any step fails. */
+static void menu_jni_init(XrShell *s)
+{
+    if (s->jni_tried) {
+        return;
+    }
+    s->jni_tried = true;
+
+    s->jvm = s->app->activity->vm;
+    JNIEnv *env = NULL;
+    if ((*s->jvm)->AttachCurrentThread(s->jvm, &env, NULL) != JNI_OK || !env) {
+        LOGE("menu: AttachCurrentThread failed");
+        return;
+    }
+    s->jni_env = env;
+
+    jobject activity = s->app->activity->clazz;
+    jclass acls = (*env)->GetObjectClass(env, activity);
+    jmethodID get_loader = (*env)->GetMethodID(
+        env, acls, "getClassLoader", "()Ljava/lang/ClassLoader;");
+    jobject loader = (*env)->CallObjectMethod(env, activity, get_loader);
+    jclass lcls = (*env)->FindClass(env, "java/lang/ClassLoader");
+    jmethodID load_class = (*env)->GetMethodID(
+        env, lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    jstring cname = (*env)->NewStringUTF(env, "com.izzy2lost.x1box.XrMenuBridge");
+    jclass bcls = (jclass)(*env)->CallObjectMethod(env, loader, load_class, cname);
+    (*env)->DeleteLocalRef(env, cname);
+    if ((*env)->ExceptionCheck(env) || !bcls) {
+        (*env)->ExceptionClear(env);
+        LOGE("menu: XrMenuBridge class not found");
+        return;
+    }
+    jmethodID ctor = (*env)->GetMethodID(env, bcls, "<init>",
+                                         "(Landroid/content/Context;)V");
+    jobject bridge = (*env)->NewObject(env, bcls, ctor, activity);
+    if ((*env)->ExceptionCheck(env) || !bridge) {
+        (*env)->ExceptionClear(env);
+        LOGE("menu: XrMenuBridge construction failed");
+        return;
+    }
+    s->menu_bridge = (*env)->NewGlobalRef(env, bridge);
+    s->m_refresh = (*env)->GetMethodID(env, bcls, "refresh", "()V");
+    s->m_count = (*env)->GetMethodID(env, bcls, "count", "()I");
+    s->m_isDirty = (*env)->GetMethodID(env, bcls, "isDirty", "()Z");
+    s->m_render = (*env)->GetMethodID(env, bcls, "render",
+                                      "(II)Landroid/graphics/Bitmap;");
+    s->m_move = (*env)->GetMethodID(env, bcls, "moveSelection", "(I)V");
+    s->m_toggleFp = (*env)->GetMethodID(env, bcls, "toggleFpJit", "()V");
+    s->m_activate = (*env)->GetMethodID(env, bcls, "activate",
+                                        "()Ljava/lang/String;");
+    LOGI("menu: JNI bridge ready");
+}
+
+/* Upload an ARGB_8888 menu Bitmap into menu_tex (RGBA). */
+static void menu_upload_texture(XrShell *s, jobject bitmap)
+{
+    JNIEnv *env = s->jni_env;
+    AndroidBitmapInfo info;
+    if (AndroidBitmap_getInfo(env, bitmap, &info) !=
+        ANDROID_BITMAP_RESULT_SUCCESS) {
+        LOGE("menu: bitmap getInfo failed");
+        return;
+    }
+    void *pixels = NULL;
+    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) !=
+            ANDROID_BITMAP_RESULT_SUCCESS ||
+        !pixels) {
+        LOGE("menu: bitmap lockPixels failed");
+        return;
+    }
+    if (!s->menu_tex) {
+        glGenTextures(1, &s->menu_tex);
+        glBindTexture(GL_TEXTURE_2D, s->menu_tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else {
+        glBindTexture(GL_TEXTURE_2D, s->menu_tex);
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(info.stride / 4));
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, info.width, info.height, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, pixels);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    AndroidBitmap_unlockPixels(env, bitmap);
+    s->menu_tex_ready = true;
+}
+
+static void menu_move(XrShell *s, int delta)
+{
+    if (s->menu_bridge) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_move,
+                                      delta);
+    }
+}
+
+static void menu_toggle_fp(XrShell *s)
+{
+    if (s->menu_bridge) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_toggleFp);
+    }
+}
+
+static void menu_open(XrShell *s)
+{
+    menu_jni_init(s);
+    if (!s->menu_bridge) {
+        return;
+    }
+    (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_refresh);
+    s->menu_open = true;
+    s->nav_latch = 0;
+    /* Release any held inputs so nothing sticks in the game while navigating. */
+    s->pad_buttons = 0;
+    memset(s->pad_axis, 0, sizeof(s->pad_axis));
+    if (s->set_gamepad) {
+        s->set_gamepad(0, s->pad_axis, 6);
+    }
+    LOGI("menu opened");
+}
+
+static void menu_close(XrShell *s)
+{
+    s->menu_open = false;
+    s->nav_latch = 0;
+    /* Resume the game with a clean pad; the user re-presses. Prevents the
+     * activation press (e.g. A) from leaking into the resumed title. */
+    s->pad_buttons = 0;
+    memset(s->pad_axis, 0, sizeof(s->pad_axis));
+    if (s->set_gamepad) {
+        s->set_gamepad(0, s->pad_axis, 6);
+    }
+    LOGI("menu closed");
+}
+
+static void menu_activate(XrShell *s)
+{
+    if (!s->menu_bridge) {
+        menu_close(s);
+        return;
+    }
+    JNIEnv *env = s->jni_env;
+    jstring jpath =
+        (jstring)(*env)->CallObjectMethod(env, s->menu_bridge, s->m_activate);
+    if (jpath) {
+        const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
+        if (path) {
+            LOGI("menu: launching %s", path);
+            if (s->request_load_disc) {
+                s->request_load_disc(path);
+            } else {
+                LOGE("menu: disc-swap bridge unavailable (emulator not up?)");
+            }
+            (*env)->ReleaseStringUTFChars(env, jpath, path);
+        }
+        (*env)->DeleteLocalRef(env, jpath);
+    }
+    menu_close(s);
 }
 
 static void egl_init(XrShell *s)
@@ -295,6 +507,7 @@ static void egl_init(XrShell *s)
         (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
             "glEGLImageTargetTexture2DOES");
     s->blit_prog = compile_prog(BLIT_VS, BLIT_FS);
+    s->menu_blit_prog = compile_prog(BLIT_VS, MENU_BLIT_FS);
     glGenVertexArrays(1, &s->blit_vao);
 }
 
@@ -707,6 +920,43 @@ static void xr_create_session(XrShell *s)
         }
         LOGI("display refresh requested 120, now %.0f", rate);
     }
+
+    /* Menu quad swapchain (portrait). Allocated up front but only presented
+     * while the picker is open, so there is no per-frame cost when closed. */
+    s->menu_w = 1024;
+    s->menu_h = 1280;
+    XrSwapchainCreateInfo msw = {
+        .type = XR_TYPE_SWAPCHAIN_CREATE_INFO,
+        .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                      XR_SWAPCHAIN_USAGE_SAMPLED_BIT,
+        .format = GL_SRGB8_ALPHA8,
+        .sampleCount = 1,
+        .width = s->menu_w,
+        .height = s->menu_h,
+        .faceCount = 1,
+        .arraySize = 1,
+        .mipCount = 1,
+    };
+    OXR(xrCreateSwapchain(s->session, &msw, &s->menu_swapchain));
+    OXR(xrEnumerateSwapchainImages(s->menu_swapchain, 0, &s->menu_swapchain_len,
+                                   NULL));
+    s->menu_images = calloc(s->menu_swapchain_len, sizeof(*s->menu_images));
+    for (uint32_t i = 0; i < s->menu_swapchain_len; i++) {
+        s->menu_images[i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR;
+    }
+    OXR(xrEnumerateSwapchainImages(
+        s->menu_swapchain, s->menu_swapchain_len, &s->menu_swapchain_len,
+        (XrSwapchainImageBaseHeader *)s->menu_images));
+    s->menu_fbos = calloc(s->menu_swapchain_len, sizeof(GLuint));
+    glGenFramebuffers(s->menu_swapchain_len, s->menu_fbos);
+    for (uint32_t i = 0; i < s->menu_swapchain_len; i++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, s->menu_fbos[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, s->menu_images[i].image, 0);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    LOGI("menu swapchain ready: %ux%u x%u images", s->menu_w, s->menu_h,
+         s->menu_swapchain_len);
 }
 
 static void draw_test_pattern(XrShell *s, GLuint fbo)
@@ -796,6 +1046,50 @@ static void xr_frame(XrShell *s)
             .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO
         };
         OXR(xrReleaseSwapchainImage(s->swapchain, &ri));
+
+        /* Menu overlay: re-upload the bitmap only when the model reports a
+         * change, then blit it (alpha preserved) into the menu swapchain. */
+        if (s->menu_open && s->menu_bridge) {
+            JNIEnv *env = s->jni_env;
+            jboolean dirty =
+                (*env)->CallBooleanMethod(env, s->menu_bridge, s->m_isDirty);
+            if (dirty || !s->menu_tex_ready) {
+                jobject bmp = (*env)->CallObjectMethod(
+                    env, s->menu_bridge, s->m_render, s->menu_w, s->menu_h);
+                if (bmp) {
+                    menu_upload_texture(s, bmp);
+                    (*env)->DeleteLocalRef(env, bmp);
+                }
+            }
+            if (s->menu_tex_ready) {
+                uint32_t midx = 0;
+                XrSwapchainImageAcquireInfo mai = {
+                    .type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+                OXR(xrAcquireSwapchainImage(s->menu_swapchain, &mai, &midx));
+                XrSwapchainImageWaitInfo mwi = {
+                    .type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO,
+                    .timeout = XR_INFINITE_DURATION };
+                OXR(xrWaitSwapchainImage(s->menu_swapchain, &mwi));
+                glBindFramebuffer(GL_FRAMEBUFFER, s->menu_fbos[midx]);
+                glViewport(0, 0, s->menu_w, s->menu_h);
+                glDisable(GL_SCISSOR_TEST);
+                glDisable(GL_BLEND);
+                glClearColor(0, 0, 0, 0);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glUseProgram(s->menu_blit_prog);
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, s->menu_tex);
+                glBindVertexArray(s->blit_vao);
+                glDrawArrays(GL_TRIANGLES, 0, 3);
+                glBindVertexArray(0);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glFinish();
+                XrSwapchainImageReleaseInfo mri = {
+                    .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+                OXR(xrReleaseSwapchainImage(s->menu_swapchain, &mri));
+            }
+        }
     }
 
     XrCompositionLayerPassthroughFB pt_layer = {
@@ -803,12 +1097,29 @@ static void xr_frame(XrShell *s)
         .layerHandle = s->passthrough_layer,
     };
 
-    const XrCompositionLayerBaseHeader *layers[2];
+    float menu_qh = s->menu_size_m * (float)s->menu_h / (float)s->menu_w;
+    XrCompositionLayerQuad menu_quad = {
+        .type = XR_TYPE_COMPOSITION_LAYER_QUAD,
+        .layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+        .space = s->local_space,
+        .eyeVisibility = XR_EYE_VISIBILITY_BOTH,
+        .subImage = { .swapchain = s->menu_swapchain,
+                      .imageRect = { .offset = { 0, 0 },
+                                     .extent = { s->menu_w, s->menu_h } } },
+        .pose = { .orientation = s->menu_orient, .position = s->menu_pos },
+        .size = { s->menu_size_m, menu_qh },
+    };
+
+    const XrCompositionLayerBaseHeader *layers[3];
     uint32_t nlayers = 0;
     if (s->have_passthrough) {
         layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&pt_layer;
     }
     layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&quad;
+    /* Picker draws on top of the emulator quad. */
+    if (s->menu_open && s->menu_tex_ready) {
+        layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&menu_quad;
+    }
 
     XrFrameEndInfo fei = {
         .type = XR_TYPE_FRAME_END_INFO,
@@ -916,8 +1227,31 @@ static int16_t gp_axt(float v)  /* trigger: 0..1 -> 0..32767 */
     return (int16_t)(v * 32767.f);
 }
 
+/* Evaluate menu navigation from the unified pad state (dpad keys, hat, or left
+ * stick Y), edge-triggered via nav_latch so one push advances one row. */
+static void menu_nav_eval(XrShell *s)
+{
+    int dir = 0;
+    if (s->pad_buttons & GP_DU) dir = -1;
+    else if (s->pad_buttons & GP_DD) dir = 1;
+    if (dir == 0) {
+        int16_t ly = s->pad_axis[AX_LY]; /* up = positive (see on_input) */
+        if (ly > 16000) dir = -1;
+        else if (ly < -16000) dir = 1;
+    }
+    if (dir != 0) {
+        if (s->nav_latch == 0) {
+            menu_move(s, dir);
+            s->nav_latch = dir;
+        }
+    } else {
+        s->nav_latch = 0;
+    }
+}
+
 /* Translate Android gamepad input and forward it to the emulator (SDL can't see
- * the pad while the XR NativeActivity holds focus). */
+ * the pad while the XR NativeActivity holds focus). While the picker is open,
+ * gamepad input drives the menu instead and is not forwarded to the game. */
 static int32_t on_input(struct android_app *app, AInputEvent *event)
 {
     XrShell *s = (XrShell *)app->userData;
@@ -932,6 +1266,27 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
         int32_t action = AKeyEvent_getAction(event);
         if (action == AKEY_EVENT_ACTION_DOWN) s->pad_buttons |= mask;
         else if (action == AKEY_EVENT_ACTION_UP) s->pad_buttons &= ~mask;
+
+        if (s->menu_open) {
+            if (action == AKEY_EVENT_ACTION_DOWN) {
+                if (mask == GP_A) menu_activate(s);
+                else if (mask == GP_B) menu_close(s);
+                else if (mask == GP_X) menu_toggle_fp(s);
+                else if ((s->pad_buttons & (GP_START | GP_BACK)) ==
+                         (GP_START | GP_BACK)) menu_close(s);
+            }
+            menu_nav_eval(s);
+            return 1; /* consume; never forward to the game while in the menu */
+        }
+
+        /* Reserved combo opens the picker (mirrors the 2D Start+Back menu). */
+        if (action == AKEY_EVENT_ACTION_DOWN &&
+            (s->pad_buttons & (GP_START | GP_BACK)) ==
+                (GP_START | GP_BACK)) {
+            menu_open(s);
+            return 1;
+        }
+
         if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
         static int gp_key_log = 0;
         if (gp_key_log++ < 12) {
@@ -963,6 +1318,10 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
         else if (hx > 0.5f) s->pad_buttons |= GP_DR;
         if (hy < -0.5f) s->pad_buttons |= GP_DU;
         else if (hy > 0.5f) s->pad_buttons |= GP_DD;
+        if (s->menu_open) {
+            menu_nav_eval(s);
+            return 1; /* drive the menu; don't forward to the game */
+        }
         if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
         return 1;
     }
@@ -994,6 +1353,11 @@ void android_main(struct android_app *app)
     shell.quad_size_m = 1.2f;
     shell.quad_aspect = 4.0f / 3.0f;
     shell.grab_hand = -1;
+
+    /* Picker sits a little closer than the game window and faces the user. */
+    shell.menu_pos = (XrVector3f){ 0.0f, 0.0f, -1.2f };
+    shell.menu_orient = (XrQuaternionf){ 0, 0, 0, 1 };
+    shell.menu_size_m = 0.9f;
 
     LOGI("xr_shell spike starting");
     egl_init(&shell);
