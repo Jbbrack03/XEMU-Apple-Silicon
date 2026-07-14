@@ -58,6 +58,140 @@
 
 #ifdef XBOX
 
+/*
+ * Diagnostic-only exact TB edge capture for the multicore trace feasibility
+ * study.  Direct chaining normally hides intermediate TBs from cpu_exec_loop,
+ * so an active capture window forces CF_NO_GOTO_* and records one row per TB.
+ * This intentionally changes performance while capturing and MUST NOT be used
+ * for FPS measurements.  With XEMU_TB_TRACE unset there is one cold unlikely
+ * check per outer dispatch and no allocation, clock read, or code-gen change.
+ */
+typedef struct QEMU_PACKED XemuTbTraceRecord {
+    uint64_t pc;
+    uint64_t phys_page;
+    uint32_t flags;
+    uint32_t cflags;
+    uint16_t size;
+    uint16_t icount;
+    uint8_t exit;
+    uint8_t tier;
+    uint16_t reserved;
+} XemuTbTraceRecord;
+
+typedef struct QEMU_PACKED XemuTbTraceHeader {
+    char magic[8];              /* XQ3TBTR1 */
+    uint32_t header_size;
+    uint32_t record_size;
+    uint64_t record_count;
+    uint64_t reserved;
+} XemuTbTraceHeader;
+
+static int xemu_tb_trace_state = -1; /* -1 unknown, 0 waiting, 1 active, 2 done */
+static int64_t xemu_tb_trace_deadline_ms;
+static uint64_t xemu_tb_trace_poll;
+static uint64_t xemu_tb_trace_count;
+static uint64_t xemu_tb_trace_capacity;
+static XemuTbTraceRecord *xemu_tb_trace_records;
+static char *xemu_tb_trace_path;
+
+static void xemu_tb_trace_init(void)
+{
+    const char *path = getenv("XEMU_TB_TRACE");
+    if (!path || !path[0]) {
+        xemu_tb_trace_state = 2;
+        return;
+    }
+
+    uint64_t capacity = 1000000;
+    const char *max_env = getenv("XEMU_TB_TRACE_MAX");
+    if (max_env && max_env[0]) {
+        capacity = g_ascii_strtoull(max_env, NULL, 10);
+    }
+    capacity = MAX(UINT64_C(1024), MIN(capacity, UINT64_C(5000000)));
+
+    int64_t delay_ms = 0;
+    const char *delay_env = getenv("XEMU_TB_TRACE_DELAY_MS");
+    if (delay_env && delay_env[0]) {
+        delay_ms = g_ascii_strtoll(delay_env, NULL, 10);
+    }
+    delay_ms = MAX(INT64_C(0), MIN(delay_ms, INT64_C(600000)));
+
+    xemu_tb_trace_records = g_try_new(XemuTbTraceRecord, capacity);
+    if (!xemu_tb_trace_records) {
+        error_report("tb-trace: allocation failed for %lu records",
+                     (unsigned long)capacity);
+        xemu_tb_trace_state = 2;
+        return;
+    }
+
+    xemu_tb_trace_path = g_strdup(path);
+    xemu_tb_trace_capacity = capacity;
+    xemu_tb_trace_deadline_ms =
+        qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + delay_ms;
+    xemu_tb_trace_state = delay_ms ? 0 : 1;
+    error_report("tb-trace: %s, max=%lu path=%s",
+                 delay_ms ? "armed" : "active",
+                 (unsigned long)capacity, path);
+}
+
+static bool xemu_tb_trace_active(void)
+{
+    if (unlikely(xemu_tb_trace_state < 0)) {
+        xemu_tb_trace_init();
+    }
+    if (likely(xemu_tb_trace_state != 0)) {
+        return xemu_tb_trace_state == 1;
+    }
+
+    /* Avoid a clock syscall on every dispatch before the requested window. */
+    if ((++xemu_tb_trace_poll & 0xfff) == 0 &&
+        qemu_clock_get_ms(QEMU_CLOCK_REALTIME) >= xemu_tb_trace_deadline_ms) {
+        xemu_tb_trace_state = 1;
+        error_report("tb-trace: capture window active");
+    }
+    return xemu_tb_trace_state == 1;
+}
+
+static void xemu_tb_trace_finish(void)
+{
+    XemuTbTraceHeader header = {
+        .magic = { 'X', 'Q', '3', 'T', 'B', 'T', 'R', '1' },
+        .header_size = sizeof(XemuTbTraceHeader),
+        .record_size = sizeof(XemuTbTraceRecord),
+        .record_count = xemu_tb_trace_count,
+    };
+    FILE *f = fopen(xemu_tb_trace_path, "wb");
+    bool ok = f && fwrite(&header, sizeof(header), 1, f) == 1 &&
+              fwrite(xemu_tb_trace_records, sizeof(XemuTbTraceRecord),
+                     xemu_tb_trace_count, f) == xemu_tb_trace_count;
+    if (f) {
+        ok = fclose(f) == 0 && ok;
+    }
+    error_report("tb-trace: wrote %lu records to %s (%s)",
+                 (unsigned long)xemu_tb_trace_count, xemu_tb_trace_path,
+                 ok ? "ok" : "FAILED");
+    g_clear_pointer(&xemu_tb_trace_records, g_free);
+    xemu_tb_trace_state = 2;
+}
+
+static inline void xemu_tb_trace_record(vaddr pc, TranslationBlock *tb,
+                                        int tb_exit)
+{
+    XemuTbTraceRecord *r = &xemu_tb_trace_records[xemu_tb_trace_count++];
+    r->pc = pc;
+    r->phys_page = tb_page_addr0(tb);
+    r->flags = tb->flags;
+    r->cflags = tb->cflags;
+    r->size = tb->size;
+    r->icount = tb->icount;
+    r->exit = tb_exit;
+    r->tier = tb->tier;
+    r->reserved = 0;
+    if (unlikely(xemu_tb_trace_count == xemu_tb_trace_capacity)) {
+        xemu_tb_trace_finish();
+    }
+}
+
 #define TIER1_PROMOTION_BUDGET   32   /* Max promotions per budget window */
 #define TIER1_BUDGET_INTERVAL_MS 10   /* Reset budget every N ms */
 
@@ -1420,6 +1554,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 cpu->cflags_next_tb = -1;
             }
 
+#ifdef XBOX
+            bool tb_trace_this = unlikely(xemu_tb_trace_active());
+            if (tb_trace_this) {
+                /* Exact diagnostic edges: make this dispatch execute one TB. */
+                s.cflags |= CF_NO_GOTO_TB | CF_NO_GOTO_PTR;
+                last_tb = NULL;
+            }
+#endif
+
             if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
                 break;
             }
@@ -1488,6 +1631,10 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 #endif
 
 #ifdef XBOX
+            if (unlikely(tb_trace_this)) {
+                xemu_tb_trace_record(s.pc, tb, tb_exit);
+                last_tb = NULL;
+            }
             /*
              * Tier-1/superblock bookkeeping only when the machinery is
              * live: with both flags off the stores below (exec_count,
