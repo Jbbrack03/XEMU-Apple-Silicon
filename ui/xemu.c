@@ -147,6 +147,7 @@ static volatile bool g_android_qemu_thread_finished = false;
  * action). Mirrors xemu_xr_set_gamepad_state's cross-thread hand-off. */
 static pthread_mutex_t g_xr_disc_lock = PTHREAD_MUTEX_INITIALIZER;
 static char *g_xr_disc_pending; /* g_strdup'd path; NULL when nothing pending */
+static bool g_xr_quit_pending;  /* eject + guest reset -> Xbox dashboard */
 
 __attribute__((visibility("default")))
 void xemu_xr_request_load_disc(const char *path)
@@ -160,23 +161,64 @@ void xemu_xr_request_load_disc(const char *path)
     pthread_mutex_unlock(&g_xr_disc_lock);
 }
 
-/* Drain a pending XR disc request. MUST be called with the BQL held. */
+/* Quit the running game: eject the disc and reset the guest so it boots back
+ * to the Xbox dashboard. Same primitives as the HUD Eject + Reset actions. */
+__attribute__((visibility("default")))
+void xemu_xr_request_quit_to_dashboard(void)
+{
+    pthread_mutex_lock(&g_xr_disc_lock);
+    g_xr_quit_pending = true;
+    pthread_mutex_unlock(&g_xr_disc_lock);
+}
+
+/* Drain a pending XR disc/quit request. MUST be called with the BQL held. */
 static void xemu_xr_drain_disc_request(void)
 {
     pthread_mutex_lock(&g_xr_disc_lock);
+    bool quit = g_xr_quit_pending;
+    g_xr_quit_pending = false;
     char *path = g_xr_disc_pending;
     g_xr_disc_pending = NULL;
     pthread_mutex_unlock(&g_xr_disc_lock);
+
+    if (quit) {
+        /* Quit wins over any queued disc load. */
+        g_free(path);
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "xr-mode: quit to dashboard (eject + reset)");
+        Error *err = NULL;
+        xemu_eject_disc(&err);
+        if (err) {
+            error_report_err(err);
+        }
+        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+        return;
+    }
     if (!path) {
         return;
     }
+    /* Same disc already mounted => the user re-picked the running game; treat as
+     * resume (no eject/reset) rather than needlessly rebooting it. */
+    const char *cur = g_config.sys.files.dvd_path;
+    if (cur && strcmp(cur, path) == 0) {
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "xr-mode: disc %s already mounted; resuming", path);
+        g_free(path);
+        return;
+    }
     __android_log_print(ANDROID_LOG_INFO, "xemu-android",
-                        "xr-mode: loading disc %s", path);
+                        "xr-mode: switching to disc %s (load + guest reset)",
+                        path);
     Error *err = NULL;
-    xemu_load_disc(path, &err);
+    xemu_load_disc(path, &err); /* eject + insert new medium, sets dvd_path */
     if (err) {
         error_report_err(err);
+        g_free(path);
+        return; /* don't reset into a failed mount */
     }
+    /* Cold-boot the guest into the freshly inserted disc; a bare medium swap
+     * would leave the running title executing against the new ISO. */
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
     g_free(path);
 }
 static volatile bool g_android_vm_pause_requested = false;

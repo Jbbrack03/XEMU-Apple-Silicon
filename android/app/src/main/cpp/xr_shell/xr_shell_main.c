@@ -121,9 +121,11 @@ typedef struct {
     XrVector3f grab_offset;  /* window pos relative to controller at grab */
     bool resizing;
 
-    /* Emulator disc-swap trigger (resolved from libxemu.so alongside the feed);
+    /* Emulator control bridges (resolved from libxemu.so alongside the feed);
      * NULL until the emulator side is up. */
     void (*request_load_disc)(const char *path);
+    void (*request_quit)(void);   /* eject + reset -> Xbox dashboard */
+    bool (*get_fp_jit)(void);     /* running process's active FP JIT mode */
 
     /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
     bool menu_open;
@@ -144,7 +146,7 @@ typedef struct {
     JNIEnv *jni_env;        /* android_main thread, attached once */
     jobject menu_bridge;    /* global ref, NULL if JNI init failed */
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
-        m_activate;
+        m_activate, m_setActiveFp;
     bool jni_tried;
 
     /* Menu input edge state */
@@ -306,6 +308,13 @@ static void resolve_emulator_feed(XrShell *s)
             LOGI("emulator disc-swap bridge resolved");
         }
     }
+    if (!s->request_quit) {
+        s->request_quit =
+            (void (*)(void))dlsym(h, "xemu_xr_request_quit_to_dashboard");
+    }
+    if (!s->get_fp_jit) {
+        s->get_fp_jit = (bool (*)(void))dlsym(h, "xemu_get_fp_jit");
+    }
 }
 
 /* Lazily attach the android_main thread to the JVM and construct the Kotlin
@@ -362,6 +371,8 @@ static void menu_jni_init(XrShell *s)
     s->m_toggleFp = (*env)->GetMethodID(env, bcls, "toggleFpJit", "()V");
     s->m_activate = (*env)->GetMethodID(env, bcls, "activate",
                                         "()Ljava/lang/String;");
+    s->m_setActiveFp =
+        (*env)->GetMethodID(env, bcls, "setActiveFpJit", "(ZZ)V");
     LOGI("menu: JNI bridge ready");
 }
 
@@ -424,6 +435,15 @@ static void menu_open(XrShell *s)
         return;
     }
     (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_refresh);
+    /* Tell the menu the running process's active FP JIT mode so it can flag
+     * per-game toggles that only take effect on the next cold launch. */
+    if (s->m_setActiveFp) {
+        bool known = s->get_fp_jit != NULL;
+        bool value = known && s->get_fp_jit();
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                      s->m_setActiveFp, (jboolean)known,
+                                      (jboolean)value);
+    }
     s->menu_open = true;
     s->nav_latch = 0;
     /* Release any held inputs so nothing sticks in the game while navigating. */
@@ -447,6 +467,18 @@ static void menu_close(XrShell *s)
         s->set_gamepad(0, s->pad_axis, 6);
     }
     LOGI("menu closed");
+}
+
+/* Quit the running game back to the Xbox dashboard (eject + guest reset). */
+static void menu_quit(XrShell *s)
+{
+    if (s->request_quit) {
+        LOGI("menu: quit to dashboard");
+        s->request_quit();
+    } else {
+        LOGE("menu: quit bridge unavailable (emulator not up?)");
+    }
+    menu_close(s);
 }
 
 static void menu_activate(XrShell *s)
@@ -1272,6 +1304,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
                 if (mask == GP_A) menu_activate(s);
                 else if (mask == GP_B) menu_close(s);
                 else if (mask == GP_X) menu_toggle_fp(s);
+                else if (mask == GP_Y) menu_quit(s);
                 else if ((s->pad_buttons & (GP_START | GP_BACK)) ==
                          (GP_START | GP_BACK)) menu_close(s);
             }

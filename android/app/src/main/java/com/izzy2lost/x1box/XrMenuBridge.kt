@@ -7,6 +7,8 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Backing model + Canvas renderer for the XR-native game picker. The OpenXR
@@ -24,11 +26,24 @@ import android.graphics.Typeface
 class XrMenuBridge(context: Context) {
   private val appContext = context.applicationContext
 
-  private var games: List<GameScanner.Game> = emptyList()
+  // Scanned off-thread; the immutable list reference is swapped atomically so
+  // the native frame/input thread never blocks on filesystem I/O.
+  @Volatile private var games: List<GameScanner.Game> = emptyList()
+  @Volatile private var scanning = false
   private var selected = 0
   private var scrollTop = 0
   private var visibleRows = 1
   private var dirty = true
+
+  // Running process's active FP JIT mode (pushed from native on open); lets us
+  // flag per-game toggles that only take effect on the next cold launch.
+  private var activeFpJitKnown = false
+  private var activeFpJitValue = false
+
+  // Debug: when XEMU_DUMP_MENU=<dir> is set, every (re)render is also written
+  // there as a PNG so the menu can be inspected without a headset.
+  private val dumpDir: String? = System.getenv("XEMU_DUMP_MENU")?.takeIf { it.isNotBlank() }
+  private var dumpCounter = 0
 
   private var bitmap: Bitmap? = null
 
@@ -45,33 +60,55 @@ class XrMenuBridge(context: Context) {
   }
   private val highlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x40FFFFFF }
   private val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF8894A0.toInt() }
+  private val notePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    color = 0xFFFFC46B.toInt()
+    typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+  }
 
   init {
     reloadGames()
   }
 
-  /** Rescan the library and reset dirty state. */
+  /** Kick an async library rescan (safe to call from the frame thread). */
   fun refresh() {
     reloadGames()
   }
 
   private fun reloadGames() {
-    games = try {
-      GameScanner.scan(appContext)
-    } catch (_: Exception) {
-      emptyList()
+    synchronized(this) {
+      if (scanning) return
+      scanning = true
     }
-    if (selected >= games.size) selected = (games.size - 1).coerceAtLeast(0)
-    dirty = true
+    dirty = true // show the scanning state immediately
+    Thread {
+      val scanned = try {
+        GameScanner.scan(appContext)
+      } catch (_: Exception) {
+        emptyList()
+      }
+      games = scanned
+      scanning = false
+      dirty = true
+    }.apply { isDaemon = true }.start()
   }
 
   fun count(): Int = games.size
 
   fun isDirty(): Boolean = dirty
 
+  /** Push the running process's active FP JIT mode (called from native on open). */
+  fun setActiveFpJit(known: Boolean, value: Boolean) {
+    if (known != activeFpJitKnown || value != activeFpJitValue) {
+      activeFpJitKnown = known
+      activeFpJitValue = value
+      dirty = true
+    }
+  }
+
   fun moveSelection(delta: Int) {
-    if (games.isEmpty()) return
-    val next = (selected + delta).coerceIn(0, games.size - 1)
+    val list = games
+    if (list.isEmpty()) return
+    val next = (selected + delta).coerceIn(0, list.size - 1)
     if (next != selected) {
       selected = next
       dirty = true
@@ -83,15 +120,15 @@ class XrMenuBridge(context: Context) {
     val game = games.getOrNull(selected) ?: return
     // Merge into existing overrides — saveOverrides rewrites every key, so a
     // partial map would wipe the game's other per-game settings.
-    val merged = PerGameSettingsManager.loadOverrides(appContext, game.fileName).toMutableMap()
+    val merged = PerGameSettingsManager.loadOverrides(appContext, game.relativePath).toMutableMap()
     val enabled = merged["setting_hard_fpu"] != "true"
     merged["setting_hard_fpu"] = if (enabled) "true" else "false"
-    PerGameSettingsManager.saveOverrides(appContext, game.fileName, merged)
+    PerGameSettingsManager.saveOverrides(appContext, game.relativePath, merged)
     dirty = true
   }
 
   private fun isFpJit(game: GameScanner.Game): Boolean {
-    return PerGameSettingsManager.loadOverrides(appContext, game.fileName)["setting_hard_fpu"] == "true"
+    return PerGameSettingsManager.loadOverrides(appContext, game.relativePath)["setting_hard_fpu"] == "true"
   }
 
   /**
@@ -103,7 +140,7 @@ class XrMenuBridge(context: Context) {
   fun activate(): String? {
     val game = games.getOrNull(selected) ?: return null
     val editor = appContext.getSharedPreferences("x1box_prefs", Context.MODE_PRIVATE).edit()
-    PerGameSettingsManager.applyRuntimeOverridesToEditor(appContext, editor, game.fileName)
+    PerGameSettingsManager.applyRuntimeOverridesToEditor(appContext, editor, game.relativePath)
     editor.putString("dvdPath", game.path).remove("dvdUri").commit()
     return game.path
   }
@@ -119,7 +156,18 @@ class XrMenuBridge(context: Context) {
     }
     drawInto(bmp, w, h)
     dirty = false
+    dumpIfRequested(bmp)
     return bmp
+  }
+
+  private fun dumpIfRequested(bmp: Bitmap) {
+    val dir = dumpDir ?: return
+    try {
+      File(dir).mkdirs()
+      val out = File(dir, "menu_%04d.png".format(dumpCounter++))
+      FileOutputStream(out).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    } catch (_: Exception) {
+    }
   }
 
   private fun drawInto(bmp: Bitmap, w: Int, h: Int) {
@@ -139,13 +187,17 @@ class XrMenuBridge(context: Context) {
     dimPaint.textSize = rowSize
     tagPaint.textSize = rowSize * 0.7f
     footerPaint.textSize = footerSize
+    notePaint.textSize = footerSize
 
     val padX = panel.left + w * 0.04f
     val headerY = panel.top + titleSize * 1.6f
     c.drawText("XEMU  •  Select a Game", padX, headerY, headerPaint)
 
+    val list = games // snapshot: scan thread may swap it mid-draw
+    if (selected >= list.size) selected = (list.size - 1).coerceAtLeast(0)
+
     val listTop = headerY + titleSize * 0.9f
-    val footerH = footerSize * 2.2f
+    val footerH = footerSize * 3.6f
     val listBottom = panel.bottom - footerH
     val rowH = rowSize * 1.9f
     visibleRows = ((listBottom - listTop) / rowH).toInt().coerceAtLeast(1)
@@ -155,16 +207,20 @@ class XrMenuBridge(context: Context) {
     if (selected >= scrollTop + visibleRows) scrollTop = selected - visibleRows + 1
     if (scrollTop < 0) scrollTop = 0
 
-    if (games.isEmpty()) {
-      c.drawText("No games found.", padX, listTop + rowH, dimPaint)
-      c.drawText(
-        "Drop .iso/.xiso files in /sdcard/Download/xemu-games",
-        padX, listTop + rowH * 2, footerPaint,
-      )
+    if (list.isEmpty()) {
+      if (scanning) {
+        c.drawText("Scanning library…", padX, listTop + rowH, dimPaint)
+      } else {
+        c.drawText("No games found.", padX, listTop + rowH, dimPaint)
+        c.drawText(
+          "Drop .iso/.xiso files in /sdcard/Download/xemu-games",
+          padX, listTop + rowH * 2, footerPaint,
+        )
+      }
     } else {
-      val last = minOf(scrollTop + visibleRows, games.size)
+      val last = minOf(scrollTop + visibleRows, list.size)
       for (i in scrollTop until last) {
-        val game = games[i]
+        val game = list[i]
         val top = listTop + (i - scrollTop) * rowH
         val baseline = top + rowH * 0.7f
         if (i == selected) {
@@ -184,8 +240,18 @@ class XrMenuBridge(context: Context) {
     }
 
     val footerY = panel.bottom - footerSize * 0.8f
+    // Warn when the selected game's FP JIT differs from the running process:
+    // the change only lands on a cold launch, not this session's disc swap.
+    val selectedGame = list.getOrNull(selected)
+    if (selectedGame != null && activeFpJitKnown &&
+      isFpJit(selectedGame) != activeFpJitValue) {
+      c.drawText(
+        "FP JIT change applies at next launch",
+        padX, footerY - footerSize * 1.4f, notePaint,
+      )
+    }
     c.drawText(
-      "Up/Down: move   A: play   X: FP JIT   B: close",
+      "Up/Down: move   A: play   X: FP JIT   Y: quit   B: close",
       padX, footerY, footerPaint,
     )
   }
