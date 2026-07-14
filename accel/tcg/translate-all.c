@@ -995,7 +995,8 @@ static void sb_reattach_exitreq(TCGContext *s,
  */
 TranslationBlock *tb_gen_superblock(CPUState *cpu,
                                      TranslationBlock *tb_a,
-                                     int dominant_exit,
+                                     int dominant_exit_a,
+                                     int dominant_exit_b,
                                      vaddr pc_a, vaddr pc_b)
 {
     CPUArchState *env = cpu_env(cpu);
@@ -1005,10 +1006,11 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     tcg_insn_unit *gen_code_buf;
     int gen_code_size, search_size, max_insns;
     int64_t ti;
-    int non_dominant = 1 - dominant_exit;
+    int non_dominant_a = 1 - dominant_exit_a;
+    int non_dominant_b = 1 - dominant_exit_b;
 
     /* Look up TB B from A's jump destination. */
-    uintptr_t dest = qatomic_read(&tb_a->jmp_dest[dominant_exit]);
+    uintptr_t dest = qatomic_read(&tb_a->jmp_dest[dominant_exit_a]);
     if (dest == (uintptr_t)NULL || (dest & 1)) {
         return NULL;
     }
@@ -1151,7 +1153,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
 
     /* Step 3: Find and remove the dominant exit (goto_tb + exit_tb). */
     TCGOp *dom_goto, *dom_exit;
-    dom_goto = sb_find_exit_ops(tcg_ctx, dominant_exit, &dom_exit);
+    dom_goto = sb_find_exit_ops(tcg_ctx, dominant_exit_a, &dom_exit);
     if (!dom_goto || !dom_exit) {
         /* Can't find the exit -- reattach exitreq and bail. */
         sb_reattach_exitreq(tcg_ctx, exitreq_label, exitreq_exit, tb);
@@ -1194,7 +1196,7 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
 
     /* Step 4: Remap non-dominant exit to slot 0. */
     TCGOp *nd_goto, *nd_exit;
-    nd_goto = sb_find_exit_ops(tcg_ctx, non_dominant, &nd_exit);
+    nd_goto = sb_find_exit_ops(tcg_ctx, non_dominant_a, &nd_exit);
     if (nd_goto && nd_exit) {
         sb_remap_exit(nd_goto, nd_exit, 0, tb);
     }
@@ -1217,29 +1219,23 @@ TranslationBlock *tb_gen_superblock(CPUState *cpu,
     /* tb->size was updated by translate_code to B's size; save it. */
     int b_size = tb->size;
 
-    /* Step 6: Remap B's exits.
-     * IMPORTANT: Remap slot 1 first, then slot 0, to avoid finding
-     * a just-remapped op when searching.
-     *
-     * B's exit slot 1 -> remove goto_tb, convert to indirect lookup
-     * B's exit slot 0 -> superblock slot 1
-     */
-    TCGOp *b_goto1, *b_exit1;
-    b_goto1 = sb_find_exit_ops(tcg_ctx, 1, &b_exit1);
-    if (b_goto1 && b_exit1) {
-        /*
-         * Convert B's second exit to an indirect lookup.
-         * Remove goto_tb, keep exit_tb with val=0 (triggers epilogue
-         * return with NULL, which the main loop handles as a full lookup).
-         */
-        tcg_op_remove(tcg_ctx, b_goto1);
-        b_exit1->args[0] = 0;  /* exit_tb(NULL, 0) -> full lookup */
+    /* Step 6: Retain B's observed dominant exit as superblock slot 1.
+     * Convert B's other exit to an indirect lookup because slot 0 is already
+     * owned by A's side exit and one TB slot cannot patch two code sites.
+     * The old hard-coded slot-0 policy catastrophically de-optimized loops
+     * whose second block was fallthrough-dominant: the hot back-edge became
+     * a full-dispatch exit on every iteration. */
+    TCGOp *b_nd_goto, *b_nd_exit;
+    b_nd_goto = sb_find_exit_ops(tcg_ctx, non_dominant_b, &b_nd_exit);
+    if (b_nd_goto && b_nd_exit) {
+        tcg_op_remove(tcg_ctx, b_nd_goto);
+        b_nd_exit->args[0] = 0;
     }
 
-    TCGOp *b_goto0, *b_exit0;
-    b_goto0 = sb_find_exit_ops(tcg_ctx, 0, &b_exit0);
-    if (b_goto0 && b_exit0) {
-        sb_remap_exit(b_goto0, b_exit0, 1, tb);
+    TCGOp *b_dom_goto, *b_dom_exit;
+    b_dom_goto = sb_find_exit_ops(tcg_ctx, dominant_exit_b, &b_dom_exit);
+    if (b_dom_goto && b_dom_exit) {
+        sb_remap_exit(b_dom_goto, b_dom_exit, 1, tb);
     }
 
     /* Step 7: Reattach exitreq epilogue. */

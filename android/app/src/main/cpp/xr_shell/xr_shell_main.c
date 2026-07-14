@@ -29,7 +29,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
 
 #define XR_USE_PLATFORM_ANDROID 1
 #define XR_USE_GRAPHICS_API_OPENGL_ES 1
@@ -127,6 +129,10 @@ typedef struct {
     void (*request_load_disc)(const char *path);
     void (*request_quit)(void);   /* eject + reset -> Xbox dashboard */
     bool (*get_fp_jit)(void);     /* running process's active FP JIT mode */
+    int (*get_vcpu_tid)(void);
+    PFN_xrSetAndroidApplicationThreadKHR set_android_thread;
+    bool xr_renderer_thread_set;
+    int xr_vcpu_tid_set;
 
     /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
     bool menu_open;
@@ -304,7 +310,8 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
 /* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
 static void resolve_emulator_feed(XrShell *s)
 {
-    if (s->acquire_ahb && s->set_gamepad && s->request_load_disc) {
+    if (s->acquire_ahb && s->set_gamepad && s->request_load_disc &&
+        s->get_vcpu_tid) {
         return;
     }
     void *h = dlopen("libxemu.so", RTLD_NOLOAD | RTLD_LAZY);
@@ -338,6 +345,54 @@ static void resolve_emulator_feed(XrShell *s)
     }
     if (!s->get_fp_jit) {
         s->get_fp_jit = (bool (*)(void))dlsym(h, "xemu_get_fp_jit");
+    }
+    if (!s->get_vcpu_tid) {
+        s->get_vcpu_tid = (int (*)(void))
+            dlsym(h, "xemu_get_vcpu_thread_id");
+    }
+}
+
+static void xr_apply_thread_settings(XrShell *s)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *env = getenv("XEMU_XR_THREAD_SETTINGS");
+        enabled = (!env || !env[0] || strcmp(env, "0") != 0) ? 1 : 0;
+        LOGI("thread settings: %s", enabled ? "enabled" : "disabled");
+    }
+    if (!enabled) {
+        return;
+    }
+
+    if (!s->set_android_thread) {
+        if (XR_FAILED(xrGetInstanceProcAddr(
+                s->instance, "xrSetAndroidApplicationThreadKHR",
+                (PFN_xrVoidFunction *)&s->set_android_thread)) ||
+            !s->set_android_thread) {
+            return;
+        }
+    }
+
+    if (!s->xr_renderer_thread_set) {
+        uint32_t tid = (uint32_t)syscall(SYS_gettid);
+        XrResult r = s->set_android_thread(
+            s->session, XR_ANDROID_THREAD_TYPE_RENDERER_MAIN_KHR, tid);
+        LOGI("thread settings: XR renderer tid=%u rc=%d", tid, (int)r);
+        s->xr_renderer_thread_set = XR_SUCCEEDED(r);
+    }
+
+    if (s->get_vcpu_tid) {
+        int tid = s->get_vcpu_tid();
+        if (tid > 0 && tid != s->xr_vcpu_tid_set) {
+            XrResult r = s->set_android_thread(
+                s->session, XR_ANDROID_THREAD_TYPE_APPLICATION_MAIN_KHR,
+                (uint32_t)tid);
+            LOGI("thread settings: vCPU application-main tid=%d rc=%d",
+                 tid, (int)r);
+            if (XR_SUCCEEDED(r)) {
+                s->xr_vcpu_tid_set = tid;
+            }
+        }
     }
 }
 
@@ -1227,6 +1282,7 @@ static void xr_frame(XrShell *s)
         OXR(xrWaitSwapchainImage(s->swapchain, &wi));
 
         resolve_emulator_feed(s);
+        xr_apply_thread_settings(s);
         GLuint emu_tex = 0;
         if (s->acquire_ahb) {
             uint64_t seq = 0;

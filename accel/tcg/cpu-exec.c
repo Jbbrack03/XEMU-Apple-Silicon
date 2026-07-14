@@ -94,6 +94,15 @@ static uint64_t xemu_tb_trace_capacity;
 static XemuTbTraceRecord *xemu_tb_trace_records;
 static char *xemu_tb_trace_path;
 
+static int xemu_vcpu_thread_id;
+
+/* Read by the OpenXR shell through dlsym so it can identify the latency-
+ * critical emulator thread to XR_KHR_android_thread_settings. */
+__attribute__((visibility("default"))) int xemu_get_vcpu_thread_id(void)
+{
+    return qatomic_read(&xemu_vcpu_thread_id);
+}
+
 static void xemu_tb_trace_init(void)
 {
     const char *path = getenv("XEMU_TB_TRACE");
@@ -406,7 +415,8 @@ static inline void tier1_maybe_promote(CPUState *cpu, TranslationBlock *tb,
  */
 TranslationBlock *tb_gen_superblock(CPUState *cpu,
                                      TranslationBlock *tb_a,
-                                     int dominant_exit,
+                                     int dominant_exit_a,
+                                     int dominant_exit_b,
                                      vaddr pc_a, vaddr pc_b);
 
 #define SUPERBLOCK_BUDGET 32  /* Max superblock formations per budget cycle */
@@ -422,6 +432,57 @@ static int superblock_budget = SUPERBLOCK_BUDGET;
  * validates it. A/B on device by launching with/without the env var.
  */
 static int g_superblock_enabled = -1;
+
+/*
+ * Diagnostic targeted mode: form exactly one observed A->B pair without
+ * enabling global tier-1 promotion/scanning.  This isolates the runtime value
+ * of merged code from the previously measured global promotion tax.
+ * Format: XEMU_SUPERBLOCK_TARGET=<pc-a>,<pc-b>[,<b-dominant-exit>].
+ */
+static int g_superblock_target_state = -1;
+static vaddr g_superblock_target_a;
+static vaddr g_superblock_target_b;
+static int g_superblock_target_b_exit;
+static TranslationBlock *g_superblock_target_tb;
+
+static inline bool superblock_target_enabled(void)
+{
+    if (g_superblock_target_state < 0) {
+        const char *env = getenv("XEMU_SUPERBLOCK_TARGET");
+        char *end_a = NULL;
+        char *end_b = NULL;
+        char *end_exit = NULL;
+        uint64_t a = 0;
+        uint64_t b = 0;
+
+        if (env && env[0]) {
+            a = g_ascii_strtoull(env, &end_a, 0);
+            if (end_a && *end_a == ',') {
+                b = g_ascii_strtoull(end_a + 1, &end_b, 0);
+            }
+        }
+        if (a && b && end_b && *end_b == ',') {
+            uint64_t b_exit = g_ascii_strtoull(end_b + 1, &end_exit, 0);
+            if (b_exit <= 1 && end_exit && *end_exit == '\0') {
+                g_superblock_target_b_exit = b_exit;
+            } else {
+                a = 0;
+            }
+        }
+        if (a && b && end_b &&
+            (*end_b == '\0' || (end_exit && *end_exit == '\0'))) {
+            g_superblock_target_a = a;
+            g_superblock_target_b = b;
+            g_superblock_target_state = 1;
+            error_report("superblock: targeted A=0x%" PRIx64
+                         " B=0x%" PRIx64 " B-exit=%d",
+                         a, b, g_superblock_target_b_exit);
+        } else {
+            g_superblock_target_state = 0;
+        }
+    }
+    return g_superblock_target_state != 0;
+}
 
 static inline bool superblock_enabled(void)
 {
@@ -448,12 +509,18 @@ static inline void tier1_maybe_form_superblock(CPUState *cpu,
                                                 TranslationBlock *tb,
                                                 vaddr pc)
 {
-    if (!superblock_enabled()) {
+    bool targeted = superblock_target_enabled();
+
+    if (!superblock_enabled() && !targeted) {
         return;
     }
 
-    /* Only Tier 1+ TBs, not already a superblock. */
-    if (tb->tier < 1 || tb->superblock != NULL) {
+    if (targeted && pc != g_superblock_target_a) {
+        return;
+    }
+
+    /* Global mode requires Tier 1; targeted mode deliberately isolates it. */
+    if ((!targeted && tb->tier < 1) || tb->superblock != NULL) {
         sb_stats[SB_REJ_TIER]++;
         return;
     }
@@ -472,7 +539,8 @@ static inline void tier1_maybe_form_superblock(CPUState *cpu,
      * Slot 0 only (see block comment above). If a slot-1 exit exists
      * and has ever been chained, both paths are live — skip.
      */
-    if (tb->jmp_reset_offset[1] != TB_JMP_OFFSET_INVALID &&
+    if (!targeted &&
+        tb->jmp_reset_offset[1] != TB_JMP_OFFSET_INVALID &&
         qatomic_read(&tb->jmp_dest[1]) != (uintptr_t)NULL) {
         sb_stats[SB_REJ_SLOT1]++;
         return;
@@ -512,7 +580,7 @@ static inline void tier1_maybe_form_superblock(CPUState *cpu,
      * entry at chain time, so a live B is always stamped). 0 = never
      * dispatched — refuse. Also refuse virtual-page mismatch with A.
      */
-    vaddr pc_b = tb_b->entry_pc;
+    vaddr pc_b = targeted ? g_superblock_target_b : tb_b->entry_pc;
     if (pc_b == 0 || ((pc ^ pc_b) & TARGET_PAGE_MASK)) {
         sb_stats[SB_REJ_DEST]++;
         return;
@@ -549,7 +617,12 @@ static inline void tier1_maybe_form_superblock(CPUState *cpu,
 
     superblock_budget--;
     mmap_lock();
-    if (tb_gen_superblock(cpu, tb, 0, pc, pc_b)) {
+    TranslationBlock *formed = tb_gen_superblock(
+        cpu, tb, 0, targeted ? g_superblock_target_b_exit : 0, pc, pc_b);
+    if (formed) {
+        if (targeted) {
+            g_superblock_target_tb = formed;
+        }
         sb_stats[SB_FORMED]++;
     } else {
         sb_stats[SB_FAILED]++;
@@ -580,11 +653,13 @@ static inline void tier1_maybe_reset_budget(void)
                         (unsigned long)g_tier1_promotions_total,
                         (unsigned long)g_tier1_promotions_dropped);
 #if defined(__ANDROID__)
-            if (superblock_enabled() || tier1_enabled()) {
+            if (superblock_enabled() || superblock_target_enabled() ||
+                tier1_enabled()) {
                 __android_log_print(ANDROID_LOG_INFO, "superblock",
                     "stats: promo=%lu drop=%lu consumed=%lu "
                     "tier=%u hot=%u slot1=%u budget=%u dest=%u "
-                    "b=%u page=%u copage=%u icount=%u FORMED=%u failed=%u",
+                    "b=%u page=%u copage=%u icount=%u FORMED=%u failed=%u "
+                    "target=%p off=%u/%u dest=%p/%p",
                     (unsigned long)g_tier1_promotions_total,
                     (unsigned long)g_tier1_promotions_dropped,
                     (unsigned long)g_tier1_consumed,
@@ -593,7 +668,15 @@ static inline void tier1_maybe_reset_budget(void)
                     sb_stats[SB_REJ_DEST], sb_stats[SB_REJ_B],
                     sb_stats[SB_REJ_PAGE], sb_stats[SB_REJ_COPAGE],
                     sb_stats[SB_REJ_ICOUNT], sb_stats[SB_FORMED],
-                    sb_stats[SB_FAILED]);
+                    sb_stats[SB_FAILED], (void *)g_superblock_target_tb,
+                    g_superblock_target_tb ?
+                        g_superblock_target_tb->jmp_reset_offset[0] : 0,
+                    g_superblock_target_tb ?
+                        g_superblock_target_tb->jmp_reset_offset[1] : 0,
+                    g_superblock_target_tb ? (void *)qatomic_read(
+                        &g_superblock_target_tb->jmp_dest[0]) : NULL,
+                    g_superblock_target_tb ? (void *)qatomic_read(
+                        &g_superblock_target_tb->jmp_dest[1]) : NULL);
             }
 #endif
         }
@@ -1641,7 +1724,23 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
              * entry_pc) would dirty the TB cacheline on every loop
              * surfacing for nothing.
              */
-            if (unlikely(tier1_enabled() || superblock_enabled())) {
+            if (unlikely(tier1_enabled() || superblock_enabled() ||
+                         superblock_target_enabled())) {
+#if defined(__ANDROID__)
+                if (unlikely(tb->superblock && superblock_target_enabled())) {
+                    static unsigned target_exec_logs;
+                    if (target_exec_logs < 12) {
+                        __android_log_print(ANDROID_LOG_INFO, "superblock",
+                            "target-exec pc=0x%" PRIx64 " exit=%d last=%p "
+                            "tb=%p off=%u/%u dest=%p/%p",
+                            (uint64_t)s.pc, tb_exit, last_tb, tb,
+                            tb->jmp_reset_offset[0], tb->jmp_reset_offset[1],
+                            (void *)qatomic_read(&tb->jmp_dest[0]),
+                            (void *)qatomic_read(&tb->jmp_dest[1]));
+                        target_exec_logs++;
+                    }
+                }
+#endif
                 uint32_t c = tb->exec_count;
                 if (c < (uint32_t)g_tier1_threshold * 2) {
                     tb->exec_count = c + 1;
@@ -1685,6 +1784,9 @@ int cpu_exec(CPUState *cpu)
     SyncClocks sc = { 0 };
 
 #ifdef XBOX
+    if (unlikely(qatomic_read(&xemu_vcpu_thread_id) == 0)) {
+        qatomic_set(&xemu_vcpu_thread_id, qemu_get_thread_id());
+    }
     static bool tb_cache_warmed = false;
     if (!tb_cache_warmed) {
         tb_cache_warmed = true;
