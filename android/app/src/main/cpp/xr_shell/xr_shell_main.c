@@ -129,6 +129,7 @@ typedef struct {
 
     /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
     bool menu_open;
+    bool menu_disabled;     /* set after a JNI failure; picker off for session */
     XrSwapchain menu_swapchain;
     uint32_t menu_swapchain_len;
     XrSwapchainImageOpenGLESKHR *menu_images;
@@ -151,6 +152,7 @@ typedef struct {
 
     /* Menu input edge state */
     int nav_latch;          /* -1/0/1: debounces stick/hat/dpad navigation */
+    uint16_t pad_deferred;  /* START/BACK held but not yet forwarded (combo) */
 } XrShell;
 
 /* --- minimal vec/quat math --- */
@@ -333,35 +335,45 @@ static void menu_jni_init(XrShell *s)
     JNIEnv *env = NULL;
     if ((*s->jvm)->AttachCurrentThread(s->jvm, &env, NULL) != JNI_OK || !env) {
         LOGE("menu: AttachCurrentThread failed");
+        s->menu_disabled = true;
         return;
     }
     s->jni_env = env;
+
+    /* All the locals below (classes, loader, ctor result) are freed in one shot
+     * by PopLocalFrame; the bridge survives as a global ref. */
+    if ((*env)->PushLocalFrame(env, 16) != 0) {
+        (*env)->ExceptionClear(env);
+        LOGE("menu: PushLocalFrame failed");
+        s->menu_disabled = true;
+        return;
+    }
 
     jobject activity = s->app->activity->clazz;
     jclass acls = (*env)->GetObjectClass(env, activity);
     jmethodID get_loader = (*env)->GetMethodID(
         env, acls, "getClassLoader", "()Ljava/lang/ClassLoader;");
-    jobject loader = (*env)->CallObjectMethod(env, activity, get_loader);
+    jobject loader = get_loader ?
+        (*env)->CallObjectMethod(env, activity, get_loader) : NULL;
     jclass lcls = (*env)->FindClass(env, "java/lang/ClassLoader");
-    jmethodID load_class = (*env)->GetMethodID(
-        env, lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    jmethodID load_class = lcls ? (*env)->GetMethodID(
+        env, lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;") : NULL;
     jstring cname = (*env)->NewStringUTF(env, "com.izzy2lost.x1box.XrMenuBridge");
-    jclass bcls = (jclass)(*env)->CallObjectMethod(env, loader, load_class, cname);
-    (*env)->DeleteLocalRef(env, cname);
+    jclass bcls = (loader && load_class && cname) ?
+        (jclass)(*env)->CallObjectMethod(env, loader, load_class, cname) : NULL;
     if ((*env)->ExceptionCheck(env) || !bcls) {
         (*env)->ExceptionClear(env);
-        LOGE("menu: XrMenuBridge class not found");
-        return;
+        LOGE("menu: XrMenuBridge class not found; picker disabled");
+        goto fail;
     }
     jmethodID ctor = (*env)->GetMethodID(env, bcls, "<init>",
                                          "(Landroid/content/Context;)V");
-    jobject bridge = (*env)->NewObject(env, bcls, ctor, activity);
+    jobject bridge = ctor ? (*env)->NewObject(env, bcls, ctor, activity) : NULL;
     if ((*env)->ExceptionCheck(env) || !bridge) {
         (*env)->ExceptionClear(env);
-        LOGE("menu: XrMenuBridge construction failed");
-        return;
+        LOGE("menu: XrMenuBridge construction failed; picker disabled");
+        goto fail;
     }
-    s->menu_bridge = (*env)->NewGlobalRef(env, bridge);
     s->m_refresh = (*env)->GetMethodID(env, bcls, "refresh", "()V");
     s->m_count = (*env)->GetMethodID(env, bcls, "count", "()I");
     s->m_isDirty = (*env)->GetMethodID(env, bcls, "isDirty", "()Z");
@@ -373,7 +385,44 @@ static void menu_jni_init(XrShell *s)
                                         "()Ljava/lang/String;");
     s->m_setActiveFp =
         (*env)->GetMethodID(env, bcls, "setActiveFpJit", "(ZZ)V");
+    /* A missing method ID leaves a pending exception AND would abort ART on the
+     * next Call*; validate all before publishing the bridge. */
+    if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
+        !s->m_isDirty || !s->m_render || !s->m_move || !s->m_toggleFp ||
+        !s->m_activate || !s->m_setActiveFp) {
+        (*env)->ExceptionClear(env);
+        LOGE("menu: method resolution failed; picker disabled");
+        goto fail;
+    }
+    s->menu_bridge = (*env)->NewGlobalRef(env, bridge);
+    (*env)->PopLocalFrame(env, NULL);
     LOGI("menu: JNI bridge ready");
+    return;
+
+fail:
+    s->menu_disabled = true;
+    (*env)->PopLocalFrame(env, NULL);
+}
+
+/* After any JNI call that can throw: if an exception is pending, log it, clear
+ * it, and permanently disable the picker for this session (never let it reach
+ * the process and abort). Returns true if the menu was just disabled. */
+static bool menu_jni_check(XrShell *s, const char *where)
+{
+    JNIEnv *env = s->jni_env;
+    if (!env || !(*env)->ExceptionCheck(env)) {
+        return false;
+    }
+    (*env)->ExceptionDescribe(env); /* dumps stack to logcat, also clears it */
+    (*env)->ExceptionClear(env);
+    LOGE("menu: JNI exception at %s; disabling picker for session", where);
+    if (s->menu_bridge) {
+        (*env)->DeleteGlobalRef(env, s->menu_bridge);
+        s->menu_bridge = NULL;
+    }
+    s->menu_open = false;
+    s->menu_disabled = true;
+    return true;
 }
 
 /* Upload an ARGB_8888 menu Bitmap into menu_tex (RGBA). */
@@ -405,8 +454,11 @@ static void menu_upload_texture(XrShell *s, jobject bitmap)
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(info.stride / 4));
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, info.width, info.height, 0, GL_RGBA,
-                 GL_UNSIGNED_BYTE, pixels);
+    /* sRGB internal format: Canvas writes sRGB-encoded bytes, so sampling must
+     * decode to linear (the SRGB8_ALPHA8 swapchain re-encodes on store).
+     * Uploading as plain RGBA would double-encode and wash the menu out. */
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, info.width, info.height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     AndroidBitmap_unlockPixels(env, bitmap);
@@ -418,6 +470,7 @@ static void menu_move(XrShell *s, int delta)
     if (s->menu_bridge) {
         (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_move,
                                       delta);
+        menu_jni_check(s, "moveSelection");
     }
 }
 
@@ -425,16 +478,23 @@ static void menu_toggle_fp(XrShell *s)
 {
     if (s->menu_bridge) {
         (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_toggleFp);
+        menu_jni_check(s, "toggleFpJit");
     }
 }
 
 static void menu_open(XrShell *s)
 {
+    if (s->menu_disabled) {
+        return;
+    }
     menu_jni_init(s);
     if (!s->menu_bridge) {
         return;
     }
     (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_refresh);
+    if (menu_jni_check(s, "refresh")) {
+        return;
+    }
     /* Tell the menu the running process's active FP JIT mode so it can flag
      * per-game toggles that only take effect on the next cold launch. */
     if (s->m_setActiveFp) {
@@ -443,11 +503,15 @@ static void menu_open(XrShell *s)
         (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
                                       s->m_setActiveFp, (jboolean)known,
                                       (jboolean)value);
+        if (menu_jni_check(s, "setActiveFpJit")) {
+            return;
+        }
     }
     s->menu_open = true;
     s->nav_latch = 0;
     /* Release any held inputs so nothing sticks in the game while navigating. */
     s->pad_buttons = 0;
+    s->pad_deferred = 0;
     memset(s->pad_axis, 0, sizeof(s->pad_axis));
     if (s->set_gamepad) {
         s->set_gamepad(0, s->pad_axis, 6);
@@ -462,6 +526,7 @@ static void menu_close(XrShell *s)
     /* Resume the game with a clean pad; the user re-presses. Prevents the
      * activation press (e.g. A) from leaking into the resumed title. */
     s->pad_buttons = 0;
+    s->pad_deferred = 0;
     memset(s->pad_axis, 0, sizeof(s->pad_axis));
     if (s->set_gamepad) {
         s->set_gamepad(0, s->pad_axis, 6);
@@ -490,6 +555,10 @@ static void menu_activate(XrShell *s)
     JNIEnv *env = s->jni_env;
     jstring jpath =
         (jstring)(*env)->CallObjectMethod(env, s->menu_bridge, s->m_activate);
+    if (menu_jni_check(s, "activate")) {
+        menu_close(s);
+        return;
+    }
     if (jpath) {
         const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
         if (path) {
@@ -1085,15 +1154,20 @@ static void xr_frame(XrShell *s)
             JNIEnv *env = s->jni_env;
             jboolean dirty =
                 (*env)->CallBooleanMethod(env, s->menu_bridge, s->m_isDirty);
-            if (dirty || !s->menu_tex_ready) {
+            if (menu_jni_check(s, "isDirty")) {
+                dirty = JNI_FALSE;
+            }
+            if (s->menu_bridge && (dirty || !s->menu_tex_ready)) {
                 jobject bmp = (*env)->CallObjectMethod(
                     env, s->menu_bridge, s->m_render, s->menu_w, s->menu_h);
-                if (bmp) {
+                if (menu_jni_check(s, "render")) {
+                    /* render threw (e.g. bitmap OOM): picker disabled. */
+                } else if (bmp) {
                     menu_upload_texture(s, bmp);
                     (*env)->DeleteLocalRef(env, bmp);
                 }
             }
-            if (s->menu_tex_ready) {
+            if (s->menu_open && s->menu_tex_ready) {
                 uint32_t midx = 0;
                 XrSwapchainImageAcquireInfo mai = {
                     .type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
@@ -1320,7 +1394,28 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
             return 1;
         }
 
-        if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
+        /* Hold-and-decide for START/BACK so a combo-in-progress never leaks a
+         * spurious lone press into the game. Defer the bit while only one of the
+         * pair is held; on release without a completed combo, emit a momentary
+         * tap so the button still works on its own. */
+        if (mask == GP_START || mask == GP_BACK) {
+            if (action == AKEY_EVENT_ACTION_DOWN) {
+                s->pad_deferred |= mask;
+            } else if (action == AKEY_EVENT_ACTION_UP &&
+                       (s->pad_deferred & mask)) {
+                s->pad_deferred &= ~mask;
+                if (s->set_gamepad) {
+                    uint16_t fwd = s->pad_buttons & ~s->pad_deferred;
+                    s->set_gamepad((uint16_t)(fwd | mask), s->pad_axis, 6);
+                    s->set_gamepad(fwd, s->pad_axis, 6);
+                }
+                return 1;
+            }
+        }
+
+        if (s->set_gamepad)
+            s->set_gamepad((uint16_t)(s->pad_buttons & ~s->pad_deferred),
+                           s->pad_axis, 6);
         static int gp_key_log = 0;
         if (gp_key_log++ < 12) {
             LOGI("XR gamepad key: code=%d action=%d -> buttons=0x%04x fwd=%d",
@@ -1355,7 +1450,9 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
             menu_nav_eval(s);
             return 1; /* drive the menu; don't forward to the game */
         }
-        if (s->set_gamepad) s->set_gamepad(s->pad_buttons, s->pad_axis, 6);
+        if (s->set_gamepad)
+            s->set_gamepad((uint16_t)(s->pad_buttons & ~s->pad_deferred),
+                           s->pad_axis, 6);
         return 1;
     }
     return 0;
@@ -1415,6 +1512,16 @@ void android_main(struct android_app *app)
         if (shell.session_running) {
             xr_frame(&shell);
         }
+    }
+
+    /* Release the JNI bridge and detach this thread if we ever attached it. */
+    if (shell.jvm && shell.jni_env) {
+        if (shell.menu_bridge) {
+            (*shell.jni_env)->DeleteGlobalRef(shell.jni_env, shell.menu_bridge);
+            shell.menu_bridge = NULL;
+        }
+        (*shell.jvm)->DetachCurrentThread(shell.jvm);
+        shell.jni_env = NULL;
     }
     LOGI("xr_shell spike exiting");
 }

@@ -139,9 +139,13 @@ class XrMenuBridge(context: Context) {
    */
   fun activate(): String? {
     val game = games.getOrNull(selected) ?: return null
-    val editor = appContext.getSharedPreferences("x1box_prefs", Context.MODE_PRIVATE).edit()
-    PerGameSettingsManager.applyRuntimeOverridesToEditor(appContext, editor, game.relativePath)
-    editor.putString("dvdPath", game.path).remove("dvdUri").commit()
+    val prefs = appContext.getSharedPreferences("x1box_prefs", Context.MODE_PRIVATE)
+    // Per-game runtime overrides matter only on a future cold boot -> async apply().
+    prefs.edit().also {
+      PerGameSettingsManager.applyRuntimeOverridesToEditor(appContext, it, game.relativePath)
+    }.apply()
+    // dvdPath must be durable before the guest reset can boot the new game -> commit().
+    prefs.edit().putString("dvdPath", game.path).remove("dvdUri").commit()
     return game.path
   }
 
