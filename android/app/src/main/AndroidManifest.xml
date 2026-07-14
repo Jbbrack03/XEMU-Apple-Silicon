@@ -2,6 +2,12 @@
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
   <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+  <!-- Declare the headset capability expected by the XR activity without
+       forcing the package's ordinary 2D library/setup activities into VR. -->
+  <uses-feature
+    android:name="android.hardware.vr.headtracking"
+    android:version="1"
+    android:required="true" />
   <uses-feature android:name="oculus.software.handtracking" android:required="false" />
   <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
 
@@ -12,6 +18,10 @@
     android:allowBackup="true"
     android:supportsRtl="true"
     android:theme="@style/Theme.Xemu">
+
+    <meta-data
+      android:name="com.oculus.supportedDevices"
+      android:value="quest2|questpro|quest3|quest3s" />
 
     <activity
       android:name=".LauncherActivity"
@@ -51,14 +61,35 @@
     </activity>
 
     <activity
+      android:name=".XrEmulatorActivity"
+      android:taskAffinity="com.izzy2lost.x1box.xr_emulator"
+      android:excludeFromRecents="true"
+      android:screenOrientation="sensorLandscape"
+      android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+      android:hardwareAccelerated="true"
+      android:exported="false">
+
+      <meta-data
+        android:name="com.samsung.android.vr.application.mode"
+        android:value="vr_only" />
+      <meta-data
+        android:name="SDL_MAIN_LIBRARY"
+        android:value="xemu" />
+    </activity>
+
+    <activity
       android:name="android.app.NativeActivity"
-      android:process=":xemu"
       android:label="xemu XR spike"
       android:exported="true"
-      android:excludeFromRecents="false"
+      android:excludeFromRecents="true"
       android:launchMode="singleTask"
+      android:screenOrientation="landscape"
+      android:resizeableActivity="false"
       android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
       android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen">
+      <meta-data
+        android:name="com.samsung.android.vr.application.mode"
+        android:value="vr_only" />
       <meta-data android:name="android.app.lib_name" android:value="xr_shell" />
       <meta-data android:name="com.oculus.handtracking.supported" android:value="true" />
       <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />

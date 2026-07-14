@@ -261,7 +261,7 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityForRestart() {
-    startActivity(Intent(this, MainActivity::class.java))
+    startActivity(Intent(this, android.app.NativeActivity::class.java))
     finish()
   }
 
@@ -273,8 +273,7 @@ class GameLibraryActivity : AppCompatActivity() {
 
     // Custom dashboards can boot from an xboxdash.xbe alias even when the HDD
     // does not look like a stock retail dashboard, so don't gate launch here.
-    // MainActivity runs in :xemu, so the disc selection must be flushed before
-    // the other process reads SharedPreferences during startup.
+    // Flush disc selection before the NativeActivity-first bootstrap reads it.
     val launchEditor = prefs.edit()
     PerGameSettingsManager.applyRuntimeOverridesToEditor(
       context = this,
@@ -287,7 +286,7 @@ class GameLibraryActivity : AppCompatActivity() {
       .putBoolean("skip_game_picker", false)
       .commit()
 
-    startActivity(Intent(this, MainActivity::class.java))
+    startActivity(Intent(this, android.app.NativeActivity::class.java))
     finish()
   }
 
@@ -470,7 +469,7 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityWithSnapshot(slot: Int) {
-    val intent = Intent(this, MainActivity::class.java).apply {
+    val intent = Intent(this, android.app.NativeActivity::class.java).apply {
       putExtra(MainActivity.EXTRA_AUTO_LOAD_SNAPSHOT_SLOT, slot)
     }
     startActivity(intent)
@@ -1443,8 +1442,7 @@ class GameLibraryActivity : AppCompatActivity() {
     if (!isFile) {
       persistUriPermission(game.uri)
     }
-    // MainActivity runs in :xemu, so the disc selection must be flushed before
-    // the other process reads SharedPreferences during startup.
+    // Flush disc selection before the NativeActivity-first bootstrap reads it.
     val launchEditor = prefs.edit()
     PerGameSettingsManager.applyRuntimeOverridesToEditor(
       context = this,
@@ -1465,7 +1463,7 @@ class GameLibraryActivity : AppCompatActivity() {
       .putBoolean("skip_game_picker", false)
       .commit()
 
-    startActivity(Intent(this, MainActivity::class.java))
+    startActivity(Intent(this, android.app.NativeActivity::class.java))
     finish()
   }
 

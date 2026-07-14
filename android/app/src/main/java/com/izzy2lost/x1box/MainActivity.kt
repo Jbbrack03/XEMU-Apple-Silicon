@@ -44,7 +44,7 @@ import java.nio.ByteOrder
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
+open class MainActivity : SDLActivity(), InputManager.InputDeviceListener {
   companion object {
     const val EXTRA_AUTO_LOAD_SNAPSHOT_SLOT = "com.izzy2lost.x1box.extra.AUTO_LOAD_SNAPSHOT_SLOT"
     private const val SNAPSHOT_PREVIEW_HEADER_SIZE = 12

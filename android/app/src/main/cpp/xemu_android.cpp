@@ -1264,6 +1264,87 @@ static bool xemu_android_pref_contains_env(const char *needle) {
   return ev.find(needle) != std::string::npos;
 }
 
+static bool read_proc_text(const char *path, std::string *out) {
+  std::ifstream f(path);
+  if (!f) return false;
+  std::ostringstream data;
+  data << f.rdbuf();
+  *out = data.str();
+  return true;
+}
+
+static bool cpu_list_excludes_protected(const std::string &list) {
+  bool saw_content_cpu = false;
+  const char *p = list.c_str();
+  while (*p) {
+    while (*p == ' ' || *p == '\t' || *p == ',') ++p;
+    if (*p == '\0' || *p == '\n' || *p == '\r') break;
+    char *end = nullptr;
+    long first = strtol(p, &end, 10);
+    if (end == p || first < 0) return false;
+    long last = first;
+    p = end;
+    if (*p == '-') {
+      long parsed = strtol(p + 1, &end, 10);
+      if (end == p + 1 || parsed < first) return false;
+      last = parsed;
+      p = end;
+    }
+    if (first <= 2) return false;
+    if (last >= 3) saw_content_cpu = true;
+  }
+  return saw_content_cpu;
+}
+
+static bool xr_immersive_cpuset_safe(std::string *detail) {
+  std::string cgroup;
+  std::string status;
+  if (!read_proc_text("/proc/self/cgroup", &cgroup) ||
+      !read_proc_text("/proc/self/status", &status)) {
+    *detail = "cannot read /proc/self cgroup/status";
+    return false;
+  }
+  if (cgroup.find("cpuset:/immersive") == std::string::npos) {
+    *detail = "process is not in /immersive";
+    return false;
+  }
+  const std::string key = "Cpus_allowed_list:";
+  size_t pos = status.find(key);
+  if (pos == std::string::npos) {
+    *detail = "Cpus_allowed_list missing";
+    return false;
+  }
+  pos += key.size();
+  size_t end = status.find('\n', pos);
+  std::string allowed = status.substr(pos, end - pos);
+  if (!cpu_list_excludes_protected(allowed)) {
+    *detail = "unsafe Cpus_allowed_list=" + allowed;
+    return false;
+  }
+  *detail = "cgroup=/immersive Cpus_allowed_list=" + allowed;
+  return true;
+}
+
+static bool wait_for_safe_xr_cpuset(void) {
+  std::string detail;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    if (xr_immersive_cpuset_safe(&detail)) {
+      __android_log_print(ANDROID_LOG_INFO, "xemu-safety",
+                          "PASS before worker creation: %s", detail.c_str());
+      return true;
+    }
+    if (attempt == 0) {
+      __android_log_print(ANDROID_LOG_WARN, "xemu-safety",
+                          "waiting for immersive cpuset: %s", detail.c_str());
+    }
+    usleep(50000);
+  }
+  __android_log_print(ANDROID_LOG_FATAL, "xemu-safety",
+                      "FAIL CLOSED: %s; QEMU workers will not start",
+                      detail.c_str());
+  return false;
+}
+
 extern "C" int SDL_main(int argc, char* argv[]) {
   (void)argc;
   (void)argv;
@@ -1432,6 +1513,11 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     }
     xemu_argv.push_back(nullptr);
     LogInfo("SDL_main: launching xemu core");
+    if (SDL_getenv("XEMU_ANDROID_XR_MODE") &&
+        !wait_for_safe_xr_cpuset()) {
+      SDL_Quit();
+      return 1;
+    }
     xemu_android_display_preinit();
 
     QemuLaunchContext launch_ctx{

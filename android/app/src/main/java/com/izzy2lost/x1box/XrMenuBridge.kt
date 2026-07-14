@@ -1,6 +1,8 @@
 package com.izzy2lost.x1box
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -24,6 +26,7 @@ import java.io.FileOutputStream
  * the ISO without rebooting the process.
  */
 class XrMenuBridge(context: Context) {
+  private val activity = context as Activity
   private val appContext = context.applicationContext
 
   // Scanned off-thread; the immutable list reference is swapped atomically so
@@ -68,6 +71,24 @@ class XrMenuBridge(context: Context) {
 
   init {
     reloadGames()
+  }
+
+  /**
+   * Invert the old launch order: the already-immersive NativeActivity owns the
+   * process first, then starts SDL/xemu in-process and immediately returns
+   * itself to the foreground. The native bootstrap independently waits for and
+   * verifies the immersive cpuset before it creates QEMU workers.
+   */
+  fun startEmulator() {
+    activity.runOnUiThread {
+      val emulatorIntent = Intent(activity, XrEmulatorActivity::class.java).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.intent?.extras?.let(::putExtras)
+      }
+      activity.startActivity(
+        emulatorIntent,
+      )
+    }
   }
 
   /** Kick an async library rescan (safe to call from the frame thread). */

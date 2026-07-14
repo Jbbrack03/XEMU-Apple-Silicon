@@ -16,6 +16,7 @@
 
 #include <android/log.h>
 #include <android/native_activity.h>
+#include <android/performance_hint.h>
 #include <android_native_app_glue.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -50,6 +51,19 @@
                  __LINE__, #fn);                                       \
         }                                                              \
     } while (0)
+
+typedef APerformanceHintManager *(*PFN_adpf_get_manager)(void);
+typedef APerformanceHintSession *(*PFN_adpf_create_session)(
+    APerformanceHintManager *, const int32_t *, size_t, int64_t);
+typedef int64_t (*PFN_adpf_get_update_rate)(APerformanceHintManager *);
+typedef int (*PFN_adpf_report)(APerformanceHintSession *, int64_t);
+typedef void (*PFN_adpf_close)(APerformanceHintSession *);
+
+static PFN_adpf_get_manager p_adpf_get_manager;
+static PFN_adpf_create_session p_adpf_create_session;
+static PFN_adpf_get_update_rate p_adpf_get_update_rate;
+static PFN_adpf_report p_adpf_report;
+static PFN_adpf_close p_adpf_close;
 
 typedef struct {
     struct android_app *app;
@@ -118,6 +132,7 @@ typedef struct {
     XrSpace aim_space[2];   /* 0=left, 1=right */
     XrPath hand_path[2];
     bool input_ready;
+    bool action_sets_attached;
 
     /* Grab drag state */
     int grab_hand;          /* -1 none, else 0/1 */
@@ -133,6 +148,20 @@ typedef struct {
     PFN_xrSetAndroidApplicationThreadKHR set_android_thread;
     bool xr_renderer_thread_set;
     int xr_vcpu_tid_set;
+
+    /* Android Dynamic Performance Framework: separate sessions because the XR
+     * renderer and guest vCPU are independent periodic workloads. All calls
+     * are made from this thread (APerformanceHintSession is not thread-safe). */
+    APerformanceHintManager *adpf_manager;
+    APerformanceHintSession *adpf_render;
+    APerformanceHintSession *adpf_vcpu;
+    int adpf_vcpu_tid;
+    int affinity_vcpu_tid;
+    int64_t adpf_update_rate_ns;
+    int64_t adpf_render_report_ns;
+    int64_t adpf_vcpu_report_ns;
+    int64_t adpf_last_frame_seq_ns;
+    bool adpf_tried;
 
     /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
     bool menu_open;
@@ -154,8 +183,9 @@ typedef struct {
     JNIEnv *jni_env;        /* android_main thread, attached once */
     jobject menu_bridge;    /* global ref, NULL if JNI init failed */
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
-        m_activate, m_setActiveFp, m_selectByName;
+        m_activate, m_setActiveFp, m_selectByName, m_startEmulator;
     bool jni_tried;
+    bool emulator_bootstrap_started;
 
     /* Menu input edge state */
     int nav_latch;          /* -1/0/1: debounces stick/hat/dpad navigation */
@@ -169,6 +199,74 @@ static int64_t now_ns(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static bool adpf_enabled(void)
+{
+    const char *env = getenv("XEMU_ADPF");
+    return !env || !env[0] || strcmp(env, "0") != 0;
+}
+
+static void adpf_init_render(XrShell *s)
+{
+    if (s->adpf_tried) return;
+    s->adpf_tried = true;
+    if (!adpf_enabled()) {
+        LOGI("ADPF: disabled by XEMU_ADPF=0");
+        return;
+    }
+    void *libandroid = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (libandroid) {
+        p_adpf_get_manager = (PFN_adpf_get_manager)dlsym(
+            libandroid, "APerformanceHint_getManager");
+        p_adpf_create_session = (PFN_adpf_create_session)dlsym(
+            libandroid, "APerformanceHint_createSession");
+        p_adpf_get_update_rate = (PFN_adpf_get_update_rate)dlsym(
+            libandroid, "APerformanceHint_getPreferredUpdateRateNanos");
+        p_adpf_report = (PFN_adpf_report)dlsym(
+            libandroid, "APerformanceHint_reportActualWorkDuration");
+        p_adpf_close = (PFN_adpf_close)dlsym(
+            libandroid, "APerformanceHint_closeSession");
+    }
+    if (!p_adpf_get_manager || !p_adpf_create_session ||
+        !p_adpf_get_update_rate || !p_adpf_report || !p_adpf_close) {
+        LOGI("ADPF: API unavailable on this Android version");
+        return;
+    }
+    s->adpf_manager = p_adpf_get_manager();
+    if (!s->adpf_manager) {
+        LOGI("ADPF: manager unavailable");
+        return;
+    }
+    int32_t tid = (int32_t)syscall(SYS_gettid);
+    s->adpf_render = p_adpf_create_session(
+        s->adpf_manager, &tid, 1, 8333333LL);
+    s->adpf_update_rate_ns =
+        p_adpf_get_update_rate(s->adpf_manager);
+    if (s->adpf_update_rate_ns <= 0) s->adpf_update_rate_ns = 8333333LL;
+    LOGI("ADPF: render tid=%d session=%s target=8.33ms update=%.2fms",
+         tid, s->adpf_render ? "ok" : "failed",
+         (double)s->adpf_update_rate_ns / 1000000.0);
+}
+
+static void adpf_init_vcpu(XrShell *s, int tid)
+{
+    if (!s->adpf_manager || s->adpf_vcpu || tid <= 0 ||
+        tid == s->adpf_vcpu_tid) return;
+    int32_t thread = (int32_t)tid;
+    s->adpf_vcpu = p_adpf_create_session(
+        s->adpf_manager, &thread, 1, 16666667LL);
+    s->adpf_vcpu_tid = tid;
+    LOGI("ADPF: vCPU tid=%d session=%s target=16.67ms", tid,
+         s->adpf_vcpu ? "ok" : "failed");
+}
+
+static void adpf_report(APerformanceHintSession *session, int64_t actual_ns,
+                        int64_t now, int64_t update_rate, int64_t *last_report)
+{
+    if (!session || actual_ns <= 0 || now - *last_report < update_rate) return;
+    int rc = p_adpf_report(session, actual_ns);
+    if (rc == 0) *last_report = now;
 }
 
 /* Forward the current pad to the emulator: physical buttons minus any deferred
@@ -360,6 +458,18 @@ static void xr_apply_thread_settings(XrShell *s)
         enabled = (!env || !env[0] || strcmp(env, "0") != 0) ? 1 : 0;
         LOGI("thread settings: %s", enabled ? "enabled" : "disabled");
     }
+    if (s->get_vcpu_tid) {
+        int tid = s->get_vcpu_tid();
+        adpf_init_vcpu(s, tid);
+        const char *pin_env = getenv("XEMU_VCPU_FAST_CORES");
+        if (tid > 0 && tid != s->affinity_vcpu_tid && pin_env && pin_env[0] &&
+            strcmp(pin_env, "0") != 0) {
+            unsigned long mask = (1UL << 4) | (1UL << 5);
+            int rc = (int)syscall(SYS_sched_setaffinity, tid, sizeof(mask), &mask);
+            LOGI("vCPU affinity: tid=%d cpus=4-5 rc=%d", tid, rc);
+            if (rc == 0) s->affinity_vcpu_tid = tid;
+        }
+    }
     if (!enabled) {
         return;
     }
@@ -464,11 +574,13 @@ static void menu_jni_init(XrShell *s)
         (*env)->GetMethodID(env, bcls, "setActiveFpJit", "(ZZ)V");
     s->m_selectByName = (*env)->GetMethodID(env, bcls, "selectByName",
                                             "(Ljava/lang/String;)Z");
+    s->m_startEmulator = (*env)->GetMethodID(env, bcls, "startEmulator", "()V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
         !s->m_isDirty || !s->m_render || !s->m_move || !s->m_toggleFp ||
-        !s->m_activate || !s->m_setActiveFp || !s->m_selectByName) {
+        !s->m_activate || !s->m_setActiveFp || !s->m_selectByName ||
+        !s->m_startEmulator) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -481,6 +593,25 @@ static void menu_jni_init(XrShell *s)
 fail:
     s->menu_disabled = true;
     (*env)->PopLocalFrame(env, NULL);
+}
+
+static bool menu_jni_check(XrShell *s, const char *where);
+
+static void start_emulator_once(XrShell *s)
+{
+    if (s->emulator_bootstrap_started) {
+        return;
+    }
+    s->emulator_bootstrap_started = true;
+    menu_jni_init(s);
+    if (!s->menu_bridge) {
+        LOGE("bootstrap: JNI bridge unavailable; emulator not started");
+        return;
+    }
+    LOGI("bootstrap: immersive NativeActivity owns process; starting SDL/xemu");
+    (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                  s->m_startEmulator);
+    menu_jni_check(s, "startEmulator");
 }
 
 /* After any JNI call that can throw: if an exception is pending, log it, clear
@@ -953,17 +1084,20 @@ static void xr_set_perf_levels(XrShell *s)
         LOGI("perf settings: entry point unavailable");
         return;
     }
-    XrResult rc = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT,
-                            XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-    XrResult rg = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT,
-                            XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-    LOGI("perf settings: CPU/GPU -> SUSTAINED_HIGH (cpu rc=%d gpu rc=%d)",
-         (int)rc, (int)rg);
+    const char *boost_env = getenv("XEMU_XR_PERF_BOOST");
+    bool boost = boost_env && boost_env[0] && strcmp(boost_env, "0") != 0;
+    XrPerfSettingsLevelEXT level = boost
+        ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT
+        : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+    XrResult rc = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, level);
+    XrResult rg = set_level(s->session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, level);
+    LOGI("perf settings: CPU/GPU -> %s (cpu rc=%d gpu rc=%d)",
+         boost ? "BOOST" : "SUSTAINED_HIGH", (int)rc, (int)rg);
 }
 
 static void xr_attach_action_set(XrShell *s)
 {
-    if (!s->input_ready) {
+    if (!s->input_ready || s->action_sets_attached) {
         return;
     }
     XrSessionActionSetsAttachInfo ai = {
@@ -971,7 +1105,12 @@ static void xr_attach_action_set(XrShell *s)
         .countActionSets = 1,
         .actionSets = &s->action_set,
     };
-    OXR(xrAttachSessionActionSets(s->session, &ai));
+    XrResult r = xrAttachSessionActionSets(s->session, &ai);
+    if (XR_SUCCEEDED(r)) {
+        s->action_sets_attached = true;
+    } else {
+        LOGE("xrAttachSessionActionSets failed: %d", (int)r);
+    }
 }
 
 static float action_float(XrShell *s, XrAction a, int hand)
@@ -1242,6 +1381,8 @@ static void xr_frame(XrShell *s)
     XrFrameWaitInfo fwi = { .type = XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { .type = XR_TYPE_FRAME_STATE };
     OXR(xrWaitFrame(s->session, &fwi, &fs));
+    int64_t work_start_ns = now_ns();
+    adpf_init_render(s);
     XrFrameBeginInfo fbi = { .type = XR_TYPE_FRAME_BEGIN_INFO };
     OXR(xrBeginFrame(s->session, &fbi));
 
@@ -1289,6 +1430,16 @@ static void xr_frame(XrShell *s)
             struct AHardwareBuffer *ahb = s->acquire_ahb(&seq);
             if (ahb) {
                 emu_tex = ahb_to_texture(s, ahb);
+                if (seq != s->last_seq) {
+                    int64_t frame_now = now_ns();
+                    if (s->adpf_last_frame_seq_ns > 0) {
+                        adpf_report(s->adpf_vcpu,
+                                    frame_now - s->adpf_last_frame_seq_ns,
+                                    frame_now, s->adpf_update_rate_ns,
+                                    &s->adpf_vcpu_report_ns);
+                    }
+                    s->adpf_last_frame_seq_ns = frame_now;
+                }
                 if (seq != s->last_seq && (seq % 600) == 0) {
                     LOGI("emulator frame seq %llu",
                          (unsigned long long)seq);
@@ -1405,6 +1556,9 @@ static void xr_frame(XrShell *s)
         .layers = layers,
     };
     OXR(xrEndFrame(s->session, &fei));
+    int64_t work_end_ns = now_ns();
+    adpf_report(s->adpf_render, work_end_ns - work_start_ns, work_end_ns,
+                s->adpf_update_rate_ns, &s->adpf_render_report_ns);
 
     s->frame_no++;
     if (s->frame_no % 300 == 0) {
@@ -1435,6 +1589,8 @@ static void xr_poll_events(XrShell *s)
                 xr_attach_action_set(s);
                 xr_set_perf_levels(s);
                 s->session_running = true;
+            } else if (sc->state == XR_SESSION_STATE_FOCUSED) {
+                start_emulator_once(s);
             } else if (sc->state == XR_SESSION_STATE_STOPPING) {
                 OXR(xrEndSession(s->session));
                 s->session_running = false;
@@ -1690,6 +1846,12 @@ void android_main(struct android_app *app)
         }
         (*shell.jvm)->DetachCurrentThread(shell.jvm);
         shell.jni_env = NULL;
+    }
+    if (shell.adpf_vcpu) {
+        p_adpf_close(shell.adpf_vcpu);
+    }
+    if (shell.adpf_render) {
+        p_adpf_close(shell.adpf_render);
     }
     LOGI("xr_shell spike exiting");
 }

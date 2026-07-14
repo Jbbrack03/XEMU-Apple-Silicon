@@ -95,8 +95,7 @@ class LauncherActivity : Activity() {
       if (frontendLaunch.dvdUri != null) {
         FrontendLaunchHelper.persistReadPermission(this, intent, frontendLaunch.dvdUri)
       }
-      // MainActivity runs in :xemu, so launch data must be flushed before
-      // handing off to the emulator process.
+      // Commit launch data before handing off to NativeActivity-first XR.
       val launchEditor = prefs.edit()
       launchEditor.putBoolean("skip_game_picker", false)
       PerGameSettingsManager.applyRuntimeOverridesToEditor(
@@ -118,7 +117,7 @@ class LauncherActivity : Activity() {
 
       if (hasMcpx && hasFlash && hasHdd) {
         DebugLog.i(TAG) { "Frontend launch resolved via ${frontendLaunch.source}" }
-        startActivity(Intent(this, MainActivity::class.java))
+        startActivity(Intent(this, android.app.NativeActivity::class.java))
         finish()
         return
       }
