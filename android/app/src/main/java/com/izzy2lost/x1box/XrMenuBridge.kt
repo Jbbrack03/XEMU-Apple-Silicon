@@ -116,6 +116,15 @@ class XrMenuBridge(context: Context) {
     }
   }
 
+  /** Debug/autotest: select the entry whose file name matches. */
+  fun selectByName(name: String): Boolean {
+    val idx = games.indexOfFirst { java.io.File(it.path).name == name }
+    if (idx < 0) return false
+    selected = idx
+    dirty = true
+    return true
+  }
+
   /** Flip the per-game FP JIT override for the highlighted title. */
   fun toggleFpJit() {
     val game = games.getOrNull(selected) ?: return

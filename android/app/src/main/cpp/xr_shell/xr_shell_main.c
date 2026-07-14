@@ -148,7 +148,7 @@ typedef struct {
     JNIEnv *jni_env;        /* android_main thread, attached once */
     jobject menu_bridge;    /* global ref, NULL if JNI init failed */
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
-        m_activate, m_setActiveFp;
+        m_activate, m_setActiveFp, m_selectByName;
     bool jni_tried;
 
     /* Menu input edge state */
@@ -407,11 +407,13 @@ static void menu_jni_init(XrShell *s)
                                         "()Ljava/lang/String;");
     s->m_setActiveFp =
         (*env)->GetMethodID(env, bcls, "setActiveFpJit", "(ZZ)V");
+    s->m_selectByName = (*env)->GetMethodID(env, bcls, "selectByName",
+                                            "(Ljava/lang/String;)Z");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
         !s->m_isDirty || !s->m_render || !s->m_move || !s->m_toggleFp ||
-        !s->m_activate || !s->m_setActiveFp) {
+        !s->m_activate || !s->m_setActiveFp || !s->m_selectByName) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -597,6 +599,86 @@ static void menu_activate(XrShell *s)
         (*env)->DeleteLocalRef(env, jpath);
     }
     menu_close(s);
+}
+
+/*
+ * Debug-only autonomous menu exercise. XEMU_MENU_AUTOTEST=1 drives
+ * open -> navigate -> FP-toggle+revert -> close through the production
+ * menu paths; XEMU_MENU_AUTOTEST=switch:<file.iso> additionally reopens,
+ * selects that entry by name and activates it (live switch + guest
+ * reset). Exists because adb key injection cannot reach an unfocused
+ * immersive activity, so headset-free validation must enter below the
+ * Android-input layer. Off (zero work) unless the env var is set.
+ */
+static void menu_autotest_step(XrShell *s)
+{
+    static int enabled = -1;
+    static const char *switch_target;
+    static uint32_t frame;
+    static int phase;
+
+    if (enabled < 0) {
+        const char *env = getenv("XEMU_MENU_AUTOTEST");
+        enabled = (env && env[0]) ? 1 : 0;
+        if (enabled && strncmp(env, "switch:", 7) == 0) {
+            switch_target = env + 7;
+        }
+        if (enabled) {
+            LOGI("menu autotest: armed%s%s", switch_target ? ", switch to " : "",
+                 switch_target ? switch_target : "");
+        }
+    }
+    if (!enabled || phase > 6 || s->menu_disabled) {
+        return;
+    }
+    frame++;
+    switch (phase) {
+    case 0: /* ~5s after session start: open */
+        if (frame >= 600) { menu_open(s); phase = 1; frame = 0; }
+        break;
+    case 1: /* navigate down, down, up */
+        if (frame == 120 || frame == 240) { menu_move(s, 1); }
+        else if (frame == 360) { menu_move(s, -1); }
+        else if (frame >= 480) { menu_toggle_fp(s); phase = 2; frame = 0; }
+        break;
+    case 2: /* revert the toggle so no persistent state is left behind */
+        if (frame >= 120) { menu_toggle_fp(s); phase = 3; frame = 0; }
+        break;
+    case 3:
+        if (frame >= 120) {
+            menu_close(s);
+            LOGI("menu autotest: nav/toggle phase PASS");
+            phase = switch_target ? 4 : 7;
+            frame = 0;
+        }
+        break;
+    case 4: /* reopen for the switch test */
+        if (frame >= 600) { menu_open(s); phase = 5; frame = 0; }
+        break;
+    case 5:
+        if (frame >= 120 && s->menu_bridge) {
+            JNIEnv *env = s->jni_env;
+            jstring jn = (*env)->NewStringUTF(env, switch_target);
+            jboolean ok = (*env)->CallBooleanMethod(
+                env, s->menu_bridge, s->m_selectByName, jn);
+            (*env)->DeleteLocalRef(env, jn);
+            if (!menu_jni_check(s, "selectByName") && ok) {
+                phase = 6; frame = 0;
+            } else {
+                LOGE("menu autotest: selectByName(%s) FAILED", switch_target);
+                menu_close(s);
+                phase = 7;
+            }
+        }
+        break;
+    case 6:
+        if (frame >= 120) {
+            LOGI("menu autotest: activating switch target");
+            menu_activate(s);
+            phase = 7;
+        }
+        break;
+    }
 }
 
 static void egl_init(XrShell *s)
@@ -1113,6 +1195,8 @@ static void xr_frame(XrShell *s)
         s->synth_buttons = 0;
         xr_forward_pad(s);
     }
+
+    menu_autotest_step(s);
 
     /* Drive 6DOF window move/resize from the controllers. */
     xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
