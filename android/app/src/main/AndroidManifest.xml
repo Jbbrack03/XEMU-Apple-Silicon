@@ -75,10 +75,15 @@
       android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
       android:hardwareAccelerated="true"
       android:exported="false">
-      <!-- This is an in-process SDL bootstrap, not an XR presentation
-           activity. NativeActivity already owns the passthrough MR session;
-           marking this transient bootstrap vr_only made Horizon classify it as
-           a second opaque immersive app and reopen Guardian mid-launch. -->
+      <!-- SDL's Android runtime is activity-scoped.  The bootstrap must retain
+           its activity-scoped VR lifetime after NativeActivity returns to the
+           foreground; without it Horizon tears down the hidden activity and
+           SDL injects a process-wide quit.  The package-wide required
+           Boundaryless/passthrough contract above remains the supported MR
+           policy for the actual NativeActivity-owned session. -->
+      <meta-data
+        android:name="com.samsung.android.vr.application.mode"
+        android:value="vr_only" />
       <meta-data
         android:name="SDL_MAIN_LIBRARY"
         android:value="xemu" />
