@@ -75,7 +75,7 @@ typedef struct QEMU_PACKED XemuTbTraceRecord {
     uint16_t icount;
     uint8_t exit;
     uint8_t tier;
-    uint16_t reserved;
+    uint16_t host_size;
 } XemuTbTraceRecord;
 
 typedef struct QEMU_PACKED XemuTbTraceHeader {
@@ -195,7 +195,8 @@ static inline void xemu_tb_trace_record(vaddr pc, TranslationBlock *tb,
     r->icount = tb->icount;
     r->exit = tb_exit;
     r->tier = tb->tier;
-    r->reserved = 0;
+    /* Existing v1 readers treated this trailing field as reserved. */
+    r->host_size = MIN(tb->tc.size, UINT16_MAX);
     if (unlikely(xemu_tb_trace_count == xemu_tb_trace_capacity)) {
         xemu_tb_trace_finish();
     }
