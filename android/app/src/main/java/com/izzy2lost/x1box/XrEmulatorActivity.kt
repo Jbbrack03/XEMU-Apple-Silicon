@@ -1,7 +1,5 @@
 package com.izzy2lost.x1box
 
-import android.app.NativeActivity
-import android.content.Intent
 import android.os.Bundle
 
 /**
@@ -20,11 +18,7 @@ class XrEmulatorActivity : MainActivity() {
     // this activity has actually been created; doing it from the caller races
     // ahead of ActivityTaskManager and leaves the 2D SDL task on top.
     window.decorView.postDelayed({
-      startActivity(
-        Intent(this, NativeActivity::class.java).addFlags(
-          Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP,
-        ),
-      )
+      startActivity(XrNativeActivityIntent.create(this))
     }, 250L)
   }
 }

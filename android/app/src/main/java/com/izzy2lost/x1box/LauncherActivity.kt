@@ -117,7 +117,7 @@ class LauncherActivity : Activity() {
 
       if (hasMcpx && hasFlash && hasHdd) {
         DebugLog.i(TAG) { "Frontend launch resolved via ${frontendLaunch.source}" }
-        startActivity(Intent(this, android.app.NativeActivity::class.java))
+        startActivity(XrNativeActivityIntent.create(this))
         finish()
         return
       }

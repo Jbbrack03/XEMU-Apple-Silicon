@@ -261,7 +261,7 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityForRestart() {
-    startActivity(Intent(this, android.app.NativeActivity::class.java))
+    startActivity(XrNativeActivityIntent.create(this))
     finish()
   }
 
@@ -286,7 +286,7 @@ class GameLibraryActivity : AppCompatActivity() {
       .putBoolean("skip_game_picker", false)
       .commit()
 
-    startActivity(Intent(this, android.app.NativeActivity::class.java))
+    startActivity(XrNativeActivityIntent.create(this))
     finish()
   }
 
@@ -469,7 +469,7 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityWithSnapshot(slot: Int) {
-    val intent = Intent(this, android.app.NativeActivity::class.java).apply {
+    val intent = XrNativeActivityIntent.create(this).apply {
       putExtra(MainActivity.EXTRA_AUTO_LOAD_SNAPSHOT_SLOT, slot)
     }
     startActivity(intent)
@@ -1463,7 +1463,7 @@ class GameLibraryActivity : AppCompatActivity() {
       .putBoolean("skip_game_picker", false)
       .commit()
 
-    startActivity(Intent(this, android.app.NativeActivity::class.java))
+    startActivity(XrNativeActivityIntent.create(this))
     finish()
   }
 
