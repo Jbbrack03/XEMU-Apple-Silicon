@@ -805,6 +805,15 @@ static void menu_autotest_step(XrShell *s)
 
     if (enabled < 0) {
         const char *env = getenv("XEMU_MENU_AUTOTEST");
+        /* The NativeActivity session reaches its first XR frame before the
+         * SDL/xemu worker has read prefs and exported env_vars.  Do not latch
+         * a missing debug flag in that short interval: after a published
+         * emulator frame (last_seq != 0), its environment is fully applied
+         * and an absent flag can safely become the zero-work production path.
+         */
+        if ((!env || !env[0]) && !s->last_seq) {
+            return;
+        }
         enabled = (env && env[0]) ? 1 : 0;
         if (enabled && strncmp(env, "switch:", 7) == 0) {
             switch_target = env + 7;
