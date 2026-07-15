@@ -18,6 +18,9 @@
  */
 
 #include "hw/xbox/nv2a/nv2a_int.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -28,6 +31,138 @@ extern uint64_t tb_cache_stats_lookup_misses;
 #endif
 
 NV2AStats g_nv2a_stats;
+
+/*
+ * The regular Android profile block emits several log records every 60 flips.
+ * That is useful while investigating a renderer, but it is itself work on the
+ * thread that is about to begin the next guest frame.  Keep the production
+ * cadence unchanged by default, but make a measured A/B possible without a
+ * rebuild.  Zero disables the block for a diagnostic run.
+ */
+static unsigned int xemu_profile_log_every(void)
+{
+    static bool initialized;
+    static unsigned int every = 60;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_PERF_LOG_EVERY");
+        if (value && value[0]) {
+            char *end = NULL;
+            unsigned long parsed = strtoul(value, &end, 10);
+            if (end && *end == '\0' && parsed <= UINT32_MAX) {
+                every = (unsigned int)parsed;
+            }
+        }
+        initialized = true;
+    }
+
+    return every;
+}
+
+/*
+ * Optional, bounded raw flip trace.  The existing `G:` telemetry is an EWMA;
+ * a fixed in-memory trace captures exact flip intervals without per-frame I/O
+ * or logcat traffic.  Once the requested post-skip sample count is collected,
+ * write one small binary file:
+ *   u32 magic ('XQ3F'), u32 version (1), u32 skip, u32 count, u32 usec[count].
+ * This is diagnostic-only and completely inactive unless all trace env vars
+ * are supplied.  The single write happens after the measured interval.
+ */
+#define XEMU_RAW_FLIP_TRACE_MAGIC   0x46335158u /* 'XQ3F' little-endian */
+#define XEMU_RAW_FLIP_TRACE_VERSION 1u
+#define XEMU_RAW_FLIP_TRACE_MAX     32768u
+
+typedef struct XemuRawFlipTrace {
+    bool initialized;
+    bool enabled;
+    bool written;
+    unsigned int skip;
+    unsigned int wanted;
+    unsigned int seen;
+    unsigned int count;
+    char path[512];
+    uint32_t usec[XEMU_RAW_FLIP_TRACE_MAX];
+} XemuRawFlipTrace;
+
+static XemuRawFlipTrace xemu_raw_flip_trace;
+
+static unsigned int xemu_profile_env_uint(const char *name, unsigned int fallback)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    unsigned long parsed;
+
+    if (!value || !value[0]) {
+        return fallback;
+    }
+
+    parsed = strtoul(value, &end, 10);
+    if (!end || *end != '\0' || parsed > UINT32_MAX) {
+        return fallback;
+    }
+
+    return (unsigned int)parsed;
+}
+
+static void xemu_raw_flip_trace_write(XemuRawFlipTrace *trace)
+{
+    uint32_t header[4] = {
+        XEMU_RAW_FLIP_TRACE_MAGIC,
+        XEMU_RAW_FLIP_TRACE_VERSION,
+        trace->skip,
+        trace->count,
+    };
+    FILE *file = fopen(trace->path, "wb");
+
+    if (!file) {
+        trace->written = true;
+        return;
+    }
+
+    fwrite(header, sizeof(header), 1, file);
+    fwrite(trace->usec, sizeof(trace->usec[0]), trace->count, file);
+    fclose(file);
+    trace->written = true;
+}
+
+static void xemu_raw_flip_trace_record(int64_t interval_us)
+{
+    XemuRawFlipTrace *trace = &xemu_raw_flip_trace;
+
+    if (!trace->initialized) {
+        const char *path = getenv("XEMU_RAW_FLIP_TRACE");
+
+        trace->initialized = true;
+        if (!path || !path[0] || strlen(path) >= sizeof(trace->path)) {
+            return;
+        }
+
+        trace->skip = xemu_profile_env_uint("XEMU_RAW_FLIP_TRACE_SKIP", 0);
+        trace->wanted = xemu_profile_env_uint("XEMU_RAW_FLIP_TRACE_COUNT", 0);
+        if (!trace->wanted || trace->wanted > XEMU_RAW_FLIP_TRACE_MAX) {
+            return;
+        }
+
+        memcpy(trace->path, path, strlen(path) + 1);
+        trace->enabled = true;
+    }
+
+    if (!trace->enabled || trace->written) {
+        return;
+    }
+
+    trace->seen++;
+    if (trace->seen <= trace->skip) {
+        return;
+    }
+
+    trace->usec[trace->count++] = interval_us > UINT32_MAX
+                                      ? UINT32_MAX
+                                      : (uint32_t)interval_us;
+    if (trace->count == trace->wanted) {
+        xemu_raw_flip_trace_write(trace);
+    }
+}
 
 void nv2a_profile_increment(void)
 {
@@ -240,18 +375,21 @@ void nv2a_profile_flip_stall(void)
     /* Track game frame time (flip-to-flip interval) */
     static int64_t prev_flip_us;
     if (prev_flip_us) {
-        float frame_ms = (float)(now - prev_flip_us) / 1000.0f;
+        int64_t frame_us = now - prev_flip_us;
+        float frame_ms = (float)frame_us / 1000.0f;
         FramePacingStats *p = &g_nv2a_stats.pacing;
         p->game_frame_ms = p->game_frame_ms * 0.8f + frame_ms * 0.2f;
         if (frame_ms < p->game_frame_min_ms || p->game_frame_min_ms == 0)
             p->game_frame_min_ms = frame_ms;
         if (frame_ms > p->game_frame_max_ms)
             p->game_frame_max_ms = frame_ms;
+        xemu_raw_flip_trace_record(frame_us);
     }
     prev_flip_us = now;
 
 #if defined(__ANDROID__) && NV2A_PERF_LOG
-    if ((g_nv2a_stats.frame_count % 60) == 0) {
+    unsigned int log_every = xemu_profile_log_every();
+    if (log_every && (g_nv2a_stats.frame_count % log_every) == 0) {
         char buf[512];
         nv2a_profile_get_phase_timing_str(buf, sizeof(buf));
         __android_log_print(ANDROID_LOG_INFO, "hakuX-phase", "%s", buf);
