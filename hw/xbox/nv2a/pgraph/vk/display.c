@@ -150,29 +150,40 @@ static uint64_t g_xr_frame_seq;
 
 /*
  * Frame dumper (visual verification without a headset). When
- * XEMU_DUMP_FRAMES=<dir> is set, every Nth published display AHB is
+ * XEMU_DUMP_FRAMES=<dir> is set, every Nth completed display AHB is
  * CPU-locked (R8G8B8A8_UNORM) and written as a .ppm to <dir>. This is the
  * exact rendered game image — NOT the passthrough compositor view — so it
- * can validate AA and renderer changes without a wearer. N via
- * XEMU_DUMP_FRAMES_EVERY (default 120).
+ * can validate AA and renderer changes without a wearer. The Vulkan fence
+ * for the display submission is waited before the CPU lock: with a negative
+ * AHardwareBuffer_lock fence, Android requires the caller to ensure that all
+ * writes to the buffer have completed. N via XEMU_DUMP_FRAMES_EVERY
+ * (default 120).
  */
-static void xemu_dump_frame_if_requested(struct AHardwareBuffer *ahb)
+static int xemu_dump_checked;
+static const char *xemu_dump_dir;
+static int xemu_dump_every = 120;
+static uint64_t xemu_dump_frame_ctr;
+static int xemu_dump_written;
+
+static bool xemu_dump_frame_requested(void)
 {
-    static int checked;
-    static const char *dump_dir;
-    static int every = 120;
-    static uint64_t frame_ctr;
-    static int written;
-    if (!checked) {
-        checked = 1;
-        dump_dir = getenv("XEMU_DUMP_FRAMES");
+    if (!xemu_dump_checked) {
+        xemu_dump_checked = 1;
+        xemu_dump_dir = getenv("XEMU_DUMP_FRAMES");
         const char *e = getenv("XEMU_DUMP_FRAMES_EVERY");
-        if (e && e[0]) every = atoi(e) > 0 ? atoi(e) : 120;
+        if (e && e[0]) {
+            xemu_dump_every = atoi(e) > 0 ? atoi(e) : 120;
+        }
     }
-    if (!dump_dir || !ahb) {
-        return;
+    if (!xemu_dump_dir || xemu_dump_written >= 30) {
+        return false;
     }
-    if ((frame_ctr++ % (uint64_t)every) != 0 || written >= 30) {
+    return (xemu_dump_frame_ctr++ % (uint64_t)xemu_dump_every) == 0;
+}
+
+static void xemu_dump_frame(struct AHardwareBuffer *ahb)
+{
+    if (!ahb || !xemu_dump_dir || xemu_dump_written >= 30) {
         return;
     }
     AHardwareBuffer_Desc d;
@@ -183,8 +194,8 @@ static void xemu_dump_frame_if_requested(struct AHardwareBuffer *ahb)
         return;
     }
     char path[512];
-    snprintf(path, sizeof(path), "%s/frame_%04d_%ux%u.ppm", dump_dir,
-             written, d.width, d.height);
+    snprintf(path, sizeof(path), "%s/frame_%04d_%ux%u.ppm", xemu_dump_dir,
+             xemu_dump_written, d.width, d.height);
     FILE *f = fopen(path, "wb");
     if (f) {
         fprintf(f, "P6\n%u %u\n255\n", d.width, d.height);
@@ -196,7 +207,7 @@ static void xemu_dump_frame_if_requested(struct AHardwareBuffer *ahb)
             }
         }
         fclose(f);
-        written++;
+        xemu_dump_written++;
         __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                             "dumped frame %s", path);
     }
@@ -208,7 +219,6 @@ static void xemu_xr_publish_frame(struct AHardwareBuffer *ahb)
     if (!ahb) {
         return;
     }
-    xemu_dump_frame_if_requested(ahb);
     pthread_mutex_lock(&g_xr_frame_lock);
     AHardwareBuffer_acquire(ahb);
     if (g_xr_frame_ahb) {
@@ -1724,6 +1734,10 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
 
     pgraph_vk_render_thread_wait_idle(r);
 
+#ifdef __ANDROID__
+    bool dump_frame = xemu_dump_frame_requested();
+#endif
+
     vkResetFences(r->device, 1, &img->fence);
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1737,6 +1751,16 @@ static void render_display(PGRAPHState *pg, SurfaceBinding *surface)
     disp->display_idx = disp->render_idx;
     disp->render_idx = (disp->render_idx + 1) % NUM_DISPLAY_IMAGES;
 #ifdef __ANDROID__
+    if (dump_frame) {
+        /* AHardwareBuffer_lock(..., -1, ...) has no acquire fence to wait
+         * on, so do not allow its CPU read to race this Vulkan submission.
+         * This is diagnostics-only; normal XR presentation stays async. */
+        VK_CHECK(vkWaitForFences(r->device, 1, &img->fence, VK_TRUE,
+                                 UINT64_MAX));
+        __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                            "frame dump synchronized to display fence");
+        xemu_dump_frame(img->ahb);
+    }
     xemu_xr_publish_frame(img->ahb);
 #endif
 #ifdef __ANDROID__
