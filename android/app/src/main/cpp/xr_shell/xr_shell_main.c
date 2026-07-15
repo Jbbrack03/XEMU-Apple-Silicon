@@ -4,14 +4,14 @@
  * Goal of this spike (docs/openxr-shell-design.md):
  *   1. Stand up an immersive OpenXR session from a NativeActivity inside
  *      the existing app.
- *   2. Passthrough behind (XR_FB_passthrough) + one quad composition
- *      layer showing a generated test pattern.
+ *   2. Passthrough behind (XR_FB_passthrough) + one quad composition layer
+ *      populated from the emulator's exported AHardwareBuffer.
  *   3. Log whether Android gamepad KeyEvents reach the activity while
  *      immersive (the decisive input question for the full shell).
  *   4. Exercise XR_FB_display_refresh_rate + XR_EXT_performance_settings.
  *
- * Deliberately single-file and dependency-light; the emulator is NOT
- * wired in yet. Frame content: animated color bars so motion is obvious.
+ * Deliberately single-file and dependency-light. Until the emulator produces
+ * its first frame, the quad is transparent so passthrough remains visible.
  */
 
 #include <android/log.h>
@@ -115,7 +115,10 @@ typedef struct {
         GLuint tex;
     } ahb_cache[8];
     GLuint blit_prog;
+    GLint blit_tex_uniform;
     GLuint blit_vao;
+    bool bridge_fallback_logged;
+    bool bridge_ready_logged;
 
     /* 6DOF window state (task #9). Quad pose in local_space + world size. */
     XrVector3f quad_pos;
@@ -304,6 +307,7 @@ static XrVector3f q_rotate(XrQuaternionf q, XrVector3f v)
 
 static PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC p_eglGetNativeClientBufferANDROID;
 static PFNEGLCREATEIMAGEKHRPROC p_eglCreateImageKHR;
+static PFNEGLDESTROYIMAGEKHRPROC p_eglDestroyImageKHR;
 static PFNGLEGLIMAGETARGETTEXTURE2DOESPROC p_glEGLImageTargetTexture2DOES;
 
 static const char *BLIT_VS =
@@ -336,14 +340,27 @@ static GLuint compile_prog(const char *vs_src, const char *fs_src)
     GLuint vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vs_src, NULL);
     glCompileShader(vs);
+    GLint ok = 0;
+    glGetShaderiv(vs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(vs, sizeof(log), NULL, log);
+        LOGE("blit vertex shader compile failed: %s", log);
+    }
     GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fs, 1, &fs_src, NULL);
     glCompileShader(fs);
+    glGetShaderiv(fs, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        glGetShaderInfoLog(fs, sizeof(log), NULL, log);
+        LOGE("blit fragment shader compile failed: %s", log);
+    }
     GLuint prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
-    GLint ok = 0;
+    ok = 0;
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[512];
@@ -372,12 +389,27 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
     if (slot < 0) { /* ring rolled (resize); reset cache */
         for (int i = 0; i < 8; i++) {
             glDeleteTextures(1, &s->ahb_cache[i].tex);
-            /* EGLImages leak here in the spike; bounded by resizes. */
+            if (s->ahb_cache[i].image != EGL_NO_IMAGE_KHR) {
+                p_eglDestroyImageKHR(s->egl_display, s->ahb_cache[i].image);
+            }
+            if (s->ahb_cache[i].ahb) {
+                AHardwareBuffer_release(s->ahb_cache[i].ahb);
+            }
             memset(&s->ahb_cache[i], 0, sizeof(s->ahb_cache[i]));
         }
         slot = 0;
     }
+    if (!p_eglGetNativeClientBufferANDROID || !p_eglCreateImageKHR ||
+        !p_eglDestroyImageKHR || !p_glEGLImageTargetTexture2DOES) {
+        LOGE("frame bridge: required EGLImage entry point unavailable");
+        return 0;
+    }
     EGLClientBuffer cb = p_eglGetNativeClientBufferANDROID(ahb);
+    if (!cb) {
+        LOGE("frame bridge: eglGetNativeClientBufferANDROID returned NULL for %p",
+             ahb);
+        return 0;
+    }
     static const EGLint attrs[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
                                     EGL_NONE };
     EGLImageKHR img = p_eglCreateImageKHR(s->egl_display, EGL_NO_CONTEXT,
@@ -390,11 +422,29 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
     }
     GLuint tex;
     glGenTextures(1, &tex);
+    if (!tex) {
+        LOGE("frame bridge: glGenTextures returned 0 (err=0x%x)",
+             glGetError());
+        p_eglDestroyImageKHR(s->egl_display, img);
+        return 0;
+    }
     glBindTexture(GL_TEXTURE_2D, tex);
     p_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)img);
+    GLenum gl_error = glGetError();
+    if (gl_error != GL_NO_ERROR) {
+        LOGE("frame bridge: glEGLImageTargetTexture2DOES failed for %p (0x%x)",
+             ahb, gl_error);
+        glDeleteTextures(1, &tex);
+        p_eglDestroyImageKHR(s->egl_display, img);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        return 0;
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, 0);
+    /* An EGLImage does not substitute for an explicit native-buffer owner.
+     * Keep one cache reference until this imported texture is evicted. */
+    AHardwareBuffer_acquire(ahb);
     s->ahb_cache[slot].ahb = ahb;
     s->ahb_cache[slot].image = img;
     s->ahb_cache[slot].tex = tex;
@@ -905,11 +955,17 @@ static void egl_init(XrShell *s)
             "eglGetNativeClientBufferANDROID");
     p_eglCreateImageKHR =
         (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    p_eglDestroyImageKHR =
+        (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
     p_glEGLImageTargetTexture2DOES =
         (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
             "glEGLImageTargetTexture2DOES");
     s->blit_prog = compile_prog(BLIT_VS, BLIT_FS);
     s->menu_blit_prog = compile_prog(BLIT_VS, MENU_BLIT_FS);
+    s->blit_tex_uniform = glGetUniformLocation(s->blit_prog, "tex");
+    if (s->blit_tex_uniform < 0) {
+        LOGE("frame bridge: blit sampler uniform unavailable");
+    }
     glGenVertexArrays(1, &s->blit_vao);
 }
 
@@ -1326,6 +1382,10 @@ static bool xr_create_session(XrShell *s)
         glBindFramebuffer(GL_FRAMEBUFFER, s->fbos[i]);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D, s->images[i].image, 0);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            LOGE("frame bridge: quad FBO %u incomplete (0x%x)", i, status);
+        }
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     LOGI("swapchain ready: %ux%u x%u images", s->quad_w, s->quad_h,
@@ -1379,18 +1439,13 @@ static bool xr_create_session(XrShell *s)
     return true;
 }
 
-static void draw_test_pattern(XrShell *s, GLuint fbo)
+static void draw_transparent_placeholder(XrShell *s, GLuint fbo)
 {
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, s->quad_w, s->quad_h);
-    glEnable(GL_SCISSOR_TEST);
-    int bands = 8;
-    for (int i = 0; i < bands; i++) {
-        float phase = (float)((s->frame_no / 2 + i) % bands) / bands;
-        glScissor(i * s->quad_w / bands, 0, s->quad_w / bands, s->quad_h);
-        glClearColor(phase, 1.0f - phase, (i & 1) ? 1.0f : 0.2f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0, 0, 0, 0);
+    glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -1444,12 +1499,13 @@ static void xr_frame(XrShell *s)
         resolve_emulator_feed(s);
         xr_apply_thread_settings(s);
         GLuint emu_tex = 0;
+        struct AHardwareBuffer *emu_ahb = NULL;
+        uint64_t emu_seq = 0;
         if (s->acquire_ahb) {
-            uint64_t seq = 0;
-            struct AHardwareBuffer *ahb = s->acquire_ahb(&seq);
-            if (ahb) {
-                emu_tex = ahb_to_texture(s, ahb);
-                if (seq != s->last_seq) {
+            emu_ahb = s->acquire_ahb(&emu_seq);
+            if (emu_ahb) {
+                emu_tex = ahb_to_texture(s, emu_ahb);
+                if (emu_seq != s->last_seq) {
                     int64_t frame_now = now_ns();
                     if (s->adpf_last_frame_seq_ns > 0) {
                         adpf_report(s->adpf_vcpu,
@@ -1459,12 +1515,12 @@ static void xr_frame(XrShell *s)
                     }
                     s->adpf_last_frame_seq_ns = frame_now;
                 }
-                if (seq != s->last_seq && (seq % 600) == 0) {
+                if (emu_seq != s->last_seq && (emu_seq % 600) == 0) {
                     LOGI("emulator frame seq %llu",
-                         (unsigned long long)seq);
+                         (unsigned long long)emu_seq);
                 }
-                s->last_seq = seq;
-                AHardwareBuffer_release(ahb); /* cache holds its own ref via EGLImage */
+                s->last_seq = emu_seq;
+                AHardwareBuffer_release(emu_ahb); /* cache holds its own ref via EGLImage */
             }
         }
         if (emu_tex) {
@@ -1474,13 +1530,34 @@ static void xr_frame(XrShell *s)
             glUseProgram(s->blit_prog);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, emu_tex);
+            if (s->blit_tex_uniform >= 0) {
+                glUniform1i(s->blit_tex_uniform, 0);
+            }
             glBindVertexArray(s->blit_vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
+            GLenum gl_error = glGetError();
+            if (gl_error != GL_NO_ERROR) {
+                LOGE("frame bridge: blit failed (tex=%u seq=%llu err=0x%x)",
+                     emu_tex, (unsigned long long)emu_seq, gl_error);
+            }
             glBindVertexArray(0);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
         } else {
-            draw_test_pattern(s, s->fbos[idx]);
+            draw_transparent_placeholder(s, s->fbos[idx]);
+        }
+        if (!emu_tex && !s->bridge_fallback_logged) {
+            LOGI("frame bridge: feed=%s ahb=%p seq=%llu tex=%u mode=%s",
+                 s->acquire_ahb ? "ready" : "unresolved", emu_ahb,
+                 (unsigned long long)emu_seq, emu_tex,
+                 emu_tex ? "emulator" : "fallback");
+            s->bridge_fallback_logged = true;
+        } else if (emu_tex && !s->bridge_ready_logged) {
+            LOGI("frame bridge: feed=%s ahb=%p seq=%llu tex=%u mode=%s",
+                 s->acquire_ahb ? "ready" : "unresolved", emu_ahb,
+                 (unsigned long long)emu_seq, emu_tex,
+                 emu_tex ? "emulator" : "fallback");
+            s->bridge_ready_logged = true;
         }
         glFinish();
         XrSwapchainImageReleaseInfo ri = {
