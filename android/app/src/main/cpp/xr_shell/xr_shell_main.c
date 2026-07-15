@@ -1216,7 +1216,7 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
     }
 }
 
-static void xr_create_session(XrShell *s)
+static bool xr_create_session(XrShell *s)
 {
     /* GLES requirements query is mandatory before session creation. */
     PFN_xrGetOpenGLESGraphicsRequirementsKHR get_reqs = NULL;
@@ -1270,12 +1270,21 @@ static void xr_create_session(XrShell *s)
                 .purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB,
             };
             if (XR_SUCCEEDED(create_ptl(s->session, &plci,
-                                        &s->passthrough_layer))) {
-                start_pt(s->passthrough);
+                                        &s->passthrough_layer)) &&
+                XR_SUCCEEDED(start_pt(s->passthrough))) {
                 s->have_passthrough = true;
                 LOGI("passthrough ready");
             }
         }
+    }
+
+    /* The package declares BOUNDARYLESS_APP, which Meta permits only for a
+     * passthrough MR experience. Never present the old opaque fallback: it
+     * would both violate that contract and leave the user without the real
+     * world behind the resizable emulator window. */
+    if (!s->have_passthrough) {
+        LOGE("passthrough required for boundaryless MR; refusing opaque XR session");
+        return false;
     }
 
     /* Quad swapchain (matches Xbox 2x-scaled output for later reuse) */
@@ -1358,6 +1367,7 @@ static void xr_create_session(XrShell *s)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     LOGI("menu swapchain ready: %ux%u x%u images", s->menu_w, s->menu_h,
          s->menu_swapchain_len);
+    return true;
 }
 
 static void draw_test_pattern(XrShell *s, GLuint fbo)
@@ -1816,7 +1826,11 @@ void android_main(struct android_app *app)
     LOGI("xr_shell spike starting");
     egl_init(&shell);
     xr_create_instance(&shell);
-    xr_create_session(&shell);
+    if (!xr_create_session(&shell)) {
+        LOGE("xr_shell exiting: required passthrough setup failed");
+        ANativeActivity_finish(app->activity);
+        return;
+    }
 
     while (!app->destroyRequested) {
         int events;

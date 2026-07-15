@@ -9,7 +9,14 @@
     android:version="1"
     android:required="true" />
   <uses-feature android:name="oculus.software.handtracking" android:required="false" />
-  <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+  <!-- The XR shell is a 6DOF passthrough MR window, never an opaque immersive
+       experience.  Horizon OS uses this declaration to suppress Guardian for
+       the complete MR session.  The native shell fails closed if the runtime
+       cannot actually create its passthrough layer. -->
+  <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
+  <uses-feature
+    android:name="com.oculus.feature.BOUNDARYLESS_APP"
+    android:required="true" />
 
   <application
     android:label="@string/app_name"
@@ -68,10 +75,10 @@
       android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
       android:hardwareAccelerated="true"
       android:exported="false">
-
-      <meta-data
-        android:name="com.samsung.android.vr.application.mode"
-        android:value="vr_only" />
+      <!-- This is an in-process SDL bootstrap, not an XR presentation
+           activity. NativeActivity already owns the passthrough MR session;
+           marking this transient bootstrap vr_only made Horizon classify it as
+           a second opaque immersive app and reopen Guardian mid-launch. -->
       <meta-data
         android:name="SDL_MAIN_LIBRARY"
         android:value="xemu" />
