@@ -93,6 +93,9 @@ static uint64_t xemu_tb_trace_count;
 static uint64_t xemu_tb_trace_capacity;
 static XemuTbTraceRecord *xemu_tb_trace_records;
 static char *xemu_tb_trace_path;
+static char *xemu_tb_trace_guest_dump_path;
+static vaddr xemu_tb_trace_guest_dump_addr;
+static size_t xemu_tb_trace_guest_dump_size = 4096;
 
 static int xemu_vcpu_thread_id;
 
@@ -105,6 +108,9 @@ __attribute__((visibility("default"))) int xemu_get_vcpu_thread_id(void)
 
 static void xemu_tb_trace_init(void)
 {
+    const char *guest_dump;
+    const char *guest_addr;
+    const char *guest_size;
     const char *path = getenv("XEMU_TB_TRACE");
     if (!path || !path[0]) {
         xemu_tb_trace_state = 2;
@@ -134,6 +140,27 @@ static void xemu_tb_trace_init(void)
     }
 
     xemu_tb_trace_path = g_strdup(path);
+    guest_dump = getenv("XEMU_TB_TRACE_GUEST_DUMP");
+    guest_addr = getenv("XEMU_TB_TRACE_GUEST_ADDR");
+    guest_size = getenv("XEMU_TB_TRACE_GUEST_SIZE");
+    if (guest_dump && guest_dump[0] && guest_addr && guest_addr[0]) {
+        char *end = NULL;
+        uint64_t addr = g_ascii_strtoull(guest_addr, &end, 0);
+        if (end && *end == '\0') {
+            xemu_tb_trace_guest_dump_path = g_strdup(guest_dump);
+            xemu_tb_trace_guest_dump_addr = addr;
+            if (guest_size && guest_size[0]) {
+                uint64_t size;
+
+                end = NULL;
+                size = g_ascii_strtoull(guest_size, &end, 0);
+                if (end && *end == '\0') {
+                    xemu_tb_trace_guest_dump_size = (size_t)
+                        MIN(MAX(size, UINT64_C(4096)), UINT64_C(4194304));
+                }
+            }
+        }
+    }
     xemu_tb_trace_capacity = capacity;
     xemu_tb_trace_deadline_ms =
         qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + delay_ms;
@@ -183,7 +210,41 @@ static void xemu_tb_trace_finish(void)
     xemu_tb_trace_state = 2;
 }
 
-static inline void xemu_tb_trace_record(vaddr pc, TranslationBlock *tb,
+static void xemu_tb_trace_dump_guest(CPUState *cpu)
+{
+    uint8_t *data;
+    FILE *f;
+    bool ok;
+
+    if (!xemu_tb_trace_guest_dump_path) {
+        return;
+    }
+    data = g_try_malloc(xemu_tb_trace_guest_dump_size);
+    if (!data) {
+        error_report("tb-trace: guest dump allocation failed");
+        return;
+    }
+    if (cpu_memory_rw_debug(cpu, xemu_tb_trace_guest_dump_addr, data,
+                            xemu_tb_trace_guest_dump_size, false) != 0) {
+        error_report("tb-trace: guest dump read failed at 0x%" PRIx64,
+                     (uint64_t)xemu_tb_trace_guest_dump_addr);
+        g_free(data);
+        return;
+    }
+
+    f = fopen(xemu_tb_trace_guest_dump_path, "wb");
+    ok = f && fwrite(data, xemu_tb_trace_guest_dump_size, 1, f) == 1;
+    if (f) {
+        ok = fclose(f) == 0 && ok;
+    }
+    error_report("tb-trace: guest dump 0x%" PRIx64 " to %s (%s)",
+                 (uint64_t)xemu_tb_trace_guest_dump_addr,
+                 xemu_tb_trace_guest_dump_path, ok ? "ok" : "FAILED");
+    g_free(data);
+}
+
+static inline void xemu_tb_trace_record(CPUState *cpu, vaddr pc,
+                                        TranslationBlock *tb,
                                         int tb_exit)
 {
     XemuTbTraceRecord *r = &xemu_tb_trace_records[xemu_tb_trace_count++];
@@ -198,6 +259,7 @@ static inline void xemu_tb_trace_record(vaddr pc, TranslationBlock *tb,
     /* Existing v1 readers treated this trailing field as reserved. */
     r->host_size = MIN(tb->tc.size, UINT16_MAX);
     if (unlikely(xemu_tb_trace_count == xemu_tb_trace_capacity)) {
+        xemu_tb_trace_dump_guest(cpu);
         xemu_tb_trace_finish();
     }
 }
@@ -1716,7 +1778,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
 #ifdef XBOX
             if (unlikely(tb_trace_this)) {
-                xemu_tb_trace_record(s.pc, tb, tb_exit);
+                xemu_tb_trace_record(cpu, s.pc, tb, tb_exit);
                 last_tb = NULL;
             }
             /*
