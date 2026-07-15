@@ -86,6 +86,39 @@ typedef struct QEMU_PACKED XemuTbTraceHeader {
     uint64_t reserved;
 } XemuTbTraceHeader;
 
+/*
+ * Optional sidecar for an offline translation-quality oracle.
+ *
+ * The compact XQ3TBTR1 stream deliberately contains just enough data for
+ * control-flow analysis.  It does not retain cs_base or immutable guest code
+ * bytes, so it cannot by itself reproduce a TCG translation.  When explicitly
+ * requested, retain one deduplicated code snapshot for every executed TB
+ * identity/version.  This is diagnostic-only and intentionally bounded; it is
+ * never consulted by normal emulation.
+ */
+typedef struct QEMU_PACKED XemuTbTraceSnapshotHeader {
+    char magic[8];              /* XQ3TBS1 */
+    uint32_t header_size;
+    uint32_t record_size;
+    uint64_t record_count;
+    uint64_t code_capacity;
+} XemuTbTraceSnapshotHeader;
+
+typedef struct QEMU_PACKED XemuTbTraceSnapshot {
+    uint64_t pc;
+    uint64_t phys_pc;
+    uint64_t cs_base;
+    uint64_t ihash;
+    uint32_t flags;
+    uint32_t trace_cflags;
+    uint32_t normal_cflags;
+    uint16_t guest_size;
+    uint16_t guest_icount;
+    uint16_t host_size;
+    uint16_t code_len;
+    uint8_t code[TARGET_PAGE_SIZE];
+} XemuTbTraceSnapshot;
+
 static int xemu_tb_trace_state = -1; /* -1 unknown, 0 waiting, 1 active, 2 done */
 static int64_t xemu_tb_trace_deadline_ms;
 static uint64_t xemu_tb_trace_poll;
@@ -96,8 +129,17 @@ static char *xemu_tb_trace_path;
 static char *xemu_tb_trace_guest_dump_path;
 static vaddr xemu_tb_trace_guest_dump_addr;
 static size_t xemu_tb_trace_guest_dump_size = 4096;
+static char *xemu_tb_trace_snapshot_path;
+static uint64_t xemu_tb_trace_snapshot_capacity;
+static uint64_t xemu_tb_trace_snapshot_skipped;
+static GPtrArray *xemu_tb_trace_snapshots;
+static GHashTable *xemu_tb_trace_snapshot_index;
 
 static int xemu_vcpu_thread_id;
+
+static guint xemu_tb_trace_snapshot_hash(gconstpointer opaque);
+static gboolean xemu_tb_trace_snapshot_equal(gconstpointer a,
+                                              gconstpointer b);
 
 /* Read by the OpenXR shell through dlsym so it can identify the latency-
  * critical emulator thread to XR_KHR_android_thread_settings. */
@@ -111,6 +153,8 @@ static void xemu_tb_trace_init(void)
     const char *guest_dump;
     const char *guest_addr;
     const char *guest_size;
+    const char *snapshot;
+    const char *snapshot_max;
     const char *path = getenv("XEMU_TB_TRACE");
     if (!path || !path[0]) {
         xemu_tb_trace_state = 2;
@@ -161,6 +205,30 @@ static void xemu_tb_trace_init(void)
             }
         }
     }
+
+    snapshot = getenv("XEMU_TB_TRACE_SNAPSHOT");
+    if (snapshot && snapshot[0]) {
+        uint64_t capacity = 16384;
+
+        snapshot_max = getenv("XEMU_TB_TRACE_SNAPSHOT_MAX");
+        if (snapshot_max && snapshot_max[0]) {
+            capacity = g_ascii_strtoull(snapshot_max, NULL, 10);
+        }
+        xemu_tb_trace_snapshot_capacity =
+            MAX(UINT64_C(1), MIN(capacity, UINT64_C(65536)));
+        xemu_tb_trace_snapshot_path = g_strdup(snapshot);
+        xemu_tb_trace_snapshots = g_ptr_array_new_with_free_func(g_free);
+        xemu_tb_trace_snapshot_index =
+            g_hash_table_new(xemu_tb_trace_snapshot_hash,
+                             xemu_tb_trace_snapshot_equal);
+        if (!xemu_tb_trace_snapshots || !xemu_tb_trace_snapshot_index) {
+            error_report("tb-trace: snapshot allocation failed");
+            g_clear_pointer(&xemu_tb_trace_snapshots, g_ptr_array_unref);
+            g_clear_pointer(&xemu_tb_trace_snapshot_index,
+                            g_hash_table_unref);
+            g_clear_pointer(&xemu_tb_trace_snapshot_path, g_free);
+        }
+    }
     xemu_tb_trace_capacity = capacity;
     xemu_tb_trace_deadline_ms =
         qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + delay_ms;
@@ -168,6 +236,128 @@ static void xemu_tb_trace_init(void)
     error_report("tb-trace: %s, max=%lu path=%s",
                  delay_ms ? "armed" : "active",
                  (unsigned long)capacity, path);
+}
+
+static guint xemu_tb_trace_snapshot_hash(gconstpointer opaque)
+{
+    const XemuTbTraceSnapshot *s = opaque;
+    uint64_t mix = s->pc ^ s->phys_pc ^ s->cs_base ^ s->ihash;
+
+    mix ^= ((uint64_t)s->flags << 32) | s->normal_cflags;
+    mix ^= ((uint64_t)s->guest_size << 16) | s->guest_icount;
+    return (guint)(mix ^ (mix >> 32));
+}
+
+static gboolean xemu_tb_trace_snapshot_equal(gconstpointer a,
+                                              gconstpointer b)
+{
+    const XemuTbTraceSnapshot *left = a;
+    const XemuTbTraceSnapshot *right = b;
+
+    return left->pc == right->pc &&
+           left->phys_pc == right->phys_pc &&
+           left->cs_base == right->cs_base &&
+           left->ihash == right->ihash &&
+           left->flags == right->flags &&
+           left->normal_cflags == right->normal_cflags &&
+           left->guest_size == right->guest_size &&
+           left->guest_icount == right->guest_icount;
+}
+
+static void xemu_tb_trace_snapshot(CPUState *cpu, vaddr pc,
+                                   TranslationBlock *tb)
+{
+    XemuTbTraceSnapshot *snapshot;
+
+    if (!xemu_tb_trace_snapshot_path || !xemu_tb_trace_snapshots ||
+        !xemu_tb_trace_snapshot_index) {
+        return;
+    }
+    if (xemu_tb_trace_snapshots->len >= xemu_tb_trace_snapshot_capacity) {
+        xemu_tb_trace_snapshot_skipped++;
+        return;
+    }
+    if (tb->size == 0 || tb->size > TARGET_PAGE_SIZE) {
+        xemu_tb_trace_snapshot_skipped++;
+        return;
+    }
+
+    snapshot = g_try_malloc0(sizeof(*snapshot));
+    if (!snapshot) {
+        xemu_tb_trace_snapshot_skipped++;
+        return;
+    }
+    snapshot->pc = pc;
+    snapshot->phys_pc = tb_page_addr0(tb);
+    snapshot->cs_base = tb->cs_base;
+    snapshot->ihash = tb->ihash;
+    snapshot->flags = tb->flags;
+    snapshot->trace_cflags = tb->cflags;
+    /* Trace mode forces these two flags; omit them for a production replay. */
+    snapshot->normal_cflags = tb->cflags &
+        ~(CF_NO_GOTO_TB | CF_NO_GOTO_PTR | CF_INVALID |
+          CF_TIER1 | CF_SUPERBLOCK);
+    snapshot->guest_size = tb->size;
+    snapshot->guest_icount = tb->icount;
+    snapshot->host_size = MIN(tb->tc.size, UINT16_MAX);
+    snapshot->code_len = tb->size;
+
+    if (g_hash_table_contains(xemu_tb_trace_snapshot_index, snapshot)) {
+        g_free(snapshot);
+        return;
+    }
+    /*
+     * Capture while this validated TB is executing.  Xbox page-wide code
+     * invalidation means a write to this code page has already discarded the
+     * TB, so these bytes correspond to the current version identified by
+     * ihash.  cpu_memory_rw_debug also handles the rare virtual page crossing.
+     */
+    if (cpu_memory_rw_debug(cpu, pc, snapshot->code, snapshot->code_len,
+                            false) != 0) {
+        xemu_tb_trace_snapshot_skipped++;
+        g_free(snapshot);
+        return;
+    }
+    g_hash_table_add(xemu_tb_trace_snapshot_index, snapshot);
+    g_ptr_array_add(xemu_tb_trace_snapshots, snapshot);
+}
+
+static void xemu_tb_trace_snapshot_finish(void)
+{
+    XemuTbTraceSnapshotHeader header = {
+        .magic = { 'X', 'Q', '3', 'T', 'B', 'S', '1', '\0' },
+        .header_size = sizeof(XemuTbTraceSnapshotHeader),
+        .record_size = sizeof(XemuTbTraceSnapshot),
+        .record_count = xemu_tb_trace_snapshots ?
+                        xemu_tb_trace_snapshots->len : 0,
+        .code_capacity = TARGET_PAGE_SIZE,
+    };
+    FILE *f;
+    bool ok = true;
+
+    if (!xemu_tb_trace_snapshot_path) {
+        return;
+    }
+    f = fopen(xemu_tb_trace_snapshot_path, "wb");
+    if (!f || fwrite(&header, sizeof(header), 1, f) != 1) {
+        ok = false;
+    }
+    for (guint i = 0; ok && xemu_tb_trace_snapshots &&
+                     i < xemu_tb_trace_snapshots->len; i++) {
+        const XemuTbTraceSnapshot *snapshot =
+            g_ptr_array_index(xemu_tb_trace_snapshots, i);
+        ok = fwrite(snapshot, sizeof(*snapshot), 1, f) == 1;
+    }
+    if (f) {
+        ok = fclose(f) == 0 && ok;
+    }
+    error_report("tb-trace: wrote %u snapshots to %s (%s, skipped=%lu)",
+                 xemu_tb_trace_snapshots ? xemu_tb_trace_snapshots->len : 0,
+                 xemu_tb_trace_snapshot_path, ok ? "ok" : "FAILED",
+                 (unsigned long)xemu_tb_trace_snapshot_skipped);
+    g_clear_pointer(&xemu_tb_trace_snapshot_index, g_hash_table_unref);
+    g_clear_pointer(&xemu_tb_trace_snapshots, g_ptr_array_unref);
+    g_clear_pointer(&xemu_tb_trace_snapshot_path, g_free);
 }
 
 static bool xemu_tb_trace_active(void)
@@ -206,6 +396,7 @@ static void xemu_tb_trace_finish(void)
     error_report("tb-trace: wrote %lu records to %s (%s)",
                  (unsigned long)xemu_tb_trace_count, xemu_tb_trace_path,
                  ok ? "ok" : "FAILED");
+    xemu_tb_trace_snapshot_finish();
     g_clear_pointer(&xemu_tb_trace_records, g_free);
     xemu_tb_trace_state = 2;
 }
@@ -258,6 +449,7 @@ static inline void xemu_tb_trace_record(CPUState *cpu, vaddr pc,
     r->tier = tb->tier;
     /* Existing v1 readers treated this trailing field as reserved. */
     r->host_size = MIN(tb->tc.size, UINT16_MAX);
+    xemu_tb_trace_snapshot(cpu, pc, tb);
     if (unlikely(xemu_tb_trace_count == xemu_tb_trace_capacity)) {
         xemu_tb_trace_dump_guest(cpu);
         xemu_tb_trace_finish();
