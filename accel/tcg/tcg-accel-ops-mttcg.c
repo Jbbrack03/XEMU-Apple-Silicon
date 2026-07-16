@@ -36,34 +36,10 @@
 #include "tcg-accel-ops.h"
 #include "tcg-accel-ops-mttcg.h"
 
-#if defined(__ANDROID__) && defined(XBOX)
-#include <sys/syscall.h>
-#endif
-
 typedef struct MttcgForceRcuNotifier {
     Notifier notifier;
     CPUState *cpu;
 } MttcgForceRcuNotifier;
-
-/*
- * Diagnostic-only Quest worker partition.  The normal scheduler is the
- * production policy.  When explicitly enabled, keep the serial Xbox vCPU on
- * one content core while PFIFO/APU use the other; this tests whether the
- * observed high worker migration rate is creating cross-title frame tails.
- */
-static void mttcg_apply_android_worker_partition(CPUState *cpu)
-{
-#if defined(__ANDROID__) && defined(XBOX)
-    const char *env = getenv("XEMU_ANDROID_WORKER_PARTITION");
-
-    if (cpu->cpu_index == 0 && env && env[0] && strcmp(env, "0") != 0) {
-        unsigned long mask = 1UL << 4;
-        long rc = syscall(SYS_sched_setaffinity, 0, sizeof(mask), &mask);
-
-        error_report("Android worker partition: vCPU cpu=4 rc=%ld", rc);
-    }
-#endif
-}
 
 static void do_nothing(CPUState *cpu, run_on_cpu_data d)
 {
@@ -104,7 +80,6 @@ static void *mttcg_cpu_thread_fn(void *arg)
     qemu_thread_get_self(cpu->thread);
 
     cpu->thread_id = qemu_get_thread_id();
-    mttcg_apply_android_worker_partition(cpu);
     cpu->neg.can_do_io = true;
     current_cpu = cpu;
     cpu_thread_signal_created(cpu);
