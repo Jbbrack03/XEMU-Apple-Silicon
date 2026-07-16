@@ -54,6 +54,24 @@ static bool batch_overlap_downloads_enabled(void)
     return enabled;
 }
 
+static bool direct_incompatible_surface_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_GPU_VRAM_INCOMPAT");
+#ifdef __ANDROID__
+        enabled = true;
+#endif
+        if (value && value[0]) {
+            enabled = strcmp(value, "0") != 0;
+        }
+        initialized = true;
+    }
+    return enabled;
+}
+
 static bool g_surface_addr_map_missing_logged;
 
 static GHashTable *surface_addr_map_get(PGRAPHVkState *r, const char *op,
@@ -3430,7 +3448,23 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 trace_nv2a_pgraph_surface_evict_reason(
                     "incompatible", surface->vram_addr);
                 compare_surfaces(surface, &target);
-                if (surface->draw_dirty) {
+                /* The new alias must be able to consume the entire target
+                 * from the imported buffer. Otherwise its legacy upload
+                 * would read the CPU pointer before this queued download
+                 * completes. */
+                bool direct_invalidated =
+                    surface->draw_dirty &&
+                    direct_incompatible_surface_enabled() &&
+                    guest_vram_surface_eligible(d, &target) &&
+                    (size_t)surface->pitch * surface->height >=
+                        (size_t)target.pitch * target.height &&
+                    download_surface_to_guest_vram(d, surface);
+                if (direct_invalidated) {
+                    invalidate_surface(d, surface);
+                    if (r->in_command_buffer) {
+                        surface->invalidation_frame = r->current_frame;
+                    }
+                } else if (surface->draw_dirty) {
                     if (r->in_command_buffer) {
                         OPT_STAT_INC(sd_eviction);
                         pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
@@ -3466,7 +3500,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                         d->vram, surface->vram_addr, region,
                         DIRTY_MEMORY_VGA);
                 }
-                shelve_surface(d, surface);
+                if (!direct_invalidated) {
+                    shelve_surface(d, surface);
+                }
                 g_nv2a_stats.surf_working.lk_evict_ns += nv2a_clock_ns() - _gt1;
                 g_nv2a_stats.surf_working.evict_count++;
             }
