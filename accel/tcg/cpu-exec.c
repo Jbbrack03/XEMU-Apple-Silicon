@@ -1125,6 +1125,24 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
     return tb_htable_lookup_common(cpu, s, &tb_ctx.htable, tb_lookup_cmp);
 }
 
+static inline bool tb_jmp_cache_state_matches(const TranslationBlock *tb,
+                                              const TCGTBCPUState *s)
+{
+    uint64_t tb_flags_cflags;
+    uint64_t state_flags_cflags;
+
+    QEMU_BUILD_BUG_ON(offsetof(TranslationBlock, cflags) !=
+                      offsetof(TranslationBlock, flags) + sizeof(tb->flags));
+    QEMU_BUILD_BUG_ON(offsetof(TCGTBCPUState, cflags) !=
+                      offsetof(TCGTBCPUState, flags) + sizeof(s->flags));
+
+    memcpy(&tb_flags_cflags, &tb->flags, sizeof(tb_flags_cflags));
+    memcpy(&state_flags_cflags, &s->flags, sizeof(state_flags_cflags));
+
+    return tb->cs_base == s->cs_base &&
+           tb_flags_cflags == state_flags_cflags;
+}
+
 static bool inv_tb_lookup_cmp(const void *p, const void *d)
 {
     const TranslationBlock *tb = p;
@@ -1168,9 +1186,7 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     tb = qatomic_read(&jc->array[hash].tb);
     if (likely(tb &&
                jc->array[hash].pc == s.pc &&
-               tb->cs_base == s.cs_base &&
-               tb->flags == s.flags &&
-               tb_cflags(tb) == s.cflags)) {
+               tb_jmp_cache_state_matches(tb, &s))) {
         goto hit;
     }
 
