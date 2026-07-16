@@ -13,6 +13,13 @@
 #include "exec/cpu-common.h"
 
 #define TB_JMP_CACHE_BITS 12
+#define TB_JMP_CACHE_DEFAULT_PAGE_BITS (TB_JMP_CACHE_BITS / 2)
+#define TB_JMP_CACHE_DEFAULT_PAGE_SIZE \
+    (1u << TB_JMP_CACHE_DEFAULT_PAGE_BITS)
+#define TB_JMP_CACHE_DEFAULT_ADDR_MASK \
+    (TB_JMP_CACHE_DEFAULT_PAGE_SIZE - 1)
+#define TB_JMP_CACHE_DEFAULT_PAGE_MASK \
+    ((1u << TB_JMP_CACHE_BITS) - TB_JMP_CACHE_DEFAULT_PAGE_SIZE)
 
 /*
  * Runtime-sized jump cache (XEMU_JMP_CACHE_BITS, default
@@ -29,6 +36,7 @@ typedef struct XemuJmpCacheGeom {
     unsigned page_size;  /* 1 << page_bits */
     unsigned addr_mask;  /* page_size - 1 */
     unsigned page_mask;  /* size - page_size */
+    bool fixed_default_hash; /* compile-time hash for default geometry */
 } XemuJmpCacheGeom;
 extern XemuJmpCacheGeom xemu_jc_geom;
 

@@ -37,6 +37,14 @@
 
 static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
 {
+    if (likely(xemu_jc_geom.fixed_default_hash)) {
+        const unsigned shift =
+            TARGET_PAGE_BITS - TB_JMP_CACHE_DEFAULT_PAGE_BITS;
+        vaddr tmp = pc ^ (pc >> shift);
+
+        return (tmp >> shift) & TB_JMP_CACHE_DEFAULT_PAGE_MASK;
+    }
+
     unsigned shift = TARGET_PAGE_BITS - xemu_jc_geom.page_bits;
     vaddr tmp = pc ^ (pc >> shift);
     return (tmp >> shift) & xemu_jc_geom.page_mask;
@@ -44,6 +52,15 @@ static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
 
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 {
+    if (likely(xemu_jc_geom.fixed_default_hash)) {
+        const unsigned shift =
+            TARGET_PAGE_BITS - TB_JMP_CACHE_DEFAULT_PAGE_BITS;
+        vaddr tmp = pc ^ (pc >> shift);
+
+        return (((tmp >> shift) & TB_JMP_CACHE_DEFAULT_PAGE_MASK) |
+                (tmp & TB_JMP_CACHE_DEFAULT_ADDR_MASK));
+    }
+
     unsigned shift = TARGET_PAGE_BITS - xemu_jc_geom.page_bits;
     vaddr tmp = pc ^ (pc >> shift);
     return (((tmp >> shift) & xemu_jc_geom.page_mask)
@@ -55,6 +72,11 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 /* In user-mode we can get better hashing because we do not have a TLB */
 static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 {
+    if (likely(xemu_jc_geom.fixed_default_hash)) {
+        return (pc ^ (pc >> TB_JMP_CACHE_BITS)) &
+               ((1u << TB_JMP_CACHE_BITS) - 1);
+    }
+
     return (pc ^ (pc >> xemu_jc_geom.bits)) & (TB_JMP_CACHE_SIZE - 1);
 }
 

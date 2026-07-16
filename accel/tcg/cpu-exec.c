@@ -2111,6 +2111,7 @@ XemuJmpCacheGeom xemu_jc_geom = {
     .page_size = 1u << (TB_JMP_CACHE_BITS / 2),
     .addr_mask = (1u << (TB_JMP_CACHE_BITS / 2)) - 1,
     .page_mask = (1u << TB_JMP_CACHE_BITS) - (1u << (TB_JMP_CACHE_BITS / 2)),
+    .fixed_default_hash = true,
 };
 
 static void xemu_jc_geom_latch(void)
@@ -2118,6 +2119,7 @@ static void xemu_jc_geom_latch(void)
     static bool latched;
     unsigned bits = TB_JMP_CACHE_BITS;
     const char *env;
+    const char *fixed_hash_env;
 
     if (latched) {
         return;
@@ -2137,6 +2139,10 @@ static void xemu_jc_geom_latch(void)
     xemu_jc_geom.page_size = 1u << (bits / 2);
     xemu_jc_geom.addr_mask = (1u << (bits / 2)) - 1;
     xemu_jc_geom.page_mask = (1u << bits) - (1u << (bits / 2));
+    fixed_hash_env = getenv("XEMU_JMP_CACHE_CONST_HASH");
+    xemu_jc_geom.fixed_default_hash =
+        bits == TB_JMP_CACHE_BITS &&
+        !(fixed_hash_env && strcmp(fixed_hash_env, "0") == 0);
     if (bits != TB_JMP_CACHE_BITS) {
         qemu_printf("jmp-cache: %u bits (%u entries)\n", bits,
                     xemu_jc_geom.size);
