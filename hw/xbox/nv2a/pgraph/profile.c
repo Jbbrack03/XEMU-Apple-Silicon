@@ -72,6 +72,21 @@ static unsigned int xemu_profile_log_every(void)
 #define XEMU_RAW_FLIP_TRACE_VERSION 1u
 #define XEMU_RAW_FLIP_TRACE_MAX     32768u
 
+/*
+ * Optional companion to the raw flip trace.  It captures the exact work
+ * accumulated between two guest flips, rather than the EWMA published to
+ * logcat.  The buffer is allocated only when explicitly requested, records
+ * no per-frame I/O, and is released after its one bounded write:
+ *   u32 magic ('XQ3P'), u32 version (1), u32 skip, u32 count,
+ *   u32 record_size, XemuRawFrameTraceSample[count].
+ *
+ * This is deliberately a separate artifact so the existing XQ3F trace
+ * remains byte-stable for driver comparisons.
+ */
+#define XEMU_RAW_FRAME_TRACE_MAGIC   0x50335158u /* 'XQ3P' little-endian */
+#define XEMU_RAW_FRAME_TRACE_VERSION 1u
+#define XEMU_RAW_FRAME_TRACE_MAX     32768u
+
 typedef struct XemuRawFlipTrace {
     bool initialized;
     bool enabled;
@@ -85,6 +100,40 @@ typedef struct XemuRawFlipTrace {
 } XemuRawFlipTrace;
 
 static XemuRawFlipTrace xemu_raw_flip_trace;
+
+typedef struct XemuRawFrameTraceSample {
+    uint32_t interval_us;
+    uint32_t surface_update_us;
+    uint32_t texture_upload_us;
+    uint32_t shader_compile_us;
+    uint32_t draw_dispatch_us;
+    uint32_t finish_us;
+    uint32_t flip_idle_us;
+    uint32_t fifo_idle_us;
+    uint32_t gpu_total_us;
+    uint32_t gpu_render_us;
+    uint32_t gpu_nonrender_us;
+    uint32_t pusher_run_us;
+    uint32_t lock_wait_us;
+    uint32_t pusher_words;
+    uint32_t method_count;
+    uint32_t kick_count;
+    uint32_t gpu_rp_count;
+} XemuRawFrameTraceSample;
+
+typedef struct XemuRawFrameTrace {
+    bool initialized;
+    bool enabled;
+    bool written;
+    unsigned int skip;
+    unsigned int wanted;
+    unsigned int seen;
+    unsigned int count;
+    char path[512];
+    XemuRawFrameTraceSample *samples;
+} XemuRawFrameTrace;
+
+static XemuRawFrameTrace xemu_raw_frame_trace;
 
 static unsigned int xemu_profile_env_uint(const char *name, unsigned int fallback)
 {
@@ -161,6 +210,100 @@ static void xemu_raw_flip_trace_record(int64_t interval_us)
                                       : (uint32_t)interval_us;
     if (trace->count == trace->wanted) {
         xemu_raw_flip_trace_write(trace);
+    }
+}
+
+static uint32_t xemu_profile_ns_to_us(int64_t ns)
+{
+    if (ns <= 0) {
+        return 0;
+    }
+    if ((uint64_t)ns >= (uint64_t)UINT32_MAX * 1000u) {
+        return UINT32_MAX;
+    }
+    return (uint32_t)(ns / 1000);
+}
+
+static void xemu_raw_frame_trace_write(XemuRawFrameTrace *trace)
+{
+    uint32_t header[5] = {
+        XEMU_RAW_FRAME_TRACE_MAGIC,
+        XEMU_RAW_FRAME_TRACE_VERSION,
+        trace->skip,
+        trace->count,
+        sizeof(*trace->samples),
+    };
+    FILE *file = fopen(trace->path, "wb");
+
+    if (file) {
+        fwrite(header, sizeof(header), 1, file);
+        fwrite(trace->samples, sizeof(*trace->samples), trace->count, file);
+        fclose(file);
+    }
+    free(trace->samples);
+    trace->samples = NULL;
+    trace->written = true;
+}
+
+static void xemu_raw_frame_trace_record(int64_t interval_us,
+                                        const FramePhaseTimingWork *phase,
+                                        const CpuTimingWork *cpu)
+{
+    XemuRawFrameTrace *trace = &xemu_raw_frame_trace;
+
+    if (!trace->initialized) {
+        const char *path = getenv("XEMU_RAW_FRAME_TRACE");
+
+        trace->initialized = true;
+        if (!path || !path[0] || strlen(path) >= sizeof(trace->path)) {
+            return;
+        }
+
+        trace->skip = xemu_profile_env_uint("XEMU_RAW_FRAME_TRACE_SKIP", 0);
+        trace->wanted = xemu_profile_env_uint("XEMU_RAW_FRAME_TRACE_COUNT", 0);
+        if (!trace->wanted || trace->wanted > XEMU_RAW_FRAME_TRACE_MAX) {
+            return;
+        }
+
+        trace->samples = calloc(trace->wanted, sizeof(*trace->samples));
+        if (!trace->samples) {
+            return;
+        }
+
+        memcpy(trace->path, path, strlen(path) + 1);
+        trace->enabled = true;
+    }
+
+    if (!trace->enabled || trace->written) {
+        return;
+    }
+
+    trace->seen++;
+    if (trace->seen <= trace->skip) {
+        return;
+    }
+
+    trace->samples[trace->count++] = (XemuRawFrameTraceSample) {
+        .interval_us = interval_us > UINT32_MAX ? UINT32_MAX : interval_us,
+        .surface_update_us = xemu_profile_ns_to_us(phase->surface_update_ns),
+        .texture_upload_us = xemu_profile_ns_to_us(phase->texture_upload_ns),
+        .shader_compile_us = xemu_profile_ns_to_us(phase->shader_compile_ns),
+        .draw_dispatch_us = xemu_profile_ns_to_us(phase->draw_dispatch_ns),
+        .finish_us = xemu_profile_ns_to_us(phase->finish_ns),
+        .flip_idle_us = xemu_profile_ns_to_us(phase->flip_idle_ns),
+        .fifo_idle_us = xemu_profile_ns_to_us(phase->fifo_idle_ns),
+        .gpu_total_us = xemu_profile_ns_to_us(phase->gpu_total_ns),
+        .gpu_render_us = xemu_profile_ns_to_us(phase->gpu_render_ns),
+        .gpu_nonrender_us = xemu_profile_ns_to_us(phase->gpu_nonrender_ns),
+        .pusher_run_us = xemu_profile_ns_to_us(cpu->pusher_run_ns),
+        .lock_wait_us = xemu_profile_ns_to_us(cpu->lock_wait_ns),
+        .pusher_words = cpu->pusher_words,
+        .method_count = cpu->method_count,
+        .kick_count = cpu->kick_count,
+        .gpu_rp_count = phase->gpu_rp_count,
+    };
+    if (trace->count == trace->wanted) {
+        xemu_raw_frame_trace_write(trace);
     }
 }
 
@@ -355,6 +498,19 @@ static void snapshot_surf_timing(void)
 void nv2a_profile_flip_stall(void)
 {
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    static int64_t prev_flip_us;
+    int64_t frame_us = prev_flip_us ? now - prev_flip_us : 0;
+
+    /*
+     * Take the exact diagnostic sample before the EWMA snapshot clears the
+     * working accumulators.  The interval has the same flip-to-flip boundary
+     * as the legacy XQ3F trace below.
+     */
+    if (prev_flip_us) {
+        xemu_raw_frame_trace_record(frame_us, &g_nv2a_stats.phase_working,
+                                    &g_nv2a_stats.cpu_working);
+    }
+
     int64_t render_time = (now-g_nv2a_stats.last_flip_time)/1000;
 
     g_nv2a_stats.frame_working.mspf = render_time;
@@ -373,9 +529,7 @@ void nv2a_profile_flip_stall(void)
     g_nv2a_stats.phase_working.post_flip = true;
 
     /* Track game frame time (flip-to-flip interval) */
-    static int64_t prev_flip_us;
     if (prev_flip_us) {
-        int64_t frame_us = now - prev_flip_us;
         float frame_ms = (float)frame_us / 1000.0f;
         FramePacingStats *p = &g_nv2a_stats.pacing;
         p->game_frame_ms = p->game_frame_ms * 0.8f + frame_ms * 0.2f;
