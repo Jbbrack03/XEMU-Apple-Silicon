@@ -381,7 +381,7 @@ static void *qemu_thread_start(void *args)
          * Linux thread names are capped at 15 visible characters. */
         char android_name[16];
         g_strlcpy(android_name, qemu_thread_args->name, sizeof(android_name));
-        pthread_setname_np(android_name);
+        pthread_setname_np(pthread_self(), android_name);
 # endif
     }
     QEMU_TSAN_ANNOTATE_THREAD_NAME(qemu_thread_args->name);
