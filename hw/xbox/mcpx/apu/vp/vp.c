@@ -22,6 +22,21 @@
 #include "hw/xbox/mcpx/apu/apu_int.h"
 #include "adpcm.h"
 
+static bool xemu_apu_upstream_voice_sync;
+
+static void xemu_apu_voice_sync_init(void)
+{
+    const char *requested = getenv("XEMU_APU_UPSTREAM_VOICE_SYNC");
+
+#ifdef __ANDROID__
+    xemu_apu_upstream_voice_sync =
+        requested == NULL || strcmp(requested, "0") != 0;
+#else
+    xemu_apu_upstream_voice_sync =
+        requested != NULL && strcmp(requested, "1") == 0;
+#endif
+}
+
 static const struct {
     hwaddr top, current, next;
 } voice_list_regs[] = {
@@ -134,15 +149,27 @@ static void voice_off(MCPXAPUState *d, uint16_t v)
 static void voice_lock(MCPXAPUState *d, uint16_t v, bool lock)
 {
     assert(v < MCPX_HW_MAX_VOICES);
-    qemu_spin_lock(&d->vp.voice_spinlocks[v]);
+
+    if (xemu_apu_upstream_voice_sync) {
+        qemu_mutex_lock(&d->lock);
+    } else {
+        qemu_spin_lock(&d->vp.voice_spinlocks[v]);
+    }
+
     uint64_t mask = 1LL << (v % 64);
     if (lock) {
         d->vp.voice_locked[v / 64] |= mask;
     } else {
         d->vp.voice_locked[v / 64] &= ~mask;
     }
-    qemu_spin_unlock(&d->vp.voice_spinlocks[v]);
-    qemu_cond_broadcast(&d->cond);
+
+    if (xemu_apu_upstream_voice_sync) {
+        qemu_cond_signal(&d->cond);
+        qemu_mutex_unlock(&d->lock);
+    } else {
+        qemu_spin_unlock(&d->vp.voice_spinlocks[v]);
+        qemu_cond_broadcast(&d->cond);
+    }
 }
 
 static bool is_voice_locked(MCPXAPUState *d, uint16_t v)
@@ -1727,12 +1754,18 @@ static void voice_work_enqueue(MCPXAPUState *d, int v, int list)
         .list = list,
     };
 
-    voice_work_acquire_voice_lock_for_processing(d, v);
+    if (!xemu_apu_upstream_voice_sync) {
+        voice_work_acquire_voice_lock_for_processing(d, v);
+    }
 }
 
 static void voice_work_release_voice_locks(MCPXAPUState *d)
 {
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
+
+    if (xemu_apu_upstream_voice_sync) {
+        return;
+    }
 
     for (int i = 0; i < vwd->queue_len; i++) {
         qemu_spin_unlock(&d->vp.voice_spinlocks[vwd->queue[i].voice]);
@@ -1788,6 +1821,19 @@ static void voice_work_schedule(MCPXAPUState *d)
     }
 }
 
+static bool any_queued_voice_locked(MCPXAPUState *d)
+{
+    VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
+
+    for (int i = 0; i < vwd->queue_len; i++) {
+        if (is_voice_locked(d, vwd->queue[i].voice)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void
 voice_work_dispatch(MCPXAPUState *d,
                     float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
@@ -1795,6 +1841,21 @@ voice_work_dispatch(MCPXAPUState *d,
     VoiceWorkDispatch *vwd = &d->vp.voice_work_dispatch;
 
     int64_t start_time = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    if (xemu_apu_upstream_voice_sync) {
+        while (true) {
+            if (qatomic_read(&d->exiting)) {
+                vwd->queue_len = 0;
+                return;
+            }
+
+            if (!any_queued_voice_locked(d)) {
+                break;
+            }
+
+            qemu_cond_timedwait(&d->cond, &d->lock, 1);
+        }
+    }
 
     qemu_mutex_lock(&vwd->lock);
 
@@ -2002,6 +2063,8 @@ void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_P
 
 void mcpx_apu_vp_init(MCPXAPUState *d)
 {
+    xemu_apu_voice_sync_init();
+
     for (int i = 0; i < MCPX_HW_MAX_VOICES; i++) {
         qemu_spin_init(&d->vp.voice_spinlocks[i]);
     }
