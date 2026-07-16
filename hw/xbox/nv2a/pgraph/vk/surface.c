@@ -36,6 +36,24 @@ static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface);
 static void download_surface_deferred(NV2AState *d, SurfaceBinding *surface);
 /* Forward declaration — defined below, also called from texture.c */
 
+static bool batch_overlap_downloads_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_BATCH_OVERLAP_DOWNLOADS");
+#ifdef __ANDROID__
+        enabled = true;
+#endif
+        if (value && value[0]) {
+            enabled = strcmp(value, "0") != 0;
+        }
+        initialized = true;
+    }
+    return enabled;
+}
+
 static bool g_surface_addr_map_missing_logged;
 
 static GHashTable *surface_addr_map_get(PGRAPHVkState *r, const char *op,
@@ -1617,6 +1635,64 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
                                             SurfaceBinding const *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (batch_overlap_downloads_enabled()) {
+        /*
+         * Multiple dirty aliases can be evicted together (for example a
+         * large depth target overlapping several smaller color targets).
+         * Record every required image-to-staging copy first, submit/wait once,
+         * and only then invalidate or free the source images.  This preserves
+         * the exact synchronous VRAM visibility of the legacy path without a
+         * fence round trip per overlapping surface.
+         */
+        SurfaceBinding *other_surface;
+        QTAILQ_FOREACH(other_surface, &r->surfaces, entry) {
+            if (!check_surfaces_overlap(surface, other_surface)) {
+                continue;
+            }
+            trace_nv2a_pgraph_surface_evict_overlapping(
+                other_surface->vram_addr, other_surface->width,
+                other_surface->height, other_surface->pitch);
+            OPT_STAT_INC(dif_overlap);
+            if (other_surface->draw_dirty) {
+                OPT_STAT_INC(dl_from_dirty_if);
+                download_surface_deferred(d, other_surface);
+            }
+        }
+
+        QTAILQ_FOREACH(other_surface, &r->shelved_surfaces, entry) {
+            if (other_surface->vram_addr == surface->vram_addr ||
+                !check_surfaces_overlap(surface, other_surface)) {
+                continue;
+            }
+            OPT_STAT_INC(dif_overlap_sh);
+            if (other_surface->draw_dirty) {
+                OPT_STAT_INC(dl_from_dirty_if);
+                download_surface_deferred(d, other_surface);
+            }
+        }
+
+        pgraph_vk_download_surface_complete_deferred(d);
+
+        SurfaceBinding *next_surface;
+        QTAILQ_FOREACH_SAFE(other_surface, &r->surfaces, entry, next_surface) {
+            if (check_surfaces_overlap(surface, other_surface)) {
+                invalidate_surface(d, other_surface);
+            }
+        }
+        QTAILQ_FOREACH_SAFE(other_surface, &r->shelved_surfaces, entry,
+                            next_surface) {
+            if (other_surface->vram_addr == surface->vram_addr ||
+                !check_surfaces_overlap(surface, other_surface)) {
+                continue;
+            }
+            QTAILQ_REMOVE(&r->shelved_surfaces, other_surface, entry);
+            deferred_downloads_clear_surface(r, other_surface);
+            destroy_surface_image(r, other_surface);
+            g_free(other_surface);
+        }
+        return;
+    }
 
     SurfaceBinding *other_surface, *next_surface;
     QTAILQ_FOREACH_SAFE (other_surface, &r->surfaces, entry, next_surface) {
