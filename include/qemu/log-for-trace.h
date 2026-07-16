@@ -18,8 +18,17 @@
 #ifndef QEMU_LOG_FOR_TRACE_H
 #define QEMU_LOG_FOR_TRACE_H
 
-/* Private global variable, don't use */
+/*
+ * Private global variable, don't use.  Tell ELF/Mach-O compilers that it
+ * cannot be interposed so hot qemu_loglevel_mask() calls address it directly
+ * instead of loading its address through the GOT.  Windows has no equivalent
+ * need for this internal executable/DSO symbol.
+ */
+#ifdef _WIN32
 extern unsigned qemu_loglevel;
+#else
+extern unsigned qemu_loglevel __attribute__((visibility("hidden")));
+#endif
 
 #define LOG_TRACE          (1u << 15)
 
