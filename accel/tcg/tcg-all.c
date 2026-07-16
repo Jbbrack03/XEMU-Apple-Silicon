@@ -85,6 +85,7 @@ bool qemu_tcg_mttcg_enabled(void)
  * startup.
  */
 extern bool tcg_jmp_cache_targeted_enabled;
+bool tcg_use_indirect_chaining;
 
 static bool tcg_resolve_jmp_cache_targeted_default(void)
 {
@@ -94,6 +95,22 @@ static bool tcg_resolve_jmp_cache_targeted_default(void)
     }
     /* Default on for Android; anything but "0" keeps it enabled. */
     return true;
+}
+
+static bool tcg_resolve_indirect_chaining(void)
+{
+#if defined(__aarch64__)
+    const char *env = getenv("XEMU_TCG_INDIRECT_CHAIN");
+
+#if defined(__ANDROID__)
+    /* Accepted Quest path; retain an exact runtime rollback. */
+    return !(env && strcmp(env, "0") == 0);
+#else
+    return env && strcmp(env, "1") == 0;
+#endif
+#else
+    return false;
+#endif
 }
 
 static void tcg_accel_instance_init(Object *obj)
@@ -108,6 +125,7 @@ static void tcg_accel_instance_init(Object *obj)
 #endif
 
     tcg_jmp_cache_targeted_enabled = tcg_resolve_jmp_cache_targeted_default();
+    tcg_use_indirect_chaining = tcg_resolve_indirect_chaining();
 }
 
 bool one_insn_per_tb;

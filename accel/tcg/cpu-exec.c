@@ -1533,7 +1533,17 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
     uintptr_t jmp_rx = (uintptr_t)tb->tc.ptr + offset;
     uintptr_t jmp_rw = jmp_rx - tcg_splitwx_diff;
 
-    tb->jmp_target_addr[n] = addr;
+    if (tcg_use_indirect_chaining) {
+        /*
+         * The generated LDR reads this slot directly.  Publish the complete
+         * pointer atomically before a subsequent chained execution can use
+         * it.  This is the current equivalent of QEMU's pre-8.0 indirect
+         * goto_tb mode, which updated only the data slot.
+         */
+        qatomic_store_release(&tb->jmp_target_addr[n], addr);
+    } else {
+        tb->jmp_target_addr[n] = addr;
+    }
     tb_target_set_jmp_target(c_tb, n, jmp_rx, jmp_rw);
 }
 

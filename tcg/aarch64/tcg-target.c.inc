@@ -2210,7 +2210,18 @@ static void tcg_out_goto_tb(TCGContext *s, int which)
     tcg_debug_assert(i_off == sextract64(i_off, 0, 21));
 
     set_jmp_insn_offset(s, which);
-    tcg_out32(s, I3206_B);
+    if (tcg_use_indirect_chaining) {
+        /*
+         * Keep the instruction stream immutable and load the destination
+         * from TranslationBlock.jmp_target_addr.  QEMU supported this form
+         * before direct-jump patching became unconditional; the following
+         * BR and BTI landing pad are already shared by both forms.
+         */
+        tcg_out32(s, deposit32(I3305_LDR | TCG_REG_TMP0, 5, 19,
+                               i_off >> 2));
+    } else {
+        tcg_out32(s, I3206_B);
+    }
     tcg_out_insn(s, 3207, BR, TCG_REG_TMP0);
     set_jmp_reset_offset(s, which);
     tcg_out_bti(s, BTI_J);
@@ -2224,6 +2235,11 @@ static void tcg_out_goto_ptr(TCGContext *s, TCGReg a0)
 void tb_target_set_jmp_target(const TranslationBlock *tb, int n,
                               uintptr_t jmp_rx, uintptr_t jmp_rw)
 {
+    if (tcg_use_indirect_chaining) {
+        /* The LDR is permanent; tb_set_jmp_target published its data slot. */
+        return;
+    }
+
     uintptr_t d_addr = tb->jmp_target_addr[n];
     ptrdiff_t d_offset = d_addr - jmp_rx;
     tcg_insn_unit insn;

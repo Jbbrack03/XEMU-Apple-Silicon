@@ -517,6 +517,13 @@ extern __thread TCGContext *tcg_ctx;
 extern const void *tcg_code_gen_epilogue;
 extern uintptr_t tcg_splitwx_diff;
 extern TCGv_env tcg_env;
+/*
+ * AArch64 chaining mode used by Android.  When enabled, goto_tb uses the
+ * permanent indirect LDR/BR form and publishes only jmp_target_addr instead
+ * of rewriting executable code for every link/unlink.  It defaults on for
+ * Android and XEMU_TCG_INDIRECT_CHAIN=0 is the rollback.
+ */
+extern bool tcg_use_indirect_chaining;
 
 #ifdef XBOX
 typedef struct {
