@@ -253,6 +253,16 @@ struct CPUTLBEntryFull {
      */
     uint8_t slow_flags[MMU_ACCESS_COUNT];
 
+#ifdef XBOX
+    /*
+     * xlat_section + guest vaddr is a ram_addr_t only for ordinary RAM.
+     * Retain that classification from tlb_set_page_full() so executable RAM
+     * lookups can avoid reversing their already-resolved host pointer.  ROMD
+     * and MMIO entries must keep the generic host-pointer lookup.
+     */
+    bool xemu_is_ram;
+#endif
+
     /*
      * Allow target-specific additions to this structure.
      * This may be used to cache items from the guest cpu

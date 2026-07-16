@@ -110,6 +110,31 @@ static inline size_t sizeof_tlb(CPUTLBDescFast *fast)
 #define XEMU_TLB_DIRTY_BUCKETS (1u << XEMU_TLB_DIRTY_BUCKET_BITS)
 #define XEMU_TLB_HOST_PAGE_MASK (~(uintptr_t)(TARGET_PAGE_SIZE - 1))
 
+static bool xemu_tcg_direct_ram_addr;
+static bool xemu_tcg_direct_ram_addr_verify;
+
+static void xemu_tcg_direct_ram_addr_init(void)
+{
+    const char *requested = getenv("XEMU_TCG_DIRECT_RAM_ADDR");
+    const char *verify = getenv("XEMU_TCG_DIRECT_RAM_ADDR_VERIFY");
+
+#if defined(__ANDROID__)
+    xemu_tcg_direct_ram_addr =
+        requested == NULL || strcmp(requested, "0") != 0;
+#else
+    xemu_tcg_direct_ram_addr =
+        requested != NULL && strcmp(requested, "1") == 0;
+#endif
+    xemu_tcg_direct_ram_addr_verify =
+        verify != NULL && strcmp(verify, "1") == 0;
+#if defined(__ANDROID__)
+    __android_log_print(ANDROID_LOG_INFO, "xemu-tlb",
+                        "direct executable-RAM address %s (verify=%s)",
+                        xemu_tcg_direct_ram_addr ? "enabled" : "disabled",
+                        xemu_tcg_direct_ram_addr_verify ? "on" : "off");
+#endif
+}
+
 /*
  * Reverse-map writable clean-RAM TLB entries by host page.  Xbox texture
  * uploads clear small dirty-bitmap ranges at kHz rates; QEMU's generic path
@@ -611,6 +636,7 @@ void tlb_init(CPUState *cpu)
     qemu_spin_init(&cpu->neg.tlb.c.lock);
 
 #ifdef XBOX
+    xemu_tcg_direct_ram_addr_init();
     xemu_tlb_dirty_index_init(cpu);
 #endif
 
@@ -1499,6 +1525,9 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
     is_ram = memory_region_is_ram(section->mr);
     is_romd = memory_region_is_romd(section->mr);
+#ifdef XBOX
+    full->xemu_is_ram = is_ram;
+#endif
 
     if (is_ram || is_romd) {
         /* RAM and ROMD both have associated host memory. */
@@ -2032,6 +2061,17 @@ tb_page_addr_t get_page_addr_code_hostp(CPUArchState *env, vaddr addr,
     if (hostp) {
         *hostp = p;
     }
+#ifdef XBOX
+    if (likely(xemu_tcg_direct_ram_addr && full->xemu_is_ram)) {
+        ram_addr_t direct = (ram_addr_t)(addr + full->xlat_section);
+
+        if (unlikely(xemu_tcg_direct_ram_addr_verify)) {
+            ram_addr_t legacy = qemu_ram_addr_from_host_nofail(p);
+            g_assert_cmphex(direct, ==, legacy);
+        }
+        return direct;
+    }
+#endif
     return qemu_ram_addr_from_host_nofail(p);
 }
 
