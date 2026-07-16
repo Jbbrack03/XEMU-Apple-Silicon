@@ -100,6 +100,7 @@ typedef struct {
     /* Emulator frame feed (Spike B). Resolved from libxemu.so at runtime;
      * NULL until the emulator process side is up. */
     struct AHardwareBuffer *(*acquire_ahb)(uint64_t *seq);
+    float (*get_display_aspect)(void); /* guest GPIO decision: 4:3 or 16:9 */
 
     /* Gamepad forwarding: SDL can't see a paired pad while the XR NativeActivity
      * has focus, so we translate Android gamepad events and push them to the
@@ -458,8 +459,8 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
 /* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
 static void resolve_emulator_feed(XrShell *s)
 {
-    if (s->acquire_ahb && s->set_gamepad && s->request_load_disc &&
-        s->get_vcpu_tid) {
+    if (s->acquire_ahb && s->get_display_aspect && s->set_gamepad &&
+        s->request_load_disc && s->get_vcpu_tid) {
         return;
     }
     void *h = dlopen("libxemu.so", RTLD_NOLOAD | RTLD_LAZY);
@@ -471,6 +472,13 @@ static void resolve_emulator_feed(XrShell *s)
             dlsym(h, "xemu_xr_acquire_display_ahb");
         if (s->acquire_ahb) {
             LOGI("emulator frame feed resolved");
+        }
+    }
+    if (!s->get_display_aspect) {
+        s->get_display_aspect = (float (*)(void))
+            dlsym(h, "xemu_xr_get_display_aspect");
+        if (s->get_display_aspect) {
+            LOGI("emulator native-aspect bridge resolved");
         }
     }
     if (!s->set_gamepad) {
@@ -498,6 +506,24 @@ static void resolve_emulator_feed(XrShell *s)
         s->get_vcpu_tid = (int (*)(void))
             dlsym(h, "xemu_get_vcpu_thread_id");
     }
+}
+
+/* Keep the physical OpenXR quad in the same aspect that xui's desktop
+ * presenter derives from the Xbox PM GPIO.  The texture itself remains the
+ * native framebuffer; only the composition-layer geometry changes. */
+static void xr_update_emulator_aspect(XrShell *s)
+{
+    if (!s->get_display_aspect) {
+        return;
+    }
+
+    float aspect = s->get_display_aspect();
+    if (aspect < 1.2f || aspect > 2.0f || aspect == s->quad_aspect) {
+        return;
+    }
+
+    s->quad_aspect = aspect;
+    LOGI("emulator display aspect %.3f", (double)aspect);
 }
 
 static void xr_apply_thread_settings(XrShell *s)
@@ -1468,6 +1494,11 @@ static void xr_frame(XrShell *s)
 
     menu_autotest_step(s);
 
+    /* Resolve before constructing the composition layer: aspect changes are
+     * visible in the same XR frame and never perturb frame production. */
+    resolve_emulator_feed(s);
+    xr_update_emulator_aspect(s);
+
     /* Drive 6DOF window move/resize from the controllers. */
     xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
 
@@ -1496,7 +1527,6 @@ static void xr_frame(XrShell *s)
         };
         OXR(xrWaitSwapchainImage(s->swapchain, &wi));
 
-        resolve_emulator_feed(s);
         xr_apply_thread_settings(s);
         GLuint emu_tex = 0;
         struct AHardwareBuffer *emu_ahb = NULL;

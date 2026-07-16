@@ -35,3 +35,15 @@ bool xemu_get_widescreen(void)
 {
     return g_widescreen;
 }
+
+#ifdef __ANDROID__
+/* The OpenXR shell receives the guest frame as an AHardwareBuffer and does not
+ * pass through xui's normal aspect-aware presenter.  Export the same guest
+ * GPIO-derived decision so its composition quad retains the native display
+ * aspect without a title list or a host-side override. */
+__attribute__((visibility("default")))
+float xemu_xr_get_display_aspect(void)
+{
+    return g_widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
+}
+#endif

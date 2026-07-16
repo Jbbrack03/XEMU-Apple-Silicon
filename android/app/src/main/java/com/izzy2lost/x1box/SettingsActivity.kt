@@ -41,6 +41,7 @@ class SettingsActivity : AppCompatActivity() {
     private const val PREF_HRTF_DEFAULT_OFF_MIGRATED = "setting_hrtf_default_off_migrated_v1"
     private const val PREF_SETTINGS_MIGRATED_V2 = "settings_migrated_v2"
     private const val PREF_SETTINGS_MIGRATED_V3 = "settings_migrated_v3"
+    private const val PREF_SURFACE_SCALE_DEFAULT_MIGRATED = "surface_scale_default_migrated_v1"
     private const val PREF_INSIGNIA_SETUP_URI = "setting_insignia_setup_assistant_uri"
     private const val PREF_INSIGNIA_SETUP_NAME = "setting_insignia_setup_assistant_name"
     private const val INSIGNIA_SIGN_UP_URL = "https://insignia.live/"
@@ -293,6 +294,7 @@ class SettingsActivity : AppCompatActivity() {
     applyHrtfDefaultOffMigration()
     applySettingsMigrationV2()
     applySettingsMigrationV3()
+    applySurfaceScaleDefaultMigration()
     setContentView(R.layout.activity_settings)
     EdgeToEdgeHelper.enable(this)
     EdgeToEdgeHelper.applySystemBarPadding(findViewById(R.id.settings_scroll))
@@ -376,7 +378,7 @@ class SettingsActivity : AppCompatActivity() {
       toggleFiltering.check(R.id.btn_filtering_linear)
     }
 
-    val scale = prefs.getInt("setting_surface_scale", 1)
+    val scale = prefs.getInt("setting_surface_scale", 2)
     when (scale) {
       2    -> toggleScale.check(R.id.btn_scale_2x)
       3    -> toggleScale.check(R.id.btn_scale_3x)
@@ -638,7 +640,7 @@ class SettingsActivity : AppCompatActivity() {
     if (!prefs.contains("setting_filtering")) editor.putString("setting_filtering", "nearest")
     if (!prefs.contains("setting_tcg_thread")) editor.putString("setting_tcg_thread", "multi")
     if (!prefs.contains("setting_audio_driver")) editor.putString("setting_audio_driver", "openslES")
-    if (!prefs.contains("setting_surface_scale")) editor.putInt("setting_surface_scale", 1)
+    if (!prefs.contains("setting_surface_scale")) editor.putInt("setting_surface_scale", 2)
     if (!prefs.contains("setting_display_mode")) editor.putInt("setting_display_mode", 0)
     if (!prefs.contains("setting_system_memory_mib")) editor.putInt("setting_system_memory_mib", 64)
     if (!prefs.contains("tcg_tb_size")) editor.putInt("tcg_tb_size", 256)
@@ -654,6 +656,25 @@ class SettingsActivity : AppCompatActivity() {
     prefs.edit()
       .putBoolean("setting_use_dsp_jit", prefs.getBoolean("setting_use_dsp_jit", true))
       .putBoolean(PREF_SETTINGS_MIGRATED_V3, true)
+      .apply()
+  }
+
+  /* The XR frame bridge has used 2x SSAA since its introduction.  Earlier
+   * settings migration code wrote 1x only when this screen was opened, so a
+   * user could lose the established quality default without selecting it.
+   * Preserve every explicit per-user value and repair missing legacy values. */
+  private fun applySurfaceScaleDefaultMigration() {
+    if (prefs.getBoolean(PREF_SURFACE_SCALE_DEFAULT_MIGRATED, false)) {
+      return
+    }
+
+    prefs.edit()
+      .apply {
+        if (!prefs.contains("setting_surface_scale")) {
+          putInt("setting_surface_scale", 2)
+        }
+        putBoolean(PREF_SURFACE_SCALE_DEFAULT_MIGRATED, true)
+      }
       .apply()
   }
 
