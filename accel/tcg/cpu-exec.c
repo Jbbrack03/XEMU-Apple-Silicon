@@ -504,6 +504,8 @@ typedef struct {
 
 static Tier1Request tier1_requests[TIER1_REQUEST_SLOTS];
 
+static inline bool tier1_enabled(void);
+
 /*
  * Called from tb_gen_code (translate-all.c) to check whether a
  * freshly translated TB should use tier-1 optimisations.
@@ -515,6 +517,10 @@ static Tier1Request tier1_requests[TIER1_REQUEST_SLOTS];
  */
 bool tier1_has_pending_request(vaddr pc, uint64_t cs_base, uint32_t flags)
 {
+    if (!tier1_enabled()) {
+        return false;
+    }
+
     for (int i = 0; i < TIER1_REQUEST_SLOTS; i++) {
         if (tier1_requests[i].valid &&
             tier1_requests[i].pc == pc &&
@@ -531,6 +537,10 @@ static uint64_t g_tier1_consumed;  /* diagnostics: requests consumed */
 int tier1_consume_request(vaddr pc, uint64_t cs_base, uint32_t flags,
                           uint32_t *cflags_out)
 {
+    if (!tier1_enabled()) {
+        return -1;
+    }
+
     for (int i = 0; i < TIER1_REQUEST_SLOTS; i++) {
         if (tier1_requests[i].valid &&
             tier1_requests[i].pc == pc &&
@@ -700,41 +710,46 @@ static vaddr g_superblock_target_b;
 static int g_superblock_target_b_exit;
 static TranslationBlock *g_superblock_target_tb;
 
+static void __attribute__((noinline)) superblock_target_resolve(void)
+{
+    const char *env = getenv("XEMU_SUPERBLOCK_TARGET");
+    char *end_a = NULL;
+    char *end_b = NULL;
+    char *end_exit = NULL;
+    uint64_t a = 0;
+    uint64_t b = 0;
+
+    if (env && env[0]) {
+        a = g_ascii_strtoull(env, &end_a, 0);
+        if (end_a && *end_a == ',') {
+            b = g_ascii_strtoull(end_a + 1, &end_b, 0);
+        }
+    }
+    if (a && b && end_b && *end_b == ',') {
+        uint64_t b_exit = g_ascii_strtoull(end_b + 1, &end_exit, 0);
+        if (b_exit <= 1 && end_exit && *end_exit == '\0') {
+            g_superblock_target_b_exit = b_exit;
+        } else {
+            a = 0;
+        }
+    }
+    if (a && b && end_b &&
+        (*end_b == '\0' || (end_exit && *end_exit == '\0'))) {
+        g_superblock_target_a = a;
+        g_superblock_target_b = b;
+        g_superblock_target_state = 1;
+        error_report("superblock: targeted A=0x%" PRIx64
+                     " B=0x%" PRIx64 " B-exit=%d",
+                     a, b, g_superblock_target_b_exit);
+    } else {
+        g_superblock_target_state = 0;
+    }
+}
+
 static inline bool superblock_target_enabled(void)
 {
-    if (g_superblock_target_state < 0) {
-        const char *env = getenv("XEMU_SUPERBLOCK_TARGET");
-        char *end_a = NULL;
-        char *end_b = NULL;
-        char *end_exit = NULL;
-        uint64_t a = 0;
-        uint64_t b = 0;
-
-        if (env && env[0]) {
-            a = g_ascii_strtoull(env, &end_a, 0);
-            if (end_a && *end_a == ',') {
-                b = g_ascii_strtoull(end_a + 1, &end_b, 0);
-            }
-        }
-        if (a && b && end_b && *end_b == ',') {
-            uint64_t b_exit = g_ascii_strtoull(end_b + 1, &end_exit, 0);
-            if (b_exit <= 1 && end_exit && *end_exit == '\0') {
-                g_superblock_target_b_exit = b_exit;
-            } else {
-                a = 0;
-            }
-        }
-        if (a && b && end_b &&
-            (*end_b == '\0' || (end_exit && *end_exit == '\0'))) {
-            g_superblock_target_a = a;
-            g_superblock_target_b = b;
-            g_superblock_target_state = 1;
-            error_report("superblock: targeted A=0x%" PRIx64
-                         " B=0x%" PRIx64 " B-exit=%d",
-                         a, b, g_superblock_target_b_exit);
-        } else {
-            g_superblock_target_state = 0;
-        }
+    if (unlikely(g_superblock_target_state < 0)) {
+        superblock_target_resolve();
     }
     return g_superblock_target_state != 0;
 }
