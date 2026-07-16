@@ -46,6 +46,8 @@
 
 #define NUM_DISPLAY_IMAGES 2
 
+#define MAX_GUEST_VRAM_PENDING_RANGES 32
+
 #define OPT_DYNAMIC_STATES      1
 #define OPT_DYNAMIC_BLEND       1
 #define NUM_GFX_DESCRIPTOR_SETS 65536
@@ -981,6 +983,7 @@ typedef struct PGRAPHVkState {
     bool debug_utils_extension_enabled;
     bool custom_border_color_extension_enabled;
     bool memory_budget_extension_enabled;
+    bool external_memory_host_extension_enabled;
     bool extended_dynamic_state_supported;
 #if OPT_DYNAMIC_BLEND
     bool eds3_blend_supported;
@@ -1118,6 +1121,19 @@ typedef struct PGRAPHVkState {
 #endif
 
     StorageBuffer storage_buffers[BUFFER_COUNT];
+    VkBuffer guest_vram_buffer;
+    VkDeviceMemory guest_vram_memory;
+    bool guest_vram_buffer_enabled;
+    MemorySyncRequirement
+        guest_vram_pending_ranges[MAX_GUEST_VRAM_PENDING_RANGES];
+    size_t num_guest_vram_pending_ranges;
+    MemorySyncRequirement
+        guest_vram_valid_ranges[MAX_GUEST_VRAM_PENDING_RANGES];
+    size_t num_guest_vram_valid_ranges;
+    bool guest_vram_cpu_wait_requested;
+    uint64_t guest_vram_download_count;
+    uint64_t guest_vram_upload_count;
+    uint64_t guest_vram_cpu_wait_count;
     PrimRewriteBuf prim_rewrite_buf;
 
     DrawQueue draw_queue;

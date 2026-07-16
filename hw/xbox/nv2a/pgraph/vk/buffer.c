@@ -173,6 +173,175 @@ static void destroy_buffer(PGRAPHState *pg, StorageBuffer *buffer)
     buffer->allocation = VK_NULL_HANDLE;
 }
 
+static bool init_guest_vram_buffer(NV2AState *d, Error **errp)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!r->external_memory_host_extension_enabled) {
+        return true;
+    }
+
+    VkDeviceSize vram_size = memory_region_size(d->vram);
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties = {
+        .sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
+    };
+    VkPhysicalDeviceProperties2 properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &host_properties,
+    };
+    vkGetPhysicalDeviceProperties2(r->physical_device, &properties);
+
+    VkPhysicalDeviceExternalBufferInfo external_buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .handleType =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    };
+    VkExternalBufferProperties external_properties = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES,
+    };
+    vkGetPhysicalDeviceExternalBufferProperties(
+        r->physical_device, &external_buffer_info, &external_properties);
+    if (!(external_properties.externalMemoryProperties
+              .externalMemoryFeatures &
+          VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+        error_setg(errp, "Vulkan host allocation is not importable");
+        return false;
+    }
+
+    VkDeviceSize alignment =
+        host_properties.minImportedHostPointerAlignment;
+    if (!alignment || (uintptr_t)d->vram_ptr % alignment != 0 ||
+        vram_size % alignment != 0) {
+        error_setg(errp,
+                   "Guest VRAM does not satisfy host import alignment "
+                   "(ptr=%p size=%" PRIu64 " align=%" PRIu64 ")",
+                   d->vram_ptr, vram_size, alignment);
+        return false;
+    }
+
+    VkExternalMemoryBufferCreateInfo external_info = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+    };
+    VkBufferCreateInfo buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = &external_info,
+        .size = vram_size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    VkResult result = vkCreateBuffer(r->device, &buffer_info, NULL,
+                                     &r->guest_vram_buffer);
+    if (result != VK_SUCCESS) {
+        error_setg(errp, "Failed to create guest VRAM buffer: %d", result);
+        return false;
+    }
+
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(r->device, r->guest_vram_buffer,
+                                  &requirements);
+    if (requirements.size != vram_size) {
+        error_setg(errp,
+                   "Guest VRAM import size mismatch (required=%" PRIu64
+                   " available=%" PRIu64 ")",
+                   requirements.size, vram_size);
+        goto fail;
+    }
+
+    VkMemoryHostPointerPropertiesEXT pointer_properties = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT,
+    };
+    result = vkGetMemoryHostPointerPropertiesEXT(
+        r->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+        d->vram_ptr, &pointer_properties);
+    if (result != VK_SUCCESS) {
+        error_setg(errp, "Failed to query guest VRAM host pointer: %d",
+                   result);
+        goto fail;
+    }
+
+    uint32_t memory_type_bits =
+        requirements.memoryTypeBits & pointer_properties.memoryTypeBits;
+    if (!memory_type_bits) {
+        error_setg(errp, "No compatible memory type for guest VRAM import");
+        goto fail;
+    }
+
+    VkImportMemoryHostPointerInfoEXT import_info = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+        .handleType =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+        .pHostPointer = d->vram_ptr,
+    };
+    VkMemoryAllocateInfo allocate_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &import_info,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = __builtin_ctz(memory_type_bits),
+    };
+    result = vkAllocateMemory(r->device, &allocate_info, NULL,
+                              &r->guest_vram_memory);
+    if (result != VK_SUCCESS) {
+        error_setg(errp, "Failed to import guest VRAM memory: %d", result);
+        goto fail;
+    }
+
+    result = vkBindBufferMemory(r->device, r->guest_vram_buffer,
+                                r->guest_vram_memory, 0);
+    if (result != VK_SUCCESS) {
+        error_setg(errp, "Failed to bind imported guest VRAM: %d", result);
+        goto fail;
+    }
+
+    r->guest_vram_buffer_enabled = true;
+    r->num_guest_vram_pending_ranges = 0;
+    r->num_guest_vram_valid_ranges = 0;
+    r->guest_vram_cpu_wait_requested = false;
+    VK_LOG_ERROR("guest_vram_buffer: enabled size=%" PRIu64
+                 " align=%" PRIu64 " type=%u",
+                 vram_size, alignment, allocate_info.memoryTypeIndex);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "hakuX-vram",
+                        "GPU-visible guest VRAM enabled size=%" PRIu64
+                        " align=%" PRIu64 " type=%u",
+                        vram_size, alignment, allocate_info.memoryTypeIndex);
+#endif
+    return true;
+
+fail:
+    if (r->guest_vram_memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, r->guest_vram_memory, NULL);
+        r->guest_vram_memory = VK_NULL_HANDLE;
+    }
+    if (r->guest_vram_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, r->guest_vram_buffer, NULL);
+        r->guest_vram_buffer = VK_NULL_HANDLE;
+    }
+    return false;
+}
+
+static void finalize_guest_vram_buffer(PGRAPHVkState *r)
+{
+    if (r->guest_vram_buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(r->device, r->guest_vram_buffer, NULL);
+        r->guest_vram_buffer = VK_NULL_HANDLE;
+    }
+    if (r->guest_vram_memory != VK_NULL_HANDLE) {
+        vkFreeMemory(r->device, r->guest_vram_memory, NULL);
+        r->guest_vram_memory = VK_NULL_HANDLE;
+    }
+    r->guest_vram_buffer_enabled = false;
+    r->num_guest_vram_pending_ranges = 0;
+    r->num_guest_vram_valid_ranges = 0;
+    r->guest_vram_cpu_wait_requested = false;
+}
+
 bool pgraph_vk_init_buffers(NV2AState *d, Error **errp)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -180,6 +349,10 @@ bool pgraph_vk_init_buffers(NV2AState *d, Error **errp)
 
     const size_t mib = 1024 * 1024;
     size_t vram_size = memory_region_size(d->vram);
+
+    if (!init_guest_vram_buffer(d, errp)) {
+        return false;
+    }
 
     MemoryBudget mb = compute_memory_budget(r);
     r->shader_module_cache_target = mb.shader_module_cache_entries;
@@ -480,6 +653,7 @@ bool pgraph_vk_init_buffers(NV2AState *d, Error **errp)
     return true;
 
 fail:
+    finalize_guest_vram_buffer(r);
     for (int i = 0; i < NUM_SUBMIT_FRAMES; i++) {
         FrameStagingState *fs = &r->frame_staging[i];
         StorageBuffer *bufs[] = {
@@ -513,6 +687,8 @@ void pgraph_vk_finalize_buffers(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
+
+    finalize_guest_vram_buffer(r);
 
     for (int i = 0; i < NUM_SUBMIT_FRAMES; i++) {
         FrameStagingState *fs = &r->frame_staging[i];

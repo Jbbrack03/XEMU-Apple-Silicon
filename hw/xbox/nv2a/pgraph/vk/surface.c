@@ -1152,6 +1152,543 @@ static void download_surface_deferred(NV2AState *d, SurfaceBinding *surface)
     download_surface(d, surface, true);
 }
 
+static bool guest_vram_surface_eligible(NV2AState *d,
+                                        const SurfaceBinding *surface)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+    bool packed_depth_stencil =
+        surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
+        surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+
+    if (!r->guest_vram_buffer_enabled || surface->swizzle ||
+        !surface->width || !surface->height ||
+        surface->pitch != surface->width * surface->fmt.bytes_per_pixel ||
+        surface->vram_addr % 4 != 0 ||
+        surface->vram_addr >= memory_region_size(d->vram) ||
+        surface->size > memory_region_size(d->vram) - surface->vram_addr) {
+        return false;
+    }
+
+    if (surface->color) {
+        return surface->fmt.bytes_per_pixel ==
+               surface->host_fmt.host_bytes_per_pixel;
+    }
+    return packed_depth_stencil && surface->fmt.bytes_per_pixel == 4;
+}
+
+static bool guest_vram_pending_range_overlaps(PGRAPHVkState *r,
+                                              hwaddr addr, hwaddr size)
+{
+    if (!size) {
+        return false;
+    }
+
+    for (size_t i = 0; i < r->num_guest_vram_pending_ranges; i++) {
+        MemorySyncRequirement *range = &r->guest_vram_pending_ranges[i];
+        if (ranges_overlap(addr, size, range->addr, range->size)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool guest_vram_valid_range_covers(PGRAPHVkState *r,
+                                          hwaddr addr, hwaddr size)
+{
+    hwaddr end = addr + size;
+    for (size_t i = 0; i < r->num_guest_vram_valid_ranges; i++) {
+        MemorySyncRequirement *range = &r->guest_vram_valid_ranges[i];
+        if (range->addr <= addr && range->addr + range->size >= end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void guest_vram_merge_range(MemorySyncRequirement *ranges,
+                                   size_t *num_ranges, hwaddr addr,
+                                   hwaddr size)
+{
+    hwaddr start = addr;
+    hwaddr end = addr + size;
+
+    for (size_t i = 0; i < *num_ranges;) {
+        MemorySyncRequirement *range = &ranges[i];
+        hwaddr range_end = range->addr + range->size;
+        if (start <= range_end && range->addr <= end) {
+            start = MIN(start, range->addr);
+            end = MAX(end, range_end);
+            ranges[i] = ranges[--*num_ranges];
+            continue;
+        }
+        i++;
+    }
+
+    ranges[(*num_ranges)++] = (MemorySyncRequirement) {
+        .addr = start,
+        .size = end - start,
+    };
+}
+
+static void guest_vram_invalidate_valid_ranges(PGRAPHVkState *r,
+                                                hwaddr addr, hwaddr size)
+{
+    for (size_t i = 0; i < r->num_guest_vram_valid_ranges;) {
+        MemorySyncRequirement *range = &r->guest_vram_valid_ranges[i];
+        if (ranges_overlap(addr, size, range->addr, range->size)) {
+            r->guest_vram_valid_ranges[i] =
+                r->guest_vram_valid_ranges[
+                    --r->num_guest_vram_valid_ranges];
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Keep a compact set of host-visible VRAM ranges whose Vulkan writes have
+ * been recorded but are not yet known to be complete. Overlapping and
+ * adjacent writes are merged; overflow conservatively covers all VRAM. */
+static void guest_vram_track_gpu_write(NV2AState *d, hwaddr addr,
+                                       hwaddr size)
+{
+    PGRAPHVkState *r = d->pgraph.vk_renderer_state;
+
+    if (r->num_guest_vram_pending_ranges ==
+        MAX_GUEST_VRAM_PENDING_RANGES) {
+        r->guest_vram_pending_ranges[0] = (MemorySyncRequirement) {
+            .addr = 0,
+            .size = memory_region_size(d->vram),
+        };
+        r->num_guest_vram_pending_ranges = 1;
+    } else {
+        guest_vram_merge_range(r->guest_vram_pending_ranges,
+                               &r->num_guest_vram_pending_ranges,
+                               addr, size);
+    }
+
+    /* Valid ranges choose the direct upload path only for data previously
+     * produced by a GPU download. On overflow, forget older optimization
+     * opportunities instead of claiming unknown bytes are GPU-authored. */
+    if (r->num_guest_vram_valid_ranges ==
+        MAX_GUEST_VRAM_PENDING_RANGES) {
+        r->num_guest_vram_valid_ranges = 0;
+    }
+    guest_vram_merge_range(r->guest_vram_valid_ranges,
+                           &r->num_guest_vram_valid_ranges, addr, size);
+}
+
+static void guest_vram_buffer_barrier(
+    VkCommandBuffer cmd, VkBuffer buffer, VkDeviceSize offset,
+    VkDeviceSize size, VkPipelineStageFlags src_stage,
+    VkAccessFlags src_access, VkPipelineStageFlags dst_stage,
+    VkAccessFlags dst_access)
+{
+    VkBufferMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        .srcAccessMask = src_access,
+        .dstAccessMask = dst_access,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = buffer,
+        .offset = offset,
+        .size = size,
+    };
+    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 1,
+                         &barrier, 0, NULL);
+}
+
+/* Record an image-to-guest-VRAM transfer without making the CPU wait. The
+ * imported buffer aliases d->vram_ptr, so a following compatible surface
+ * upload can consume the data in-order on the same Vulkan queue. */
+static bool download_surface_to_guest_vram(NV2AState *d,
+                                           SurfaceBinding *surface)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    if (!guest_vram_surface_eligible(d, surface) ||
+        surface->download_row_count != 0) {
+        return false;
+    }
+
+    bool packed_depth_stencil = !surface->color;
+    bool downscale = pg->surface_scale_factor != 1;
+    size_t guest_size = surface->pitch * surface->height;
+    unsigned int scaled_width = surface->width;
+    unsigned int scaled_height = surface->height;
+    pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
+
+    nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
+                                 "download_surface_to_guest_vram");
+    pgraph_vk_transition_image_layout(
+        pg, cmd, surface->image, surface->host_fmt.vk_format,
+        surface->image_layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+    if (packed_depth_stencil) {
+        VkBuffer compute_dst =
+            r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
+        VkBuffer compute_src =
+            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+        size_t compute_dst_size =
+            r->storage_buffers[BUFFER_COMPUTE_DST].buffer_size;
+
+        VkBufferImageCopy copy_regions[2];
+        int num_copy_regions = 1;
+        copy_regions[0] = (VkBufferImageCopy) {
+            .imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .imageSubresource.layerCount = 1,
+            .imageExtent =
+                (VkExtent3D){ scaled_width, scaled_height, 1 },
+        };
+        if (surface->host_fmt.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            size_t depth_size = scaled_width * scaled_height * 4;
+            copy_regions[num_copy_regions++] = (VkBufferImageCopy) {
+                .bufferOffset = ROUND_UP(
+                    depth_size,
+                    r->device_props.limits.minStorageBufferOffsetAlignment),
+                .imageSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT,
+                .imageSubresource.layerCount = 1,
+                .imageExtent =
+                    (VkExtent3D){ scaled_width, scaled_height, 1 },
+            };
+        }
+
+        guest_vram_buffer_barrier(
+            cmd, compute_dst, 0, compute_dst_size,
+            VK_PIPELINE_STAGE_TRANSFER_BIT |
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+        vkCmdCopyImageToBuffer(cmd, surface->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               compute_dst, num_copy_regions, copy_regions);
+        guest_vram_buffer_barrier(
+            cmd, compute_dst, 0, compute_dst_size,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+        guest_vram_buffer_barrier(
+            cmd, compute_src, 0, guest_size,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT);
+
+        pgraph_vk_pack_depth_stencil(pg, surface, cmd, compute_dst,
+                                     compute_src, downscale);
+
+        guest_vram_buffer_barrier(
+            cmd, compute_src, 0, guest_size,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT);
+        guest_vram_buffer_barrier(
+            cmd, r->guest_vram_buffer, surface->vram_addr, guest_size,
+            VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferCopy copy = {
+            .dstOffset = surface->vram_addr,
+            .size = guest_size,
+        };
+        vkCmdCopyBuffer(cmd, compute_src, r->guest_vram_buffer, 1, &copy);
+    } else {
+        VkImage source_image = surface->image;
+        if (downscale) {
+            if (surface->image_scratch_current_layout !=
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                pgraph_vk_transition_image_layout(
+                    pg, cmd, surface->image_scratch,
+                    surface->host_fmt.vk_format,
+                    surface->image_scratch_current_layout,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                surface->image_scratch_current_layout =
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            }
+            VkImageBlit blit = {
+                .srcSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .layerCount = 1,
+                },
+                .srcOffsets = {
+                    { 0, 0, 0 },
+                    { scaled_width, scaled_height, 1 },
+                },
+                .dstSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .layerCount = 1,
+                },
+                .dstOffsets = {
+                    { 0, 0, 0 },
+                    { surface->width, surface->height, 1 },
+                },
+            };
+            vkCmdBlitImage(cmd, surface->image,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           surface->image_scratch,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                           VK_FILTER_LINEAR);
+            pgraph_vk_transition_image_layout(
+                pg, cmd, surface->image_scratch,
+                surface->host_fmt.vk_format,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            surface->image_scratch_current_layout =
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            source_image = surface->image_scratch;
+        }
+
+        guest_vram_buffer_barrier(
+            cmd, r->guest_vram_buffer, surface->vram_addr, guest_size,
+            VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+        VkBufferImageCopy copy = {
+            .bufferOffset = surface->vram_addr,
+            .bufferRowLength = surface->width,
+            .imageSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .layerCount = 1,
+            },
+            .imageExtent =
+                (VkExtent3D){ surface->width, surface->height, 1 },
+        };
+        vkCmdCopyImageToBuffer(cmd, source_image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               r->guest_vram_buffer, 1, &copy);
+    }
+
+    guest_vram_buffer_barrier(
+        cmd, r->guest_vram_buffer, surface->vram_addr, guest_size,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT);
+    pgraph_vk_transition_image_layout(
+        pg, cmd, surface->image, surface->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, surface->image_layout);
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    memory_region_set_client_dirty(d->vram, surface->vram_addr,
+                                   guest_size, DIRTY_MEMORY_VGA);
+    memory_region_set_client_dirty(d->vram, surface->vram_addr,
+                                   guest_size, DIRTY_MEMORY_NV2A_TEX);
+    surface->download_pending = false;
+    surface->download_row_count = 0;
+    surface->draw_dirty = false;
+    surface->download_generation = surface->draw_generation;
+    guest_vram_track_gpu_write(d, surface->vram_addr, guest_size);
+    r->guest_vram_download_count++;
+#ifdef __ANDROID__
+    if (r->guest_vram_download_count <= 4 ||
+        r->guest_vram_download_count % 600 == 0) {
+        __android_log_print(
+            ANDROID_LOG_INFO, "hakuX-vram",
+            "download=%" PRIu64 " %s addr=0x%" HWADDR_PRIx
+            " %ux%u pitch=%u scale=%u",
+            r->guest_vram_download_count,
+            surface->color ? "color" : "zeta", surface->vram_addr,
+            surface->width, surface->height, surface->pitch,
+            pg->surface_scale_factor);
+    }
+#endif
+    return true;
+}
+
+static bool upload_surface_from_guest_vram(NV2AState *d,
+                                           SurfaceBinding *surface)
+{
+    PGRAPHState *pg = &d->pgraph;
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    size_t guest_size = surface->pitch * surface->height;
+    if (!guest_vram_surface_eligible(d, surface) ||
+        !guest_vram_valid_range_covers(r, surface->vram_addr,
+                                      guest_size)) {
+        return false;
+    }
+
+    bool packed_depth_stencil = !surface->color;
+    bool upscale = pg->surface_scale_factor > 1;
+    unsigned int scaled_width = surface->width;
+    unsigned int scaled_height = surface->height;
+    pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
+
+    VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
+    pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
+                                 "upload_surface_from_guest_vram");
+    guest_vram_buffer_barrier(
+        cmd, r->guest_vram_buffer, surface->vram_addr, guest_size,
+        VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    VkBuffer source_buffer = r->guest_vram_buffer;
+    VkBufferImageCopy regions[2];
+    int num_regions = 1;
+    regions[0] = (VkBufferImageCopy) {
+        .bufferOffset = surface->vram_addr,
+        .imageSubresource = {
+            .aspectMask = surface->color ? VK_IMAGE_ASPECT_COLOR_BIT :
+                                           VK_IMAGE_ASPECT_DEPTH_BIT,
+            .layerCount = 1,
+        },
+        .imageExtent =
+            (VkExtent3D){ surface->width, surface->height, 1 },
+    };
+
+    if (packed_depth_stencil) {
+        VkBuffer compute_dst =
+            r->storage_buffers[BUFFER_COMPUTE_DST].buffer;
+        VkBuffer compute_src =
+            r->storage_buffers[BUFFER_COMPUTE_SRC].buffer;
+        VkBufferCopy copy = {
+            .srcOffset = surface->vram_addr,
+            .size = guest_size,
+        };
+        guest_vram_buffer_barrier(
+            cmd, compute_dst, 0, guest_size,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+        vkCmdCopyBuffer(cmd, r->guest_vram_buffer, compute_dst, 1, &copy);
+        guest_vram_buffer_barrier(
+            cmd, compute_dst, 0, guest_size,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+
+        size_t depth_size = scaled_width * scaled_height * 4;
+        size_t stencil_offset = ROUND_UP(
+            depth_size,
+            r->device_props.limits.minStorageBufferOffsetAlignment);
+        size_t unpacked_size = stencil_offset +
+                               scaled_width * scaled_height;
+        guest_vram_buffer_barrier(
+            cmd, compute_src, 0, unpacked_size,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT);
+        pgraph_vk_unpack_depth_stencil(pg, surface, cmd, compute_dst,
+                                       compute_src);
+        guest_vram_buffer_barrier(
+            cmd, compute_src, 0, unpacked_size,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT);
+
+        source_buffer = compute_src;
+        regions[0].bufferOffset = 0;
+        regions[0].imageExtent =
+            (VkExtent3D){ scaled_width, scaled_height, 1 };
+        if (surface->host_fmt.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            regions[num_regions++] = (VkBufferImageCopy) {
+                .bufferOffset = stencil_offset,
+                .imageSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT,
+                    .layerCount = 1,
+                },
+                .imageExtent = regions[0].imageExtent,
+            };
+        }
+    }
+
+    if (surface->color && upscale) {
+        if (surface->image_scratch_current_layout !=
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            pgraph_vk_transition_image_layout(
+                pg, cmd, surface->image_scratch,
+                surface->host_fmt.vk_format,
+                surface->image_scratch_current_layout,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            surface->image_scratch_current_layout =
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        }
+        vkCmdCopyBufferToImage(cmd, source_buffer, surface->image_scratch,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               num_regions, regions);
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image_scratch,
+            surface->host_fmt.vk_format,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        surface->image_scratch_current_layout =
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            surface->image_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit blit = {
+            .srcSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .layerCount = 1,
+            },
+            .srcOffsets = {
+                { 0, 0, 0 },
+                { surface->width, surface->height, 1 },
+            },
+            .dstSubresource = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .layerCount = 1,
+            },
+            .dstOffsets = {
+                { 0, 0, 0 },
+                { scaled_width, scaled_height, 1 },
+            },
+        };
+        vkCmdBlitImage(cmd, surface->image_scratch,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       surface->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       1, &blit, VK_FILTER_LINEAR);
+    } else {
+        pgraph_vk_transition_image_layout(
+            pg, cmd, surface->image, surface->host_fmt.vk_format,
+            surface->image_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        vkCmdCopyBufferToImage(cmd, source_buffer, surface->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               num_regions, regions);
+    }
+
+    VkImageLayout default_layout = surface->color ?
+        VK_IMAGE_LAYOUT_GENERAL :
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    pgraph_vk_transition_image_layout(
+        pg, cmd, surface->image, surface->host_fmt.vk_format,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, default_layout);
+    surface->image_layout = default_layout;
+    guest_vram_buffer_barrier(
+        cmd, r->guest_vram_buffer, surface->vram_addr, guest_size,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    pgraph_vk_end_debug_marker(r, cmd);
+    pgraph_vk_end_nondraw_commands(pg, cmd);
+
+    surface->upload_pending = false;
+    surface->draw_time = pg->draw_time;
+    surface->initialized = true;
+    r->guest_vram_upload_count++;
+#ifdef __ANDROID__
+    if (r->guest_vram_upload_count <= 4 ||
+        r->guest_vram_upload_count % 600 == 0) {
+        __android_log_print(
+            ANDROID_LOG_INFO, "hakuX-vram",
+            "upload=%" PRIu64 " %s addr=0x%" HWADDR_PRIx
+            " %ux%u pitch=%u scale=%u",
+            r->guest_vram_upload_count,
+            surface->color ? "color" : "zeta", surface->vram_addr,
+            surface->width, surface->height, surface->pitch,
+            pg->surface_scale_factor);
+    }
+#endif
+    return true;
+}
+
 bool pgraph_vk_prerecord_display_download(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -1243,6 +1780,17 @@ void pgraph_vk_process_pending_downloads(NV2AState *d)
     PGRAPHVkState *r = pg->vk_renderer_state;
     SurfaceBinding *surface;
 
+    if (r->guest_vram_cpu_wait_requested) {
+        if (r->num_guest_vram_pending_ranges) {
+            if (r->in_command_buffer) {
+                pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
+            } else {
+                pgraph_vk_flush_all_frames(pg);
+            }
+            r->num_guest_vram_pending_ranges = 0;
+        }
+        r->guest_vram_cpu_wait_requested = false;
+    }
     pgraph_vk_download_surface_complete_deferred(d);
 
     bool can_defer = true;
@@ -1400,7 +1948,27 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
     qemu_mutex_lock(&d->pgraph.lock);
 
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
-    bool wait_for_downloads = false;
+    bool guest_vram_wait =
+        guest_vram_pending_range_overlaps(r, addr, len);
+    bool wait_for_downloads = guest_vram_wait;
+    if (guest_vram_wait) {
+        r->guest_vram_cpu_wait_requested = true;
+        r->guest_vram_cpu_wait_count++;
+#ifdef __ANDROID__
+        if (r->guest_vram_cpu_wait_count <= 8 ||
+            r->guest_vram_cpu_wait_count % 120 == 0) {
+            __android_log_print(
+                ANDROID_LOG_INFO, "hakuX-vram",
+                "cpu-wait=%" PRIu64 " addr=0x%" HWADDR_PRIx
+                " len=0x%" HWADDR_PRIx " pending-ranges=%zu",
+                r->guest_vram_cpu_wait_count, addr, len,
+                r->num_guest_vram_pending_ranges);
+        }
+#endif
+    }
+    if (write) {
+        guest_vram_invalidate_valid_ranges(r, addr, len);
+    }
 
     SurfaceBinding *surface;
     QTAILQ_FOREACH(surface, &r->surfaces, entry) {
@@ -1645,6 +2213,7 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
          * the exact synchronous VRAM visibility of the legacy path without a
          * fence round trip per overlapping surface.
          */
+        bool used_guest_vram = false;
         SurfaceBinding *other_surface;
         QTAILQ_FOREACH(other_surface, &r->surfaces, entry) {
             if (!check_surfaces_overlap(surface, other_surface)) {
@@ -1656,7 +2225,11 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
             OPT_STAT_INC(dif_overlap);
             if (other_surface->draw_dirty) {
                 OPT_STAT_INC(dl_from_dirty_if);
-                download_surface_deferred(d, other_surface);
+                if (download_surface_to_guest_vram(d, other_surface)) {
+                    used_guest_vram = true;
+                } else {
+                    download_surface_deferred(d, other_surface);
+                }
             }
         }
 
@@ -1668,7 +2241,11 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
             OPT_STAT_INC(dif_overlap_sh);
             if (other_surface->draw_dirty) {
                 OPT_STAT_INC(dl_from_dirty_if);
-                download_surface_deferred(d, other_surface);
+                if (download_surface_to_guest_vram(d, other_surface)) {
+                    used_guest_vram = true;
+                } else {
+                    download_surface_deferred(d, other_surface);
+                }
             }
         }
 
@@ -1678,6 +2255,9 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
         QTAILQ_FOREACH_SAFE(other_surface, &r->surfaces, entry, next_surface) {
             if (check_surfaces_overlap(surface, other_surface)) {
                 invalidate_surface(d, other_surface);
+                if (used_guest_vram && r->in_command_buffer) {
+                    other_surface->invalidation_frame = r->current_frame;
+                }
             }
         }
         QTAILQ_FOREACH_SAFE(other_surface, &r->shelved_surfaces, entry,
@@ -1688,8 +2268,14 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
             }
             QTAILQ_REMOVE(&r->shelved_surfaces, other_surface, entry);
             deferred_downloads_clear_surface(r, other_surface);
-            destroy_surface_image(r, other_surface);
-            g_free(other_surface);
+            if (used_guest_vram && r->in_command_buffer) {
+                other_surface->invalidation_frame = r->current_frame;
+                QTAILQ_INSERT_HEAD(&r->invalid_surfaces, other_surface,
+                                   entry);
+            } else {
+                destroy_surface_image(r, other_surface);
+                g_free(other_surface);
+            }
         }
         return;
     }
@@ -2176,6 +2762,10 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                  surface->swizzle ? "sz" : "lin", surface->vram_addr,
                  surface->width, surface->height, surface->pitch,
                  surface->fmt.bytes_per_pixel);
+
+    if (upload_surface_from_guest_vram(d, surface)) {
+        return;
+    }
 
     surface->upload_pending = false;
     surface->draw_time = pg->draw_time;

@@ -484,6 +484,22 @@ static void add_optional_device_extension_names(
         available_extensions, enabled_extension_names,
         VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
+    const char *guest_vram_buffer = getenv("XEMU_GPU_VRAM_BUFFER");
+    bool enable_guest_vram_buffer = guest_vram_buffer &&
+                                    guest_vram_buffer[0] &&
+                                    strcmp(guest_vram_buffer, "0") != 0;
+#ifdef __ANDROID__
+    if (!guest_vram_buffer || !guest_vram_buffer[0]) {
+        enable_guest_vram_buffer = true;
+    }
+#endif
+    if (enable_guest_vram_buffer) {
+        r->external_memory_host_extension_enabled =
+            add_extension_if_available(
+                available_extensions, enabled_extension_names,
+                VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    }
+
     if (r->device_props.apiVersion < VK_API_VERSION_1_3) {
         r->extended_dynamic_state_supported = add_extension_if_available(
             available_extensions, enabled_extension_names,
