@@ -92,6 +92,11 @@ struct CPUAddressSpace;
 /* see accel/tcg/tb-jmp-cache.h */
 struct CPUJumpCache;
 
+#ifdef XBOX
+/* Private implementation lives in accel/tcg/cputlb.c. */
+struct XemuTlbDirtyIndex;
+#endif
+
 /* see accel-cpu.h */
 struct AccelCPUClass;
 
@@ -302,6 +307,9 @@ typedef struct CPUTLBDesc {
 typedef struct CPUTLBCommon {
     /* Serialize updates to f.table and d.vtable, and others as noted. */
     QemuSpin lock;
+#ifdef XBOX
+    struct XemuTlbDirtyIndex *xemu_dirty_index;
+#endif
     /*
      * Within dirty, for each bit N, modifications have been made to
      * mmu_idx N since the last time that mmu_idx was flushed.

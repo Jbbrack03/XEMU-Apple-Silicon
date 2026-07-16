@@ -105,6 +105,240 @@ static inline size_t sizeof_tlb(CPUTLBDescFast *fast)
     return fast->mask + (1 << CPU_TLB_ENTRY_BITS);
 }
 
+#ifdef XBOX
+#define XEMU_TLB_DIRTY_BUCKET_BITS 12
+#define XEMU_TLB_DIRTY_BUCKETS (1u << XEMU_TLB_DIRTY_BUCKET_BITS)
+#define XEMU_TLB_HOST_PAGE_MASK (~(uintptr_t)(TARGET_PAGE_SIZE - 1))
+
+/*
+ * Reverse-map writable clean-RAM TLB entries by host page.  Xbox texture
+ * uploads clear small dirty-bitmap ranges at kHz rates; QEMU's generic path
+ * scans every main and victim entry in every active MMU mode for each clear.
+ * All TLB entry replacement, flush, victim-swap, and dirty re-arm paths are
+ * serialized by tlb_c.lock, so intrusive nodes let the clear path visit only
+ * entries that can actually match without adding another synchronization
+ * domain.
+ */
+
+typedef struct XemuTlbDirtyNode {
+    struct XemuTlbDirtyNode *next;
+    struct XemuTlbDirtyNode **pprev;
+    uintptr_t host_page;
+    CPUTLBEntry *entry;
+    CPUTLBEntryFull *full;
+} XemuTlbDirtyNode;
+
+typedef struct XemuTlbDirtyMode {
+    XemuTlbDirtyNode *main;
+    size_t main_count;
+    XemuTlbDirtyNode victim[CPU_VTLB_SIZE];
+} XemuTlbDirtyMode;
+
+struct XemuTlbDirtyIndex {
+    XemuTlbDirtyNode *buckets[XEMU_TLB_DIRTY_BUCKETS];
+    XemuTlbDirtyMode mode[NB_MMU_MODES];
+    size_t count;
+    bool verify;
+};
+
+static bool xemu_tlb_dirty_index_requested(void)
+{
+    const char *env = getenv("XEMU_TLB_DIRTY_INDEX");
+
+#if defined(__ANDROID__)
+    /* Accepted Quest path; retain an exact runtime rollback. */
+    return !(env && strcmp(env, "0") == 0);
+#else
+    return env && strcmp(env, "1") == 0;
+#endif
+}
+
+static unsigned xemu_tlb_dirty_bucket(uintptr_t host_page)
+{
+    uintptr_t key = host_page >> TARGET_PAGE_BITS;
+
+    key ^= key >> XEMU_TLB_DIRTY_BUCKET_BITS;
+    key ^= key >> (2 * XEMU_TLB_DIRTY_BUCKET_BITS);
+    return key & (XEMU_TLB_DIRTY_BUCKETS - 1);
+}
+
+static void xemu_tlb_dirty_node_remove(struct XemuTlbDirtyIndex *index,
+                                       XemuTlbDirtyNode *node)
+{
+    if (node->pprev == NULL) {
+        return;
+    }
+
+    *node->pprev = node->next;
+    if (node->next != NULL) {
+        node->next->pprev = node->pprev;
+    }
+    node->next = NULL;
+    node->pprev = NULL;
+    index->count--;
+}
+
+static bool xemu_tlb_dirty_entry_key(CPUTLBEntryFull *full,
+                                     CPUTLBEntry *entry,
+                                     uintptr_t *host_page)
+{
+    const uintptr_t addr = qatomic_read(&entry->addr_write);
+    int flags = addr | full->slow_flags[MMU_DATA_STORE];
+
+    flags &= TLB_INVALID_MASK | TLB_MMIO | TLB_DISCARD_WRITE | TLB_NOTDIRTY;
+    if (flags != 0) {
+        return false;
+    }
+
+    *host_page = ((addr & TARGET_PAGE_MASK) + entry->addend) &
+                 XEMU_TLB_HOST_PAGE_MASK;
+    return true;
+}
+
+static void xemu_tlb_dirty_node_refresh(struct XemuTlbDirtyIndex *index,
+                                        XemuTlbDirtyNode *node,
+                                        CPUTLBEntry *entry,
+                                        CPUTLBEntryFull *full)
+{
+    XemuTlbDirtyNode **bucket;
+    uintptr_t host_page;
+
+    xemu_tlb_dirty_node_remove(index, node);
+    node->entry = entry;
+    node->full = full;
+
+    if (!xemu_tlb_dirty_entry_key(full, entry, &host_page)) {
+        return;
+    }
+
+    bucket = &index->buckets[xemu_tlb_dirty_bucket(host_page)];
+    node->host_page = host_page;
+    node->next = *bucket;
+    node->pprev = bucket;
+    if (node->next != NULL) {
+        node->next->pprev = &node->next;
+    }
+    *bucket = node;
+    index->count++;
+}
+
+static struct XemuTlbDirtyIndex *xemu_tlb_dirty_index(CPUState *cpu)
+{
+    return cpu->neg.tlb.c.xemu_dirty_index;
+}
+
+static XemuTlbDirtyNode *xemu_tlb_dirty_main_node(CPUState *cpu,
+                                                  int mmu_idx, size_t slot)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+
+    return index ? &index->mode[mmu_idx].main[slot] : NULL;
+}
+
+static XemuTlbDirtyNode *xemu_tlb_dirty_victim_node(CPUState *cpu,
+                                                    int mmu_idx, size_t slot)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+
+    return index ? &index->mode[mmu_idx].victim[slot] : NULL;
+}
+
+static void xemu_tlb_dirty_remove_node(CPUState *cpu,
+                                       XemuTlbDirtyNode *node)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+
+    if (index != NULL) {
+        xemu_tlb_dirty_node_remove(index, node);
+    }
+}
+
+static void xemu_tlb_dirty_refresh_node(CPUState *cpu,
+                                        XemuTlbDirtyNode *node,
+                                        CPUTLBEntry *entry,
+                                        CPUTLBEntryFull *full)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+
+    if (index != NULL) {
+        xemu_tlb_dirty_node_refresh(index, node, entry, full);
+    }
+}
+
+static void xemu_tlb_dirty_mode_clear(CPUState *cpu, int mmu_idx)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+    XemuTlbDirtyMode *mode;
+
+    if (index == NULL) {
+        return;
+    }
+
+    mode = &index->mode[mmu_idx];
+    for (size_t i = 0; i < mode->main_count; i++) {
+        xemu_tlb_dirty_node_remove(index, &mode->main[i]);
+    }
+    for (size_t i = 0; i < CPU_VTLB_SIZE; i++) {
+        xemu_tlb_dirty_node_remove(index, &mode->victim[i]);
+    }
+}
+
+static void xemu_tlb_dirty_mode_resize(CPUState *cpu, int mmu_idx,
+                                       size_t entries)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+    XemuTlbDirtyMode *mode;
+
+    if (index == NULL) {
+        return;
+    }
+
+    mode = &index->mode[mmu_idx];
+    xemu_tlb_dirty_mode_clear(cpu, mmu_idx);
+    g_free(mode->main);
+    mode->main = g_new0(XemuTlbDirtyNode, entries);
+    mode->main_count = entries;
+}
+
+static void xemu_tlb_dirty_index_init(CPUState *cpu)
+{
+    struct XemuTlbDirtyIndex *index;
+    const char *verify;
+
+    cpu->neg.tlb.c.xemu_dirty_index = NULL;
+    if (!xemu_tlb_dirty_index_requested()) {
+        return;
+    }
+
+    index = g_new0(struct XemuTlbDirtyIndex, 1);
+    verify = getenv("XEMU_TLB_DIRTY_INDEX_VERIFY");
+    index->verify = verify && strcmp(verify, "1") == 0;
+    cpu->neg.tlb.c.xemu_dirty_index = index;
+#if defined(__ANDROID__)
+    __android_log_print(ANDROID_LOG_INFO, "xemu-tlb",
+                        "dirty host-page index enabled (verify=%s)",
+                        index->verify ? "on" : "off");
+#endif
+}
+
+static void xemu_tlb_dirty_index_destroy(CPUState *cpu)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+
+    if (index == NULL) {
+        return;
+    }
+
+    for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        xemu_tlb_dirty_mode_clear(cpu, mmu_idx);
+        g_free(index->mode[mmu_idx].main);
+    }
+    g_assert(index->count == 0);
+    g_free(index);
+    cpu->neg.tlb.c.xemu_dirty_index = NULL;
+}
+#endif
+
 static inline uint64_t tlb_read_idx(const CPUTLBEntry *entry,
                                     MMUAccessType access_type)
 {
@@ -230,7 +464,8 @@ static size_t tlb_dyn_max_entries(void)
     return max;
 }
 
-static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
+static void tlb_mmu_resize_locked(CPUState *cpu, int mmu_idx,
+                                  CPUTLBDesc *desc, CPUTLBDescFast *fast,
                                   int64_t now)
 {
     size_t old_size = tlb_n_entries(fast);
@@ -281,6 +516,9 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         return;
     }
 
+#ifdef XBOX
+    xemu_tlb_dirty_mode_clear(cpu, mmu_idx);
+#endif
     g_free(fast->table);
     g_free(desc->fulltlb);
 
@@ -310,10 +548,17 @@ static void tlb_mmu_resize_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast,
         fast->table = g_try_new(CPUTLBEntry, new_size);
         desc->fulltlb = g_try_new(CPUTLBEntryFull, new_size);
     }
+#ifdef XBOX
+    xemu_tlb_dirty_mode_resize(cpu, mmu_idx, new_size);
+#endif
 }
 
-static void tlb_mmu_flush_locked(CPUTLBDesc *desc, CPUTLBDescFast *fast)
+static void tlb_mmu_flush_locked(CPUState *cpu, int mmu_idx,
+                                 CPUTLBDesc *desc, CPUTLBDescFast *fast)
 {
+#ifdef XBOX
+    xemu_tlb_dirty_mode_clear(cpu, mmu_idx);
+#endif
     desc->n_used_entries = 0;
     desc->large_page_addr = -1;
     desc->large_page_mask = -1;
@@ -328,11 +573,12 @@ static void tlb_flush_one_mmuidx_locked(CPUState *cpu, int mmu_idx,
     CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
     CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
 
-    tlb_mmu_resize_locked(desc, fast, now);
-    tlb_mmu_flush_locked(desc, fast);
+    tlb_mmu_resize_locked(cpu, mmu_idx, desc, fast, now);
+    tlb_mmu_flush_locked(cpu, mmu_idx, desc, fast);
 }
 
-static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
+static void tlb_mmu_init(CPUState *cpu, int mmu_idx,
+                         CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
 {
     size_t n_entries = 1 << CPU_TLB_DYN_DEFAULT_BITS;
 
@@ -341,7 +587,10 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
     fast->mask = (n_entries - 1) << CPU_TLB_ENTRY_BITS;
     fast->table = g_new(CPUTLBEntry, n_entries);
     desc->fulltlb = g_new(CPUTLBEntryFull, n_entries);
-    tlb_mmu_flush_locked(desc, fast);
+#ifdef XBOX
+    xemu_tlb_dirty_mode_resize(cpu, mmu_idx, n_entries);
+#endif
+    tlb_mmu_flush_locked(cpu, mmu_idx, desc, fast);
 }
 
 static inline void tlb_n_used_entries_inc(CPUState *cpu, uintptr_t mmu_idx)
@@ -361,11 +610,15 @@ void tlb_init(CPUState *cpu)
 
     qemu_spin_init(&cpu->neg.tlb.c.lock);
 
+#ifdef XBOX
+    xemu_tlb_dirty_index_init(cpu);
+#endif
+
     /* All tlbs are initialized flushed. */
     cpu->neg.tlb.c.dirty = 0;
 
     for (i = 0; i < NB_MMU_MODES; i++) {
-        tlb_mmu_init(&cpu->neg.tlb.d[i], cpu_tlb_fast(cpu, i), now);
+        tlb_mmu_init(cpu, i, &cpu->neg.tlb.d[i], cpu_tlb_fast(cpu, i), now);
     }
 }
 
@@ -373,6 +626,9 @@ void tlb_destroy(CPUState *cpu)
 {
     int i;
 
+#ifdef XBOX
+    xemu_tlb_dirty_index_destroy(cpu);
+#endif
     qemu_spin_destroy(&cpu->neg.tlb.c.lock);
     for (i = 0; i < NB_MMU_MODES; i++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[i];
@@ -524,6 +780,10 @@ static void tlb_flush_vtlb_page_mask_locked(CPUState *cpu, int mmu_idx,
     assert_cpu_is_self(cpu);
     for (k = 0; k < CPU_VTLB_SIZE; k++) {
         if (tlb_flush_entry_mask_locked(&d->vtable[k], page, mask)) {
+#ifdef XBOX
+            xemu_tlb_dirty_remove_node(
+                cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, k));
+#endif
             tlb_n_used_entries_dec(cpu, mmu_idx);
         }
     }
@@ -547,7 +807,14 @@ static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
                   midx, lp_addr, lp_mask);
         tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
     } else {
-        if (tlb_flush_entry_locked(tlb_entry(cpu, midx, page), page)) {
+        size_t index = tlb_index(cpu, midx, page);
+
+        if (tlb_flush_entry_locked(&cpu_tlb_fast(cpu, midx)->table[index],
+                                   page)) {
+#ifdef XBOX
+            xemu_tlb_dirty_remove_node(
+                cpu, xemu_tlb_dirty_main_node(cpu, midx, index));
+#endif
             tlb_n_used_entries_dec(cpu, midx);
         }
         tlb_flush_vtlb_page_locked(cpu, midx, page);
@@ -740,6 +1007,12 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         CPUTLBEntry *entry = tlb_entry(cpu, midx, page);
 
         if (tlb_flush_entry_mask_locked(entry, page, mask)) {
+#ifdef XBOX
+            size_t index = tlb_index(cpu, midx, page);
+
+            xemu_tlb_dirty_remove_node(
+                cpu, xemu_tlb_dirty_main_node(cpu, midx, index));
+#endif
             tlb_n_used_entries_dec(cpu, midx);
         }
         tlb_flush_vtlb_page_mask_locked(cpu, midx, page, mask);
@@ -936,6 +1209,83 @@ static void tlb_reset_dirty_range_locked(CPUTLBEntryFull *full, CPUTLBEntry *ent
     }
 }
 
+#ifdef XBOX
+static void xemu_tlb_dirty_index_verify_reset(CPUState *cpu,
+                                              uintptr_t start,
+                                              uintptr_t length)
+{
+    for (int mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
+        CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
+        size_t n = tlb_n_entries(fast);
+
+        for (size_t i = 0; i < n; i++) {
+            uintptr_t host_page;
+
+            if (xemu_tlb_dirty_entry_key(&desc->fulltlb[i], &fast->table[i],
+                                         &host_page) &&
+                (host_page - start) < length) {
+                error_report("xemu dirty-TLB index missed main mode %d slot %zu",
+                             mmu_idx, i);
+                abort();
+            }
+        }
+
+        for (size_t i = 0; i < CPU_VTLB_SIZE; i++) {
+            uintptr_t host_page;
+
+            if (xemu_tlb_dirty_entry_key(&desc->vfulltlb[i], &desc->vtable[i],
+                                         &host_page) &&
+                (host_page - start) < length) {
+                error_report("xemu dirty-TLB index missed victim mode %d slot %zu",
+                             mmu_idx, i);
+                abort();
+            }
+        }
+    }
+}
+
+static void xemu_tlb_dirty_index_reset(CPUState *cpu, uintptr_t start,
+                                       uintptr_t length)
+{
+    struct XemuTlbDirtyIndex *index = xemu_tlb_dirty_index(cpu);
+    uintptr_t first = start & XEMU_TLB_HOST_PAGE_MASK;
+    uintptr_t end = TARGET_PAGE_ALIGN(start + length);
+
+    for (uintptr_t page = first; page < end; page += TARGET_PAGE_SIZE) {
+        unsigned bucket = xemu_tlb_dirty_bucket(page);
+        XemuTlbDirtyNode *node = index->buckets[bucket];
+
+        while (node != NULL) {
+            XemuTlbDirtyNode *next = node->next;
+
+            if (node->host_page == page) {
+                uintptr_t host_page;
+
+                if (!xemu_tlb_dirty_entry_key(node->full, node->entry,
+                                              &host_page)) {
+                    xemu_tlb_dirty_node_remove(index, node);
+                } else if ((host_page - start) < length) {
+                    uintptr_t addr = qatomic_read(&node->entry->addr_write);
+
+                    qatomic_set(&node->entry->addr_write,
+                                addr | TLB_NOTDIRTY);
+                    xemu_tlb_dirty_node_remove(index, node);
+                } else if (host_page != node->host_page) {
+                    xemu_tlb_dirty_node_refresh(index, node, node->entry,
+                                                node->full);
+                }
+            }
+            node = next;
+        }
+    }
+
+    if (index->verify) {
+        xemu_tlb_dirty_index_verify_reset(cpu, start, length);
+    }
+}
+#endif
+
 /*
  * Called with tlb_c.lock held.
  * Called only from the vCPU context, i.e. the TLB's owner thread.
@@ -955,6 +1305,13 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
     int mmu_idx;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+#ifdef XBOX
+    if (xemu_tlb_dirty_index(cpu) != NULL) {
+        xemu_tlb_dirty_index_reset(cpu, start, length);
+        qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+        return;
+    }
+#endif
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
@@ -998,12 +1355,14 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
 }
 
 /* Called with tlb_c.lock held */
-static inline void tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
+static inline bool tlb_set_dirty1_locked(CPUTLBEntry *tlb_entry,
                                          vaddr addr)
 {
     if (tlb_entry->addr_write == (addr | TLB_NOTDIRTY)) {
         tlb_entry->addr_write = addr;
+        return true;
     }
+    return false;
 }
 
 /* update the TLB corresponding to virtual page vaddr
@@ -1017,13 +1376,31 @@ static void tlb_set_dirty(CPUState *cpu, vaddr addr)
     addr &= TARGET_PAGE_MASK;
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
-        tlb_set_dirty1_locked(tlb_entry(cpu, mmu_idx, addr), addr);
+        size_t index = tlb_index(cpu, mmu_idx, addr);
+        CPUTLBEntry *entry = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
+
+        if (tlb_set_dirty1_locked(entry, addr)) {
+#ifdef XBOX
+            xemu_tlb_dirty_refresh_node(
+                cpu, xemu_tlb_dirty_main_node(cpu, mmu_idx, index), entry,
+                &cpu->neg.tlb.d[mmu_idx].fulltlb[index]);
+#endif
+        }
     }
 
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         int k;
         for (k = 0; k < CPU_VTLB_SIZE; k++) {
-            tlb_set_dirty1_locked(&cpu->neg.tlb.d[mmu_idx].vtable[k], addr);
+            CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+            CPUTLBEntry *entry = &desc->vtable[k];
+
+            if (tlb_set_dirty1_locked(entry, addr)) {
+#ifdef XBOX
+                xemu_tlb_dirty_refresh_node(
+                    cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, k), entry,
+                    &desc->vfulltlb[k]);
+#endif
+            }
         }
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
@@ -1186,6 +1563,11 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     /* Make sure there's no cached translation for the new page.  */
     tlb_flush_vtlb_page_locked(cpu, mmu_idx, addr_page);
 
+#ifdef XBOX
+    xemu_tlb_dirty_remove_node(
+        cpu, xemu_tlb_dirty_main_node(cpu, mmu_idx, index));
+#endif
+
     /*
      * Only evict the old entry to the victim tlb if it's for a
      * different page; otherwise just overwrite the stale data.
@@ -1195,8 +1577,17 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
         CPUTLBEntry *tv = &desc->vtable[vidx];
 
         /* Evict the old entry into the victim tlb.  */
+#ifdef XBOX
+        xemu_tlb_dirty_remove_node(
+            cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, vidx));
+#endif
         copy_tlb_helper_locked(tv, te);
         desc->vfulltlb[vidx] = desc->fulltlb[index];
+#ifdef XBOX
+        xemu_tlb_dirty_refresh_node(
+            cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, vidx), tv,
+            &desc->vfulltlb[vidx]);
+#endif
         tlb_n_used_entries_dec(cpu, mmu_idx);
     }
 
@@ -1242,6 +1633,11 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
                     MMU_DATA_STORE, prot & PAGE_WRITE);
 
     copy_tlb_helper_locked(te, &tn);
+#ifdef XBOX
+    xemu_tlb_dirty_refresh_node(
+        cpu, xemu_tlb_dirty_main_node(cpu, mmu_idx, index), te,
+        &desc->fulltlb[index]);
+#endif
     tlb_n_used_entries_inc(cpu, mmu_idx);
     qemu_spin_unlock(&tlb->c.lock);
 }
@@ -1379,17 +1775,29 @@ static bool victim_tlb_hit(CPUState *cpu, size_t mmu_idx, size_t index,
         if (cmp == page) {
             /* Found entry in victim tlb, swap tlb and iotlb.  */
             CPUTLBEntry tmptlb, *tlb = &cpu_tlb_fast(cpu, mmu_idx)->table[index];
-
-            qemu_spin_lock(&cpu->neg.tlb.c.lock);
-            copy_tlb_helper_locked(&tmptlb, tlb);
-            copy_tlb_helper_locked(tlb, vtlb);
-            copy_tlb_helper_locked(vtlb, &tmptlb);
-            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
-
             CPUTLBEntryFull *f1 = &cpu->neg.tlb.d[mmu_idx].fulltlb[index];
             CPUTLBEntryFull *f2 = &cpu->neg.tlb.d[mmu_idx].vfulltlb[vidx];
             CPUTLBEntryFull tmpf;
+
+            qemu_spin_lock(&cpu->neg.tlb.c.lock);
+#ifdef XBOX
+            xemu_tlb_dirty_remove_node(
+                cpu, xemu_tlb_dirty_main_node(cpu, mmu_idx, index));
+            xemu_tlb_dirty_remove_node(
+                cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, vidx));
+#endif
+            copy_tlb_helper_locked(&tmptlb, tlb);
+            copy_tlb_helper_locked(tlb, vtlb);
+            copy_tlb_helper_locked(vtlb, &tmptlb);
             tmpf = *f1; *f1 = *f2; *f2 = tmpf;
+#ifdef XBOX
+            xemu_tlb_dirty_refresh_node(
+                cpu, xemu_tlb_dirty_main_node(cpu, mmu_idx, index), tlb, f1);
+            xemu_tlb_dirty_refresh_node(
+                cpu, xemu_tlb_dirty_victim_node(cpu, mmu_idx, vidx), vtlb,
+                f2);
+#endif
+            qemu_spin_unlock(&cpu->neg.tlb.c.lock);
             return true;
         }
     }
