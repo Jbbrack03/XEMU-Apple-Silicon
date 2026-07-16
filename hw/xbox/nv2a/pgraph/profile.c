@@ -110,6 +110,8 @@ typedef struct XemuRawFrameTraceSample {
     uint32_t finish_us;
     uint32_t flip_idle_us;
     uint32_t fifo_idle_us;
+    uint32_t fifo_idle_frame_us;
+    uint32_t fifo_idle_starve_us;
     uint32_t gpu_total_us;
     uint32_t gpu_render_us;
     uint32_t gpu_nonrender_us;
@@ -292,6 +294,8 @@ static void xemu_raw_frame_trace_record(int64_t interval_us,
         .finish_us = xemu_profile_ns_to_us(phase->finish_ns),
         .flip_idle_us = xemu_profile_ns_to_us(phase->flip_idle_ns),
         .fifo_idle_us = xemu_profile_ns_to_us(phase->fifo_idle_ns),
+        .fifo_idle_frame_us = xemu_profile_ns_to_us(phase->fifo_idle_frame_ns),
+        .fifo_idle_starve_us = xemu_profile_ns_to_us(phase->fifo_idle_starve_ns),
         .gpu_total_us = xemu_profile_ns_to_us(phase->gpu_total_ns),
         .gpu_render_us = xemu_profile_ns_to_us(phase->gpu_render_ns),
         .gpu_nonrender_us = xemu_profile_ns_to_us(phase->gpu_nonrender_ns),
