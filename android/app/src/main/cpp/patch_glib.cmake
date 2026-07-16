@@ -32,12 +32,36 @@ string(REPLACE
 )
 file(WRITE "${MESON_FILE}" "${MESON_CONTENTS}")
 
+# libglib is linked statically into libxemu after QEMU's many default-priority
+# type-registration constructors.  Run GLib's initializer first: otherwise an
+# early QEMU constructor can create quark 0 before quark_ht exists.  The old
+# workaround merely hid GLib's duplicate-init assertion and left quark_ht NULL,
+# producing later g_hash_table assertions on ordinary shader-cache misses.
+set(GLIB_INIT_FILE "${GLIB_SOURCE_DIR}/glib/glib-init.c")
+if(NOT EXISTS "${GLIB_INIT_FILE}")
+  message(FATAL_ERROR "glib-init.c not found at ${GLIB_INIT_FILE}")
+endif()
+file(READ "${GLIB_INIT_FILE}" GLIB_INIT_CONTENTS)
+string(REPLACE
+  "G_DEFINE_CONSTRUCTOR(glib_init_ctor)"
+  "static void glib_init_ctor (void) __attribute__((constructor(101)));"
+  GLIB_INIT_PATCHED
+  "${GLIB_INIT_CONTENTS}"
+)
+if(GLIB_INIT_PATCHED STREQUAL GLIB_INIT_CONTENTS AND
+   NOT GLIB_INIT_CONTENTS MATCHES "constructor\\(101\\)")
+  message(FATAL_ERROR "unable to set early GLib constructor priority")
+endif()
+file(WRITE "${GLIB_INIT_FILE}" "${GLIB_INIT_PATCHED}")
+
+# Restore upstream's invariant if this source tree was previously configured
+# with the superseded duplicate-init workaround.
 set(GQUARK_FILE "${GLIB_SOURCE_DIR}/glib/gquark.c")
 if(EXISTS "${GQUARK_FILE}")
   file(READ "${GQUARK_FILE}" GQUARK_CONTENTS)
   string(REPLACE
-    "  g_assert (quark_seq_id == 0);\n"
     "  if (quark_seq_id != 0) {\n    return;\n  }\n"
+    "  g_assert (quark_seq_id == 0);\n"
     GQUARK_CONTENTS
     "${GQUARK_CONTENTS}"
   )
