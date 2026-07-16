@@ -1481,6 +1481,16 @@ extern "C" int SDL_main(int argc, char* argv[]) {
 
     std::vector<std::string> arg_storage;
     arg_storage.emplace_back("xemu");
+    {
+      const char* debug_threads = SDL_getenv("XEMU_DEBUG_THREAD_NAMES");
+      if (debug_threads && debug_threads[0] && strcmp(debug_threads, "0") != 0) {
+        // QEMU's supported debug-only name option makes per-thread host
+        // counters attributable without changing scheduling or emulation.
+        arg_storage.emplace_back("-name");
+        arg_storage.emplace_back("debug-threads=on");
+        LogInfo("SDL_main: QEMU debug thread names enabled");
+      }
+    }
     if (IsTcgTuningEnabled()) {
       const char* tcg_thread = GetTcgThreadFromEnv();
       int tcg_tb_size = GetTcgTbSizeFromEnv();
