@@ -63,7 +63,24 @@
 
 static bool xemu_fast_rdtsc_enabled;
 static bool xemu_fast_rdtsc_init_done;
+static bool xemu_rdtsc_fixed_point_enabled;
 static uint64_t xemu_cntfrq;
+
+/*
+ * Quest 3 exposes a 19.2 MHz architectural counter.  Scale that counter to
+ * the Xbox 733,333,333 Hz TSC with a Q6.58 multiplier.  The multiplier is the
+ * nearest integer to (733333333 / 19200000) * 2^58; its rate error remains
+ * below half a guest TSC tick past the guest counter's own 64-bit wrap time.
+ * Unlike the exact constant-divisor formulation, this compiles to MUL,
+ * UMULH, and EXTR rather than a reciprocal-division sequence.
+ */
+#define XEMU_QUEST_CNTFRQ 19200000ULL
+#define XEMU_QUEST_TSC_Q58 UINT64_C(0x98c71c709cd97865)
+
+static inline uint64_t xemu_scale_quest_tsc(uint64_t counter)
+{
+    return ((__uint128_t)counter * XEMU_QUEST_TSC_Q58) >> 58;
+}
 
 /*
  * Android correction to the source fork's "VM never pauses mid-run"
@@ -118,8 +135,9 @@ static void xemu_fast_rdtsc_init(void)
 
     /* Default ON for Android; only "0" disables. */
     bool enabled = true;
-    const char *env = getenv("XEMU_FAST_RDTSC");
-    if (env && env[0] && strcmp(env, "0") == 0) {
+    const char *fast_env = getenv("XEMU_FAST_RDTSC");
+    const char *fixed_env;
+    if (fast_env && fast_env[0] && strcmp(fast_env, "0") == 0) {
         enabled = false;
     }
 
@@ -127,6 +145,12 @@ static void xemu_fast_rdtsc_init(void)
     if (xemu_cntfrq == 0) {
         /* cntfrq_el0 unreadable/zero; force fallback to the QEMU path. */
         enabled = false;
+    }
+
+    xemu_rdtsc_fixed_point_enabled = xemu_cntfrq == XEMU_QUEST_CNTFRQ;
+    fixed_env = getenv("XEMU_RDTSC_FIXED_POINT");
+    if (fixed_env && fixed_env[0] && strcmp(fixed_env, "0") == 0) {
+        xemu_rdtsc_fixed_point_enabled = false;
     }
 
     if (enabled) {
@@ -137,10 +161,11 @@ static void xemu_fast_rdtsc_init(void)
     xemu_fast_rdtsc_init_done = true;
 
     __android_log_print(ANDROID_LOG_INFO, "xemu-perf",
-                        "fast_rdtsc=%d source=%s cntfrq=%llu",
+                        "fast_rdtsc=%d source=%s cntfrq=%llu fixed_point=%d",
                         (int)xemu_fast_rdtsc_enabled,
-                        (env && env[0]) ? "env" : "auto-default",
-                        (unsigned long long)xemu_cntfrq);
+                        (fast_env && fast_env[0]) ? "env" : "auto-default",
+                        (unsigned long long)xemu_cntfrq,
+                        (int)xemu_rdtsc_fixed_point_enabled);
 }
 #endif /* XBOX && __ANDROID__ && __aarch64__ */
 
@@ -154,6 +179,9 @@ uint64_t cpu_get_tsc(CPUX86State *env)
     }
     if (xemu_fast_rdtsc_enabled) {
         uint64_t v = cntvct_now() - qatomic_read(&xemu_tsc_pause_offset);
+        if (xemu_rdtsc_fixed_point_enabled) {
+            return xemu_scale_quest_tsc(v);
+        }
         return muldiv64(v, 733333333, xemu_cntfrq);
     }
 # endif
