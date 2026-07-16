@@ -102,6 +102,20 @@ static void pfifo_run_pusher(NV2AState *d);
 static uint32_t ramht_hash(NV2AState *d, uint32_t handle);
 static RAMHTEntry ramht_lookup(NV2AState *d, uint32_t handle);
 
+static void pfifo_apply_android_worker_partition(void)
+{
+#if defined(__ANDROID__)
+    const char *env = getenv("XEMU_ANDROID_WORKER_PARTITION");
+
+    if (env && env[0] && strcmp(env, "0") != 0) {
+        unsigned long mask = 1UL << 5;
+        long rc = syscall(SYS_sched_setaffinity, 0, sizeof(mask), &mask);
+
+        error_report("Android worker partition: PFIFO cpu=5 rc=%ld", rc);
+    }
+#endif
+}
+
 /* PFIFO - MMIO and DMA FIFO submission to PGRAPH and VPE */
 uint64_t pfifo_read(void *opaque, hwaddr addr, unsigned int size)
 {
@@ -589,6 +603,7 @@ void *pfifo_thread(void *arg)
 #if defined(__ANDROID__) && XEMU_OPT_THREAD_AFFINITY
     xemu_pin_to_big_cores("pfifo_thread");
 #endif
+    pfifo_apply_android_worker_partition();
 
     pgraph_init_thread(d);
 

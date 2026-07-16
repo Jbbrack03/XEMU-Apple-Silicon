@@ -20,6 +20,7 @@
  */
 
 #include "apu_int.h"
+#include "qemu/error-report.h"
 
 MCPXAPUState *g_state; // Used via debug handlers
 
@@ -778,6 +779,18 @@ type_init(mcpx_apu_register);
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
+#ifdef __ANDROID__
+    {
+        const char *env = getenv("XEMU_ANDROID_WORKER_PARTITION");
+
+        if (env && env[0] && strcmp(env, "0") != 0) {
+            unsigned long mask = 1UL << 5;
+            long rc = syscall(SYS_sched_setaffinity, 0, sizeof(mask), &mask);
+
+            error_report("Android worker partition: APU cpu=5 rc=%ld", rc);
+        }
+    }
+#endif
     qemu_mutex_lock(&d->lock);
     while (!qatomic_read(&d->exiting)) {
         int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
