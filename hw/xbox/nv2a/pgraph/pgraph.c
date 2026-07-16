@@ -873,6 +873,12 @@ void pgraph_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 
         break;
     }
+    case NV_PGRAPH_CTX_CONTROL:
+        pgraph_reg_w(pg, addr, val);
+        if (val & NV_PGRAPH_CTX_CONTROL_CHID) {
+            pfifo_kick(d);
+        }
+        break;
     default:
         pgraph_reg_w(pg, addr, val);
         break;

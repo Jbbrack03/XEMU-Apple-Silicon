@@ -171,6 +171,26 @@ static bool can_fifo_access(NV2AState *d) {
            NV_PGRAPH_FIFO_ACCESS;
 }
 
+static bool pgraph_channel_valid(NV2AState *d)
+{
+    return qatomic_read(&d->pgraph.regs_[NV_PGRAPH_CTX_CONTROL]) &
+           NV_PGRAPH_CTX_CONTROL_CHID;
+}
+
+static bool pgraph_channel_matches(NV2AState *d, unsigned int channel_id)
+{
+    uint32_t user = qatomic_read(&d->pgraph.regs_[NV_PGRAPH_CTX_USER]);
+
+    return pgraph_channel_valid(d) &&
+           GET_MASK(user, NV_PGRAPH_CTX_USER_CHID) == channel_id;
+}
+
+static bool pgraph_channel_ready(NV2AState *d, unsigned int channel_id)
+{
+    return !qatomic_read(&d->pgraph.waiting_for_context_switch) &&
+           can_fifo_access(d) && pgraph_channel_matches(d, channel_id);
+}
+
 /* If NV097_FLIP_STALL was executed, check if the flip has completed.
  * This will usually happen in the VSYNC interrupt handler.
  */
@@ -264,7 +284,10 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
 
         if (can_fifo_access(d)) {
             pgraph_context_switch(d, entry.channel_id);
-            if (!d->pgraph.waiting_for_context_switch) {
+            /* pgraph_context_switch drops pg->lock while raising the guest
+             * interrupt. The guest may acknowledge it before restoring FIFO
+             * access and CHID, so revalidate the complete dispatch invariant. */
+            if (pgraph_channel_ready(d, entry.channel_id)) {
                 num_proc =
                     pgraph_method(d, subchannel, 0, entry.instance, parameters,
                                   num_words_available, max_lookahead_words, inc);
@@ -280,7 +303,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
 
         if (can_fifo_access(d)) {
             pgraph_context_switch(d, entry.channel_id);
-            if (!d->pgraph.waiting_for_context_switch) {
+            if (pgraph_channel_ready(d, entry.channel_id)) {
                 num_proc =
                     pgraph_method(d, subchannel, 0, entry.instance, parameters,
                                   num_words_available, max_lookahead_words, inc);
@@ -312,7 +335,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
 
 #if XEMU_OPT_PFIFO_LOCK_BATCH
 #if XEMU_OPT_LOCKLESS_FAST_DISPATCH
-        if (inc && can_fifo_access(d)) {
+        if (inc && can_fifo_access(d) && pgraph_channel_valid(d)) {
             num_proc = pgraph_method_try_fast(
                 d, subchannel, method, parameter,
                 parameters, num_words_available, max_lookahead_words);
@@ -326,7 +349,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         qemu_mutex_lock(&d->pgraph.lock);
         qemu_mutex_unlock(&d->pfifo.lock);
 
-        if (can_fifo_access(d)) {
+        if (can_fifo_access(d) && pgraph_channel_valid(d)) {
             num_proc =
                 pgraph_method(d, subchannel, method, parameter, parameters,
                               num_words_available, max_lookahead_words, inc);
@@ -342,7 +365,7 @@ static ssize_t pfifo_run_puller(NV2AState *d, uint32_t method_entry,
         qemu_mutex_unlock(&d->pfifo.lock);
         qemu_mutex_lock(&d->pgraph.lock);
 
-        if (can_fifo_access(d)) {
+        if (can_fifo_access(d) && pgraph_channel_valid(d)) {
             num_proc =
                 pgraph_method(d, subchannel, method, parameter, parameters,
                               num_words_available, max_lookahead_words, inc);
