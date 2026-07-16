@@ -30,7 +30,7 @@ void qemu_thread_naming(bool enable)
 
 #if !defined CONFIG_PTHREAD_SETNAME_NP_W_TID && \
     !defined CONFIG_PTHREAD_SETNAME_NP_WO_TID && \
-    !defined CONFIG_PTHREAD_SET_NAME_NP
+    !defined CONFIG_PTHREAD_SET_NAME_NP && !defined(__ANDROID__)
     /* This is a debugging option, not fatal */
     if (enable) {
         fprintf(stderr, "qemu: thread naming not supported on this host\n");
@@ -375,6 +375,13 @@ static void *qemu_thread_start(void *args)
         pthread_setname_np(qemu_thread_args->name);
 # elif defined(CONFIG_PTHREAD_SET_NAME_NP)
         pthread_set_name_np(pthread_self(), qemu_thread_args->name);
+# elif defined(__ANDROID__)
+        /* Bionic supports the one-argument API but this CMake build doesn't
+         * run QEMU's configure probe that defines CONFIG_PTHREAD_SETNAME_NP.
+         * Linux thread names are capped at 15 visible characters. */
+        char android_name[16];
+        g_strlcpy(android_name, qemu_thread_args->name, sizeof(android_name));
+        pthread_setname_np(android_name);
 # endif
     }
     QEMU_TSAN_ANNOTATE_THREAD_NAME(qemu_thread_args->name);
