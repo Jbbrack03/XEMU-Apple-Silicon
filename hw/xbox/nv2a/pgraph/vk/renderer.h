@@ -201,6 +201,14 @@ struct OptBisectStats {
     int dnu_dropped_clear;
     int dnu_forced_partial;
     int dnu_forced_any;
+    /* Retention-viability probe: touched fraction of an evicted span at
+     * its next new-binding upload (untouched / <=25% / <=50% / >50% /
+     * no eviction record found). */
+    int ret_untouched;
+    int ret_t25;
+    int ret_t50;
+    int ret_t100;
+    int ret_nofind;
 };
 extern struct OptBisectStats g_opt_stats;
 

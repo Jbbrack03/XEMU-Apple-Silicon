@@ -72,6 +72,86 @@ static bool direct_incompatible_surface_enabled(void)
     return enabled;
 }
 
+/*
+ * Retention-viability probe (counters only, no behavior change): for each
+ * incompatible-alias eviction, record the evicted span; mark it touched
+ * when a DIFFERENT surface's guest-VRAM download intersects it; classify
+ * the touched fraction when the span's next new-binding upload executes.
+ * Answers whether a retained image could skip (part of) the re-upload.
+ */
+#define RET_PROBE_MAX 16
+typedef struct RetProbeRec {
+    hwaddr addr;
+    size_t size;
+    size_t touched;
+    uint64_t seq;
+    bool valid;
+} RetProbeRec;
+static RetProbeRec ret_probe[RET_PROBE_MAX];
+static uint64_t ret_probe_seq;
+
+static void ret_probe_record_eviction(hwaddr addr, size_t size)
+{
+    int slot = 0;
+    uint64_t oldest = UINT64_MAX;
+    for (int i = 0; i < RET_PROBE_MAX; i++) {
+        if (!ret_probe[i].valid) {
+            slot = i;
+            break;
+        }
+        if (ret_probe[i].addr == addr) {
+            slot = i;
+            break;
+        }
+        if (ret_probe[i].seq < oldest) {
+            oldest = ret_probe[i].seq;
+            slot = i;
+        }
+    }
+    ret_probe[slot] = (RetProbeRec){
+        .addr = addr, .size = size, .touched = 0,
+        .seq = ++ret_probe_seq, .valid = true,
+    };
+}
+
+static void ret_probe_mark_download(hwaddr addr, size_t size)
+{
+    for (int i = 0; i < RET_PROBE_MAX; i++) {
+        if (!ret_probe[i].valid || ret_probe[i].addr == addr) {
+            continue; /* skip empty slots and the span's own download */
+        }
+        hwaddr lo = MAX(ret_probe[i].addr, addr);
+        hwaddr hi = MIN(ret_probe[i].addr + ret_probe[i].size, addr + size);
+        if (lo < hi) {
+            ret_probe[i].touched = MIN(ret_probe[i].size,
+                                       ret_probe[i].touched + (hi - lo));
+        }
+    }
+}
+
+static void ret_probe_classify_upload(hwaddr addr, size_t size)
+{
+    for (int i = 0; i < RET_PROBE_MAX; i++) {
+        if (!ret_probe[i].valid || ret_probe[i].addr != addr) {
+            continue;
+        }
+        double frac = ret_probe[i].size ?
+            (double)ret_probe[i].touched / (double)ret_probe[i].size : 1.0;
+        if (ret_probe[i].touched == 0) {
+            OPT_STAT_INC(ret_untouched);
+        } else if (frac <= 0.25) {
+            OPT_STAT_INC(ret_t25);
+        } else if (frac <= 0.50) {
+            OPT_STAT_INC(ret_t50);
+        } else {
+            OPT_STAT_INC(ret_t100);
+        }
+        ret_probe[i].valid = false;
+        return;
+    }
+    OPT_STAT_INC(ret_nofind);
+}
+
 bool pgraph_vk_defer_new_surface_upload_enabled(void)
 {
     static bool initialized;
@@ -1356,6 +1436,7 @@ static bool download_surface_to_guest_vram(NV2AState *d,
     unsigned int scaled_height = surface->height;
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
+    ret_probe_mark_download(surface->vram_addr, guest_size);
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
     ND_BREAK_STAT(pg, nd_vram_dl);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
@@ -2264,6 +2345,9 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
                 other_surface->vram_addr, other_surface->width,
                 other_surface->height, other_surface->pitch);
             OPT_STAT_INC(dif_overlap);
+            ret_probe_record_eviction(other_surface->vram_addr,
+                                      (size_t)other_surface->pitch *
+                                          other_surface->height);
             if (other_surface->draw_dirty) {
                 OPT_STAT_INC(dl_from_dirty_if);
                 if (download_surface_to_guest_vram(d, other_surface)) {
@@ -2796,6 +2880,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     }
     if (surface->upload_reason & SURFACE_UPLOAD_REASON_NEW) {
         OPT_STAT_INC(upl_reason_new_binding);
+        ret_probe_classify_upload(surface->vram_addr,
+                                  (size_t)surface->pitch * surface->height);
     }
     if (surface->upload_reason & SURFACE_UPLOAD_REASON_MEM_DIRTY) {
         OPT_STAT_INC(upl_reason_mem_dirty);
@@ -3508,6 +3594,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                  * from the imported buffer. Otherwise its legacy upload
                  * would read the CPU pointer before this queued download
                  * completes. */
+                ret_probe_record_eviction(surface->vram_addr,
+                                          (size_t)surface->pitch *
+                                              surface->height);
                 bool direct_invalidated =
                     surface->draw_dirty &&
                     direct_incompatible_surface_enabled() &&
