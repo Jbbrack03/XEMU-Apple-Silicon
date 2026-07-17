@@ -72,6 +72,24 @@ static bool direct_incompatible_surface_enabled(void)
     return enabled;
 }
 
+bool pgraph_vk_defer_new_surface_upload_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_DEFER_NEW_SURFACE_UPLOAD");
+#ifdef __ANDROID__
+        enabled = true;
+#endif
+        if (value && value[0]) {
+            enabled = strcmp(value, "0") != 0;
+        }
+        initialized = true;
+    }
+    return enabled;
+}
+
 static bool g_surface_addr_map_missing_logged;
 
 static GHashTable *surface_addr_map_get(PGRAPHVkState *r, const char *op,
@@ -2766,6 +2784,13 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         return;
     }
 
+    if (surface->deferred_upload) {
+        surface->deferred_upload = false;
+        OPT_STAT_INC(dnu_forced_any);
+    }
+    /* Executed uploads define the content from VRAM; never discard it. */
+    surface->load_discard_once = false;
+
     if (surface->upload_reason & SURFACE_UPLOAD_REASON_CPU_WRITE) {
         OPT_STAT_INC(upl_reason_cpu_write);
     }
@@ -3291,6 +3316,8 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     target->size = height * MAX(surface->pitch, width * fmt.bytes_per_pixel);
     target->upload_pending = true;
     target->upload_reason = SURFACE_UPLOAD_REASON_NEW;
+    target->deferred_upload = false;
+    target->load_discard_once = false;
     target->download_pending = false;
     target->draw_dirty = false;
     target->dma_addr = dma.address;
@@ -3542,8 +3569,14 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         if (should_create) {
             int64_t _gt2 = nv2a_clock_ns();
             bool unshelved = false;
+            bool shelf_content_valid = true;
             surface = get_shelved_surface(r, target.vram_addr, &target);
             if (surface) {
+                /* A shelved binding whose deferred initial upload never
+                 * resolved has an undefined VkImage; treat it as a fresh
+                 * image so the pending upload still executes. */
+                shelf_content_valid =
+                    !(surface->upload_pending && surface->deferred_upload);
                 migrate_surface_image(&target, surface);
                 unshelved = true;
             } else {
@@ -3560,7 +3593,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
             *surface = target;
             set_surface_label(pg, surface);
 
-            if (unshelved) {
+            if (unshelved && shelf_content_valid) {
                 /*
                  * The VkImage already contains valid data from the
                  * previous binding, so skip the VRAM upload and mark
@@ -3634,6 +3667,33 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
     }
 }
 
+/*
+ * Execute a bound surface's pending upload, unless it is a new-binding
+ * initial upload created while pgraph_vk_clear_surface is deciding what
+ * the clear covers. In that case postpone it: the clear either drops it
+ * (full-surface, full-channel — the guest never observes the VRAM bytes)
+ * or forces it before clearing partially. pg->clearing is set only by
+ * pgraph_vk_clear_surface, so a deferred upload never escapes that call:
+ * any later executor path clears the flag in pgraph_vk_upload_surface_data.
+ */
+static void upload_or_defer_surface_data(NV2AState *d, SurfaceBinding *surface)
+{
+    PGRAPHState *pg = &d->pgraph;
+
+    if (pgraph_vk_defer_new_surface_upload_enabled() && pg->clearing &&
+        surface->upload_pending && !surface->initialized &&
+        surface->upload_reason == SURFACE_UPLOAD_REASON_NEW &&
+        !surface->swizzle) {
+        if (!surface->deferred_upload) {
+            surface->deferred_upload = true;
+            OPT_STAT_INC(dnu_deferred);
+        }
+        return;
+    }
+
+    pgraph_vk_upload_surface_data(d, surface, false);
+}
+
 // FIXME: Move to common?
 void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
                               bool zeta_write)
@@ -3703,7 +3763,7 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         if (r->color_binding) {
             r->color_binding->frame_time = pg->frame_time;
             if (upload) {
-                pgraph_vk_upload_surface_data(d, r->color_binding, false);
+                upload_or_defer_surface_data(d, r->color_binding);
                 r->color_binding->draw_time = pg->draw_time;
                 r->color_binding->swizzle = swizzle;
                 g_nv2a_stats.surf_working.upload_count++;
@@ -3713,7 +3773,7 @@ void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
         if (r->zeta_binding) {
             r->zeta_binding->frame_time = pg->frame_time;
             if (upload) {
-                pgraph_vk_upload_surface_data(d, r->zeta_binding, false);
+                upload_or_defer_surface_data(d, r->zeta_binding);
                 r->zeta_binding->draw_time = pg->draw_time;
                 r->zeta_binding->swizzle = swizzle;
                 g_nv2a_stats.surf_working.upload_count++;

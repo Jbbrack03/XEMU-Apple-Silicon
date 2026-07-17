@@ -143,7 +143,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.rp_end_query,
                 g_opt_stats.rp_end_clear,
@@ -174,6 +174,10 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.upl_reason_mem_dirty,
                 g_opt_stats.upl_reason_blit,
                 g_opt_stats.upl_reason_untagged,
+                g_opt_stats.dnu_deferred,
+                g_opt_stats.dnu_dropped_clear,
+                g_opt_stats.dnu_forced_partial,
+                g_opt_stats.dnu_forced_any,
                 g_opt_stats.sd_eviction,
                 g_opt_stats.sd_eviction_nocb,
                 g_opt_stats.sd_dl_to_buf,
@@ -2060,6 +2064,9 @@ static VkAttachmentLoadOp get_optimal_color_load_op(PGRAPHVkState *r)
     if (!r->color_binding) {
         return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     }
+    if (r->color_binding->load_discard_once) {
+        return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    }
     if (r->color_drawn_in_cb) {
         return VK_ATTACHMENT_LOAD_OP_LOAD;
     }
@@ -2072,6 +2079,9 @@ static VkAttachmentLoadOp get_optimal_color_load_op(PGRAPHVkState *r)
 static VkAttachmentLoadOp get_optimal_zeta_load_op(PGRAPHVkState *r)
 {
     if (!r->zeta_binding) {
+        return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    }
+    if (r->zeta_binding->load_discard_once) {
         return VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     }
     if (r->zeta_drawn_in_cb) {
@@ -2133,6 +2143,14 @@ static void begin_render_pass(PGRAPHState *pg)
     begin_state.color_load_op = get_optimal_color_load_op(r);
     begin_state.zeta_load_op = get_optimal_zeta_load_op(r);
     begin_state.stencil_load_op = begin_state.zeta_load_op;
+    /* One-shot: only the pass that records the content-defining clear may
+     * discard its attachment load. */
+    if (r->color_binding) {
+        r->color_binding->load_discard_once = false;
+    }
+    if (r->zeta_binding) {
+        r->zeta_binding->load_discard_once = false;
+    }
     r->begin_render_pass = get_render_pass(r, &begin_state);
 
     VkRenderPassBeginInfo render_pass_begin_info = {
@@ -5480,6 +5498,26 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
     NV2A_VK_DGROUP_END();
 }
 
+/*
+ * Whether the guest clear rect covers every pixel of the binding.
+ * xmin..ymax are the raw register values in pre-anti-aliased guest
+ * coordinates; binding dimensions carry the anti-aliasing factor.
+ */
+static bool clear_covers_full_surface(PGRAPHState *pg,
+                                      const SurfaceBinding *binding,
+                                      unsigned int xmin, unsigned int ymin,
+                                      unsigned int xmax, unsigned int ymax)
+{
+    if (xmin != 0 || ymin != 0) {
+        return false;
+    }
+
+    unsigned int width = xmax + 1;
+    unsigned int height = ymax + 1;
+    pgraph_apply_anti_aliasing_factor(pg, &width, &height);
+    return width >= binding->width && height >= binding->height;
+}
+
 void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
 {
     PGRAPHState *pg = &d->pgraph;
@@ -5527,6 +5565,59 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
     unsigned int xmax = GET_MASK(clearrectx, NV_PGRAPH_CLEARRECTX_XMAX);
     unsigned int ymin = GET_MASK(clearrecty, NV_PGRAPH_CLEARRECTY_YMIN);
     unsigned int ymax = GET_MASK(clearrecty, NV_PGRAPH_CLEARRECTY_YMAX);
+
+    /*
+     * Resolve deferred new-binding initial uploads before any clear work.
+     * A binding created by this clear's surface_update always ended the
+     * render pass, so the inline-clear fast path below cannot run while a
+     * deferred upload exists, and calling the upload here is pass-safe.
+     * Dropping requires that this clear overwrite every byte the skipped
+     * upload would have produced: full clear rect and full channels for
+     * that aspect. The recorded vkCmdClearAttachments in the fall-through
+     * path then defines the content, so the binding is marked initialized
+     * here (begin_pre_draw asserts it); load_discard_once keeps the free
+     * DONT_CARE load for the pass that records the clear.
+     */
+    if (r->color_binding && r->color_binding->deferred_upload) {
+        const bool full_channel = write_color &&
+            (parameter & NV097_CLEAR_SURFACE_COLOR) ==
+                (NV097_CLEAR_SURFACE_R | NV097_CLEAR_SURFACE_G |
+                 NV097_CLEAR_SURFACE_B | NV097_CLEAR_SURFACE_A);
+        if (full_channel &&
+            clear_covers_full_surface(pg, r->color_binding, xmin, ymin, xmax,
+                                      ymax)) {
+            r->color_binding->upload_pending = false;
+            r->color_binding->deferred_upload = false;
+            r->color_binding->upload_reason = 0;
+            r->color_binding->initialized = true;
+            r->color_binding->load_discard_once = true;
+            OPT_STAT_INC(dnu_dropped_clear);
+        } else {
+            OPT_STAT_INC(dnu_forced_partial);
+            pgraph_vk_upload_surface_data(d, r->color_binding, false);
+        }
+    }
+    if (r->zeta_binding && r->zeta_binding->deferred_upload) {
+        VkImageAspectFlags aspect = r->zeta_binding->host_fmt.aspect;
+        const bool full_channel = write_zeta &&
+            (!(aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
+             (parameter & NV097_CLEAR_SURFACE_Z)) &&
+            (!(aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ||
+             (parameter & NV097_CLEAR_SURFACE_STENCIL));
+        if (full_channel &&
+            clear_covers_full_surface(pg, r->zeta_binding, xmin, ymin, xmax,
+                                      ymax)) {
+            r->zeta_binding->upload_pending = false;
+            r->zeta_binding->deferred_upload = false;
+            r->zeta_binding->upload_reason = 0;
+            r->zeta_binding->initialized = true;
+            r->zeta_binding->load_discard_once = true;
+            OPT_STAT_INC(dnu_dropped_clear);
+        } else {
+            OPT_STAT_INC(dnu_forced_partial);
+            pgraph_vk_upload_surface_data(d, r->zeta_binding, false);
+        }
+    }
 
     NV2A_VK_DGROUP_BEGIN("CLEAR min=(%d,%d) max=(%d,%d)%s%s", xmin, ymin, xmax,
                          ymax, write_color ? " color" : "",

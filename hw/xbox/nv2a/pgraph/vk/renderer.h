@@ -196,6 +196,11 @@ struct OptBisectStats {
     int upl_reason_mem_dirty;
     int upl_reason_blit;
     int upl_reason_untagged;
+    /* Defer-and-drop of new-binding initial uploads (clear-first-consumer). */
+    int dnu_deferred;
+    int dnu_dropped_clear;
+    int dnu_forced_partial;
+    int dnu_forced_any;
 };
 extern struct OptBisectStats g_opt_stats;
 
@@ -335,6 +340,23 @@ typedef struct SurfaceBinding {
     bool upload_pending;
     /* Which mechanism(s) set upload_pending, for upload attribution. */
     uint8_t upload_reason;
+    /*
+     * A pending new-binding initial upload whose execution was postponed
+     * while pgraph_vk_clear_surface decides whether a full-surface,
+     * full-channel clear makes it dead work. While set, the VkImage
+     * content is undefined and guest VRAM remains authoritative; every
+     * consumer must resolve it via pgraph_vk_upload_surface_data (which
+     * clears the flag) or the clear's drop path. Never outlives the
+     * pgraph_vk_clear_surface call that triggered the binding's creation.
+     */
+    bool deferred_upload;
+    /*
+     * The next render pass on this binding may load with DONT_CARE: the
+     * image content is undefined and a recorded full-surface clear in
+     * that pass defines every pixel. Set by the clear's drop path,
+     * consumed (cleared) at the next begin_render_pass.
+     */
+    bool load_discard_once;
 
     unsigned int download_row_start;
     unsigned int download_row_count; // 0 = full surface
@@ -1511,6 +1533,7 @@ void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 bool pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
 void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                                    bool force);
+bool pgraph_vk_defer_new_surface_upload_enabled(void);
 void pgraph_vk_surface_update(NV2AState *d, bool upload, bool color_write,
                               bool zeta_write);
 SurfaceBinding *pgraph_vk_surface_get(NV2AState *d, hwaddr addr);
