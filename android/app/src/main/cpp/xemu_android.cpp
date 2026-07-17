@@ -880,29 +880,26 @@ static SetupFiles SyncSetupFiles() {
   int tbSize = GetPrefInt(env, activity, "tcg_tb_size", 256);
 
   DisplaySettings ds;
-  /* Default surface_scale = 2 (2x supersampled antialiasing). The Adreno
-   * 740 renders Xbox-era 640x480 scenes at ~17-28% GPU even at 2x, and the
-   * guest is CPU-bound so SSAA is nearly free here; 2x also maps 1:1 into
-   * the 1280x960 XR quad. Users can lower to 1 or raise to 4. */
-  ds.surface_scale = GetPrefInt(
-      env, activity, "setting_surface_scale",
-      GetPrefInt(env, activity, "surface_scale", 2));
-  if (ds.surface_scale < 1) ds.surface_scale = 1;
-  if (ds.surface_scale > 4) ds.surface_scale = 4;
-  ds.vsync = GetPrefBool(
-      env, activity, "setting_vsync",
-      GetPrefBool(env, activity, "vsync", false));
+  /* VR-build fixed quality/compat points. The accepted Quest configuration
+   * is 2x SSAA (maps 1:1 into the 1280x960 XR quad), XR-owned pacing (no
+   * guest vsync), retail 64 MB, shader cache on, and DSP JIT whenever DSP
+   * is enabled. Stale or externally written prefs for these keys must not
+   * change engine behavior, so they are clamped here rather than read. */
+  ds.surface_scale = 2;
+  ds.vsync = false;
   ds.unlock_framerate = GetPrefBool(env, activity, "unlock_framerate", true);
   ds.validation_layers = GetPrefBool(env, activity, "validation_layers", false);
   ds.skip_boot_anim = GetPrefBool(env, activity, "setting_skip_boot_anim", true);
   ds.use_dsp = GetPrefBool(env, activity, "setting_use_dsp", false);
-  ds.use_dsp_jit = GetPrefBool(env, activity, "setting_use_dsp_jit", true);
+  ds.use_dsp_jit = true;
   ds.hrtf = GetPrefBool(env, activity, "setting_hrtf",
                          GetPrefBool(env, activity, "hrtf", false));
-  ds.cache_shaders = GetPrefBool(env, activity, "setting_cache_shaders", true);
+  ds.cache_shaders = true;
   ds.net_enable = GetPrefBool(env, activity, "setting_network_enable", false);
-  ds.mem_limit_mib = GetPrefInt(env, activity, "setting_system_memory_mib",
-                                 GetPrefInt(env, activity, "sys_mem_mib", 64));
+  ds.mem_limit_mib = 64;
+  __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                      "VR fixed settings: ssaa=2 vsync=off mem=64 "
+                      "shader-cache=on dsp-jit=on");
   {
     std::string thread = GetPrefString(env, activity, "setting_tcg_thread");
     if (thread.empty()) {

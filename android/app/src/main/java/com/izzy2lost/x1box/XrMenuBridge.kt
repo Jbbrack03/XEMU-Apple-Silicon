@@ -165,35 +165,25 @@ class XrMenuBridge(context: Context) {
 
   private class Section(val title: String, val items: List<Setting>)
 
+  // Only settings that are safe on the Quest build are offered. Image
+  // quality, pacing, console memory, FPU JIT, shader cache, and DSP JIT are
+  // fixed at the validated configuration by the native launcher; per-game
+  // compatibility overrides remain available through the library.
   private val sections = listOf(
     Section("DISPLAY", listOf(
-      Setting.SegInt("setting_surface_scale", "Supersampling",
-        "Renders internally above 640×480 for a sharper image", listOf(1, 2, 3),
-        listOf("1×", "2×", "3×"), 2),
       Setting.SegStr("setting_filtering", "Texture Filtering",
         "Smooth blends texels; Sharp keeps hard pixel edges",
         listOf("nearest", "linear"), listOf("Sharp", "Smooth"), "linear"),
-      Setting.Toggle("setting_vsync", "VSync",
-        "Synchronize guest presentation with the display", false),
       Setting.Toggle("show_fps", "FPS Overlay",
         "Draw a frame-rate readout over the game", false),
     )),
     Section("SYSTEM", listOf(
-      Setting.Toggle("setting_hard_fpu", "Hardware FPU JIT",
-        "Native float math — major speed-up on heavy titles", true),
-      Setting.Toggle("setting_cache_shaders", "Cache Shaders",
-        "Reuse compiled shaders across sessions for faster loads", true),
       Setting.Toggle("setting_skip_boot_anim", "Skip Boot Animation",
         "Boot straight into the game or dashboard", true),
-      Setting.SegInt("setting_system_memory_mib", "Console Memory",
-        "128 MB matches a debug kit; some homebrew needs it", listOf(64, 128),
-        listOf("64 MB", "128 MB"), 64),
     )),
     Section("AUDIO", listOf(
       Setting.Toggle("setting_use_dsp", "DSP Emulation",
-        "Emulate the audio DSP — needed by a few titles, costs CPU", false),
-      Setting.Toggle("setting_use_dsp_jit", "DSP JIT",
-        "Recompile DSP code natively when DSP emulation is on", true),
+        "Accurate audio DSP for the few titles that need it — uses more CPU and battery", false),
       Setting.Toggle("setting_hrtf", "HRTF Spatial Audio",
         "Head-related transfer function for positional audio", false),
     )),
@@ -1185,7 +1175,6 @@ class XrMenuBridge(context: Context) {
     val battery = if (batteryPct >= 0) {
       "$batteryPct%" + if (batteryCharging) " · charging" else ""
     } else "—"
-    val scale = prefs.getInt("setting_surface_scale", 2)
 
     fun card(ix: Int, iy: Int, label: String, value: String, valueColor: Int) {
       val x = left + ix * (cardW + gap)
@@ -1209,7 +1198,7 @@ class XrMenuBridge(context: Context) {
     card(1, 0, "GUEST PACE", pace,
       if (guestFrameMs > 0.5f) Th.ACCENT else Th.TEXT_SECONDARY)
     card(0, 1, "HEADSET BATTERY", battery, Th.TEXT_PRIMARY)
-    card(1, 1, "RENDERER", "Vulkan · Turnip · ${scale}× SSAA", Th.TEXT_PRIMARY)
+    card(1, 1, "RENDERER", "Vulkan · Turnip · 2× SSAA", Th.TEXT_PRIMARY)
 
     // Actions.
     val actionsTop = contentTop + 16f + 2 * (cardH + gap) + 18f
