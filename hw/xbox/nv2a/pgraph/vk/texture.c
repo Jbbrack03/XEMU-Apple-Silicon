@@ -768,6 +768,7 @@ static void upload_texture_image(PGRAPHState *pg, int texture_idx,
     vmaFlushAllocation(r->allocator, staging->allocation,
                        staging_base, buffer_offset - staging_base);
 
+    ND_BREAK_STAT(pg, nd_tex_upload);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_GREEN, __func__);
 
@@ -844,6 +845,7 @@ static void copy_zeta_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surfac
         surface->vram_addr, surface->width, surface->height);
 
 #if OPT_SURF_TO_TEX_INLINE
+    ND_BREAK_STAT(pg, nd_tex_zcopy);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 #else
     pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
@@ -1026,6 +1028,7 @@ static void bind_surface_as_texture(PGRAPHState *pg, SurfaceBinding *surface,
     nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
 
     // End render pass to flush tile writes, then barrier for shader reads
+    ND_BREAK_STAT(pg, nd_tex_s2t);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 
     VkImageMemoryBarrier barrier = {
@@ -1079,6 +1082,7 @@ static void bind_zeta_surface_as_texture(PGRAPHState *pg,
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_TO_TEX);
 
+    ND_BREAK_STAT(pg, nd_tex_zbind);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 
     VkImageMemoryBarrier barrier = {
@@ -1137,6 +1141,7 @@ static void copy_surface_to_texture(PGRAPHState *pg, SurfaceBinding *surface,
         surface->vram_addr, surface->width, surface->height);
 
 #if OPT_SURF_TO_TEX_INLINE
+    ND_BREAK_STAT(pg, nd_tex_s2tcopy);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 #else
     pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);

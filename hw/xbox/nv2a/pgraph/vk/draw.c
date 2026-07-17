@@ -187,6 +187,22 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.dif_dds_fb,
                 g_opt_stats.dif_other);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
+                "nd_detail: pd%d su%d dld%d s2b%d vdl%d vul%d cr%d sup%d "
+                "txu%d zcp%d s2t%d zbd%d s2c%d",
+                g_opt_stats.nd_predraw_rp,
+                g_opt_stats.nd_surf_update,
+                g_opt_stats.nd_dl_deferred,
+                g_opt_stats.nd_s2t_blit,
+                g_opt_stats.nd_vram_dl,
+                g_opt_stats.nd_vram_ul,
+                g_opt_stats.nd_surf_create,
+                g_opt_stats.nd_surf_upload,
+                g_opt_stats.nd_tex_upload,
+                g_opt_stats.nd_tex_zcopy,
+                g_opt_stats.nd_tex_s2t,
+                g_opt_stats.nd_tex_zbind,
+                g_opt_stats.nd_tex_s2tcopy);
+        __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
                 "buf_detail: ds%d ubo%d fb%d stg%d comp%d vtx%d",
                 g_opt_stats.buf_ds_full,
                 g_opt_stats.buf_ubo_full,
@@ -3189,6 +3205,7 @@ mfp_miss: (void)0;
         bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
 
         if (r->framebuffer_dirty || render_pass_dirty) {
+            ND_BREAK_STAT(pg, nd_predraw_rp);
             pgraph_vk_ensure_not_in_render_pass(pg);
         }
         if (render_pass_dirty) {

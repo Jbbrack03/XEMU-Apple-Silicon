@@ -129,6 +129,20 @@ struct OptBisectStats {
     int rp_end_clear;
     int rp_end_nondraw;
     int rp_end_finish;
+    /* Which nondraw interruption broke an open pass (call-site attribution). */
+    int nd_predraw_rp;   /* pre-draw framebuffer/render-pass object change */
+    int nd_surf_update;  /* surface bind churn in update_surface_part */
+    int nd_dl_deferred;  /* deferred surface download batch */
+    int nd_s2t_blit;     /* inline surface-to-texture copy helper */
+    int nd_vram_dl;      /* direct guest-VRAM download */
+    int nd_vram_ul;      /* direct guest-VRAM upload */
+    int nd_surf_create;  /* surface image creation */
+    int nd_surf_upload;  /* surface data upload */
+    int nd_tex_upload;   /* texture image upload */
+    int nd_tex_zcopy;    /* zeta surface -> texture copy */
+    int nd_tex_s2t;      /* surface bound as texture */
+    int nd_tex_zbind;    /* zeta surface bound as texture */
+    int nd_tex_s2tcopy;  /* color surface -> texture copy */
     int barrier_count;
     int transition_count;
     int finish_calls;
@@ -183,6 +197,13 @@ extern struct OptBisectStats g_opt_stats;
 #else
 #define OPT_STAT_INC(field) do { } while (0)
 #endif
+/* Count a nondraw call site only when it will actually break an open pass. */
+#define ND_BREAK_STAT(pg, field)                                   \
+    do {                                                           \
+        if ((pg)->vk_renderer_state->in_render_pass) {             \
+            OPT_STAT_INC(field);                                   \
+        }                                                          \
+    } while (0)
 #define OPT_SURF_TO_TEX_INLINE  1
 /*
  * OPT_SYNC_RANGE_SKIP: skip sync_vertex_ram_buffer when the element range is

@@ -285,6 +285,7 @@ static bool download_surface_record_deferred(NV2AState *d,
                  scaled_height = surface->height;
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
+    ND_BREAK_STAT(pg, nd_dl_deferred);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
                                  "download_surface_deferred");
@@ -751,6 +752,7 @@ static void download_surface_to_buffer(NV2AState *d, SurfaceBinding *surface,
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
 #if OPT_SURF_TO_TEX_INLINE
+    ND_BREAK_STAT(pg, nd_s2t_blit);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
 #else
     VkCommandBuffer cmd = pgraph_vk_begin_single_time_commands(pg);
@@ -1337,6 +1339,7 @@ static bool download_surface_to_guest_vram(NV2AState *d,
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
+    ND_BREAK_STAT(pg, nd_vram_dl);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
                                  "download_surface_to_guest_vram");
@@ -1537,6 +1540,7 @@ static bool upload_surface_from_guest_vram(NV2AState *d,
     unsigned int scaled_height = surface->height;
     pgraph_apply_scaling_factor(pg, &scaled_width, &scaled_height);
 
+    ND_BREAK_STAT(pg, nd_vram_ul);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
                                  "upload_surface_from_guest_vram");
@@ -2574,6 +2578,7 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &surface->image_view));
 
+    ND_BREAK_STAT(pg, nd_surf_create);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
@@ -2864,6 +2869,7 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     vmaFlushAllocation(r->allocator, copy_buffer->allocation, staging_base,
                        uploaded_image_size);
 
+    ND_BREAK_STAT(pg, nd_surf_upload);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED, __func__);
 
@@ -3351,6 +3357,7 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
         int64_t _gt0 = nv2a_clock_ns();
         // FIXME: We don't need to be so aggressive flushing the command list
         // pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_CREATE);
+        ND_BREAK_STAT(pg, nd_surf_update);
         pgraph_vk_ensure_not_in_render_pass(pg);
 
         unbind_surface(d, color);
