@@ -1811,13 +1811,47 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
     trace_nv2a_pgraph_flip_increment_write(old, new);
     pg->frame_time++;
 
-    /* Fallback: process diag capture at frame boundary when
-     * FLIP_STALL may not be called (after pause/resume). */
 #ifdef CONFIG_VULKAN
-    if (nv2a_dbg_diag_frame_pending() || nv2a_dbg_diag_frame_active()) {
-        d->pgraph.renderer->ops.surface_update(d, false, true, true);
-        d->pgraph.renderer->ops.flip_stall(d);
-        nv2a_profile_flip_stall();
+    /* One-shot diagnostic auto-trigger: XEMU_DIAG_AUTO_SKIP=<frame> arms a
+     * diag capture of XEMU_DIAG_AUTO_FRAMES frames (default 1) at that
+     * frame_time. Cold when unset (one cached getenv, one int compare).
+     * This site runs every guest flip even when FLIP_STALL does not. */
+    {
+        static bool diag_auto_init;
+        static int diag_auto_skip = -1;
+        static int diag_auto_frames = 1;
+
+        if (!diag_auto_init) {
+            const char *s = getenv("XEMU_DIAG_AUTO_SKIP");
+            if (s && s[0]) {
+                diag_auto_skip = atoi(s);
+                const char *f = getenv("XEMU_DIAG_AUTO_FRAMES");
+                if (f && f[0]) {
+                    diag_auto_frames = atoi(f);
+                }
+            }
+            diag_auto_init = true;
+        }
+        bool armed_this_call = false;
+        if (diag_auto_skip >= 0 && pg->frame_time >= diag_auto_skip) {
+            nv2a_dbg_trigger_diag_frames(diag_auto_frames);
+            diag_auto_skip = -1;
+            armed_this_call = true;
+        }
+
+        /* Fallback: process diag capture at frame boundary when
+         * FLIP_STALL may not be called (after pause/resume). Skip the
+         * call that just armed: FLIP_INCREMENT_WRITE sits adjacent to
+         * FLIP_STALL in the present sequence, so processing here would
+         * open a microseconds-wide capture window with no draws. The
+         * game's own next FLIP_STALL (or the next fallback pass) starts
+         * the session at a true frame boundary instead. */
+        if (!armed_this_call &&
+            (nv2a_dbg_diag_frame_pending() || nv2a_dbg_diag_frame_active())) {
+            d->pgraph.renderer->ops.surface_update(d, false, true, true);
+            d->pgraph.renderer->ops.flip_stall(d);
+            nv2a_profile_flip_stall();
+        }
     }
 #endif
 }
