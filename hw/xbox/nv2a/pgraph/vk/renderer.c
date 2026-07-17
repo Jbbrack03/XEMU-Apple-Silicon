@@ -47,6 +47,26 @@ typedef struct {
     uint8_t  pipeline_cache_uuid[VK_UUID_SIZE];
 } GpuDriverIdentity;
 
+/*
+ * The external-memory display path samples SurfaceBinding::image directly;
+ * the speculative flip predownload only feeds CPU staging copies whose fence
+ * completion was the measured PGR2 jitter tail. Demand-driven reads keep
+ * their own exact download paths, so the copy is skipped by default there.
+ * XEMU_SKIP_EXTERNAL_DISPLAY_PREDOWNLOAD=0 restores the legacy predownload.
+ */
+static bool skip_external_display_predownload_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_SKIP_EXTERNAL_DISPLAY_PREDOWNLOAD");
+        enabled = !(value && strcmp(value, "0") == 0);
+        initialized = true;
+    }
+    return enabled;
+}
+
 static void remove_directory_recursive(const char *path)
 {
     GDir *dir = g_dir_open(path, 0, NULL);
@@ -175,6 +195,11 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     __android_log_print(ANDROID_LOG_INFO, "hakuX",
                         "pgraph_vk_init: external memory interop=%s",
                         use_external_memory ? "enabled" : "disabled");
+    __android_log_print(
+        ANDROID_LOG_INFO, "hakuX",
+        "pgraph_vk_init: external display predownload=%s",
+        use_external_memory && skip_external_display_predownload_enabled() ?
+            "skipped" : "enabled");
 #endif
     pg->vk_renderer_state->display.use_external_memory = use_external_memory;
 #endif
@@ -1264,8 +1289,14 @@ static void pgraph_vk_flip_stall(NV2AState *d)
      * the flip stall finish submits it. This piggybacks the surface-to-staging
      * copy onto the same GPU submission as the frame's draws, eliminating a
      * separate SURFACE_DOWN finish (one fewer vkQueueSubmit + fence cycle).
+     * On the external-memory display path the presented image never reads
+     * this copy, so it is skipped there unless the rollback env disables it.
      */
-    pgraph_vk_prerecord_display_download(d);
+    PGRAPHVkState *r_flip = d->pgraph.vk_renderer_state;
+    if (!(r_flip->display.use_external_memory &&
+          skip_external_display_predownload_enabled())) {
+        pgraph_vk_prerecord_display_download(d);
+    }
 
     pgraph_vk_finish(&d->pgraph, VK_FINISH_REASON_FLIP_STALL);
 
