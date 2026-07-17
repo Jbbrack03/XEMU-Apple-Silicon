@@ -762,3 +762,11 @@ int nv2a_profile_get_counter_value(unsigned int cnt)
                        NV2A_PROF_NUM_FRAMES;
     return g_nv2a_stats.frame_history[idx].counters[cnt];
 }
+
+/* XR shell status readout: latest guest flip-to-flip EWMA in milliseconds.
+ * Read-only display telemetry (aligned 32-bit load; no lock needed). */
+__attribute__((visibility("default")))
+float xemu_xr_get_game_frame_ms(void)
+{
+    return g_nv2a_stats.pacing.game_frame_ms;
+}

@@ -26,6 +26,7 @@
 #include <android/bitmap.h>
 #include <android/keycodes.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -167,7 +168,7 @@ typedef struct {
     int64_t adpf_last_frame_seq_ns;
     bool adpf_tried;
 
-    /* In-VR game picker menu (JNI-backed, rendered to its own quad layer). */
+    /* In-VR shell UI (JNI-backed, rendered to its own quad layer). */
     bool menu_open;
     bool menu_disabled;     /* set after a JNI failure; picker off for session */
     XrSwapchain menu_swapchain;
@@ -176,23 +177,43 @@ typedef struct {
     GLuint *menu_fbos;
     int menu_w, menu_h;
     GLuint menu_tex;        /* holds the latest uploaded menu bitmap */
+    int menu_tex_w, menu_tex_h; /* allocated storage; enables SubImage path */
     bool menu_tex_ready;    /* menu_tex has valid contents to blit */
     GLuint menu_blit_prog;  /* alpha-preserving blit (vs opaque blit_prog) */
     XrVector3f menu_pos;
     XrQuaternionf menu_orient;
     float menu_size_m;
 
-    /* JNI bridge to XrMenuBridge (Kotlin owns the list + Canvas rendering). */
+    /* View-anchored placement + laser pointer for the shell UI. */
+    XrSpace view_space;
+    XrTime last_predicted_time;
+    XrAction menu_click_action; /* left controller menu button */
+    bool menu_btn_prev;
+    int pointer_hand;           /* hand whose ray hit the panel, -1 = none */
+    bool pointer_inside;
+    float pointer_x, pointer_y; /* panel pixels */
+    int pointer_sent_x, pointer_sent_y;
+    bool pointer_sent_press;
+    bool pointer_pressed;       /* trigger click with hysteresis */
+    GLuint cursor_prog;
+    GLint cursor_center_loc, cursor_radius_loc;
+    int64_t guest_ms_push_ns;   /* last setGuestFrameMs push */
+    float (*get_game_frame_ms)(void); /* libxemu pace readout, may be NULL */
+
+    /* JNI bridge to XrMenuBridge (Kotlin owns the model + Canvas rendering). */
     JavaVM *jvm;
     JNIEnv *jni_env;        /* android_main thread, attached once */
     jobject menu_bridge;    /* global ref, NULL if JNI init failed */
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
-        m_activate, m_setActiveFp, m_selectByName, m_startEmulator;
+        m_activate, m_setActiveFp, m_selectByName, m_startEmulator,
+        m_pointer, m_pointerExit, m_scroll, m_navPage, m_command, m_button,
+        m_setGuestMs;
     bool jni_tried;
     bool emulator_bootstrap_started;
 
     /* Menu input edge state */
-    int nav_latch;          /* -1/0/1: debounces stick/hat/dpad navigation */
+    int nav_latch;          /* -1/0/1: debounces vertical stick/hat/dpad nav */
+    int nav_latch_x;        /* -1/0/1: debounces horizontal nav */
     uint16_t pad_deferred;  /* START/BACK held but not yet forwarded (combo) */
     uint16_t synth_buttons; /* synthetic START/BACK asserted to the guest */
     int64_t synth_retract_ns; /* monotonic deadline to drop synth_buttons */
@@ -335,6 +356,23 @@ static const char *MENU_BLIT_FS =
     "in vec2 uv;\n"
     "out vec4 frag;\n"
     "void main() { frag = texture(tex, uv); }\n";
+/* Laser-pointer cursor: white core with a dark rim, anti-aliased, drawn over
+ * the menu texture (scissored to the cursor's bounding box). */
+static const char *CURSOR_FS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "uniform vec2 center;\n"
+    "uniform float radius;\n"
+    "in vec2 uv;\n"
+    "out vec4 frag;\n"
+    "void main() {\n"
+    "  float d = distance(gl_FragCoord.xy, center);\n"
+    "  float aa = 1.5;\n"
+    "  float disc = 1.0 - smoothstep(radius - aa, radius + aa, d);\n"
+    "  float core = 1.0 - smoothstep(radius * 0.62 - aa, radius * 0.62 + aa, d);\n"
+    "  vec3 rgb = mix(vec3(0.04, 0.05, 0.07), vec3(1.0), core);\n"
+    "  frag = vec4(rgb * disc, disc);\n"
+    "}\n";
 
 static GLuint compile_prog(const char *vs_src, const char *fs_src)
 {
@@ -506,6 +544,10 @@ static void resolve_emulator_feed(XrShell *s)
         s->get_vcpu_tid = (int (*)(void))
             dlsym(h, "xemu_get_vcpu_thread_id");
     }
+    if (!s->get_game_frame_ms) {
+        s->get_game_frame_ms = (float (*)(void))
+            dlsym(h, "xemu_xr_get_game_frame_ms");
+    }
 }
 
 /* Keep the physical OpenXR quad in the same aspect that xui's desktop
@@ -642,7 +684,7 @@ static void menu_jni_init(XrShell *s)
     s->m_isDirty = (*env)->GetMethodID(env, bcls, "isDirty", "()Z");
     s->m_render = (*env)->GetMethodID(env, bcls, "render",
                                       "(II)Landroid/graphics/Bitmap;");
-    s->m_move = (*env)->GetMethodID(env, bcls, "moveSelection", "(I)V");
+    s->m_move = (*env)->GetMethodID(env, bcls, "moveSelection", "(II)V");
     s->m_toggleFp = (*env)->GetMethodID(env, bcls, "toggleFpJit", "()V");
     s->m_activate = (*env)->GetMethodID(env, bcls, "activate",
                                         "()Ljava/lang/String;");
@@ -651,12 +693,22 @@ static void menu_jni_init(XrShell *s)
     s->m_selectByName = (*env)->GetMethodID(env, bcls, "selectByName",
                                             "(Ljava/lang/String;)Z");
     s->m_startEmulator = (*env)->GetMethodID(env, bcls, "startEmulator", "()V");
+    s->m_pointer = (*env)->GetMethodID(env, bcls, "pointer", "(FFZ)Z");
+    s->m_pointerExit = (*env)->GetMethodID(env, bcls, "pointerExit", "()V");
+    s->m_scroll = (*env)->GetMethodID(env, bcls, "scroll", "(F)V");
+    s->m_navPage = (*env)->GetMethodID(env, bcls, "navPage", "(I)V");
+    s->m_command = (*env)->GetMethodID(env, bcls, "consumeCommand", "()I");
+    s->m_button = (*env)->GetMethodID(env, bcls, "gamepadButton", "(I)V");
+    s->m_setGuestMs =
+        (*env)->GetMethodID(env, bcls, "setGuestFrameMs", "(F)V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
         !s->m_isDirty || !s->m_render || !s->m_move || !s->m_toggleFp ||
         !s->m_activate || !s->m_setActiveFp || !s->m_selectByName ||
-        !s->m_startEmulator) {
+        !s->m_startEmulator || !s->m_pointer || !s->m_pointerExit ||
+        !s->m_scroll || !s->m_navPage || !s->m_command || !s->m_button ||
+        !s->m_setGuestMs) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -742,20 +794,28 @@ static void menu_upload_texture(XrShell *s, jobject bitmap)
     glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(info.stride / 4));
     /* sRGB internal format: Canvas writes sRGB-encoded bytes, so sampling must
      * decode to linear (the SRGB8_ALPHA8 swapchain re-encodes on store).
-     * Uploading as plain RGBA would double-encode and wash the menu out. */
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, info.width, info.height, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+     * Uploading as plain RGBA would double-encode and wash the menu out.
+     * Re-uploads (hover/scroll) reuse the storage via TexSubImage. */
+    if (s->menu_tex_w == (int)info.width && s->menu_tex_h == (int)info.height) {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, info.width, info.height,
+                        GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    } else {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, info.width,
+                     info.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        s->menu_tex_w = (int)info.width;
+        s->menu_tex_h = (int)info.height;
+    }
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     AndroidBitmap_unlockPixels(env, bitmap);
     s->menu_tex_ready = true;
 }
 
-static void menu_move(XrShell *s, int delta)
+static void menu_move(XrShell *s, int dx, int dy)
 {
     if (s->menu_bridge) {
         (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_move,
-                                      delta);
+                                      dx, dy);
         menu_jni_check(s, "moveSelection");
     }
 }
@@ -766,6 +826,39 @@ static void menu_toggle_fp(XrShell *s)
         (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_toggleFp);
         menu_jni_check(s, "toggleFpJit");
     }
+}
+
+/* Place a panel dist meters ahead of the current gaze (yaw only, facing the
+ * user, at eye height). Falls back to the previous pose if the view can't be
+ * located this frame. */
+static void place_in_front(XrShell *s, float dist, XrVector3f *pos,
+                           XrQuaternionf *orient)
+{
+    if (!s->view_space || !s->last_predicted_time) {
+        return;
+    }
+    XrSpaceLocation loc = { .type = XR_TYPE_SPACE_LOCATION };
+    if (XR_FAILED(xrLocateSpace(s->view_space, s->local_space,
+                                s->last_predicted_time, &loc)) ||
+        !(loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
+        !(loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        return;
+    }
+    XrVector3f fwd = q_rotate(loc.pose.orientation, (XrVector3f){ 0, 0, -1 });
+    float len = sqrtf(fwd.x * fwd.x + fwd.z * fwd.z);
+    if (len < 0.1f) {
+        return; /* looking straight up/down: keep the previous pose */
+    }
+    float fx = fwd.x / len, fz = fwd.z / len;
+    pos->x = loc.pose.position.x + fx * dist;
+    pos->y = loc.pose.position.y;
+    pos->z = loc.pose.position.z + fz * dist;
+    /* Quad +Z normal must point back at the head: R_y(theta)*(0,0,1) = -f. */
+    float theta = atan2f(-fx, -fz);
+    orient->x = 0.0f;
+    orient->y = sinf(theta * 0.5f);
+    orient->z = 0.0f;
+    orient->w = cosf(theta * 0.5f);
 }
 
 static void menu_open(XrShell *s)
@@ -795,6 +888,13 @@ static void menu_open(XrShell *s)
     }
     s->menu_open = true;
     s->nav_latch = 0;
+    /* Spawn the panel in front of the user's current gaze. */
+    place_in_front(s, 1.15f, &s->menu_pos, &s->menu_orient);
+    s->pointer_hand = -1;
+    s->pointer_inside = false;
+    s->pointer_pressed = false;
+    s->pointer_sent_press = false;
+    s->pointer_sent_x = s->pointer_sent_y = -1;
     /* Release any held inputs so nothing sticks in the game while navigating. */
     s->pad_buttons = 0;
     s->pad_deferred = 0;
@@ -810,6 +910,13 @@ static void menu_close(XrShell *s)
 {
     s->menu_open = false;
     s->nav_latch = 0;
+    if (s->menu_bridge) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                      s->m_pointerExit);
+        menu_jni_check(s, "pointerExit");
+    }
+    s->pointer_inside = false;
+    s->pointer_pressed = false;
     /* Resume the game with a clean pad; the user re-presses. Prevents the
      * activation press (e.g. A) from leaking into the resumed title. */
     s->pad_buttons = 0;
@@ -863,6 +970,65 @@ static void menu_activate(XrShell *s)
     menu_close(s);
 }
 
+/* Drain UI-raised commands (pointer clicks / contextual buttons). Values
+ * mirror XrMenuBridge.CMD_*. */
+static void menu_drain_commands(XrShell *s)
+{
+    if (!s->menu_open || !s->menu_bridge) {
+        return;
+    }
+    for (int guard = 0; guard < 4; guard++) {
+        jint cmd = (*s->jni_env)->CallIntMethod(s->jni_env, s->menu_bridge,
+                                                s->m_command);
+        if (menu_jni_check(s, "consumeCommand")) {
+            return;
+        }
+        switch (cmd) {
+        case 0:
+            return;
+        case 1: /* close */
+            menu_close(s);
+            return;
+        case 2: /* quit to dashboard */
+            menu_quit(s);
+            return;
+        case 3: /* recenter both panels in front of the current gaze */
+            place_in_front(s, 1.5f, &s->quad_pos, &s->quad_orient);
+            place_in_front(s, 1.15f, &s->menu_pos, &s->menu_orient);
+            break;
+        case 4: /* launch the selected game */
+            menu_activate(s);
+            return;
+        default:
+            return;
+        }
+    }
+}
+
+/* Contextual face button (0=A activate, 1=X, 2=Y): the Kotlin model decides
+ * what it means on the current page, then raised commands are drained. */
+static void menu_button(XrShell *s, int code)
+{
+    if (!s->menu_bridge) {
+        return;
+    }
+    (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_button,
+                                  code);
+    if (menu_jni_check(s, "gamepadButton")) {
+        return;
+    }
+    menu_drain_commands(s);
+}
+
+static void menu_nav_page(XrShell *s, int dir)
+{
+    if (s->menu_bridge) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_navPage,
+                                      dir);
+        menu_jni_check(s, "navPage");
+    }
+}
+
 /*
  * Debug-only autonomous menu exercise. XEMU_MENU_AUTOTEST=1 drives
  * open -> navigate -> FP-toggle+revert -> close through the production
@@ -908,17 +1074,21 @@ static void menu_autotest_step(XrShell *s)
         if (frame >= 600) { menu_open(s); phase = 1; frame = 0; }
         break;
     case 1: /* navigate down, down, up */
-        if (frame == 120 || frame == 240) { menu_move(s, 1); }
-        else if (frame == 360) { menu_move(s, -1); }
+        if (frame == 120 || frame == 240) { menu_move(s, 0, 1); }
+        else if (frame == 360) { menu_move(s, 0, -1); }
         else if (frame >= 480) { menu_toggle_fp(s); phase = 2; frame = 0; }
         break;
     case 2: /* revert the toggle so no persistent state is left behind */
         if (frame >= 120) { menu_toggle_fp(s); phase = 3; frame = 0; }
         break;
-    case 3:
-        if (frame >= 120) {
+    case 3: /* page tour: settings -> system -> library, then close */
+        if (frame == 120 || frame == 300 || frame == 480) {
+            menu_nav_page(s, 1);
+        } else if (frame == 200 || frame == 380) {
+            menu_move(s, 0, 1); /* exercise focus on the toured page */
+        } else if (frame >= 600) {
             menu_close(s);
-            LOGI("menu autotest: nav/toggle phase PASS");
+            LOGI("menu autotest: nav/toggle/page phase PASS");
             phase = switch_target ? 4 : 7;
             frame = 0;
         }
@@ -988,6 +1158,9 @@ static void egl_init(XrShell *s)
             "glEGLImageTargetTexture2DOES");
     s->blit_prog = compile_prog(BLIT_VS, BLIT_FS);
     s->menu_blit_prog = compile_prog(BLIT_VS, MENU_BLIT_FS);
+    s->cursor_prog = compile_prog(BLIT_VS, CURSOR_FS);
+    s->cursor_center_loc = glGetUniformLocation(s->cursor_prog, "center");
+    s->cursor_radius_loc = glGetUniformLocation(s->cursor_prog, "radius");
     s->blit_tex_uniform = glGetUniformLocation(s->blit_prog, "tex");
     if (s->blit_tex_uniform < 0) {
         LOGE("frame bridge: blit sampler uniform unavailable");
@@ -1113,8 +1286,16 @@ static void xr_input_init(XrShell *s)
     strcpy(aci.actionName, "aim"); strcpy(aci.localizedActionName, "Aim");
     xrCreateAction(s->action_set, &aci, &s->aim_pose_action);
 
+    /* Left-controller menu button toggles the shell UI (right menu button is
+     * reserved by Horizon). Single subaction: bound to the left hand only. */
+    XrActionCreateInfo mci = { .type = XR_TYPE_ACTION_CREATE_INFO };
+    mci.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    strcpy(mci.actionName, "shell_menu");
+    strcpy(mci.localizedActionName, "Shell Menu");
+    xrCreateAction(s->action_set, &mci, &s->menu_click_action);
+
     XrPath p_grip_l, p_grip_r, p_trig_l, p_trig_r, p_stk_l, p_stk_r,
-        p_aim_l, p_aim_r;
+        p_aim_l, p_aim_r, p_menu_l;
     xrStringToPath(s->instance, "/user/hand/left/input/squeeze/value", &p_grip_l);
     xrStringToPath(s->instance, "/user/hand/right/input/squeeze/value", &p_grip_r);
     xrStringToPath(s->instance, "/user/hand/left/input/trigger/value", &p_trig_l);
@@ -1123,12 +1304,14 @@ static void xr_input_init(XrShell *s)
     xrStringToPath(s->instance, "/user/hand/right/input/thumbstick", &p_stk_r);
     xrStringToPath(s->instance, "/user/hand/left/input/aim/pose", &p_aim_l);
     xrStringToPath(s->instance, "/user/hand/right/input/aim/pose", &p_aim_r);
+    xrStringToPath(s->instance, "/user/hand/left/input/menu/click", &p_menu_l);
 
     XrActionSuggestedBinding b[] = {
         { s->grab_action, p_grip_l }, { s->grab_action, p_grip_r },
         { s->resize_action, p_trig_l }, { s->resize_action, p_trig_r },
         { s->stick_action, p_stk_l }, { s->stick_action, p_stk_r },
         { s->aim_pose_action, p_aim_l }, { s->aim_pose_action, p_aim_r },
+        { s->menu_click_action, p_menu_l },
     };
     XrPath profile;
     xrStringToPath(s->instance,
@@ -1224,11 +1407,132 @@ static XrVector2f action_vec2(XrShell *s, XrAction a, int hand)
     return st.isActive ? st.currentState : (XrVector2f){ 0, 0 };
 }
 
-/* Per-frame 6DOF window update. dt in seconds; predicted display time for
- * the aim pose. Grip on either hand grabs the window and moves it rigidly
- * with the controller (position + a follow of controller yaw). Trigger
- * held = resize: thumbstick X scales, Y pushes/pulls along view. Stick Y
- * without resize also nudges depth. */
+static bool action_bool(XrShell *s, XrAction a)
+{
+    XrActionStateGetInfo gi = { .type = XR_TYPE_ACTION_STATE_GET_INFO,
+                                .action = a,
+                                .subactionPath = XR_NULL_PATH };
+    XrActionStateBoolean st = { .type = XR_TYPE_ACTION_STATE_BOOLEAN };
+    xrGetActionStateBoolean(s->session, &gi, &st);
+    return st.isActive && st.currentState;
+}
+
+/* Intersect a controller aim pose with the menu quad. Returns panel pixel
+ * coordinates when the ray hits the panel front within its bounds. */
+static bool menu_ray_hit(XrShell *s, const XrPosef *aim, float *out_x,
+                         float *out_y)
+{
+    XrVector3f n = q_rotate(s->menu_orient, (XrVector3f){ 0, 0, 1 });
+    XrVector3f d = q_rotate(aim->orientation, (XrVector3f){ 0, 0, -1 });
+    float denom = d.x * n.x + d.y * n.y + d.z * n.z;
+    if (fabsf(denom) < 1e-4f) {
+        return false;
+    }
+    XrVector3f rel = v3_sub(s->menu_pos, aim->position);
+    float t = (rel.x * n.x + rel.y * n.y + rel.z * n.z) / denom;
+    if (t < 0.05f || t > 10.0f) {
+        return false;
+    }
+    XrVector3f hit = v3_add(aim->position,
+                            (XrVector3f){ d.x * t, d.y * t, d.z * t });
+    XrQuaternionf inv = { -s->menu_orient.x, -s->menu_orient.y,
+                          -s->menu_orient.z, s->menu_orient.w };
+    XrVector3f local = q_rotate(inv, v3_sub(hit, s->menu_pos));
+    float w = s->menu_size_m;
+    float h = w * (float)s->menu_h / (float)s->menu_w;
+    float u = local.x / w + 0.5f;
+    float v = 0.5f - local.y / h;
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+        return false;
+    }
+    *out_x = u * (float)s->menu_w;
+    *out_y = v * (float)s->menu_h;
+    return true;
+}
+
+/* Laser-pointer processing while the shell UI is open: hover, trigger click
+ * (with hysteresis), and stick scrolling all route into the Kotlin model. */
+static void menu_pointer_update(XrShell *s, XrSpaceLocation loc[2], float dt)
+{
+    if (!s->menu_bridge) {
+        return;
+    }
+    /* Pick the pointing hand: keep the current one while it still hits the
+     * panel; otherwise prefer the right hand. */
+    int hit_hand = -1;
+    float px = 0, py = 0;
+    int order[3];
+    int order_n = 0;
+    if (s->pointer_hand >= 0) order[order_n++] = s->pointer_hand;
+    order[order_n++] = 1;
+    order[order_n++] = 0;
+    for (int i = 0; i < order_n; i++) {
+        int h = order[i];
+        if (h < 0 || h > 1) continue;
+        if (!(loc[h].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
+            !(loc[h].locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            continue;
+        }
+        if (menu_ray_hit(s, &loc[h].pose, &px, &py)) {
+            hit_hand = h;
+            break;
+        }
+    }
+
+    if (hit_hand < 0) {
+        s->pointer_hand = -1;
+        if (s->pointer_inside) {
+            s->pointer_inside = false;
+            s->pointer_pressed = false;
+            s->pointer_sent_press = false;
+            (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                          s->m_pointerExit);
+            menu_jni_check(s, "pointerExit");
+        }
+        return;
+    }
+
+    s->pointer_hand = hit_hand;
+    s->pointer_inside = true;
+    s->pointer_x = px;
+    s->pointer_y = py;
+
+    /* Trigger click with hysteresis so jitter can't double-fire. */
+    float trig = action_float(s, s->resize_action, hit_hand);
+    if (!s->pointer_pressed && trig > 0.6f) {
+        s->pointer_pressed = true;
+    } else if (s->pointer_pressed && trig < 0.4f) {
+        s->pointer_pressed = false;
+    }
+
+    int ix = (int)px, iy = (int)py;
+    if (ix != s->pointer_sent_x || iy != s->pointer_sent_y ||
+        s->pointer_pressed != s->pointer_sent_press) {
+        s->pointer_sent_x = ix;
+        s->pointer_sent_y = iy;
+        s->pointer_sent_press = s->pointer_pressed;
+        (*s->jni_env)->CallBooleanMethod(s->jni_env, s->menu_bridge,
+                                         s->m_pointer, px, py,
+                                         (jboolean)s->pointer_pressed);
+        if (menu_jni_check(s, "pointer")) {
+            return; /* bridge disabled: no further calls this frame */
+        }
+    }
+
+    /* Stick on the pointing hand scrolls the page smoothly. */
+    XrVector2f stick = action_vec2(s, s->stick_action, hit_hand);
+    if (stick.y > 0.15f || stick.y < -0.15f) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_scroll,
+                                      -stick.y * 1500.0f * dt);
+        menu_jni_check(s, "scroll");
+    }
+}
+
+/* Per-frame controller update. Menu closed: grip = grab-to-move the game
+ * window, trigger = resize (stick X scales, Y pushes/pulls). Menu open: the
+ * ray drives the UI (trigger = click, stick = scroll) and grip moves the UI
+ * panel instead. The left-controller menu button toggles the shell UI in
+ * both states. */
 static void xr_update_window(XrShell *s, XrTime predicted, float dt)
 {
     if (!s->input_ready) {
@@ -1243,6 +1547,19 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
         return;
     }
 
+    /* Menu button edge: toggle the shell UI. */
+    if (s->menu_click_action) {
+        bool down = action_bool(s, s->menu_click_action);
+        if (down && !s->menu_btn_prev) {
+            if (s->menu_open) {
+                menu_close(s);
+            } else {
+                menu_open(s);
+            }
+        }
+        s->menu_btn_prev = down;
+    }
+
     /* Locate both controllers. */
     XrSpaceLocation loc[2] = { { .type = XR_TYPE_SPACE_LOCATION },
                                { .type = XR_TYPE_SPACE_LOCATION } };
@@ -1252,11 +1569,11 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
         }
     }
 
-    /* Resize mode: either trigger held. */
-    bool resize = action_float(s, s->resize_action, 0) > 0.6f ||
-                  action_float(s, s->resize_action, 1) > 0.6f;
-
-    /* Grab: prefer a hand already grabbing; else whichever grip is pressed. */
+    /* Grab: prefer a hand already grabbing; else whichever grip is pressed.
+     * Targets the shell panel while the menu is open, else the game window. */
+    XrVector3f *tgt_pos = s->menu_open ? &s->menu_pos : &s->quad_pos;
+    XrQuaternionf *tgt_orient = s->menu_open ? &s->menu_orient
+                                             : &s->quad_orient;
     int want = -1;
     for (int h = 0; h < 2; h++) {
         if (action_float(s, s->grab_action, h) > 0.6f &&
@@ -1273,17 +1590,27 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
             /* Begin grab: record window offset in controller-local frame. */
             XrQuaternionf inv = { -cp.orientation.x, -cp.orientation.y,
                                   -cp.orientation.z, cp.orientation.w };
-            s->grab_offset = q_rotate(inv, v3_sub(s->quad_pos, cp.position));
+            s->grab_offset = q_rotate(inv, v3_sub(*tgt_pos, cp.position));
             s->grab_hand = want;
         }
         /* Move: window rides the controller. Orientation follows controller
          * so the panel faces where you point. */
-        s->quad_pos = v3_add(cp.position, q_rotate(cp.orientation,
-                                                    s->grab_offset));
-        s->quad_orient = cp.orientation;
+        *tgt_pos = v3_add(cp.position, q_rotate(cp.orientation,
+                                                s->grab_offset));
+        *tgt_orient = cp.orientation;
     } else {
         s->grab_hand = -1;
     }
+
+    if (s->menu_open) {
+        menu_pointer_update(s, loc, dt);
+        menu_drain_commands(s);
+        return;
+    }
+
+    /* Resize mode: either trigger held (menu closed only). */
+    bool resize = action_float(s, s->resize_action, 0) > 0.6f ||
+                  action_float(s, s->resize_action, 1) > 0.6f;
 
     /* Thumbstick: use the right stick (fall back to left). */
     XrVector2f stick = action_vec2(s, s->stick_action, 1);
@@ -1337,6 +1664,15 @@ static bool xr_create_session(XrShell *s)
                                   .position = { 0, 0, 0 } },
     };
     OXR(xrCreateReferenceSpace(s->session, &rsci, &s->local_space));
+
+    /* Head pose for gaze-anchored panel placement (menu open / recenter). */
+    XrReferenceSpaceCreateInfo vsci = {
+        .type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
+        .referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW,
+        .poseInReferenceSpace = { .orientation = { 0, 0, 0, 1 },
+                                  .position = { 0, 0, 0 } },
+    };
+    OXR(xrCreateReferenceSpace(s->session, &vsci, &s->view_space));
 
     xr_input_init(s);
 
@@ -1426,10 +1762,11 @@ static bool xr_create_session(XrShell *s)
         LOGI("display refresh requested 120, now %.0f", rate);
     }
 
-    /* Menu quad swapchain (portrait). Allocated up front but only presented
-     * while the picker is open, so there is no per-frame cost when closed. */
-    s->menu_w = 1024;
-    s->menu_h = 1280;
+    /* Shell-UI quad swapchain (landscape panel). Allocated up front but only
+     * presented while the menu is open, so there is no per-frame cost when
+     * closed. */
+    s->menu_w = 1600;
+    s->menu_h = 1000;
     XrSwapchainCreateInfo msw = {
         .type = XR_TYPE_SWAPCHAIN_CREATE_INFO,
         .usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
@@ -1481,6 +1818,7 @@ static void xr_frame(XrShell *s)
     XrFrameWaitInfo fwi = { .type = XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { .type = XR_TYPE_FRAME_STATE };
     OXR(xrWaitFrame(s->session, &fwi, &fs));
+    s->last_predicted_time = fs.predictedDisplayTime;
     int64_t work_start_ns = now_ns();
     adpf_init_render(s);
     XrFrameBeginInfo fbi = { .type = XR_TYPE_FRAME_BEGIN_INFO };
@@ -1599,8 +1937,23 @@ static void xr_frame(XrShell *s)
          * change, then blit it (alpha preserved) into the menu swapchain. */
         if (s->menu_open && s->menu_bridge) {
             JNIEnv *env = s->jni_env;
-            jboolean dirty =
-                (*env)->CallBooleanMethod(env, s->menu_bridge, s->m_isDirty);
+            /* Push the guest pace readout about once a second; 0 when no
+             * fresh emulator frame arrived in the last 2 seconds. */
+            int64_t push_now = now_ns();
+            if (push_now - s->guest_ms_push_ns > 1000000000LL) {
+                s->guest_ms_push_ns = push_now;
+                float ms = 0.0f;
+                if (s->get_game_frame_ms && s->adpf_last_frame_seq_ns > 0 &&
+                    push_now - s->adpf_last_frame_seq_ns < 2000000000LL) {
+                    ms = s->get_game_frame_ms();
+                }
+                (*env)->CallVoidMethod(env, s->menu_bridge, s->m_setGuestMs,
+                                       ms);
+                menu_jni_check(s, "setGuestFrameMs");
+            }
+            jboolean dirty = s->menu_bridge ?
+                (*env)->CallBooleanMethod(env, s->menu_bridge, s->m_isDirty) :
+                JNI_FALSE;
             if (menu_jni_check(s, "isDirty")) {
                 dirty = JNI_FALSE;
             }
@@ -1634,6 +1987,28 @@ static void xr_frame(XrShell *s)
                 glBindTexture(GL_TEXTURE_2D, s->menu_tex);
                 glBindVertexArray(s->blit_vao);
                 glDrawArrays(GL_TRIANGLES, 0, 3);
+                /* Laser-pointer cursor on top of the panel (FBO origin is
+                 * bottom-left; panel pixels are top-left). */
+                if (s->pointer_inside && s->cursor_prog) {
+                    const float radius = 11.0f;
+                    float cx = s->pointer_x;
+                    float cy = (float)s->menu_h - s->pointer_y;
+                    glUseProgram(s->cursor_prog);
+                    glUniform2f(s->cursor_center_loc, cx, cy);
+                    glUniform1f(s->cursor_radius_loc,
+                                s->pointer_pressed ? radius * 0.8f : radius);
+                    glEnable(GL_BLEND);
+                    glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                    glEnable(GL_SCISSOR_TEST);
+                    int sx = (int)(cx - radius - 3.0f);
+                    int sy = (int)(cy - radius - 3.0f);
+                    int sw = (int)(radius * 2.0f + 6.0f);
+                    glScissor(sx < 0 ? 0 : sx, sy < 0 ? 0 : sy, sw, sw);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                    glDisable(GL_SCISSOR_TEST);
+                    glDisable(GL_BLEND);
+                }
                 glBindVertexArray(0);
                 glBindTexture(GL_TEXTURE_2D, 0);
                 glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1785,25 +2160,40 @@ static int16_t gp_axt(float v)  /* trigger: 0..1 -> 0..32767 */
     return (int16_t)(v * 32767.f);
 }
 
-/* Evaluate menu navigation from the unified pad state (dpad keys, hat, or left
- * stick Y), edge-triggered via nav_latch so one push advances one row. */
+/* Evaluate menu navigation from the unified pad state (dpad keys, hat, or the
+ * left stick), edge-triggered per axis so one push moves focus one step. */
 static void menu_nav_eval(XrShell *s)
 {
-    int dir = 0;
-    if (s->pad_buttons & GP_DU) dir = -1;
-    else if (s->pad_buttons & GP_DD) dir = 1;
-    if (dir == 0) {
+    int dy = 0, dx = 0;
+    if (s->pad_buttons & GP_DU) dy = -1;
+    else if (s->pad_buttons & GP_DD) dy = 1;
+    if (s->pad_buttons & GP_DL) dx = -1;
+    else if (s->pad_buttons & GP_DR) dx = 1;
+    if (dy == 0) {
         int16_t ly = s->pad_axis[AX_LY]; /* up = positive (see on_input) */
-        if (ly > 16000) dir = -1;
-        else if (ly < -16000) dir = 1;
+        if (ly > 16000) dy = -1;
+        else if (ly < -16000) dy = 1;
     }
-    if (dir != 0) {
+    if (dx == 0) {
+        int16_t lx = s->pad_axis[AX_LX];
+        if (lx < -16000) dx = -1;
+        else if (lx > 16000) dx = 1;
+    }
+    if (dy != 0) {
         if (s->nav_latch == 0) {
-            menu_move(s, dir);
-            s->nav_latch = dir;
+            menu_move(s, 0, dy);
+            s->nav_latch = dy;
         }
     } else {
         s->nav_latch = 0;
+    }
+    if (dx != 0) {
+        if (s->nav_latch_x == 0) {
+            menu_move(s, dx, 0);
+            s->nav_latch_x = dx;
+        }
+    } else {
+        s->nav_latch_x = 0;
     }
 }
 
@@ -1827,10 +2217,12 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
 
         if (s->menu_open) {
             if (action == AKEY_EVENT_ACTION_DOWN) {
-                if (mask == GP_A) menu_activate(s);
+                if (mask == GP_A) menu_button(s, 0);
                 else if (mask == GP_B) menu_close(s);
-                else if (mask == GP_X) menu_toggle_fp(s);
-                else if (mask == GP_Y) menu_quit(s);
+                else if (mask == GP_X) menu_button(s, 1);
+                else if (mask == GP_Y) menu_button(s, 2);
+                else if (mask == GP_WHITE) menu_nav_page(s, -1);
+                else if (mask == GP_BLACK) menu_nav_page(s, 1);
                 else if ((s->pad_buttons & (GP_START | GP_BACK)) ==
                          (GP_START | GP_BACK)) menu_close(s);
             }
@@ -1934,10 +2326,14 @@ void android_main(struct android_app *app)
     shell.quad_aspect = 4.0f / 3.0f;
     shell.grab_hand = -1;
 
-    /* Picker sits a little closer than the game window and faces the user. */
-    shell.menu_pos = (XrVector3f){ 0.0f, 0.0f, -1.2f };
+    /* Shell UI panel: landscape, a little closer than the game window; it is
+     * re-anchored in front of the user's gaze every time it opens. */
+    shell.menu_pos = (XrVector3f){ 0.0f, 0.0f, -1.15f };
     shell.menu_orient = (XrQuaternionf){ 0, 0, 0, 1 };
-    shell.menu_size_m = 0.9f;
+    shell.menu_size_m = 1.15f;
+    shell.pointer_hand = -1;
+    shell.pointer_sent_x = -1;
+    shell.pointer_sent_y = -1;
 
     LOGI("xr_shell spike starting");
     egl_init(&shell);

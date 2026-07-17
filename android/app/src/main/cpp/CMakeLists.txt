@@ -1279,6 +1279,7 @@ target_include_directories(android_native_app_glue PUBLIC
 add_library(xr_shell SHARED
   ${CMAKE_CURRENT_LIST_DIR}/xr_shell/xr_shell_main.c)
 find_library(jnigraphics-lib jnigraphics)
+find_library(m-lib m)
 target_link_libraries(xr_shell
   android_native_app_glue
   OpenXR::openxr_loader
@@ -1287,6 +1288,7 @@ target_link_libraries(xr_shell
   ${egl-lib}
   ${glesv3-lib}
   ${jnigraphics-lib}
+  ${m-lib}
 )
 # native_app_glue needs this to keep ANativeActivity_onCreate
 set_property(TARGET xr_shell APPEND_STRING PROPERTY
