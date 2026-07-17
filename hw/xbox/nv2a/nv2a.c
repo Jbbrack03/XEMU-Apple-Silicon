@@ -207,6 +207,25 @@ static int64_t nv2a_calc_vblank_period_ns(NV2AState *d)
     return 16683750;
 }
 
+static bool nv2a_vblank_30fps_exit_fix_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *value = getenv("XEMU_VBLANK_30FPS_EXIT");
+        if (value) {
+            enabled = strcmp(value, "0") != 0;
+        } else {
+#ifdef __ANDROID__
+            enabled = 1;
+#else
+            enabled = 0;
+#endif
+        }
+    }
+    return enabled;
+}
+
 static int64_t s_last_vblank_fire_ns;
 
 static void nv2a_vblank_timer_cb(void *opaque)
@@ -239,7 +258,12 @@ static void nv2a_vblank_timer_cb(void *opaque)
      * hysteresis to prevent thrashing at the boundary.
      *
      * Enter unlock mode when frame time < 1.5 periods (~60fps zone).
-     * Exit only when frame time > 2.5 periods (well into 30fps).
+     * On Android, exit when frame time exceeds 1.875 periods: this keeps the
+     * useful hysteresis through 40--33fps dips, but lets a stable 30fps game
+     * leave unlock mode after a 60fps logo or menu. The legacy 2.5-period
+     * threshold can never exit at a two-period 30fps cadence and continually
+     * defers its intermediate VBLANK. XEMU_VBLANK_30FPS_EXIT=0 is the exact
+     * rollback; other platforms retain the legacy threshold by default.
      *
      * Without hysteresis, a game dipping from 60fps to ~40fps would
      * cross the threshold, lose the generous deferral window, fall to
@@ -250,7 +274,9 @@ static void nv2a_vblank_timer_cb(void *opaque)
                                                  : d->last_frame_ns;
     if (g_config.perf.unlock_framerate && effective_frame_ns > 0) {
         int64_t enter_thresh = period + period / 2;
-        int64_t exit_thresh  = period * 2 + period / 2;
+        int64_t exit_thresh = nv2a_vblank_30fps_exit_fix_enabled()
+                                ? period + period * 7 / 8
+                                : period * 2 + period / 2;
         if (!d->unlock_mode_active && effective_frame_ns < enter_thresh) {
             d->unlock_mode_active = true;
         } else if (d->unlock_mode_active && effective_frame_ns > exit_thresh) {
