@@ -1815,7 +1815,9 @@ void sdl2_gl_refresh(DisplayChangeListener *dcl)
     android_log_gl_error("refresh-makecurrent");
 #endif
     update_fps();
+#ifdef __ANDROID__
     g_android_frame_counter++;
+#endif
 
     /* XXX: Note that this bypasses the usual VGA path in order to quickly
      * get the surface. This is simple and fast, at the cost of accuracy.

@@ -1813,11 +1813,13 @@ DEF_METHOD(NV097, FLIP_INCREMENT_WRITE)
 
     /* Fallback: process diag capture at frame boundary when
      * FLIP_STALL may not be called (after pause/resume). */
+#ifdef CONFIG_VULKAN
     if (nv2a_dbg_diag_frame_pending() || nv2a_dbg_diag_frame_active()) {
         d->pgraph.renderer->ops.surface_update(d, false, true, true);
         d->pgraph.renderer->ops.flip_stall(d);
         nv2a_profile_flip_stall();
     }
+#endif
 }
 
 DEF_METHOD(NV097, FLIP_STALL)

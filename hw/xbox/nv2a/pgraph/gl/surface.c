@@ -1748,7 +1748,7 @@ static void surface_copy_shrink_row(uint8_t *out, const uint8_t *in,
         return;
     }
 
-#ifdef __aarch64__
+#if defined(__ANDROID__) && defined(__aarch64__)
     if (bytes_per_pixel == 4 &&
         android_neon_surface_copy_shrink_row_4bpp(out, in, width, factor)) {
         return;
@@ -2288,8 +2288,10 @@ static void surface_download_to_buffer(NV2AState *d, SurfaceBinding *surface,
         pg->surface_scale_factor * surface->pitch,
         pg->surface_scale_factor * surface->width,
         pg->surface_scale_factor * surface->height, flip, gl_read_buf);
+#ifdef __ANDROID__
     android_log_surface_download_errors("surface_download_to_buffer: post-read",
                                         surface);
+#endif
 
     /* FIXME: Replace this with a hw accelerated version */
     if (downscale) {

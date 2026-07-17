@@ -621,8 +621,10 @@ void xemu_input_init(void)
         xemu_input_bind(0, xc, 0);
         xemu_input_rebind_xmu(0);
         fprintf(stderr, "xemu: XR gamepad synthetic pad bound to port 1\n");
+#ifdef __ANDROID__
         __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                             "XR gamepad forwarding active (port 1)");
+#endif
     }
 }
 

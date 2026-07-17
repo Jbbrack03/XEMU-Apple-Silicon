@@ -33,6 +33,7 @@ system_ss.add(files(
   'cputlb.c',
   'icount-common.c',
   'monitor.c',
+  'tb-cache-hints.c',
   'tcg-accel-ops.c',
   'tcg-accel-ops-icount.c',
   'tcg-accel-ops-mttcg.c',
