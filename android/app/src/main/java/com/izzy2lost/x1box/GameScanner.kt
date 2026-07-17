@@ -21,12 +21,16 @@ object GameScanner {
   private const val MAX_DEPTH = 6
 
   data class Game(
+    // Raw filename-derived title. This is the cover-art lookup key and must
+    // stay stable; user-facing text uses displayTitle instead.
     val title: String,
     val path: String,
     // Path relative to the scan root (incl. subdirs) — matches the id the 2D
     // SAF flow uses (GameLibraryActivity relativePath) so per-game overrides
     // land in the same bucket and same-basename games don't collide.
     val relativePath: String,
+    // Proper game name for the shelf label (curated map, else title-cased).
+    val displayTitle: String = title,
   )
 
   fun scan(context: Context): List<Game> {
@@ -70,11 +74,13 @@ object GameScanner {
           if (!child.isFile || !isSupported(name)) continue
           if (!seenFiles.add(child.absolutePath.lowercase(Locale.ROOT))) continue
           val rel = child.absolutePath.removePrefix(rootPath).trimStart('/')
-          out.add(Game(toTitle(name), child.absolutePath, rel.ifEmpty { name }))
+          val raw = toTitle(name)
+          out.add(Game(raw, child.absolutePath, rel.ifEmpty { name },
+                       toDisplayTitle(raw)))
         }
       }
     }
-    out.sortBy { it.title.lowercase(Locale.ROOT) }
+    out.sortBy { it.displayTitle.lowercase(Locale.ROOT) }
     return out
   }
 
@@ -97,5 +103,48 @@ object GameScanner {
       .replace(Regex("\\s+"), " ")
       .trim()
       .ifEmpty { raw.trim() }
+  }
+
+  // Proper box names for common dump-style basenames; anything unknown gets
+  // simple title casing so the shelf never shows raw abbreviations.
+  private val knownTitles = mapOf(
+    "burnout3" to "Burnout 3: Takedown",
+    "crimson" to "Crimson Skies",
+    "crimson skies" to "Crimson Skies: High Road to Revenge",
+    "doa3" to "Dead or Alive 3",
+    "fable" to "Fable",
+    "forza" to "Forza Motorsport",
+    "halo - combat evolved" to "Halo: Combat Evolved",
+    "halo" to "Halo: Combat Evolved",
+    "halo2" to "Halo 2",
+    "hl2" to "Half-Life 2",
+    "jsrf" to "Jet Set Radio Future",
+    "kotor" to "Star Wars: Knights of the Old Republic",
+    "morrowind" to "The Elder Scrolls III: Morrowind",
+    "ngb" to "Ninja Gaiden Black",
+    "outrun 2" to "OutRun 2",
+    "outrun2" to "OutRun 2",
+    "panzer" to "Panzer Dragoon Orta",
+    "pgr2" to "Project Gotham Racing 2",
+    "rainbow six 3" to "Tom Clancy's Rainbow Six 3",
+    "rtcw" to "Return to Castle Wolfenstein",
+    "sc2" to "SoulCalibur II",
+    "soul calibur 2" to "SoulCalibur II",
+    "sof2" to "Soldier of Fortune II: Double Helix",
+  )
+
+  private val smallWords = setOf("of", "the", "and", "in", "on", "at", "to", "a", "an")
+
+  private fun toDisplayTitle(raw: String): String {
+    knownTitles[raw.lowercase(Locale.ROOT)]?.let { return it }
+    val words = raw.split(' ')
+    return words.mapIndexed { i, w ->
+      val lower = w.lowercase(Locale.ROOT)
+      when {
+        w.length <= 1 -> w.uppercase(Locale.ROOT)
+        i > 0 && lower in smallWords -> lower
+        else -> lower.replaceFirstChar { it.uppercase(Locale.ROOT) }
+      }
+    }.joinToString(" ")
   }
 }

@@ -182,14 +182,14 @@ class XrMenuBridge(context: Context) {
         "Boot straight into the game or dashboard", true),
     )),
     Section("AUDIO", listOf(
-      Setting.Toggle("setting_use_dsp", "DSP Emulation",
-        "Accurate audio DSP for the few titles that need it — uses more CPU and battery", false),
-      Setting.Toggle("setting_hrtf", "HRTF Spatial Audio",
-        "Head-related transfer function for positional audio", false),
+      Setting.Toggle("setting_use_dsp", "Enhanced Audio Accuracy",
+        "Fixes music and effects in the few games that need it — uses more battery", false),
+      Setting.Toggle("setting_hrtf", "3D Headphone Audio",
+        "Positional surround sound tuned for the headset speakers", false),
     )),
     Section("NETWORK", listOf(
-      Setting.Toggle("setting_network_enable", "Insignia Networking",
-        "Enable the emulated network adapter for online play", false),
+      Setting.Toggle("setting_network_enable", "Online Play (Insignia)",
+        "Connect to the Insignia service for Xbox Live-era online play", false),
     )),
   )
 
@@ -791,7 +791,7 @@ class XrMenuBridge(context: Context) {
     when (page) {
       PAGE_LIBRARY -> {
         hint("A", Th.BTN_A, "Play")
-        hint("X", Th.BTN_X, "FP JIT")
+        hint("X", Th.BTN_X, "Compat Mode")
         hint("B", Th.BTN_B, "Close")
       }
       PAGE_SETTINGS -> {
@@ -931,7 +931,7 @@ class XrMenuBridge(context: Context) {
           c.drawRect(cover, fill)
         }
       } else {
-        drawPlaceholderCover(c, cover, game.title, pressedId == id)
+        drawPlaceholderCover(c, cover, game.displayTitle, pressedId == id)
       }
       c.restore()
 
@@ -984,7 +984,7 @@ class XrMenuBridge(context: Context) {
       text.textSize = 23f
       text.color = if (focused || hovered) Th.TEXT_PRIMARY else Th.TEXT_SECONDARY
       text.textAlign = Paint.Align.CENTER
-      c.drawText(ellipsize(game.title, text, cellW - 8f), cover.centerX(),
+      c.drawText(ellipsize(game.displayTitle, text, cellW - 8f), cover.centerX(),
         cy + coverH + 36f, text)
       text.textAlign = Paint.Align.LEFT
     }
@@ -998,7 +998,7 @@ class XrMenuBridge(context: Context) {
       text.typeface = tfRegular
       text.textSize = 22f
       text.color = Th.AMBER
-      c.drawText("FP JIT change applies at next cold launch", left, contentBottom - 6f, text)
+      c.drawText("Compatibility change applies at next launch", left, contentBottom - 6f, text)
     }
   }
 
@@ -1164,7 +1164,7 @@ class XrMenuBridge(context: Context) {
     val cardH = 128f
     val currentDvd = prefs.getString("dvdPath", null)
     val playing = currentDvd?.let { p ->
-      games.find { it.path == p }?.title
+      games.find { it.path == p }?.displayTitle
         ?: File(p).name.substringBeforeLast('.').replace('_', ' ')
     } ?: "Xbox Dashboard"
     val pace = if (guestFrameMs > 0.5f) {
