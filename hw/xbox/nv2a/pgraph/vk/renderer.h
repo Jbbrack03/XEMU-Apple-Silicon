@@ -190,8 +190,19 @@ struct OptBisectStats {
     int s2t_fail_cubemap;
     int s2t_fail_levels;
     int s2t_fail_fmt;
+    /* Executed-surface-upload attribution (multi-label per upload). */
+    int upl_reason_cpu_write;
+    int upl_reason_new_binding;
+    int upl_reason_mem_dirty;
+    int upl_reason_blit;
+    int upl_reason_untagged;
 };
 extern struct OptBisectStats g_opt_stats;
+
+#define SURFACE_UPLOAD_REASON_CPU_WRITE (1 << 0)
+#define SURFACE_UPLOAD_REASON_NEW       (1 << 1)
+#define SURFACE_UPLOAD_REASON_MEM_DIRTY (1 << 2)
+#define SURFACE_UPLOAD_REASON_BLIT      (1 << 3)
 #if NV2A_PERF_LOG
 #define OPT_STAT_INC(field) (g_opt_stats.field++)
 #else
@@ -322,6 +333,8 @@ typedef struct SurfaceBinding {
     bool draw_dirty;
     bool download_pending;
     bool upload_pending;
+    /* Which mechanism(s) set upload_pending, for upload attribution. */
+    uint8_t upload_reason;
 
     unsigned int download_row_start;
     unsigned int download_row_count; // 0 = full surface

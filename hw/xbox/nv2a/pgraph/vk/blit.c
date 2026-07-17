@@ -182,6 +182,7 @@ void pgraph_vk_image_blit(NV2AState *d)
             surf_dest->draw_dirty = false;
         }
         surf_dest->upload_pending = true;
+        surf_dest->upload_reason |= SURFACE_UPLOAD_REASON_BLIT;
         pg->draw_time++;
     }
 

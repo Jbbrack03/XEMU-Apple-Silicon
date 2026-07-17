@@ -2049,6 +2049,7 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
 
         if (write) {
             surface->upload_pending = true;
+            surface->upload_reason |= SURFACE_UPLOAD_REASON_CPU_WRITE;
         }
     }
 
@@ -2765,6 +2766,23 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         return;
     }
 
+    if (surface->upload_reason & SURFACE_UPLOAD_REASON_CPU_WRITE) {
+        OPT_STAT_INC(upl_reason_cpu_write);
+    }
+    if (surface->upload_reason & SURFACE_UPLOAD_REASON_NEW) {
+        OPT_STAT_INC(upl_reason_new_binding);
+    }
+    if (surface->upload_reason & SURFACE_UPLOAD_REASON_MEM_DIRTY) {
+        OPT_STAT_INC(upl_reason_mem_dirty);
+    }
+    if (surface->upload_reason & SURFACE_UPLOAD_REASON_BLIT) {
+        OPT_STAT_INC(upl_reason_blit);
+    }
+    if (!surface->upload_reason) {
+        OPT_STAT_INC(upl_reason_untagged);
+    }
+    surface->upload_reason = 0;
+
     VK_LOG("upload_surface: %s addr=0x%x %ux%u pitch=%d bpp=%d swizzle=%d",
            surface->color ? "COLOR" : "ZETA", surface->vram_addr,
            surface->width, surface->height, surface->pitch,
@@ -3272,6 +3290,7 @@ static void populate_surface_binding_target_sized(NV2AState *d, bool color,
     target->pitch = surface->pitch;
     target->size = height * MAX(surface->pitch, width * fmt.bytes_per_pixel);
     target->upload_pending = true;
+    target->upload_reason = SURFACE_UPLOAD_REASON_NEW;
     target->download_pending = false;
     target->draw_dirty = false;
     target->dma_addr = dma.address;
@@ -3448,6 +3467,9 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 pg->surface_binding_dim.clip_y = surface->shape.clip_y;
                 pg->surface_binding_dim.clip_height = surface->shape.clip_height;
                 surface->upload_pending |= mem_dirty;
+                if (mem_dirty) {
+                    surface->upload_reason |= SURFACE_UPLOAD_REASON_MEM_DIRTY;
+                }
                 pg->surface_zeta.buffer_dirty |= color;
                 should_create = false;
                 g_nv2a_stats.surf_working.lk_hit_ns += nv2a_clock_ns() - _gt1;
