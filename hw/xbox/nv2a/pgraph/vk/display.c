@@ -200,7 +200,14 @@ static void xemu_dump_frame(struct AHardwareBuffer *ahb)
     if (f) {
         fprintf(f, "P6\n%u %u\n255\n", d.width, d.height);
         const uint8_t *row = (const uint8_t *)pixels;
-        for (uint32_t y = 0; y < d.height; y++) {
+        /*
+         * The AHB stores the display shader's output, which is V-flipped
+         * relative to what the XR quad presents (its UV mapping flips
+         * again). Write rows bottom-up so dumps match the wearer's view;
+         * the raw top-down order misled two sessions' visual analyses
+         * (research/20260717-s36-overlay-flip-attribution.md).
+         */
+        for (uint32_t y = d.height; y-- > 0;) {
             const uint8_t *px = row + (size_t)y * d.stride * 4;
             for (uint32_t x = 0; x < d.width; x++) {
                 fwrite(px + x * 4, 1, 3, f); /* RGB, drop A */
