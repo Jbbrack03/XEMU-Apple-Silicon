@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qemu/fast-hash.h"
 #include "qemu/error-report.h"
+#include <glib/gstdio.h>
 #include "renderer.h"
 #include "system/physmem.h"
 #include "ui/xemu-settings.h"
@@ -438,6 +439,25 @@ static bool pipeline_cache_entry_compare(Lru *lru, LruNode *node,
     return memcmp(&snode->key, key, sizeof(PipelineKey));
 }
 
+/*
+ * A driver-serialized pipeline-cache blob can pass vkCreatePipelineCache
+ * and still crash the driver at first pipeline use (observed with the
+ * product Turnip driver; poisoned repro preserved in
+ * artifacts/cache-poison-s35). The sentinel marks a loaded disk blob that
+ * has not yet survived early rendering; if a session dies inside that
+ * window, the next boot discards the blob instead of crash-looping.
+ * Normal process kills after the window never discard the cache.
+ */
+#define PIPELINE_CACHE_TRUST_AFTER_US (60 * 1000000LL)
+static bool pipeline_cache_probation;
+static int64_t pipeline_cache_loaded_us;
+
+static char *pipeline_cache_sentinel_path(void)
+{
+    return g_strdup_printf("%svk_pipeline_cache.inuse",
+                           xemu_settings_get_base_path());
+}
+
 static void init_pipeline_cache(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -448,11 +468,22 @@ static void init_pipeline_cache(PGRAPHState *pg)
     if (g_config.perf.cache_shaders) {
         const char *base = xemu_settings_get_base_path();
         char *plc_path = g_strdup_printf("%svk_pipeline_cache.bin", base);
-        if (g_file_get_contents(plc_path, (gchar **)&initial_data,
-                                &initial_size, NULL)) {
+        char *sentinel = pipeline_cache_sentinel_path();
+        if (g_file_test(sentinel, G_FILE_TEST_EXISTS)) {
+            VK_LOG_ERROR("Previous session died with an unproven pipeline "
+                         "cache; discarding it");
+            g_unlink(plc_path);
+            g_unlink(sentinel);
+        } else if (g_file_get_contents(plc_path, (gchar **)&initial_data,
+                                       &initial_size, NULL)) {
             VK_LOG("Loaded pipeline cache from disk (%zu bytes)", initial_size);
             g_nv2a_stats.shader_stats.pipeline_cache_disk_loaded = 1;
+            g_file_set_contents(sentinel, "1", 1, NULL);
+            pipeline_cache_probation = true;
+            pipeline_cache_loaded_us =
+                qemu_clock_get_us(QEMU_CLOCK_REALTIME);
         }
+        g_free(sentinel);
         g_free(plc_path);
     }
 
@@ -514,6 +545,14 @@ static void maybe_save_pipeline_cache(PGRAPHVkState *r)
     }
     static int64_t last_save_us;
     int64_t now = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    if (pipeline_cache_probation &&
+        (now - pipeline_cache_loaded_us) > PIPELINE_CACHE_TRUST_AFTER_US) {
+        char *sentinel = pipeline_cache_sentinel_path();
+        g_unlink(sentinel);
+        g_free(sentinel);
+        pipeline_cache_probation = false;
+        VK_LOG("Pipeline cache survived probation; keeping it");
+    }
     if (last_save_us && (now - last_save_us) < PIPELINE_CACHE_SAVE_INTERVAL_US) {
         return;
     }
@@ -527,6 +566,12 @@ static void finalize_pipeline_cache(PGRAPHState *pg)
 
     if (g_config.perf.cache_shaders) {
         save_pipeline_cache_to_disk(r);
+        if (pipeline_cache_probation) {
+            char *sentinel = pipeline_cache_sentinel_path();
+            g_unlink(sentinel);
+            g_free(sentinel);
+            pipeline_cache_probation = false;
+        }
     }
 
     lru_flush(&r->pipeline_cache);
