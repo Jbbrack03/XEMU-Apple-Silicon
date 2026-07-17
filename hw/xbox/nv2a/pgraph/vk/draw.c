@@ -142,8 +142,12 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d PreDL:%d sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
                 g_opt_stats.render_pass_breaks,
+                g_opt_stats.rp_end_query,
+                g_opt_stats.rp_end_clear,
+                g_opt_stats.rp_end_nondraw,
+                g_opt_stats.rp_end_finish,
                 g_opt_stats.finish_calls,
                 g_opt_stats.finish_vtx_dirty,
                 g_opt_stats.finish_surf_create,
@@ -159,6 +163,10 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.stall_skipped_empty,
                 g_opt_stats.inline_clear_hits,
                 g_opt_stats.inline_clear_misses,
+                g_opt_stats.iclr_miss_partial,
+                g_opt_stats.iclr_miss_no_cb,
+                g_opt_stats.iclr_miss_no_rp,
+                g_opt_stats.iclr_miss_fb_dirty,
                 g_opt_stats.predownload_hits,
                 g_opt_stats.sd_eviction,
                 g_opt_stats.sd_eviction_nocb,
@@ -2102,6 +2110,28 @@ static void end_render_pass(PGRAPHVkState *r)
     }
 }
 
+/* Cause-attributed render-pass end: counts the reason only when a pass was
+ * actually open (end_render_pass itself is a no-op otherwise). */
+enum {
+    RP_END_QUERY,
+    RP_END_CLEAR,
+    RP_END_NONDRAW,
+    RP_END_FINISH,
+};
+
+static void end_render_pass_why(PGRAPHVkState *r, int why)
+{
+    if (r->in_render_pass) {
+        switch (why) {
+        case RP_END_QUERY:   OPT_STAT_INC(rp_end_query);   break;
+        case RP_END_CLEAR:   OPT_STAT_INC(rp_end_clear);   break;
+        case RP_END_NONDRAW: OPT_STAT_INC(rp_end_nondraw); break;
+        case RP_END_FINISH:  OPT_STAT_INC(rp_end_finish);  break;
+        }
+    }
+    end_render_pass(r);
+}
+
 static void gpu_ts_readback(PGRAPHVkState *r, int frame)
 {
     if (!r->gpu_ts_supported) {
@@ -2253,7 +2283,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
         nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
 
         if (r->in_render_pass) {
-            end_render_pass(r);
+            end_render_pass_why(r, RP_END_FINISH);
         }
         if (r->query_in_flight) {
             end_query(r);
@@ -2708,7 +2738,7 @@ void pgraph_vk_ensure_not_in_render_pass(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
-    end_render_pass(r);
+    end_render_pass_why(r, RP_END_NONDRAW);
     if (r->query_in_flight) {
         end_query(r);
     }
@@ -3213,20 +3243,20 @@ static void begin_draw(PGRAPHState *pg)
     // Visibility testing
     if (!pg->clearing && pg->zpass_pixel_count_enable) {
         if (r->new_query_needed && r->query_in_flight) {
-            end_render_pass(r);
+            end_render_pass_why(r, RP_END_QUERY);
             end_query(r);
         }
         if (!r->query_in_flight) {
-            end_render_pass(r);
+            end_render_pass_why(r, RP_END_QUERY);
             begin_query(r);
         }
     } else if (r->query_in_flight) {
-        end_render_pass(r);
+        end_render_pass_why(r, RP_END_QUERY);
         end_query(r);
     }
 
     if (pg->clearing) {
-        end_render_pass(r);
+        end_render_pass_why(r, RP_END_CLEAR);
     }
 
     bool must_bind_pipeline = r->pipeline_binding_changed;
@@ -3490,7 +3520,7 @@ static void end_draw(PGRAPHState *pg)
     assert(r->in_render_pass);
 
     if (pg->clearing) {
-        end_render_pass(r);
+        end_render_pass_why(r, RP_END_CLEAR);
     }
 
     r->in_draw = false;
@@ -5531,6 +5561,17 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
             pgraph_vk_set_surface_dirty(pg, write_color, write_zeta);
             NV2A_VK_DGROUP_END();
             return;
+        }
+
+        /* Attribute the fall-through to its first failing condition. */
+        if (partial_color_clear) {
+            OPT_STAT_INC(iclr_miss_partial);
+        } else if (!r->in_command_buffer) {
+            OPT_STAT_INC(iclr_miss_no_cb);
+        } else if (!r->in_render_pass) {
+            OPT_STAT_INC(iclr_miss_no_rp);
+        } else {
+            OPT_STAT_INC(iclr_miss_fb_dirty);
         }
     }
 

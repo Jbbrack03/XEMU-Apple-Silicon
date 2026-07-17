@@ -118,7 +118,17 @@ struct OptBisectStats {
     int draw_merge_break_full;
     int inline_clear_hits;
     int inline_clear_misses;
+    /* Inline-clear fall-through causes (first failing condition). */
+    int iclr_miss_partial;
+    int iclr_miss_no_cb;
+    int iclr_miss_no_rp;
+    int iclr_miss_fb_dirty;
     int render_pass_breaks;
+    /* Render-pass end causes (counted only when a pass was actually open). */
+    int rp_end_query;
+    int rp_end_clear;
+    int rp_end_nondraw;
+    int rp_end_finish;
     int barrier_count;
     int transition_count;
     int finish_calls;
