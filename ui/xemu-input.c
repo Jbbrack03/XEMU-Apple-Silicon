@@ -545,9 +545,12 @@ void xemu_input_set_voice_chat(bool enable)
      * constructors, which a static link happily drops without a symbol
      * reference from linked code. */
     extern void xemu_force_xblc_link(void);
-    extern void xemu_android_force_sdlaudio_link(void);
     xemu_force_xblc_link();
+#ifdef __ANDROID__
+    /* The aaudio SDL driver anchor exists only in the Android build. */
+    extern void xemu_android_force_sdlaudio_link(void);
     xemu_android_force_sdlaudio_link();
+#endif
 
     xemu_voice_chat_requested = enable;
 }

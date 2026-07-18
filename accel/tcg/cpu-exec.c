@@ -116,7 +116,10 @@ typedef struct QEMU_PACKED XemuTbTraceSnapshot {
     uint16_t guest_icount;
     uint16_t host_size;
     uint16_t code_len;
-    uint8_t code[TARGET_PAGE_SIZE];
+    /* Xbox x86 pages are always 4 KiB; TARGET_PAGE_SIZE is not an
+     * integer constant expression on hosts with TARGET_PAGE_BITS_VARY,
+     * and newer Clang rejects the VLA-in-struct extension outright. */
+    uint8_t code[4096];
 } XemuTbTraceSnapshot;
 
 static int xemu_tb_trace_state = -1; /* -1 unknown, 0 waiting, 1 active, 2 done */
@@ -277,7 +280,7 @@ static void xemu_tb_trace_snapshot(CPUState *cpu, vaddr pc,
         xemu_tb_trace_snapshot_skipped++;
         return;
     }
-    if (tb->size == 0 || tb->size > TARGET_PAGE_SIZE) {
+    if (tb->size == 0 || tb->size > sizeof(snapshot->code)) {
         xemu_tb_trace_snapshot_skipped++;
         return;
     }
@@ -330,7 +333,7 @@ static void xemu_tb_trace_snapshot_finish(void)
         .record_size = sizeof(XemuTbTraceSnapshot),
         .record_count = xemu_tb_trace_snapshots ?
                         xemu_tb_trace_snapshots->len : 0,
-        .code_capacity = TARGET_PAGE_SIZE,
+        .code_capacity = sizeof(((XemuTbTraceSnapshot *)0)->code),
     };
     FILE *f;
     bool ok = true;
