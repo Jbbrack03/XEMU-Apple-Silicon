@@ -185,6 +185,18 @@ struct OptBisectStats {
     int ers_seen;
     int ers_fired;
     int ers_nocb_drains;
+    /* Texture-path cost attribution (s38 Crimson heavy-combat probe). */
+    int tex_up_reup;      /* cache-hit content-changed re-uploads */
+    int tex_up_new;       /* cache-miss (new binding) uploads */
+    int tex_up_kb;        /* guest bytes decoded+uploaded, KiB */
+    int tex_hash_n;       /* content hashes computed */
+    int tex_hash_kb;      /* bytes hashed, KiB */
+    int tex_hash_saved;   /* dirty-flagged but hash-equal: upload avoided */
+    int tex_up_drain;     /* flush_all_frames forced by in-flight re-upload */
+    int tex_trim_calls;   /* budget-pressure trim invocations */
+    int tex_trim_evicted; /* entries evicted by budget trims */
+    int tex_cache_used;   /* texture_cache.num_used at last trim/check */
+    int budget_pct_max;   /* max heap allocation/budget ratio x100 seen */
     int predownload_hits;
     /* Why a render-target-as-texture read fell to the download stall path
      * (check_surface_to_texture_compatiblity failure reasons). */
@@ -1355,6 +1367,7 @@ typedef struct PGRAPHVkState {
     ShaderModuleCacheEntry *shader_module_cache_entries;
     size_t shader_module_cache_target;
     size_t texture_cache_target;
+    int64_t last_texture_trim_ns;
     int image_pool_max;
     int surface_image_pool_max;
 
@@ -1609,6 +1622,7 @@ bool pgraph_vk_check_textures_fast_skip(PGRAPHState *pg);
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d, hwaddr addr,
                                             hwaddr size);
 void pgraph_vk_trim_texture_cache(PGRAPHState *pg);
+void pgraph_vk_stamp_bound_textures(PGRAPHState *pg);
 
 // compile_worker.c
 #if OPT_ASYNC_COMPILE

@@ -1640,6 +1640,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
 
     uint64_t content_hash = 0;
     if (!surface_to_texture && possibly_dirty) {
+        OPT_STAT_INC(tex_hash_n);
+        g_opt_stats.tex_hash_kb += (int)(texture_length >> 10);
         content_hash = fast_hash(texture_data, texture_length);
         if (is_indexed) {
             content_hash ^= fast_hash(palette_data, texture_palette_data_size);
@@ -1709,11 +1711,16 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         } else {
             if (possibly_dirty && content_hash != snode->hash) {
                 if (snode->submit_time + r->num_active_frames > r->submit_count) {
+                    OPT_STAT_INC(tex_up_drain);
                     pgraph_vk_flush_all_frames(pg);
                 }
+                OPT_STAT_INC(tex_up_reup);
+                g_opt_stats.tex_up_kb += (int)(texture_length >> 10);
                 upload_texture_image(pg, texture_idx, snode);
                 snode->hash = content_hash;
                 did_upload = true;
+            } else if (possibly_dirty) {
+                OPT_STAT_INC(tex_hash_saved);
             }
             snode->possibly_dirty = false;
         }
@@ -2047,6 +2054,8 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
             copy_surface_to_texture(pg, surface, snode);
         }
     } else {
+        OPT_STAT_INC(tex_up_new);
+        g_opt_stats.tex_up_kb += (int)(texture_length >> 10);
         upload_texture_image(pg, texture_idx, snode);
         snode->draw_time = 0;
     }
@@ -2073,6 +2082,22 @@ static void update_timestamps(PGRAPHVkState *r)
             r->texture_bindings[i]->submit_time = r->submit_count;
         }
     }
+}
+
+/* Called at every finish while a command buffer is open. bind_textures is
+ * skipped entirely while texture state is unchanged, so a long-bound
+ * texture's submit_time goes stale across submits; once it is finally
+ * replaced, pre_evict's num_active_frames guard would treat it as
+ * evictable even though descriptor sets recorded in the last in-flight
+ * frames still reference its image view (GPU use-after-free — observed as
+ * intermittent driver SIGSEGVs under budget-trim eviction storms).
+ * Stamping the bound set at submission makes the guard arithmetic sound:
+ * anything unbound for more than num_active_frames submits truly has no
+ * live references. */
+void pgraph_vk_stamp_bound_textures(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+    update_timestamps(r);
 }
 
 bool pgraph_vk_check_textures_fast_skip(PGRAPHState *pg)
@@ -2395,12 +2420,16 @@ void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
 
     // FIXME: Allow specifying some amount to trim by
 
+    OPT_STAT_INC(tex_trim_calls);
+    g_opt_stats.tex_cache_used = (int)r->texture_cache.num_used;
+
     int num_to_evict = r->texture_cache.num_used / 4;
     int num_evicted = 0;
 
     while (num_to_evict-- && lru_try_evict_one(&r->texture_cache)) {
         num_evicted += 1;
     }
+    g_opt_stats.tex_trim_evicted += num_evicted;
 
     NV2A_VK_DPRINTF("Evicted %d textures, %d remain", num_evicted, r->texture_cache.num_used);
 }

@@ -143,7 +143,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d] eRS[f%d s%d nd%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d] eRS[f%d s%d nd%d] TexU[re%d nw%d kb%d h%d hkb%d sv%d dr%d tc%d te%d cu%d bp%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.rp_end_query,
                 g_opt_stats.rp_end_clear,
@@ -213,7 +213,18 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.iev_src_rows,
                 g_opt_stats.ers_fired,
                 g_opt_stats.ers_seen,
-                g_opt_stats.ers_nocb_drains);
+                g_opt_stats.ers_nocb_drains,
+                g_opt_stats.tex_up_reup,
+                g_opt_stats.tex_up_new,
+                g_opt_stats.tex_up_kb,
+                g_opt_stats.tex_hash_n,
+                g_opt_stats.tex_hash_kb,
+                g_opt_stats.tex_hash_saved,
+                g_opt_stats.tex_up_drain,
+                g_opt_stats.tex_trim_calls,
+                g_opt_stats.tex_trim_evicted,
+                g_opt_stats.tex_cache_used,
+                g_opt_stats.budget_pct_max);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
                 "nd_detail: pd%d su%d dld%d s2b%d vdl%d vul%d cr%d sup%d "
                 "txu%d zcp%d s2t%d zbd%d s2c%d",
@@ -2385,6 +2396,11 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
     if (r->in_command_buffer) {
         nv2a_profile_inc_counter(finish_reason_to_counter_enum[finish_reason]);
+
+        /* This CB references every currently-bound texture through its
+         * recorded descriptor sets; stamp them so eviction guards hold
+         * for the frames this submission stays in flight. */
+        pgraph_vk_stamp_bound_textures(pg);
 
         if (r->in_render_pass) {
             end_render_pass_why(r, RP_END_FINISH);
