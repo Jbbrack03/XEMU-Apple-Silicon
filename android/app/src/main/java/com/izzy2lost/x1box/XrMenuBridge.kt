@@ -48,6 +48,11 @@ class XrMenuBridge(context: Context) {
   private val appContext = context.applicationContext
   private val prefs = appContext.getSharedPreferences("x1box_prefs", Context.MODE_PRIVATE)
 
+  // Window placement lives in its own prefs file: it changes whenever the
+  // user moves a window and must not perturb the emulator settings file.
+  private val windowPrefs =
+    appContext.getSharedPreferences("xr_window_prefs", Context.MODE_PRIVATE)
+
   // ---------------------------------------------------------------------
   // Commands raised by UI actions, drained by the native shell.
   // ---------------------------------------------------------------------
@@ -60,7 +65,9 @@ class XrMenuBridge(context: Context) {
 
     private const val PAGE_LIBRARY = 0
     private const val PAGE_SETTINGS = 1
-    private const val PAGE_SYSTEM = 2
+    private const val PAGE_ONLINE = 2
+    private const val PAGE_SYSTEM = 3
+    private const val PAGE_COUNT = 4
   }
 
   // Scanned off-thread; the immutable list reference is swapped atomically so
@@ -103,6 +110,16 @@ class XrMenuBridge(context: Context) {
 
   // Settings keys changed since the menu was created (drives the amber dot).
   private val changedKeys = HashSet<String>()
+
+  // Online (Insignia) page: plain file-presence checks only. NEVER call the
+  // native HDD tools (nativeInspectDashboardFlags etc.) from this class: they
+  // initialize the QEMU block layer, and this process runs (or will run) the
+  // emulator — the second qemu_clock_init aborts the process.
+  private data class OnlineStatus(
+    val hasHdd: Boolean,
+    val hasEeprom: Boolean,
+  )
+  @Volatile private var onlineStatus: OnlineStatus? = null
 
   private val covers = XrCoverArt(appContext) { dirty = true }
 
@@ -186,6 +203,8 @@ class XrMenuBridge(context: Context) {
         "Fixes music and effects in the few games that need it — uses more battery", false),
       Setting.Toggle("setting_hrtf", "3D Headphone Audio",
         "Positional surround sound tuned for the headset speakers", false),
+      Setting.Toggle("setting_voice_chat", "Xbox Live Voice Chat",
+        "Use the headset microphone for in-game voice on Insignia", false),
     )),
     Section("NETWORK", listOf(
       Setting.Toggle("setting_network_enable", "Online Play (Insignia)",
@@ -195,6 +214,56 @@ class XrMenuBridge(context: Context) {
 
   init {
     reloadGames()
+    inspectOnlineStatusOnce()
+  }
+
+  private fun resolveHddFileForOnline(): File? =
+    prefs.getString("hddPath", null)?.let(::File)?.takeIf { it.isFile }
+
+  private fun resolveEepromFileForOnline(): File {
+    val base = appContext.getExternalFilesDir(null) ?: appContext.filesDir
+    return File(File(base, "x1box"), "eeprom.bin")
+  }
+
+  private fun inspectOnlineStatusOnce() {
+    Thread {
+      runCatching {
+        onlineStatus = OnlineStatus(
+          hasHdd = resolveHddFileForOnline() != null,
+          hasEeprom = resolveEepromFileForOnline().isFile,
+        )
+        dirty = true
+      }
+    }.apply { isDaemon = true }.start()
+  }
+
+  /**
+   * Deferred Insignia preparation: the Online page only marks preparation as
+   * pending, because the DNS writes touch the HDD image and EEPROM, which must
+   * not be modified while xemu owns them. This runs in startEmulator(), the
+   * one point where the emulator is guaranteed not to be running yet.
+   */
+  private fun applyPendingInsigniaPrepare() {
+    if (!prefs.getBoolean("insignia_prepare_pending", false)) return
+    try {
+      val hddFile = resolveHddFileForOnline()
+        ?: throw IllegalStateException("No hard-drive image found")
+      val eepromFile = resolveEepromFileForOnline()
+      if (!eepromFile.isFile) throw IllegalStateException("No console EEPROM found")
+      XboxInsigniaHelper.applyConfigSectorDns(hddFile)
+      XboxEepromEditor.applyXboxLiveDns(eepromFile, XboxInsigniaHelper.primaryDnsBytes())
+      prefs.edit()
+        .putBoolean("insignia_prepare_pending", false)
+        .putLong("insignia_prepared_ms", System.currentTimeMillis())
+        .remove("insignia_prepare_error")
+        .apply()
+    } catch (t: Throwable) {
+      // Always clear pending (no silent retry loops); surface the reason.
+      prefs.edit()
+        .putBoolean("insignia_prepare_pending", false)
+        .putString("insignia_prepare_error", t.message ?: t.javaClass.simpleName)
+        .apply()
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -208,6 +277,20 @@ class XrMenuBridge(context: Context) {
    * verifies the immersive cpuset before it creates QEMU workers.
    */
   fun startEmulator() {
+    // Safe point for deferred Insignia DNS writes: xemu is not running yet.
+    applyPendingInsigniaPrepare()
+    // Voice chat needs the microphone; ask once here so the in-VR system
+    // dialog appears before the game grabs focus. Denial is non-fatal (the
+    // communicator captures silence until granted on a later boot).
+    if (prefs.getBoolean("setting_voice_chat", false) &&
+      appContext.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) !=
+      android.content.pm.PackageManager.PERMISSION_GRANTED
+    ) {
+      activity.runOnUiThread {
+        activity.requestPermissions(
+          arrayOf(android.Manifest.permission.RECORD_AUDIO), 7301)
+      }
+    }
     activity.runOnUiThread {
       val emulatorIntent = Intent(activity, XrEmulatorActivity::class.java).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -264,6 +347,40 @@ class XrMenuBridge(context: Context) {
     }
   }
 
+  /** Stable per-game window-placement key: the active disc's filename. */
+  private fun windowKey(): String =
+    prefs.getString("dvdPath", null)?.let { File(it).name } ?: "default"
+
+  /**
+   * Saved 6DOF placement for the active game's window as [px, py, pz, qx, qy,
+   * qz, qw, width_m]. Falls back to the last placement any game saved; empty
+   * when no window has ever been moved. Height is never stored — it always
+   * derives from the live guest 4:3/16:9 aspect in the shell.
+   */
+  fun getWindowPlacement(): FloatArray {
+    val raw = windowPrefs.getString("win:${windowKey()}", null)
+      ?: windowPrefs.getString("win:default", null)
+      ?: return FloatArray(0)
+    val parts = raw.split(",")
+    if (parts.size != 8) return FloatArray(0)
+    val out = FloatArray(8)
+    for (i in parts.indices) {
+      out[i] = parts[i].toFloatOrNull() ?: return FloatArray(0)
+    }
+    return out
+  }
+
+  /** Persist the active game's window placement (also the new-game default). */
+  fun saveWindowPlacement(px: Float, py: Float, pz: Float,
+                          qx: Float, qy: Float, qz: Float, qw: Float,
+                          width: Float) {
+    val v = listOf(px, py, pz, qx, qy, qz, qw, width).joinToString(",")
+    windowPrefs.edit()
+      .putString("win:${windowKey()}", v)
+      .putString("win:default", v)
+      .apply()
+  }
+
   /** Native drains one queued UI command per call (CMD_*). */
   fun consumeCommand(): Int {
     val cmd = pendingCommand
@@ -316,7 +433,7 @@ class XrMenuBridge(context: Context) {
 
   /** LB/RB page cycling. */
   fun navPage(delta: Int) {
-    val next = ((page + delta) % 3 + 3) % 3
+    val next = ((page + delta) % PAGE_COUNT + PAGE_COUNT) % PAGE_COUNT
     if (next != page) {
       switchPage(next)
     }
@@ -487,6 +604,32 @@ class XrMenuBridge(context: Context) {
       id == "sys:recenter" -> { pendingCommand = CMD_RECENTER; dirty = true }
       id == "sys:quit" -> pendingCommand = CMD_QUIT_TO_DASHBOARD
       id == "sys:close" -> pendingCommand = CMD_CLOSE
+      id == "ins:net" -> {
+        val cur = prefs.getBoolean("setting_network_enable", false)
+        prefs.edit().putBoolean("setting_network_enable", !cur).apply()
+        changedKeys.add("setting_network_enable")
+        dirty = true
+      }
+      id == "ins:prepare" -> {
+        // Mark only: the HDD/EEPROM writes run at the next emulator start,
+        // when xemu does not own the files (see applyPendingInsigniaPrepare).
+        prefs.edit()
+          .putBoolean("setting_network_enable", true)
+          .putBoolean("insignia_prepare_pending", true)
+          .apply()
+        changedKeys.add("setting_network_enable")
+        dirty = true
+      }
+      id == "ins:setup" -> {
+        val idx = games.indexOfFirst {
+          it.title.contains("insignia", true) ||
+            it.title.contains("setup assistant", true)
+        }
+        if (idx >= 0) {
+          selected = idx
+          pendingCommand = CMD_LAUNCH
+        }
+      }
     }
   }
 
@@ -623,6 +766,7 @@ class XrMenuBridge(context: Context) {
     when (page) {
       PAGE_LIBRARY -> drawLibrary(c, contentLeft, contentRight)
       PAGE_SETTINGS -> drawSettings(c, contentLeft, contentRight)
+      PAGE_ONLINE -> drawOnline(c, contentLeft, contentRight)
       PAGE_SYSTEM -> drawSystem(c, contentLeft, contentRight)
     }
     c.restore()
@@ -650,7 +794,7 @@ class XrMenuBridge(context: Context) {
     text.color = Th.TEXT_TERTIARY
     c.drawText("QUEST EDITION", 77f, 104f, text)
 
-    val labels = arrayOf("Library", "Settings", "System")
+    val labels = arrayOf("Library", "Settings", "Online", "System")
     for (i in labels.indices) {
       val top = 170f + i * 88f
       val r = RectF(20f, top, Th.RAIL_W - 20f, top + 72f)
@@ -706,7 +850,12 @@ class XrMenuBridge(context: Context) {
           c.drawCircle(kx, y, 4.2f, fill)
         }
       }
-      2 -> { // system: pulse line
+      2 -> { // online: globe
+        c.drawCircle(cx, cy, 12f, stroke)
+        c.drawOval(RectF(cx - 5.5f, cy - 12f, cx + 5.5f, cy + 12f), stroke)
+        c.drawLine(cx - 12f, cy, cx + 12f, cy, stroke)
+      }
+      3 -> { // system: pulse line
         val p = Path()
         p.moveTo(cx - 13f, cy)
         p.lineTo(cx - 5f, cy)
@@ -1152,6 +1301,174 @@ class XrMenuBridge(context: Context) {
   }
 
   // --- system page ---
+
+  /**
+   * Online page: guided Insignia (Xbox Live revival) onboarding. Five steps
+   * with live status; every actionable step is a focusable the pointer and
+   * gamepad can activate. Copy avoids jargon — the user needs to know what to
+   * do, not how DNS works.
+   */
+  private fun drawOnline(c: Canvas, left: Float, right: Float) {
+    text.typeface = tfMedium
+    text.textSize = 44f
+    text.color = Th.TEXT_PRIMARY
+    c.drawText("Online Play — Insignia", left, contentTop - 12f, text)
+
+    val st = onlineStatus
+    val netOn = prefs.getBoolean("setting_network_enable", false)
+    val preparePending = prefs.getBoolean("insignia_prepare_pending", false)
+    val preparedMs = prefs.getLong("insignia_prepared_ms", 0L)
+    val setupIdx = games.indexOfFirst {
+      it.title.contains("insignia", true) ||
+        it.title.contains("setup assistant", true)
+    }
+
+    var y = contentTop + 14f
+    val rowH = 118f
+    val gap = 16f
+
+    fun step(
+      n: Int,
+      title: String,
+      detail: String,
+      status: String,
+      statusColor: Int,
+      actionId: String?,
+      actionLabel: String?,
+    ) {
+      val r = RectF(left, y, right, y + rowH)
+      fill.color = Th.CARD_BG
+      c.drawRoundRect(r, 20f, 20f, fill)
+      stroke.color = Th.CARD_STROKE
+      stroke.strokeWidth = 2f
+      c.drawRoundRect(r, 20f, 20f, stroke)
+
+      // Step number badge.
+      fill.color = Th.ACCENT_DIM
+      c.drawCircle(r.left + 46f, r.centerY(), 24f, fill)
+      text.typeface = tfBold
+      text.textSize = 26f
+      text.color = Th.ACCENT
+      text.textAlign = Paint.Align.CENTER
+      c.drawText("$n", r.left + 46f, r.centerY() + 9f, text)
+      text.textAlign = Paint.Align.LEFT
+
+      text.typeface = tfMedium
+      text.textSize = 28f
+      text.color = Th.TEXT_PRIMARY
+      c.drawText(title, r.left + 92f, r.top + 44f, text)
+      text.typeface = tfRegular
+      text.textSize = 21f
+      text.color = Th.TEXT_SECONDARY
+      c.drawText(ellipsize(detail, text, r.width() - 380f), r.left + 92f,
+        r.top + 76f, text)
+      text.typeface = tfRegular
+      text.textSize = 21f
+      text.color = statusColor
+      c.drawText(ellipsize(status, text, r.width() - 380f), r.left + 92f,
+        r.top + 104f, text)
+
+      if (actionId != null && actionLabel != null) {
+        text.typeface = tfMedium
+        text.textSize = 24f
+        val bw = text.measureText(actionLabel) + 60f
+        val br = RectF(r.right - bw - 24f, r.centerY() - 30f, r.right - 24f,
+          r.centerY() + 30f)
+        focusables.add(Focusable(actionId, br))
+        fill.color = when {
+          pressedId == actionId -> Th.PRESS_FILL
+          hoverId == actionId || focusId == actionId -> Th.HOVER_FILL
+          else -> 0x1AFFFFFF
+        }
+        c.drawRoundRect(br, 30f, 30f, fill)
+        if (focusId == actionId || hoverId == actionId) {
+          stroke.color = Th.ACCENT
+          stroke.strokeWidth = 2.5f
+          c.drawRoundRect(br, 30f, 30f, stroke)
+        }
+        text.color = Th.TEXT_PRIMARY
+        text.textAlign = Paint.Align.CENTER
+        c.drawText(actionLabel, br.centerX(), br.centerY() + 8f, text)
+        text.textAlign = Paint.Align.LEFT
+      }
+      y += rowH + gap
+    }
+
+    step(
+      1, "Create a free Insignia account",
+      "Visit insignia.live on your phone or computer and sign up.",
+      "Accounts are free — you only need one per player.",
+      Th.TEXT_TERTIARY, null, null,
+    )
+
+    step(
+      2, "Turn on Online Play",
+      "Lets games reach the Insignia service over your Wi-Fi.",
+      if (netOn) "On" else "Off — turn this on to play online",
+      if (netOn) Th.ACCENT else Th.AMBER,
+      "ins:net", if (netOn) "Turn Off" else "Turn On",
+    )
+
+    val prepError = prefs.getString("insignia_prepare_error", null)
+    val prepStatus: String
+    val prepColor: Int
+    when {
+      preparePending -> {
+        prepStatus = "Will be applied the next time a game starts"
+        prepColor = Th.AMBER
+      }
+      preparedMs > 0L -> {
+        prepStatus = "Done — this console is pointed at Insignia"
+        prepColor = Th.ACCENT
+      }
+      prepError != null -> {
+        prepStatus = "Setup failed: $prepError"
+        prepColor = Th.DANGER
+      }
+      st == null -> {
+        prepStatus = "Checking your console…"
+        prepColor = Th.TEXT_TERTIARY
+      }
+      !st.hasHdd -> {
+        prepStatus = "No hard-drive image found — finish first-time setup in 2D settings"
+        prepColor = Th.DANGER
+      }
+      !st.hasEeprom -> {
+        prepStatus = "No console EEPROM found — finish first-time setup in 2D settings"
+        prepColor = Th.DANGER
+      }
+      else -> {
+        prepStatus = "Not set up yet"
+        prepColor = Th.AMBER
+      }
+    }
+    step(
+      3, "Point this console at Insignia",
+      "One-time setup that tells the Xbox where Xbox Live lives now.",
+      prepStatus, prepColor,
+      if (st != null && st.hasHdd && st.hasEeprom && !preparePending)
+        "ins:prepare" else null,
+      if (preparedMs > 0L) "Set Up Again" else "Set Up",
+    )
+
+    step(
+      4, "Register this console",
+      "Boot the Insignia Setup Assistant once and follow its steps.",
+      when {
+        setupIdx >= 0 -> "Setup Assistant found in your library"
+        else -> "Download it from insignia.live and copy it into your games folder"
+      },
+      if (setupIdx >= 0) Th.ACCENT else Th.TEXT_TERTIARY,
+      if (setupIdx >= 0) "ins:setup" else null, "Boot It",
+    )
+
+    step(
+      5, "Sign in from an online game",
+      "Start a supported game and choose Xbox Live in its menus.",
+      "Your account from step 1 signs in on the Xbox side.",
+      Th.TEXT_TERTIARY, null, null,
+    )
+  }
 
   private fun drawSystem(c: Canvas, left: Float, right: Float) {
     text.typeface = tfMedium

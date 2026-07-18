@@ -207,9 +207,15 @@ typedef struct {
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
         m_activate, m_setActiveFp, m_selectByName, m_startEmulator,
         m_pointer, m_pointerExit, m_scroll, m_navPage, m_command, m_button,
-        m_setGuestMs;
+        m_setGuestMs, m_getWinPlacement, m_saveWinPlacement;
     bool jni_tried;
     bool emulator_bootstrap_started;
+
+    /* Persisted per-game window placement: any completed move/resize/recenter
+     * saves after a short idle debounce; restore happens at bootstrap and on
+     * each disc swap. */
+    bool window_dirty;
+    int64_t window_save_deadline_ns;
 
     /* Menu input edge state */
     int nav_latch;          /* -1/0/1: debounces vertical stick/hat/dpad nav */
@@ -701,6 +707,10 @@ static void menu_jni_init(XrShell *s)
     s->m_button = (*env)->GetMethodID(env, bcls, "gamepadButton", "(I)V");
     s->m_setGuestMs =
         (*env)->GetMethodID(env, bcls, "setGuestFrameMs", "(F)V");
+    s->m_getWinPlacement =
+        (*env)->GetMethodID(env, bcls, "getWindowPlacement", "()[F");
+    s->m_saveWinPlacement =
+        (*env)->GetMethodID(env, bcls, "saveWindowPlacement", "(FFFFFFFF)V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
@@ -708,7 +718,7 @@ static void menu_jni_init(XrShell *s)
         !s->m_activate || !s->m_setActiveFp || !s->m_selectByName ||
         !s->m_startEmulator || !s->m_pointer || !s->m_pointerExit ||
         !s->m_scroll || !s->m_navPage || !s->m_command || !s->m_button ||
-        !s->m_setGuestMs) {
+        !s->m_setGuestMs || !s->m_getWinPlacement || !s->m_saveWinPlacement) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -724,6 +734,7 @@ fail:
 }
 
 static bool menu_jni_check(XrShell *s, const char *where);
+static void window_placement_apply(XrShell *s);
 
 static void start_emulator_once(XrShell *s)
 {
@@ -740,6 +751,7 @@ static void start_emulator_once(XrShell *s)
     (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
                                   s->m_startEmulator);
     menu_jni_check(s, "startEmulator");
+    window_placement_apply(s);
 }
 
 /* After any JNI call that can throw: if an exception is pending, log it, clear
@@ -761,6 +773,71 @@ static bool menu_jni_check(XrShell *s, const char *where)
     s->menu_open = false;
     s->menu_disabled = true;
     return true;
+}
+
+/* Restore the active game's persisted window placement (position, facing,
+ * width). Only width is stored — height always derives from the live guest
+ * 4:3/16:9 aspect, so a restore can never break the aspect lock. Invalid
+ * stored data is rejected fail-closed and the defaults remain. */
+static void window_placement_apply(XrShell *s)
+{
+    if (!s->menu_bridge || !s->m_getWinPlacement) {
+        return;
+    }
+    JNIEnv *env = s->jni_env;
+    jfloatArray arr = (jfloatArray)(*env)->CallObjectMethod(
+        env, s->menu_bridge, s->m_getWinPlacement);
+    if (menu_jni_check(s, "getWindowPlacement") || !arr) {
+        return;
+    }
+    float v[8];
+    bool ok = (*env)->GetArrayLength(env, arr) == 8;
+    if (ok) {
+        (*env)->GetFloatArrayRegion(env, arr, 0, 8, v);
+    }
+    (*env)->DeleteLocalRef(env, arr);
+    if (!ok) {
+        return;
+    }
+    float qn = sqrtf(v[3] * v[3] + v[4] * v[4] + v[5] * v[5] + v[6] * v[6]);
+    if (!(qn > 0.5f && qn < 2.0f) ||
+        fabsf(v[0]) > 10.0f || fabsf(v[1]) > 10.0f || fabsf(v[2]) > 10.0f ||
+        !(v[7] >= 0.3f && v[7] <= 4.0f)) {
+        LOGE("window placement: stored value rejected");
+        return;
+    }
+    s->quad_pos = (XrVector3f){ v[0], v[1], v[2] };
+    s->quad_orient =
+        (XrQuaternionf){ v[3] / qn, v[4] / qn, v[5] / qn, v[6] / qn };
+    s->quad_size_m = v[7];
+    LOGI("window placement restored (w=%.2fm)", (double)v[7]);
+}
+
+/* Debounced persistence: mark on every user-driven placement change; the
+ * save fires once ~1 s after the last change, never per frame. */
+static void window_placement_mark_dirty(XrShell *s)
+{
+    s->window_dirty = true;
+    s->window_save_deadline_ns = now_ns() + 1000000000LL;
+}
+
+static void window_placement_maybe_save(XrShell *s)
+{
+    if (!s->window_dirty || now_ns() < s->window_save_deadline_ns) {
+        return;
+    }
+    s->window_dirty = false;
+    if (!s->menu_bridge || !s->m_saveWinPlacement) {
+        return;
+    }
+    (*s->jni_env)->CallVoidMethod(
+        s->jni_env, s->menu_bridge, s->m_saveWinPlacement,
+        s->quad_pos.x, s->quad_pos.y, s->quad_pos.z,
+        s->quad_orient.x, s->quad_orient.y, s->quad_orient.z,
+        s->quad_orient.w, s->quad_size_m);
+    if (!menu_jni_check(s, "saveWindowPlacement")) {
+        LOGI("window placement saved (w=%.2fm)", (double)s->quad_size_m);
+    }
 }
 
 /* Upload an ARGB_8888 menu Bitmap into menu_tex (RGBA). */
@@ -966,6 +1043,8 @@ static void menu_activate(XrShell *s)
             (*env)->ReleaseStringUTFChars(env, jpath, path);
         }
         (*env)->DeleteLocalRef(env, jpath);
+        /* The new game may have its own saved window placement. */
+        window_placement_apply(s);
     }
     menu_close(s);
 }
@@ -995,6 +1074,7 @@ static void menu_drain_commands(XrShell *s)
         case 3: /* recenter both panels in front of the current gaze */
             place_in_front(s, 1.5f, &s->quad_pos, &s->quad_orient);
             place_in_front(s, 1.15f, &s->menu_pos, &s->menu_orient);
+            window_placement_mark_dirty(s);
             break;
         case 4: /* launch the selected game */
             menu_activate(s);
@@ -1598,6 +1678,9 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
         *tgt_pos = v3_add(cp.position, q_rotate(cp.orientation,
                                                 s->grab_offset));
         *tgt_orient = cp.orientation;
+        if (!s->menu_open) {
+            window_placement_mark_dirty(s);
+        }
     } else {
         s->grab_hand = -1;
     }
@@ -1623,6 +1706,7 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
             s->quad_size_m *= (1.0f + stick.x * 0.6f * dt);
             if (s->quad_size_m < 0.3f) s->quad_size_m = 0.3f;
             if (s->quad_size_m > 4.0f) s->quad_size_m = 4.0f;
+            window_placement_mark_dirty(s);
         }
     }
     if (stick.y > DEAD || stick.y < -DEAD) {
@@ -1631,6 +1715,7 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
         float d = -stick.y * 0.8f * dt;
         s->quad_pos = v3_add(s->quad_pos,
                              (XrVector3f){ fwd.x * d, fwd.y * d, fwd.z * d });
+        window_placement_mark_dirty(s);
     }
 }
 
@@ -1839,6 +1924,7 @@ static void xr_frame(XrShell *s)
 
     /* Drive 6DOF window move/resize from the controllers. */
     xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
+    window_placement_maybe_save(s);
 
     float qh = s->quad_size_m / (s->quad_aspect > 0 ? s->quad_aspect : 1.333f);
     XrCompositionLayerQuad quad = {

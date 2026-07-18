@@ -531,6 +531,84 @@ static const char *get_bound_driver(int port)
 
 static const int port_map[4] = { 3, 4, 1, 2 };
 
+/* Xbox Live Communicator (voice chat). Requested by the launcher before
+ * input init; attached to a free expansion slot of the player's controller
+ * hub after XMUs claim theirs. The usb-xblc device opens its host audio
+ * streams only when the guest activates voice, so an idle communicator
+ * costs no capture or playback resources. */
+static bool xemu_voice_chat_requested;
+
+void xemu_input_set_voice_chat(bool enable)
+{
+    /* Static-library link anchors: both the usb-xblc device model and the
+     * QEMU SDL audio driver are registered only by their type_init/module
+     * constructors, which a static link happily drops without a symbol
+     * reference from linked code. */
+    extern void xemu_force_xblc_link(void);
+    extern void xemu_android_force_sdlaudio_link(void);
+    xemu_force_xblc_link();
+    xemu_android_force_sdlaudio_link();
+
+    xemu_voice_chat_requested = enable;
+}
+
+static void xemu_input_attach_xblc(int player_index)
+{
+    if (!xemu_voice_chat_requested) {
+        return;
+    }
+    assert(player_index >= 0 && player_index < 4);
+    ControllerState *player = bound_controllers[player_index];
+    if (!player) {
+        return;
+    }
+
+    static const int slot_port_map[2] = { 2, 3 };
+    int slot = -1;
+    for (int i = 0; i < 2; i++) {
+        if (player->peripheral_types[i] == PERIPHERAL_NONE) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        fprintf(stderr,
+                "xemu: voice chat requested but both expansion slots of "
+                "player %d are occupied\n", player_index + 1);
+        return;
+    }
+
+    QDict *qdict = qdict_new();
+    qdict_put_str(qdict, "driver", "usb-xblc");
+    char *id = g_strdup_printf("xblc_%d", player_index);
+    qdict_put_str(qdict, "id", id);
+    g_free(id);
+    char *port = g_strdup_printf("1.%d.%d", port_map[player_index],
+                                 slot_port_map[slot]);
+    qdict_put_str(qdict, "port", port);
+    g_free(port);
+
+    Error *err = NULL;
+    QemuOpts *opts = qemu_opts_from_qdict(qemu_find_opts("device"), qdict,
+                                          &err);
+    DeviceState *dev = NULL;
+    if (opts) {
+        dev = qdev_device_add(opts, &err);
+    }
+    qobject_unref(qdict);
+    if (!dev) {
+        fprintf(stderr, "xemu: failed to attach communicator: %s\n",
+                err ? error_get_pretty(err) : "unknown error");
+        error_free(err);
+        return;
+    }
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "voice chat: communicator attached (player %d "
+                        "slot %c)", player_index + 1, 'A' + slot);
+#endif
+}
+
 void xemu_input_init(void)
 {
     if (g_config.input.background_input_capture) {
@@ -596,6 +674,7 @@ void xemu_input_init(void)
         QTAILQ_INSERT_TAIL(&available_controllers, sc, entry);
         xemu_input_bind(scripted_input.port, sc, 0);
         xemu_input_rebind_xmu(scripted_input.port);
+        xemu_input_attach_xblc(scripted_input.port);
         fprintf(stderr, "xemu: scripted controller bound to port %d\n",
                 scripted_input.port + 1);
     }
@@ -620,6 +699,7 @@ void xemu_input_init(void)
         QTAILQ_INSERT_TAIL(&available_controllers, xc, entry);
         xemu_input_bind(0, xc, 0);
         xemu_input_rebind_xmu(0);
+        xemu_input_attach_xblc(0);
         fprintf(stderr, "xemu: XR gamepad synthetic pad bound to port 1\n");
 #ifdef __ANDROID__
         __android_log_print(ANDROID_LOG_INFO, "xemu-android",

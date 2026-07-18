@@ -37,6 +37,7 @@ extern "C" bool xemu_get_fast_fences(void);
 extern "C" void xemu_set_skip_empty_report_stalls(bool enable);
 extern "C" bool xemu_get_skip_empty_report_stalls(void);
 extern "C" void xemu_set_pipeline_deferred(bool enable);
+extern "C" void xemu_input_set_voice_chat(bool enable);
 extern "C" bool xemu_get_pipeline_deferred(void);
 extern "C" void xemu_set_busy_spin_wait(bool enable);
 extern "C" void xemu_set_fp_jit(bool enable);
@@ -970,6 +971,26 @@ static SetupFiles SyncSetupFiles() {
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "pipeline deferred finishes: %s",
                       pipeline_deferred ? "ON" : "OFF");
+
+  // Xbox Live voice chat: attach the Communicator (usb-xblc) to player 1's
+  // free expansion slot at input init. The device opens Quest mic/speaker
+  // streams only while a game activates voice. Default OFF.
+  bool voice_chat = GetPrefBool(env, activity, "setting_voice_chat", false);
+  xemu_input_set_voice_chat(voice_chat);
+  __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                      "voice chat (communicator): %s",
+                      voice_chat ? "ON" : "OFF");
+  // SDL's Java "android" backend (the openslES pref mapping) supports only a
+  // single open device; the communicator adds a second stream and the game
+  // audio + communicator combination aborts inside AudioTrack. AAudio
+  // supports multiple streams and capture, so voice chat forces it. An
+  // explicit "dummy" (no audio) choice is respected.
+  if (voice_chat && ds.audio_driver == "android") {
+    ds.audio_driver = "aaudio";
+    __android_log_print(ANDROID_LOG_INFO, "xemu-android",
+                        "voice chat: forcing aaudio audio driver "
+                        "(multi-stream + capture)");
+  }
 
   // Diagnostic A/B: force the original pure busy-spin submit wait.
   bool busy_spin = GetPrefBool(env, activity, "busy_spin_wait", false);

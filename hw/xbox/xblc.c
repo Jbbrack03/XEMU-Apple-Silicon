@@ -403,3 +403,9 @@ static void usb_xblc_register_types(void)
 }
 
 type_init(usb_xblc_register_types)
+
+/* Referenced from ui/xemu-input.c so the static-library link cannot drop
+ * this object; its only other entry point is the type_init constructor. */
+void xemu_force_xblc_link(void)
+{
+}

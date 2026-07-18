@@ -62,14 +62,40 @@ internal object XboxInsigniaHelper {
     return DashboardStatus(NativeBridge.nativeInspectDashboardFlags(hddFile.absolutePath))
   }
 
+  // Absolute byte offsets of the four DNS pairs inside the Xbox config area
+  // at the start of the disk (static / Xbox Live / DHCP / PPPoE blocks).
+  // Mirrors the native HDD tool; kept in pure Kotlin because the QEMU block
+  // layer must never be initialized inside the process that will (or does)
+  // run the emulator — qemu_clock_init aborts on the second initialization.
+  private val PRIMARY_DNS_OFFSETS = longArrayOf(0x102C, 0x1060, 0x1178, 0x118C)
+  private val SECONDARY_DNS_OFFSETS = longArrayOf(0x1030, 0x1064, 0x117C, 0x1190)
+  private const val CONFIG_MINIMUM_BYTES = 0x1194L
+
   @Throws(IOException::class, IllegalArgumentException::class)
   fun applyConfigSectorDns(hddFile: File) {
     require(hddFile.isFile) { "No local HDD image is configured." }
-    NativeBridge.nativeApplyConfigSectorDns(
-      hddFile.absolutePath,
-      primaryDnsBytes,
-      secondaryDnsBytes,
-    )
+    java.io.RandomAccessFile(hddFile, "rw").use { raf ->
+      require(raf.length() >= CONFIG_MINIMUM_BYTES) {
+        "The current HDD image is too small to contain the Xbox config sector"
+      }
+      val magic = ByteArray(4)
+      raf.seek(0)
+      raf.readFully(magic)
+      val isQcow2 = magic[0] == 'Q'.code.toByte() && magic[1] == 'F'.code.toByte() &&
+        magic[2] == 'I'.code.toByte() && magic[3] == 0xFB.toByte()
+      require(!isQcow2) {
+        "QCOW2 HDD images need the desktop setup flow; in-app setup supports raw hdd.img"
+      }
+      for (off in PRIMARY_DNS_OFFSETS) {
+        raf.seek(off)
+        raf.write(primaryDnsBytes)
+      }
+      for (off in SECONDARY_DNS_OFFSETS) {
+        raf.seek(off)
+        raf.write(secondaryDnsBytes)
+      }
+      raf.fd.sync()
+    }
   }
 
   fun primaryDnsBytes(): ByteArray = primaryDnsBytes.copyOf()
