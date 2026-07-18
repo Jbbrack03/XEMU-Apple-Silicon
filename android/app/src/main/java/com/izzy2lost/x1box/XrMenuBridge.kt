@@ -59,15 +59,15 @@ class XrMenuBridge(context: Context) {
   companion object {
     const val CMD_NONE = 0
     const val CMD_CLOSE = 1
-    const val CMD_QUIT_TO_DASHBOARD = 2
+    const val CMD_QUIT_TO_DASHBOARD = 2 // native: eject + reset, land in library
     const val CMD_RECENTER = 3
     const val CMD_LAUNCH = 4
+    const val CMD_MIC_TOGGLE = 5
 
     private const val PAGE_LIBRARY = 0
     private const val PAGE_SETTINGS = 1
     private const val PAGE_ONLINE = 2
     private const val PAGE_SYSTEM = 3
-    private const val PAGE_COUNT = 4
   }
 
   // Scanned off-thread; the immutable list reference is swapped atomically so
@@ -79,6 +79,12 @@ class XrMenuBridge(context: Context) {
 
   private var page = PAGE_LIBRARY
   private var pendingCommand = CMD_NONE
+
+  // Whether the emulator process bootstrap has run (pushed by native on open).
+  // Running: the menu is an in-game overlay — Library (disc swap) plus the
+  // SAFE-while-running System actions only; cold-boot settings (Settings /
+  // Online pages) are offered only before a game is up.
+  @Volatile private var emulatorRunning = false
 
   // Focusables are rebuilt on every render pass (screen coordinates).
   private data class Focusable(val id: String, val rect: RectF)
@@ -331,6 +337,40 @@ class XrMenuBridge(context: Context) {
     return dirty
   }
 
+  /**
+   * Consume the one-shot auto-boot request. Every deliberate launch (frontend
+   * intent, 2D picker, staged bench prefs) sets xr_pending_boot=true; a plain
+   * app launch leaves it unset so the shell opens on the library instead of
+   * cold-booting the emulator with no game chosen.
+   */
+  fun shouldAutoBoot(): Boolean {
+    val pending = prefs.getBoolean("xr_pending_boot", false)
+    if (pending) {
+      prefs.edit().putBoolean("xr_pending_boot", false).commit()
+    }
+    return pending
+  }
+
+  /** Native pushes whether the emulator bootstrap has run (on menu open). */
+  fun setEmulatorState(running: Boolean) {
+    if (running != emulatorRunning) {
+      emulatorRunning = running
+      if (!visiblePages().contains(page)) {
+        switchPage(PAGE_LIBRARY)
+      }
+      dirty = true
+    }
+  }
+
+  /** Native lands the wearer here after quit-to-library. */
+  fun showLibrary() {
+    switchPage(PAGE_LIBRARY)
+  }
+
+  private fun visiblePages(): IntArray =
+    if (emulatorRunning) intArrayOf(PAGE_LIBRARY, PAGE_SYSTEM)
+    else intArrayOf(PAGE_LIBRARY, PAGE_SETTINGS, PAGE_ONLINE, PAGE_SYSTEM)
+
   /** Push the running process's active FP JIT mode (called from native on open). */
   fun setActiveFpJit(known: Boolean, value: Boolean) {
     if (known != activeFpJitKnown || value != activeFpJitValue) {
@@ -440,9 +480,11 @@ class XrMenuBridge(context: Context) {
     }
   }
 
-  /** LB/RB page cycling. */
+  /** LB/RB page cycling (within the pages the current mode offers). */
   fun navPage(delta: Int) {
-    val next = ((page + delta) % PAGE_COUNT + PAGE_COUNT) % PAGE_COUNT
+    val pages = visiblePages()
+    val cur = pages.indexOf(page).coerceAtLeast(0)
+    val next = pages[((cur + delta) % pages.size + pages.size) % pages.size]
     if (next != page) {
       switchPage(next)
     }
@@ -576,6 +618,9 @@ class XrMenuBridge(context: Context) {
   }
 
   private fun switchPage(next: Int) {
+    if (!visiblePages().contains(next)) {
+      return
+    }
     page = next
     hoverId = null
     pressedId = null
@@ -612,6 +657,7 @@ class XrMenuBridge(context: Context) {
       id == "btn:rescan" -> refresh()
       id == "sys:recenter" -> { pendingCommand = CMD_RECENTER; dirty = true }
       id == "sys:quit" -> pendingCommand = CMD_QUIT_TO_DASHBOARD
+      id == "sys:mic" -> { pendingCommand = CMD_MIC_TOGGLE; dirty = true }
       id == "sys:close" -> pendingCommand = CMD_CLOSE
       id == "ins:net" -> {
         val cur = prefs.getBoolean("setting_network_enable", false)
@@ -804,8 +850,9 @@ class XrMenuBridge(context: Context) {
     c.drawText("QUEST EDITION", 77f, 104f, text)
 
     val labels = arrayOf("Library", "Settings", "Online", "System")
-    for (i in labels.indices) {
-      val top = 170f + i * 88f
+    val pages = visiblePages()
+    for ((slot, i) in pages.withIndex()) {
+      val top = 170f + slot * 88f
       val r = RectF(20f, top, Th.RAIL_W - 20f, top + 72f)
       val id = "nav:$i"
       focusables.add(Focusable(id, r))
@@ -1122,7 +1169,7 @@ class XrMenuBridge(context: Context) {
         c.drawText("FP", br.centerX(), br.centerY() + 6f, text)
         text.textAlign = Paint.Align.LEFT
       }
-      if (currentDvd != null && currentDvd == game.path) {
+      if (emulatorRunning && currentDvd != null && currentDvd == game.path) {
         text.typeface = tfBold
         text.textSize = 17f
         val label = "PLAYING"
@@ -1489,10 +1536,14 @@ class XrMenuBridge(context: Context) {
     val cardW = (right - left - gap) / 2f
     val cardH = 128f
     val currentDvd = prefs.getString("dvdPath", null)
-    val playing = currentDvd?.let { p ->
-      games.find { it.path == p }?.displayTitle
-        ?: File(p).name.substringBeforeLast('.').replace('_', ' ')
-    } ?: "Xbox Dashboard"
+    val playing = if (!emulatorRunning) {
+      "Nothing yet"
+    } else {
+      currentDvd?.let { p ->
+        games.find { it.path == p }?.displayTitle
+          ?: File(p).name.substringBeforeLast('.').replace('_', ' ')
+      } ?: "Xbox Dashboard"
+    }
     val pace = if (guestFrameMs > 0.5f) {
       "%.1f ms · %.0f fps".format(guestFrameMs, 1000f / guestFrameMs)
     } else {
@@ -1520,11 +1571,14 @@ class XrMenuBridge(context: Context) {
       text.color = valueColor
       c.drawText(ellipsize(value, text, cardW - 52f), x + 26f, y + 94f, text)
     }
+    val scale = prefs.getInt("setting_surface_scale", 1)
+    val renderer = "Vulkan · Turnip" +
+      if (scale > 1) " · ${scale}× SSAA" else " · Native"
     card(0, 0, "NOW PLAYING", playing, Th.TEXT_PRIMARY)
     card(1, 0, "GUEST PACE", pace,
       if (guestFrameMs > 0.5f) Th.ACCENT else Th.TEXT_SECONDARY)
     card(0, 1, "HEADSET BATTERY", battery, Th.TEXT_PRIMARY)
-    card(1, 1, "RENDERER", "Vulkan · Turnip · 2× SSAA", Th.TEXT_PRIMARY)
+    card(1, 1, "RENDERER", renderer, Th.TEXT_PRIMARY)
     var cardRows = 2
     if (micState >= 0) {
       card(0, 2, "MICROPHONE",
@@ -1569,7 +1623,12 @@ class XrMenuBridge(context: Context) {
     }
     action("sys:recenter", "Recenter Screen", false)
     action("sys:close", "Close Menu", false)
-    action("sys:quit", "Quit to Dashboard", true)
+    if (micState >= 0) {
+      action("sys:mic", if (micState == 1) "Unmute Mic" else "Mute Mic", false)
+    }
+    if (emulatorRunning) {
+      action("sys:quit", "Quit to Library", true)
+    }
 
     // About footer.
     text.typeface = tfRegular

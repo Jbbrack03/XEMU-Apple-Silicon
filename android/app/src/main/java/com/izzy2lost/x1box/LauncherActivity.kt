@@ -98,6 +98,9 @@ class LauncherActivity : Activity() {
       // Commit launch data before handing off to NativeActivity-first XR.
       val launchEditor = prefs.edit()
       launchEditor.putBoolean("skip_game_picker", false)
+      // Deliberate game launch: the XR shell consumes this and boots straight
+      // into the queued game instead of opening on its library.
+      launchEditor.putBoolean("xr_pending_boot", true)
       PerGameSettingsManager.applyRuntimeOverridesToEditor(
         context = this,
         editor = launchEditor,
@@ -129,15 +132,18 @@ class LauncherActivity : Activity() {
       Toast.makeText(this, R.string.frontend_launch_unresolved, Toast.LENGTH_LONG).show()
     }
 
-    // Once the BIOS/HDD are set up, land on the game picker. It auto-discovers
-    // games from the app-specific external dir (needs NO permission), plus
-    // shared folders when all-files access is granted, and handles the
-    // "no games yet / grant access / pick a folder" UX itself — so no SAF
-    // folder grant is required to reach it.
+    // Once the BIOS/HDD are set up, land on the XR shell's native library
+    // (library-first: the shell opens on its game grid, and picking a title
+    // cold-starts the emulator). The 2D GameLibraryActivity remains reachable
+    // from the setup wizard and the 2D in-game menu for management flows.
     val needsSetup = !setupComplete || !hasMcpx || !hasFlash || !hasHdd
-    val next = if (needsSetup) SetupWizardActivity::class.java else GameLibraryActivity::class.java
-
-    startActivity(Intent(this, next))
+    if (needsSetup) {
+      startActivity(Intent(this, SetupWizardActivity::class.java))
+    } else {
+      // Plain app launch: no queued boot — the shell opens on the library.
+      prefs.edit().putBoolean("xr_pending_boot", false).commit()
+      startActivity(XrNativeActivityIntent.create(this))
+    }
     finish()
   }
 

@@ -261,6 +261,8 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityForRestart() {
+    // Deliberate boot: the XR shell consumes this and skips its library.
+    prefs.edit().putBoolean("xr_pending_boot", true).commit()
     startActivity(XrNativeActivityIntent.create(this))
     finish()
   }
@@ -284,6 +286,7 @@ class GameLibraryActivity : AppCompatActivity() {
       .remove("dvdUri")
       .remove("dvdPath")
       .putBoolean("skip_game_picker", false)
+      .putBoolean("xr_pending_boot", true)
       .commit()
 
     startActivity(XrNativeActivityIntent.create(this))
@@ -469,6 +472,8 @@ class GameLibraryActivity : AppCompatActivity() {
   }
 
   private fun launchMainActivityWithSnapshot(slot: Int) {
+    // Deliberate boot: the XR shell consumes this and skips its library.
+    prefs.edit().putBoolean("xr_pending_boot", true).commit()
     val intent = XrNativeActivityIntent.create(this).apply {
       putExtra(MainActivity.EXTRA_AUTO_LOAD_SNAPSHOT_SLOT, slot)
     }
@@ -1461,6 +1466,7 @@ class GameLibraryActivity : AppCompatActivity() {
     }
     launchEditor
       .putBoolean("skip_game_picker", false)
+      .putBoolean("xr_pending_boot", true)
       .commit()
 
     startActivity(XrNativeActivityIntent.create(this))

@@ -1527,9 +1527,12 @@ class SettingsActivity : AppCompatActivity() {
       .putString("dvdUri", uri.toString())
       .remove("dvdPath")
       .putBoolean("skip_game_picker", false)
+      // Deliberate boot: the library-first XR shell consumes this and boots
+      // the setup assistant instead of opening on its library.
+      .putBoolean("xr_pending_boot", true)
       .commit()
 
-    startActivity(Intent(this, android.app.NativeActivity::class.java))
+    startActivity(XrNativeActivityIntent.create(this))
   }
 
   private fun resolveInsigniaSetupAssistantUri(): Uri? {

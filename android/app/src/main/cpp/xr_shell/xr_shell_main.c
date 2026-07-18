@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -215,9 +216,17 @@ typedef struct {
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
         m_activate, m_setActiveFp, m_selectByName, m_startEmulator,
         m_pointer, m_pointerExit, m_scroll, m_navPage, m_command, m_button,
-        m_setGuestMs, m_getWinPlacement, m_saveWinPlacement, m_setMicState;
+        m_setGuestMs, m_getWinPlacement, m_saveWinPlacement, m_setMicState,
+        m_shouldAutoBoot, m_setEmuState, m_showLibrary;
     bool jni_tried;
     bool emulator_bootstrap_started;
+    /* Library-first: true after quit-to-library (guest idles on the hidden
+     * dashboard); the emulator quad layer is not submitted while set. */
+    bool game_hidden;
+    /* The library auto-opens once on the first no-boot FOCUSED; later focus
+     * regains must respect a deliberate close (Meta overlay round-trips fire
+     * FOCUSED repeatedly). */
+    bool library_auto_opened;
 
     /* Persisted per-game window placement: any completed move/resize/recenter
      * saves after a short idle debounce; restore happens at bootstrap and on
@@ -741,6 +750,11 @@ static void menu_jni_init(XrShell *s)
     s->m_saveWinPlacement =
         (*env)->GetMethodID(env, bcls, "saveWindowPlacement", "(FFFFFFFF)V");
     s->m_setMicState = (*env)->GetMethodID(env, bcls, "setMicState", "(I)V");
+    s->m_shouldAutoBoot =
+        (*env)->GetMethodID(env, bcls, "shouldAutoBoot", "()Z");
+    s->m_setEmuState =
+        (*env)->GetMethodID(env, bcls, "setEmulatorState", "(Z)V");
+    s->m_showLibrary = (*env)->GetMethodID(env, bcls, "showLibrary", "()V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
@@ -749,7 +763,8 @@ static void menu_jni_init(XrShell *s)
         !s->m_startEmulator || !s->m_pointer || !s->m_pointerExit ||
         !s->m_scroll || !s->m_navPage || !s->m_command || !s->m_button ||
         !s->m_setGuestMs || !s->m_getWinPlacement || !s->m_saveWinPlacement ||
-        !s->m_setMicState) {
+        !s->m_setMicState || !s->m_shouldAutoBoot || !s->m_setEmuState ||
+        !s->m_showLibrary) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -766,23 +781,54 @@ fail:
 
 static bool menu_jni_check(XrShell *s, const char *where);
 static void window_placement_apply(XrShell *s);
+static void menu_open(XrShell *s);
 
-static void start_emulator_once(XrShell *s)
+/* The one-per-process SDL/xemu bootstrap (QEMU cannot re-init in the same
+ * process). Boots whatever dvdPath/dvdUri the prefs currently hold. */
+static void bootstrap_emulator(XrShell *s)
 {
-    if (s->emulator_bootstrap_started) {
+    if (s->emulator_bootstrap_started || !s->menu_bridge) {
         return;
     }
     s->emulator_bootstrap_started = true;
-    menu_jni_init(s);
-    if (!s->menu_bridge) {
-        LOGE("bootstrap: JNI bridge unavailable; emulator not started");
-        return;
-    }
     LOGI("bootstrap: immersive NativeActivity owns process; starting SDL/xemu");
     (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
                                   s->m_startEmulator);
     menu_jni_check(s, "startEmulator");
     window_placement_apply(s);
+}
+
+/* Every FOCUSED. Library-first: only auto-boot when a deliberate launch queued
+ * a game (frontend intent, 2D picker, staged bench prefs — all set the
+ * one-shot xr_pending_boot pref that shouldAutoBoot consumes). A plain app
+ * launch opens the LIBRARY instead of cold-booting into a black void.
+ *
+ * The flag is consumed on EVERY focus gain — even when the bootstrap latch is
+ * already set — so it can never go stale: a 2D flow that queues a boot while
+ * the emulator is already up (which a single-init QEMU process cannot honor)
+ * must not leave a true flag behind to misfire as an auto-boot on some later
+ * cold start that bypasses LauncherActivity. */
+static void start_emulator_once(XrShell *s)
+{
+    menu_jni_init(s);
+    if (!s->menu_bridge) {
+        if (!s->emulator_bootstrap_started) {
+            LOGE("bootstrap: JNI bridge unavailable; emulator not started");
+        }
+        return;
+    }
+    jboolean boot = (*s->jni_env)->CallBooleanMethod(
+        s->jni_env, s->menu_bridge, s->m_shouldAutoBoot);
+    if (menu_jni_check(s, "shouldAutoBoot") || s->emulator_bootstrap_started) {
+        return;
+    }
+    if (boot) {
+        bootstrap_emulator(s);
+    } else if (!s->menu_open && !s->library_auto_opened) {
+        LOGI("bootstrap: no queued game; opening library");
+        s->library_auto_opened = true;
+        menu_open(s);
+    }
 }
 
 /* After any JNI call that can throw: if an exception is pending, log it, clear
@@ -994,6 +1040,13 @@ static void menu_open(XrShell *s)
             return;
         }
     }
+    /* Running vs library mode decides which pages/actions the menu offers
+     * (in-game: Library for disc swap + curated safe System actions only). */
+    (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge, s->m_setEmuState,
+                                  (jboolean)s->emulator_bootstrap_started);
+    if (menu_jni_check(s, "setEmulatorState")) {
+        return;
+    }
     s->menu_open = true;
     s->nav_latch = 0;
     /* Spawn the panel in front of the user's current gaze. */
@@ -1037,16 +1090,59 @@ static void menu_close(XrShell *s)
     LOGI("menu closed");
 }
 
-/* Quit the running game back to the Xbox dashboard (eject + guest reset). */
+/* Toggle the voice-chat mic (right-Touch-A and the menu's mic action share
+ * this). Inert unless voice chat is enabled. Haptic confirm: long buzz =
+ * muted, short tick = live. */
+static void toggle_mic(XrShell *s)
+{
+    if (!s->set_mic_muted || !s->get_voice_enabled || !s->get_voice_enabled()) {
+        return;
+    }
+    int muted = s->get_mic_muted ? !s->get_mic_muted() : 1;
+    s->set_mic_muted(muted);
+    if (s->mute_haptic_action) {
+        XrHapticVibration vib = {
+            .type = XR_TYPE_HAPTIC_VIBRATION,
+            .duration = muted ? 250000000LL : 60000000LL,
+            .frequency = XR_FREQUENCY_UNSPECIFIED,
+            .amplitude = muted ? 1.0f : 0.5f,
+        };
+        XrHapticActionInfo hai = {
+            .type = XR_TYPE_HAPTIC_ACTION_INFO,
+            .action = s->mute_haptic_action,
+            .subactionPath = XR_NULL_PATH,
+        };
+        xrApplyHapticFeedback(s->session, &hai,
+                              (const XrHapticBaseHeader *)&vib);
+    }
+    LOGI("voice chat mic: %s", muted ? "MUTED" : "LIVE");
+}
+
+/* Quit the running game: eject + guest reset (the guest idles on its
+ * dashboard, but the emulator quad is hidden) and land the wearer in the XR
+ * LIBRARY — never the Xbox dashboard. */
 static void menu_quit(XrShell *s)
 {
     if (s->request_quit) {
-        LOGI("menu: quit to dashboard");
+        LOGI("menu: quit to library (eject + guest reset)");
         s->request_quit();
     } else {
         LOGE("menu: quit bridge unavailable (emulator not up?)");
     }
-    menu_close(s);
+    s->game_hidden = true;
+    if (s->menu_bridge) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                      s->m_showLibrary);
+        if (menu_jni_check(s, "showLibrary")) {
+            /* Bridge just died: with the menu disabled the wearer would be
+             * stranded in empty passthrough. Show the dashboard instead. */
+            s->game_hidden = false;
+            return;
+        }
+    }
+    if (!s->menu_open) {
+        menu_open(s);
+    }
 }
 
 static void menu_activate(XrShell *s)
@@ -1065,12 +1161,18 @@ static void menu_activate(XrShell *s)
     if (jpath) {
         const char *path = (*env)->GetStringUTFChars(env, jpath, NULL);
         if (path) {
-            LOGI("menu: launching %s", path);
-            if (s->request_load_disc) {
+            if (!s->emulator_bootstrap_started) {
+                /* activate() already committed dvdPath; the bootstrap reads
+                 * it. This is the library-first cold-start path. */
+                LOGI("menu: cold-starting emulator with %s", path);
+                bootstrap_emulator(s);
+            } else if (s->request_load_disc) {
+                LOGI("menu: launching %s", path);
                 s->request_load_disc(path);
             } else {
                 LOGE("menu: disc-swap bridge unavailable (emulator not up?)");
             }
+            s->game_hidden = false;
             (*env)->ReleaseStringUTFChars(env, jpath, path);
         }
         (*env)->DeleteLocalRef(env, jpath);
@@ -1110,6 +1212,9 @@ static void menu_drain_commands(XrShell *s)
         case 4: /* launch the selected game */
             menu_activate(s);
             return;
+        case 5: /* toggle the voice-chat mic */
+            toggle_mic(s);
+            break;
         default:
             return;
         }
@@ -1148,16 +1253,43 @@ static void menu_nav_page(XrShell *s, int dir)
  * reset). Exists because adb key injection cannot reach an unfocused
  * immersive activity, so headset-free validation must enter below the
  * Android-input layer. Off (zero work) unless the env var is set.
+ *
+ * The debug system property `debug.xemu.menu_autotest` is an equivalent
+ * trigger settable via adb BEFORE launch. It exists for library-first runs:
+ * env_vars are exported by the SDL/xemu worker, which does not start until a
+ * game is picked, so an env trigger can never arm the pre-boot library.
+ *
+ * Mode "full:<first.iso>:<second.iso>" is the headset-free library tour:
+ * library (already open, library-first) -> select+activate first game (COLD
+ * START path) -> wait for emulator frames -> reopen menu -> quit-to-library
+ * (window hidden) -> select+activate second game (DISC-SWAP path). Ground
+ * truth for each leg comes from the parallel screenrecord + quad dumps; the
+ * seq checks here are liveness only.
  */
 static void menu_autotest_step(XrShell *s)
 {
     static int enabled = -1;
     static const char *switch_target;
+    static char *full_first;
+    static const char *full_second;
+    static uint64_t mark_seq;
     static uint32_t frame;
     static int phase;
 
     if (enabled < 0) {
+        static char prop_buf[PROP_VALUE_MAX];
+        static uint32_t poll_gate;
+        /* Pre-boot (library idle) this arming check would otherwise run per
+         * frame indefinitely; poll the debug triggers at ~1 Hz instead. */
+        if (!s->last_seq && (poll_gate++ % 72) != 0) {
+            return;
+        }
         const char *env = getenv("XEMU_MENU_AUTOTEST");
+        if ((!env || !env[0]) &&
+            __system_property_get("debug.xemu.menu_autotest", prop_buf) > 0 &&
+            prop_buf[0]) {
+            env = prop_buf;
+        }
         /* The NativeActivity session reaches its first XR frame before the
          * SDL/xemu worker has read prefs and exported env_vars.  Do not latch
          * a missing debug flag in that short interval: after a published
@@ -1170,13 +1302,33 @@ static void menu_autotest_step(XrShell *s)
         enabled = (env && env[0]) ? 1 : 0;
         if (enabled && strncmp(env, "switch:", 7) == 0) {
             switch_target = env + 7;
+        } else if (enabled && strncmp(env, "full:", 5) == 0) {
+            full_first = strdup(env + 5);
+            char *colon = full_first ? strchr(full_first, ':') : NULL;
+            if (colon) {
+                *colon = 0;
+                full_second = colon + 1;
+            }
+            if (!full_first || !full_first[0] || !full_second ||
+                !full_second[0]) {
+                LOGE("menu autotest: bad full:<a>:<b> spec");
+                enabled = 0;
+            } else {
+                phase = 100;
+            }
         }
         if (enabled) {
-            LOGI("menu autotest: armed%s%s", switch_target ? ", switch to " : "",
-                 switch_target ? switch_target : "");
+            if (full_first) {
+                LOGI("menu autotest: armed, full tour %s -> %s",
+                     full_first, full_second);
+            } else {
+                LOGI("menu autotest: armed%s%s",
+                     switch_target ? ", switch to " : "",
+                     switch_target ? switch_target : "");
+            }
         }
     }
-    if (!enabled || phase > 6 || s->menu_disabled) {
+    if (!enabled || (phase > 6 && phase < 100) || s->menu_disabled) {
         return;
     }
     frame++;
@@ -1227,6 +1379,111 @@ static void menu_autotest_step(XrShell *s)
         if (frame >= 120) {
             LOGI("menu autotest: activating switch target");
             menu_activate(s);
+            phase = 7;
+        }
+        break;
+
+    /* --- full library tour (library-first ground-truth exercise) --- */
+    case 100: /* settle; the library should already be open (library-first) */
+        if (frame >= 360) {
+            if (!s->menu_open) {
+                menu_open(s);
+            }
+            phase = 101;
+            frame = 0;
+        }
+        break;
+    case 101: /* select the first game (retry while the async scan finishes) */
+        if (frame >= 180 && (frame % 120) == 0 && s->menu_bridge) {
+            JNIEnv *env = s->jni_env;
+            jstring jn = (*env)->NewStringUTF(env, full_first);
+            jboolean ok = (*env)->CallBooleanMethod(
+                env, s->menu_bridge, s->m_selectByName, jn);
+            (*env)->DeleteLocalRef(env, jn);
+            if (!menu_jni_check(s, "selectByName") && ok) {
+                phase = 102;
+                frame = 0;
+            } else if (frame >= 1800) {
+                LOGE("menu autotest: full tour selectByName(%s) FAILED",
+                     full_first);
+                phase = 7;
+            }
+        }
+        break;
+    case 102: /* activate -> library-first COLD START */
+        if (frame >= 120) {
+            LOGI("menu autotest: full tour cold-start %s", full_first);
+            mark_seq = s->last_seq;
+            menu_activate(s);
+            phase = 103;
+            frame = 0;
+        }
+        break;
+    case 103: /* wait for emulator frames to flow (liveness only) */
+        if (s->last_seq > mark_seq + 300) {
+            LOGI("menu autotest: full tour first game live (seq %llu)",
+                 (unsigned long long)s->last_seq);
+            phase = 104;
+            frame = 0;
+        } else if (frame >= 72 * 180) {
+            LOGE("menu autotest: full tour first game never rendered");
+            phase = 7;
+        }
+        break;
+    case 104: /* dwell in-game so captures record real content */
+        if (frame >= 72 * 30) {
+            menu_open(s);
+            phase = 105;
+            frame = 0;
+        }
+        break;
+    case 105: /* quit-to-library: window hides, menu stays on Library */
+        if (frame >= 240) {
+            LOGI("menu autotest: full tour quit-to-library");
+            menu_quit(s);
+            phase = 106;
+            frame = 0;
+        }
+        break;
+    case 106: /* dwell in the library with the game window hidden */
+        if (frame >= 480) {
+            phase = 107;
+            frame = 0;
+        }
+        break;
+    case 107: /* select the second game */
+        if (frame >= 120 && (frame % 120) == 0 && s->menu_bridge) {
+            JNIEnv *env = s->jni_env;
+            jstring jn = (*env)->NewStringUTF(env, full_second);
+            jboolean ok = (*env)->CallBooleanMethod(
+                env, s->menu_bridge, s->m_selectByName, jn);
+            (*env)->DeleteLocalRef(env, jn);
+            if (!menu_jni_check(s, "selectByName") && ok) {
+                phase = 108;
+                frame = 0;
+            } else if (frame >= 1800) {
+                LOGE("menu autotest: full tour selectByName(%s) FAILED",
+                     full_second);
+                phase = 7;
+            }
+        }
+        break;
+    case 108: /* activate -> DISC-SWAP path (emulator already running) */
+        if (frame >= 120) {
+            LOGI("menu autotest: full tour disc-swap %s", full_second);
+            mark_seq = s->last_seq;
+            menu_activate(s);
+            phase = 109;
+            frame = 0;
+        }
+        break;
+    case 109: /* liveness after the swap; visuals decide correctness */
+        if (s->last_seq > mark_seq + 300) {
+            LOGI("menu autotest: FULL LIBRARY TOUR PASS (seq %llu)",
+                 (unsigned long long)s->last_seq);
+            phase = 7;
+        } else if (frame >= 72 * 180) {
+            LOGE("menu autotest: full tour second game never rendered");
             phase = 7;
         }
         break;
@@ -1694,30 +1951,12 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
     }
 
     /* Right-controller A: toggle the voice-chat mic. Active only when voice
-     * chat is enabled, so the button stays inert otherwise. Haptic confirm:
-     * one long buzz = muted, one short tick = live. */
+     * chat is enabled, so the button stays inert otherwise. */
     if (s->mute_action && s->set_mic_muted && s->get_voice_enabled &&
         s->get_voice_enabled()) {
         bool down = action_bool(s, s->mute_action);
         if (down && !s->mute_btn_prev) {
-            int muted = s->get_mic_muted ? !s->get_mic_muted() : 1;
-            s->set_mic_muted(muted);
-            if (s->mute_haptic_action) {
-                XrHapticVibration vib = {
-                    .type = XR_TYPE_HAPTIC_VIBRATION,
-                    .duration = muted ? 250000000LL : 60000000LL,
-                    .frequency = XR_FREQUENCY_UNSPECIFIED,
-                    .amplitude = muted ? 1.0f : 0.5f,
-                };
-                XrHapticActionInfo hai = {
-                    .type = XR_TYPE_HAPTIC_ACTION_INFO,
-                    .action = s->mute_haptic_action,
-                    .subactionPath = XR_NULL_PATH,
-                };
-                xrApplyHapticFeedback(s->session, &hai,
-                                      (const XrHapticBaseHeader *)&vib);
-            }
-            LOGI("voice chat mic: %s", muted ? "MUTED" : "LIVE");
+            toggle_mic(s);
         }
         s->mute_btn_prev = down;
     }
@@ -2181,7 +2420,7 @@ static void xr_frame(XrShell *s)
             s->bridge_ready_logged = true;
         }
         glFinish();
-        if (emu_tex) {
+        if (emu_tex && !s->game_hidden) {
             xr_dump_quad(s, idx);
         }
         XrSwapchainImageReleaseInfo ri = {
@@ -2308,7 +2547,13 @@ static void xr_frame(XrShell *s)
     if (s->have_passthrough) {
         layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&pt_layer;
     }
-    layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&quad;
+    /* Quit-to-library hides the emulator window (the guest idles on its
+     * dashboard behind the scenes) until the next game is picked. Without a
+     * passthrough layer, hiding it could submit ZERO layers (opaque black) —
+     * keep the quad in that narrow case. */
+    if (!s->game_hidden || !s->have_passthrough) {
+        layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&quad;
+    }
     /* Picker draws on top of the emulator quad. */
     if (s->menu_open && s->menu_tex_ready) {
         layers[nlayers++] = (const XrCompositionLayerBaseHeader *)&menu_quad;
