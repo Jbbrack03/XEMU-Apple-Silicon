@@ -354,6 +354,21 @@ static const char *BLIT_VS =
     "  uv = vec2(p.x, 1.0 - p.y);\n"
     "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
     "}\n";
+/* The emulator quad samples the guest display AHB, which is stored bottom-up —
+ * the opposite convention from the top-down Android bitmaps the menu and cursor
+ * use. It must therefore NOT apply the shared vertical flip: doing so rendered
+ * the entire emulator image upside-down for the wearer (confirmed by a
+ * quad-swapchain readback of the Halo menu showing it vertically mirrored vs the
+ * upright pre-composition frame; the s36 "dump artifact" conclusion was wrong).
+ * Only this emulator-quad program drops the flip; menu/cursor keep BLIT_VS. */
+static const char *BLIT_VS_EMU =
+    "#version 300 es\n"
+    "out vec2 uv;\n"
+    "void main() {\n"
+    "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
+    "  uv = vec2(p.x, p.y);\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
 static const char *BLIT_FS =
     "#version 300 es\n"
     "precision mediump float;\n"
@@ -1252,7 +1267,7 @@ static void egl_init(XrShell *s)
     p_glEGLImageTargetTexture2DOES =
         (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress(
             "glEGLImageTargetTexture2DOES");
-    s->blit_prog = compile_prog(BLIT_VS, BLIT_FS);
+    s->blit_prog = compile_prog(BLIT_VS_EMU, BLIT_FS);
     s->menu_blit_prog = compile_prog(BLIT_VS, MENU_BLIT_FS);
     s->cursor_prog = compile_prog(BLIT_VS, CURSOR_FS);
     s->cursor_center_loc = glGetUniformLocation(s->cursor_prog, "center");
@@ -1405,7 +1420,7 @@ static void xr_input_init(XrShell *s)
     xrCreateAction(s->action_set, &hci, &s->mute_haptic_action);
 
     XrPath p_grip_l, p_grip_r, p_trig_l, p_trig_r, p_stk_l, p_stk_r,
-        p_aim_l, p_aim_r, p_menu_l, p_a_r, p_hapt_r;
+        p_aim_l, p_aim_r, p_menu_l, p_a_r, p_b_r, p_hapt_r;
     xrStringToPath(s->instance, "/user/hand/left/input/squeeze/value", &p_grip_l);
     xrStringToPath(s->instance, "/user/hand/right/input/squeeze/value", &p_grip_r);
     xrStringToPath(s->instance, "/user/hand/left/input/trigger/value", &p_trig_l);
@@ -1416,6 +1431,7 @@ static void xr_input_init(XrShell *s)
     xrStringToPath(s->instance, "/user/hand/right/input/aim/pose", &p_aim_r);
     xrStringToPath(s->instance, "/user/hand/left/input/menu/click", &p_menu_l);
     xrStringToPath(s->instance, "/user/hand/right/input/a/click", &p_a_r);
+    xrStringToPath(s->instance, "/user/hand/right/input/b/click", &p_b_r);
     xrStringToPath(s->instance, "/user/hand/right/output/haptic", &p_hapt_r);
 
     XrActionSuggestedBinding b[] = {
@@ -1424,6 +1440,9 @@ static void xr_input_init(XrShell *s)
         { s->stick_action, p_stk_l }, { s->stick_action, p_stk_r },
         { s->aim_pose_action, p_aim_l }, { s->aim_pose_action, p_aim_r },
         { s->menu_click_action, p_menu_l },
+        /* Right-controller B also toggles the in-game overlay (Touch B is a
+         * separate OpenXR namespace from the BT gamepad, so no game conflict). */
+        { s->menu_click_action, p_b_r },
         { s->mute_action, p_a_r },
         { s->mute_haptic_action, p_hapt_r },
     };
@@ -1839,10 +1858,20 @@ static bool xr_create_session(XrShell *s)
             .type = XR_TYPE_PASSTHROUGH_CREATE_INFO_FB
         };
         if (XR_SUCCEEDED(create_pt(s->session, &pci, &s->passthrough))) {
+            /* The layer must be RUNNING to composite, not merely created:
+             * xrPassthroughStartFB starts the passthrough OBJECT, but the LAYER
+             * stays paused unless flagged running at creation (or resumed via
+             * xrPassthroughLayerResumeFB). Without this the layer composited
+             * BLACK despite "passthrough ready" — games launched into a black
+             * void while the 2D menu (no such layer) showed passthrough.
+             * Verified against WinlatorXR's working setup (it resumes the layer).
+             * We always want passthrough on for boundaryless MR, so run it at
+             * creation rather than toggling. */
             XrPassthroughLayerCreateInfoFB plci = {
                 .type = XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB,
                 .passthrough = s->passthrough,
                 .purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB,
+                .flags = XR_PASSTHROUGH_IS_RUNNING_AT_CREATION_BIT_FB,
             };
             if (XR_SUCCEEDED(create_ptl(s->session, &plci,
                                         &s->passthrough_layer)) &&
@@ -1961,6 +1990,81 @@ static void draw_transparent_placeholder(XrShell *s, GLuint fbo)
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+/* Env-gated capture of the composed quad swapchain image (default off). This is
+ * the exact mono image the quad layer presents to BOTH eyes — the closest
+ * app-readable proxy for the wearer's view. It does NOT include the
+ * system-composited passthrough behind the quad, nor the runtime's lens
+ * distortion; the app cannot read those.
+ *   XEMU_XR_DUMP_QUAD=<dir>       enable + output directory
+ *   XEMU_XR_DUMP_QUAD_EVERY=<N>   capture every Nth emulator-fed frame (def 120)
+ *   XEMU_XR_DUMP_QUAD_SKIP=<N>    ignore the first N emulator-fed frames (def 0),
+ *                                 so early black boot frames don't exhaust the cap
+ * The PPM is written so row 0 is the TOP row of the quad framebuffer
+ * (glReadPixels returns bottom-up; we reverse it). No orientation "correction"
+ * beyond that is applied on purpose: whether framebuffer-top equals wearer-up
+ * must be established empirically against a known reference, not assumed here —
+ * that unverified assumption is exactly what previously masked the flip. */
+static void xr_dump_quad(XrShell *s, uint32_t idx)
+{
+    static int inited = 0;
+    static const char *dir = NULL;
+    static int every = 120;
+    static int skip = 0;
+    static const int cap = 30;
+    static int written = 0;
+    static uint64_t seen = 0;
+    if (!inited) {
+        inited = 1;
+        dir = getenv("XEMU_XR_DUMP_QUAD");
+        const char *e = getenv("XEMU_XR_DUMP_QUAD_EVERY");
+        if (e && *e) { int v = atoi(e); if (v > 0) every = v; }
+        const char *sk = getenv("XEMU_XR_DUMP_QUAD_SKIP");
+        if (sk && *sk) { int v = atoi(sk); if (v >= 0) skip = v; }
+    }
+    if (!dir || !*dir || written >= cap) return;
+    uint64_t n = seen++;
+    if (n < (uint64_t)skip) return;
+    if (((n - (uint64_t)skip) % (uint64_t)every) != 0) return;
+
+    int w = s->quad_w, h = s->quad_h;
+    if (w <= 0 || h <= 0) return;
+    size_t rgba_row = (size_t)w * 4;
+    unsigned char *rgba = malloc(rgba_row * (size_t)h);
+    unsigned char *rgb_row = malloc((size_t)w * 3);
+    if (!rgba || !rgb_row) { free(rgba); free(rgb_row); return; }
+
+    GLint prev = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbos[idx]);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    GLenum err = glGetError();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev);
+    if (err != GL_NO_ERROR) {
+        LOGE("quad dump: glReadPixels err 0x%x", err);
+        free(rgba); free(rgb_row); return;
+    }
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/quad_%04d_%dx%d.ppm", dir, written, w, h);
+    FILE *f = fopen(path, "wb");
+    if (!f) { LOGE("quad dump: open %s failed", path); free(rgba); free(rgb_row); return; }
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int y = h - 1; y >= 0; --y) {
+        const unsigned char *src = rgba + (size_t)y * rgba_row;
+        for (int x = 0; x < w; ++x) {
+            rgb_row[x * 3 + 0] = src[x * 4 + 0];
+            rgb_row[x * 3 + 1] = src[x * 4 + 1];
+            rgb_row[x * 3 + 2] = src[x * 4 + 2];
+        }
+        fwrite(rgb_row, 1, (size_t)w * 3, f);
+    }
+    fclose(f);
+    free(rgba); free(rgb_row);
+    LOGI("quad dump: wrote %s", path);
+    written++;
+}
+
 static void xr_frame(XrShell *s)
 {
     XrFrameWaitInfo fwi = { .type = XR_TYPE_FRAME_WAIT_INFO };
@@ -2077,6 +2181,9 @@ static void xr_frame(XrShell *s)
             s->bridge_ready_logged = true;
         }
         glFinish();
+        if (emu_tex) {
+            xr_dump_quad(s, idx);
+        }
         XrSwapchainImageReleaseInfo ri = {
             .type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO
         };

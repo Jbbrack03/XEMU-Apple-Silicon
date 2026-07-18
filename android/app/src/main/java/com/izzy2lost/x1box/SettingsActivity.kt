@@ -378,7 +378,7 @@ class SettingsActivity : AppCompatActivity() {
       toggleFiltering.check(R.id.btn_filtering_linear)
     }
 
-    val scale = prefs.getInt("setting_surface_scale", 2)
+    val scale = prefs.getInt("setting_surface_scale", 1)
     when (scale) {
       2    -> toggleScale.check(R.id.btn_scale_2x)
       3    -> toggleScale.check(R.id.btn_scale_3x)
@@ -640,7 +640,7 @@ class SettingsActivity : AppCompatActivity() {
     if (!prefs.contains("setting_filtering")) editor.putString("setting_filtering", "nearest")
     if (!prefs.contains("setting_tcg_thread")) editor.putString("setting_tcg_thread", "multi")
     if (!prefs.contains("setting_audio_driver")) editor.putString("setting_audio_driver", "openslES")
-    if (!prefs.contains("setting_surface_scale")) editor.putInt("setting_surface_scale", 2)
+    if (!prefs.contains("setting_surface_scale")) editor.putInt("setting_surface_scale", 1)
     if (!prefs.contains("setting_display_mode")) editor.putInt("setting_display_mode", 0)
     if (!prefs.contains("setting_system_memory_mib")) editor.putInt("setting_system_memory_mib", 64)
     if (!prefs.contains("tcg_tb_size")) editor.putInt("tcg_tb_size", 256)
@@ -659,10 +659,9 @@ class SettingsActivity : AppCompatActivity() {
       .apply()
   }
 
-  /* The XR frame bridge has used 2x SSAA since its introduction.  Earlier
-   * settings migration code wrote 1x only when this screen was opened, so a
-   * user could lose the established quality default without selecting it.
-   * Preserve every explicit per-user value and repair missing legacy values. */
+  /* Anti-aliasing (host supersampling) is opt-in, not forced: an unset install
+   * defaults to 1x = native, no SSAA. Preserve every explicit per-user value
+   * (including a deliberately chosen 2x/3x) and only fill in a missing value. */
   private fun applySurfaceScaleDefaultMigration() {
     if (prefs.getBoolean(PREF_SURFACE_SCALE_DEFAULT_MIGRATED, false)) {
       return
@@ -671,7 +670,7 @@ class SettingsActivity : AppCompatActivity() {
     prefs.edit()
       .apply {
         if (!prefs.contains("setting_surface_scale")) {
-          putInt("setting_surface_scale", 2)
+          putInt("setting_surface_scale", 1)
         }
         putBoolean(PREF_SURFACE_SCALE_DEFAULT_MIGRATED, true)
       }

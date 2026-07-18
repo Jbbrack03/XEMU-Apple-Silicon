@@ -881,12 +881,13 @@ static SetupFiles SyncSetupFiles() {
   int tbSize = GetPrefInt(env, activity, "tcg_tb_size", 256);
 
   DisplaySettings ds;
-  /* VR-build fixed quality/compat points. The accepted Quest configuration
-   * is 2x SSAA (maps 1:1 into the 1280x960 XR quad), XR-owned pacing (no
-   * guest vsync), retail 64 MB, shader cache on, and DSP JIT whenever DSP
-   * is enabled. Stale or externally written prefs for these keys must not
-   * change engine behavior, so they are clamped here rather than read. */
-  ds.surface_scale = 2;
+  /* VR-build fixed quality/compat points. XR-owned pacing (no guest vsync),
+   * retail 64 MB, shader cache on, and DSP JIT whenever DSP is enabled remain
+   * fixed. surface_scale (host supersampling / SSAA) is read from the pref and
+   * defaults to 1 = native 640x480 with no SSAA, so anti-aliasing is opt-in
+   * rather than forced: users who want it select 2 (1280x960) or 3 in Settings.
+   * Native is also the performance-baseline / visual-oracle configuration. */
+  ds.surface_scale = GetPrefInt(env, activity, "setting_surface_scale", 1);
   ds.vsync = false;
   ds.unlock_framerate = GetPrefBool(env, activity, "unlock_framerate", true);
   ds.validation_layers = GetPrefBool(env, activity, "validation_layers", false);
