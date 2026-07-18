@@ -67,6 +67,45 @@ void pgraph_vk_finalize_reports(PGRAPHState *pg)
     vkDestroyQueryPool(r->device, r->query_pool, NULL);
 }
 
+/* Candidate (XEMU_EARLY_REPORT_SUBMIT): when the guest enqueues a zpass
+ * report and the current command buffer already carries substantial work,
+ * submit it immediately as a deferred finish (no fence wait, no report
+ * drain). The GPU starts on the batched work at enqueue time instead of at
+ * the eventual pfifo stall, so the stall's blocking
+ * vkGetQueryPoolResults(WAIT) sees mostly-complete queries. */
+static bool early_report_submit_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_EARLY_REPORT_SUBMIT");
+        if (value && value[0]) {
+            enabled = strcmp(value, "0") != 0;
+        }
+        initialized = true;
+    }
+    return enabled;
+}
+
+static int early_report_submit_min_draws(void)
+{
+    static bool initialized;
+    static int min_draws = 24;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_EARLY_REPORT_SUBMIT_MIN_DRAWS");
+        if (value && value[0]) {
+            int parsed = atoi(value);
+            if (parsed > 0) {
+                min_draws = parsed;
+            }
+        }
+        initialized = true;
+    }
+    return min_draws;
+}
+
 static QueryReport *alloc_report(PGRAPHVkState *r)
 {
     QueryReport *report = QSIMPLEQ_FIRST(&r->report_pool);
@@ -112,6 +151,27 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
     QSIMPLEQ_INSERT_TAIL(&r->report_queue, report, entry);
 
     r->new_query_needed = true;
+
+    if (early_report_submit_enabled()) {
+        OPT_STAT_INC(ers_seen);
+        /* The query-pool guard mirrors the stall-skip guard below: an early
+         * submit skips the report drain (the only reset of
+         * num_queries_in_flight) while its staging reset suppresses the
+         * NEED_BUFFER_SPACE finishes that would otherwise drain. Once the
+         * pool is half full, fall back to baseline dynamics so a draining
+         * finish happens before begin_query's live pool-limit assert. */
+        /* pending_post_fence_cb would convert this finish into one whose
+         * render-thread handler fence-waits; this path spin-waits while
+         * holding pgraph.lock (locked method dispatch), so never arm the
+         * early submit with a callback pending. */
+        if (!r->is_render_thread_context && r->in_command_buffer &&
+            !r->in_draw && !r->pending_post_fence_cb &&
+            r->num_queries_in_flight > 0 &&
+            r->num_queries_in_flight < (r->max_queries_in_flight / 2) &&
+            r->draws_in_cb >= early_report_submit_min_draws()) {
+            pgraph_vk_finish(pg, VK_FINISH_REASON_EARLY_REPORT);
+        }
+    }
 }
 
 void pgraph_vk_process_pending_reports_internal(NV2AState *d)
@@ -180,6 +240,20 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
 
     uint32_t *dma_get = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_GET];
     uint32_t *dma_put = &d->pfifo.regs[NV_PFIFO_CACHE1_DMA_PUT];
+
+    /* If an early report submit already flushed the command buffer, the
+     * STALLED drain below can never fire (it requires an open CB) and the
+     * queued reports would starve while the guest polls. Every query
+     * belonging to a queued report has been submitted in that case, so
+     * drain directly. Gated by the same flag as the early submit so
+     * XEMU_EARLY_REPORT_SUBMIT=0 restores baseline behavior exactly. */
+    if (early_report_submit_enabled() &&
+        *dma_get == *dma_put && !r->in_command_buffer &&
+        !QSIMPLEQ_EMPTY(&r->report_queue)) {
+        OPT_STAT_INC(ers_nocb_drains);
+        pgraph_vk_process_pending_reports_internal(d);
+        return;
+    }
 
     if (*dma_get == *dma_put && r->in_command_buffer) {
         /* This preemptive drain-finish exists only to service pending

@@ -143,7 +143,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d] eRS[f%d s%d nd%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.rp_end_query,
                 g_opt_stats.rp_end_clear,
@@ -210,7 +210,10 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.iev_src_pitch,
                 g_opt_stats.iev_src_fmt,
                 g_opt_stats.iev_src_other,
-                g_opt_stats.iev_src_rows);
+                g_opt_stats.iev_src_rows,
+                g_opt_stats.ers_fired,
+                g_opt_stats.ers_seen,
+                g_opt_stats.ers_nocb_drains);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
                 "nd_detail: pd%d su%d dld%d s2b%d vdl%d vul%d cr%d sup%d "
                 "txu%d zcp%d s2t%d zbd%d s2c%d",
@@ -2282,6 +2285,7 @@ const enum NV2A_PROF_COUNTERS_ENUM finish_reason_to_counter_enum[] = {
     [VK_FINISH_REASON_FLIP_STALL] = NV2A_PROF_FINISH_FLIP_STALL,
     [VK_FINISH_REASON_FLUSH] = NV2A_PROF_FINISH_FLUSH,
     [VK_FINISH_REASON_STALLED] = NV2A_PROF_FINISH_STALLED,
+    [VK_FINISH_REASON_EARLY_REPORT] = NV2A_PROF_FINISH_EARLY_REPORT,
 };
 
 void pgraph_vk_flush_all_frames(PGRAPHState *pg)
@@ -2339,6 +2343,7 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
     case VK_FINISH_REASON_FLIP_STALL: OPT_STAT_INC(finish_flip); break;
     case VK_FINISH_REASON_FLUSH: OPT_STAT_INC(finish_flush); break;
     case VK_FINISH_REASON_STALLED: OPT_STAT_INC(finish_stalled); break;
+    case VK_FINISH_REASON_EARLY_REPORT: OPT_STAT_INC(ers_fired); break;
     }
     {
         PGRAPHVkState *r_rw = pg->vk_renderer_state;
@@ -2464,7 +2469,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
         bool deferred = (finish_reason == VK_FINISH_REASON_FLIP_STALL ||
                          finish_reason == VK_FINISH_REASON_PRESENTING ||
-                         finish_reason == VK_FINISH_REASON_STALLED);
+                         finish_reason == VK_FINISH_REASON_STALLED ||
+                         finish_reason == VK_FINISH_REASON_EARLY_REPORT);
         if (g_xemu_fast_fences) {
             deferred = deferred ||
                 finish_reason == VK_FINISH_REASON_NEED_BUFFER_SPACE ||
@@ -2576,7 +2582,14 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
             pgraph_vk_render_thread_enqueue(r, cmd);
 
-            if (deferred && !g_xemu_pipeline_deferred) {
+            /* The early-report no-CB drain assumes every query recorded
+             * before the finish returned is on the GPU queue; the
+             * pipeline_deferred escape below must never skip this wait for
+             * EARLY_REPORT or that drain could WAIT on (or read stale
+             * results from) an unsubmitted command buffer. */
+            bool must_wait_submit = !g_xemu_pipeline_deferred ||
+                finish_reason == VK_FINISH_REASON_EARLY_REPORT;
+            if (deferred && must_wait_submit) {
                 /* Wait for the render thread to complete vkQueueSubmit.
                  * Light titles submit in <100μs, so spin briefly (syscall-free
                  * fast path). Heavy titles' submits take several ms (large
@@ -2788,7 +2801,15 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
     NV2AState *d = container_of(pg, NV2AState, pgraph);
 
-    pgraph_vk_process_pending_reports_internal(d);
+    /* An early report submit exists only to start the GPU on the batched
+     * work at report-enqueue time; the guest is not stalled yet, and
+     * draining query results here would block on exactly the completion
+     * latency this path removes. The queued reports are drained at the
+     * next stall/flip finish, or by the no-CB drain in
+     * pgraph_vk_process_pending_reports. */
+    if (finish_reason != VK_FINISH_REASON_EARLY_REPORT) {
+        pgraph_vk_process_pending_reports_internal(d);
+    }
 
     NV2A_PHASE_TIMER_END(finish);
 }

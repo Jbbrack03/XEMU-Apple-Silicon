@@ -182,6 +182,9 @@ struct OptBisectStats {
     int stall_deferred;
     int stall_batched;
     int stall_skipped_empty;
+    int ers_seen;
+    int ers_fired;
+    int ers_nocb_drains;
     int predownload_hits;
     /* Why a render-target-as-texture read fell to the download stall path
      * (check_surface_to_texture_compatiblity failure reasons). */
@@ -662,6 +665,7 @@ typedef enum FinishReason {
     VK_FINISH_REASON_FLIP_STALL,
     VK_FINISH_REASON_FLUSH,
     VK_FINISH_REASON_STALLED,
+    VK_FINISH_REASON_EARLY_REPORT,
 } FinishReason;
 
 typedef enum {
