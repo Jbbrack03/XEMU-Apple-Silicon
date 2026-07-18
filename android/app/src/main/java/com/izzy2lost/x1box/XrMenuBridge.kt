@@ -103,6 +103,7 @@ class XrMenuBridge(context: Context) {
 
   // Live telemetry pushed by the shell / polled from Android.
   private var guestFrameMs = 0f
+  private var micState = -1
   private var batteryPct = -1
   private var batteryCharging = false
   private var clockText = ""
@@ -343,6 +344,14 @@ class XrMenuBridge(context: Context) {
   fun setGuestFrameMs(ms: Float) {
     if (abs(ms - guestFrameMs) > 0.15f) {
       guestFrameMs = ms
+      if (page == PAGE_SYSTEM) dirty = true
+    }
+  }
+
+  /** Shell pushes the voice-chat mic state: -1 = voice off, 0 = live, 1 = muted. */
+  fun setMicState(state: Int) {
+    if (state != micState) {
+      micState = state
       if (page == PAGE_SYSTEM) dirty = true
     }
   }
@@ -1516,9 +1525,18 @@ class XrMenuBridge(context: Context) {
       if (guestFrameMs > 0.5f) Th.ACCENT else Th.TEXT_SECONDARY)
     card(0, 1, "HEADSET BATTERY", battery, Th.TEXT_PRIMARY)
     card(1, 1, "RENDERER", "Vulkan · Turnip · 2× SSAA", Th.TEXT_PRIMARY)
+    var cardRows = 2
+    if (micState >= 0) {
+      card(0, 2, "MICROPHONE",
+        if (micState == 1) "Muted" else "Live",
+        if (micState == 1) Th.AMBER else Th.ACCENT)
+      card(1, 2, "MIC CONTROL", "A on the right Touch controller",
+        Th.TEXT_SECONDARY)
+      cardRows = 3
+    }
 
     // Actions.
-    val actionsTop = contentTop + 16f + 2 * (cardH + gap) + 18f
+    val actionsTop = contentTop + 16f + cardRows * (cardH + gap) + 18f
     text.typeface = tfMedium
     text.textSize = 21f
     text.color = Th.TEXT_TERTIARY

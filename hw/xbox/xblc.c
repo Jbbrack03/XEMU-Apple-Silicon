@@ -78,7 +78,28 @@ typedef struct USBXBLCState {
         uint8_t packet[XBLC_MAX_PACKET];
         Fifo8 fifo;
     } in;
+
+    bool mic_mute_applied;
 } USBXBLCState;
+
+/* User mic mute (the real Communicator puck had a hardware mute). Set from
+ * the XR shell thread; consumed in the USB frame handler under the BQL.
+ * Muting deactivates the host capture stream entirely, so the platform's
+ * microphone-privacy indicator turns off; the guest keeps receiving valid
+ * (silent) isochronous packets and never sees a device change. */
+static int g_xblc_mic_muted;
+
+__attribute__((visibility("default")))
+void xemu_xr_set_mic_muted(int muted)
+{
+    qatomic_set(&g_xblc_mic_muted, muted ? 1 : 0);
+}
+
+__attribute__((visibility("default")))
+int xemu_xr_get_mic_muted(void)
+{
+    return qatomic_read(&g_xblc_mic_muted);
+}
 
 enum {
     STR_MANUFACTURER = 1,
@@ -240,7 +261,8 @@ static void xblc_audio_stream_init(USBDevice *dev, uint16_t sample_rate)
                                 s, input_callback, &s->as);
 
     AUD_set_active_out(s->out.voice, TRUE);
-    AUD_set_active_in(s->in.voice, TRUE);
+    s->mic_mute_applied = qatomic_read(&g_xblc_mic_muted) != 0;
+    AUD_set_active_in(s->in.voice, !s->mic_mute_applied);
     DPRINTF("[XBLC] Init audio streams at %d Hz\n", sample_rate);
 }
 
@@ -285,11 +307,23 @@ static void usb_xblc_handle_data(USBDevice *dev, USBPacket *p)
     USBXBLCState *s = (USBXBLCState *)dev;
     uint32_t to_process, chunk_len;
 
+    /* Apply a pending mute/unmute here: this runs under the BQL, where the
+     * audio API is safe to call, unlike the XR shell thread that set it. */
+    bool muted = qatomic_read(&g_xblc_mic_muted) != 0;
+    if (s->in.voice && muted != s->mic_mute_applied) {
+        AUD_set_active_in(s->in.voice, !muted);
+        if (muted) {
+            fifo8_reset(&s->in.fifo);
+        }
+        s->mic_mute_applied = muted;
+        DPRINTF("[XBLC] mic %s\n", muted ? "muted" : "live");
+    }
+
     switch (p->pid) {
     case USB_TOKEN_IN:
         // Microphone Data - Get data from fifo and copy into usb packet
         assert(p->ep->nr == XBLC_EP_IN);
-        to_process = MIN(fifo8_num_used(&s->in.fifo), p->iov.size);
+        to_process = muted ? 0 : MIN(fifo8_num_used(&s->in.fifo), p->iov.size);
         chunk_len = 0;
 
         // fifo may not give us a contiguous packet, so may need multiple calls

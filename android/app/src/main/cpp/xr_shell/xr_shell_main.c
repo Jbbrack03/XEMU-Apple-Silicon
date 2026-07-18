@@ -189,6 +189,14 @@ typedef struct {
     XrTime last_predicted_time;
     XrAction menu_click_action; /* left controller menu button */
     bool menu_btn_prev;
+
+    /* Voice-chat mic mute: right-controller A, haptic confirm. */
+    XrAction mute_action;
+    XrAction mute_haptic_action;
+    bool mute_btn_prev;
+    void (*set_mic_muted)(int);
+    int (*get_mic_muted)(void);
+    int (*get_voice_enabled)(void);
     int pointer_hand;           /* hand whose ray hit the panel, -1 = none */
     bool pointer_inside;
     float pointer_x, pointer_y; /* panel pixels */
@@ -207,7 +215,7 @@ typedef struct {
     jmethodID m_refresh, m_count, m_isDirty, m_render, m_move, m_toggleFp,
         m_activate, m_setActiveFp, m_selectByName, m_startEmulator,
         m_pointer, m_pointerExit, m_scroll, m_navPage, m_command, m_button,
-        m_setGuestMs, m_getWinPlacement, m_saveWinPlacement;
+        m_setGuestMs, m_getWinPlacement, m_saveWinPlacement, m_setMicState;
     bool jni_tried;
     bool emulator_bootstrap_started;
 
@@ -554,6 +562,12 @@ static void resolve_emulator_feed(XrShell *s)
         s->get_game_frame_ms = (float (*)(void))
             dlsym(h, "xemu_xr_get_game_frame_ms");
     }
+    if (!s->set_mic_muted) {
+        s->set_mic_muted = (void (*)(int))dlsym(h, "xemu_xr_set_mic_muted");
+        s->get_mic_muted = (int (*)(void))dlsym(h, "xemu_xr_get_mic_muted");
+        s->get_voice_enabled =
+            (int (*)(void))dlsym(h, "xemu_xr_get_voice_chat_enabled");
+    }
 }
 
 /* Keep the physical OpenXR quad in the same aspect that xui's desktop
@@ -711,6 +725,7 @@ static void menu_jni_init(XrShell *s)
         (*env)->GetMethodID(env, bcls, "getWindowPlacement", "()[F");
     s->m_saveWinPlacement =
         (*env)->GetMethodID(env, bcls, "saveWindowPlacement", "(FFFFFFFF)V");
+    s->m_setMicState = (*env)->GetMethodID(env, bcls, "setMicState", "(I)V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
@@ -718,7 +733,8 @@ static void menu_jni_init(XrShell *s)
         !s->m_activate || !s->m_setActiveFp || !s->m_selectByName ||
         !s->m_startEmulator || !s->m_pointer || !s->m_pointerExit ||
         !s->m_scroll || !s->m_navPage || !s->m_command || !s->m_button ||
-        !s->m_setGuestMs || !s->m_getWinPlacement || !s->m_saveWinPlacement) {
+        !s->m_setGuestMs || !s->m_getWinPlacement || !s->m_saveWinPlacement ||
+        !s->m_setMicState) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -1374,8 +1390,22 @@ static void xr_input_init(XrShell *s)
     strcpy(mci.localizedActionName, "Shell Menu");
     xrCreateAction(s->action_set, &mci, &s->menu_click_action);
 
+    /* Right-controller A toggles the voice-chat mic (Touch controllers are
+     * a separate OpenXR input namespace, so this can never collide with any
+     * Bluetooth gamepad's A button). Haptic on the same hand confirms. */
+    XrActionCreateInfo mtci = { .type = XR_TYPE_ACTION_CREATE_INFO };
+    mtci.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+    strcpy(mtci.actionName, "mic_mute");
+    strcpy(mtci.localizedActionName, "Mic Mute");
+    xrCreateAction(s->action_set, &mtci, &s->mute_action);
+    XrActionCreateInfo hci = { .type = XR_TYPE_ACTION_CREATE_INFO };
+    hci.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+    strcpy(hci.actionName, "mic_haptic");
+    strcpy(hci.localizedActionName, "Mic Haptic");
+    xrCreateAction(s->action_set, &hci, &s->mute_haptic_action);
+
     XrPath p_grip_l, p_grip_r, p_trig_l, p_trig_r, p_stk_l, p_stk_r,
-        p_aim_l, p_aim_r, p_menu_l;
+        p_aim_l, p_aim_r, p_menu_l, p_a_r, p_hapt_r;
     xrStringToPath(s->instance, "/user/hand/left/input/squeeze/value", &p_grip_l);
     xrStringToPath(s->instance, "/user/hand/right/input/squeeze/value", &p_grip_r);
     xrStringToPath(s->instance, "/user/hand/left/input/trigger/value", &p_trig_l);
@@ -1385,6 +1415,8 @@ static void xr_input_init(XrShell *s)
     xrStringToPath(s->instance, "/user/hand/left/input/aim/pose", &p_aim_l);
     xrStringToPath(s->instance, "/user/hand/right/input/aim/pose", &p_aim_r);
     xrStringToPath(s->instance, "/user/hand/left/input/menu/click", &p_menu_l);
+    xrStringToPath(s->instance, "/user/hand/right/input/a/click", &p_a_r);
+    xrStringToPath(s->instance, "/user/hand/right/output/haptic", &p_hapt_r);
 
     XrActionSuggestedBinding b[] = {
         { s->grab_action, p_grip_l }, { s->grab_action, p_grip_r },
@@ -1392,6 +1424,8 @@ static void xr_input_init(XrShell *s)
         { s->stick_action, p_stk_l }, { s->stick_action, p_stk_r },
         { s->aim_pose_action, p_aim_l }, { s->aim_pose_action, p_aim_r },
         { s->menu_click_action, p_menu_l },
+        { s->mute_action, p_a_r },
+        { s->mute_haptic_action, p_hapt_r },
     };
     XrPath profile;
     xrStringToPath(s->instance,
@@ -1638,6 +1672,35 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
             }
         }
         s->menu_btn_prev = down;
+    }
+
+    /* Right-controller A: toggle the voice-chat mic. Active only when voice
+     * chat is enabled, so the button stays inert otherwise. Haptic confirm:
+     * one long buzz = muted, one short tick = live. */
+    if (s->mute_action && s->set_mic_muted && s->get_voice_enabled &&
+        s->get_voice_enabled()) {
+        bool down = action_bool(s, s->mute_action);
+        if (down && !s->mute_btn_prev) {
+            int muted = s->get_mic_muted ? !s->get_mic_muted() : 1;
+            s->set_mic_muted(muted);
+            if (s->mute_haptic_action) {
+                XrHapticVibration vib = {
+                    .type = XR_TYPE_HAPTIC_VIBRATION,
+                    .duration = muted ? 250000000LL : 60000000LL,
+                    .frequency = XR_FREQUENCY_UNSPECIFIED,
+                    .amplitude = muted ? 1.0f : 0.5f,
+                };
+                XrHapticActionInfo hai = {
+                    .type = XR_TYPE_HAPTIC_ACTION_INFO,
+                    .action = s->mute_haptic_action,
+                    .subactionPath = XR_NULL_PATH,
+                };
+                xrApplyHapticFeedback(s->session, &hai,
+                                      (const XrHapticBaseHeader *)&vib);
+            }
+            LOGI("voice chat mic: %s", muted ? "MUTED" : "LIVE");
+        }
+        s->mute_btn_prev = down;
     }
 
     /* Locate both controllers. */
@@ -2036,6 +2099,15 @@ static void xr_frame(XrShell *s)
                 (*env)->CallVoidMethod(env, s->menu_bridge, s->m_setGuestMs,
                                        ms);
                 menu_jni_check(s, "setGuestFrameMs");
+                if (s->menu_bridge && s->m_setMicState) {
+                    int mic = -1; /* voice chat off */
+                    if (s->get_voice_enabled && s->get_voice_enabled()) {
+                        mic = (s->get_mic_muted && s->get_mic_muted()) ? 1 : 0;
+                    }
+                    (*env)->CallVoidMethod(env, s->menu_bridge,
+                                           s->m_setMicState, mic);
+                    menu_jni_check(s, "setMicState");
+                }
             }
             jboolean dirty = s->menu_bridge ?
                 (*env)->CallBooleanMethod(env, s->menu_bridge, s->m_isDirty) :

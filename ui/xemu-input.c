@@ -557,6 +557,13 @@ bool xemu_input_get_voice_chat(void)
     return xemu_voice_chat_requested;
 }
 
+/* dlsym bridge for the XR shell (mirrors xemu_xr_set_gamepad_state). */
+__attribute__((visibility("default")))
+int xemu_xr_get_voice_chat_enabled(void)
+{
+    return xemu_voice_chat_requested;
+}
+
 static void xemu_input_attach_xblc(int player_index)
 {
     if (!xemu_voice_chat_requested) {
