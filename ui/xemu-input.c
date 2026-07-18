@@ -552,6 +552,11 @@ void xemu_input_set_voice_chat(bool enable)
     xemu_voice_chat_requested = enable;
 }
 
+bool xemu_input_get_voice_chat(void)
+{
+    return xemu_voice_chat_requested;
+}
+
 static void xemu_input_attach_xblc(int player_index)
 {
     if (!xemu_voice_chat_requested) {

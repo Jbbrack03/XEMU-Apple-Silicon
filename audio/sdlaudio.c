@@ -444,6 +444,19 @@ static void sdl_enable_in(HWVoiceIn *hw, bool enable)
 
 static void *sdl_audio_init(Audiodev *dev, Error **errp)
 {
+#ifdef __ANDROID__
+    /* On Android this driver exists only for the Xbox Live Communicator's
+     * AUD capture/playback. The machine's default audiodev must NOT bind
+     * it: game audio (MCPX APU) opens SDL directly, and a second stream
+     * aborts on the single-device Java backend. With voice chat off this
+     * driver declines and the default audiodev falls back to "none",
+     * which is the exact pre-voice behavior. */
+    extern bool xemu_input_get_voice_chat(void);
+    if (!xemu_input_get_voice_chat()) {
+        error_setg(errp, "sdl AUD driver is reserved for voice chat");
+        return NULL;
+    }
+#endif
     if (SDL_InitSubSystem (SDL_INIT_AUDIO)) {
         error_setg(errp, "SDL failed to initialize audio subsystem");
         return NULL;

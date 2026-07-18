@@ -138,6 +138,7 @@ bool xemu_input_bind_xmu(int player_index, int peripheral_port_index,
                          const char *filename, bool is_rebind);
 void xemu_input_rebind_xmu(int port);
 void xemu_input_set_voice_chat(bool enable);
+bool xemu_input_get_voice_chat(void);
 void xemu_input_unbind_xmu(int player_index, int peripheral_port_index);
 int xemu_input_get_controller_default_bind_port(ControllerState *state, int start);
 void xemu_save_peripheral_settings(int player_index, int peripheral_index,
