@@ -1600,6 +1600,7 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
     const float budget_threshold = 0.8;
 #endif
     bool near_budget = false;
+    float max_ratio = 0.0f;
 
     for (uint32_t i = 0; i < props->memoryHeapCount; i++) {
         VmaBudget *b = &budgets[i];
@@ -1608,10 +1609,61 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
         }
         float use_to_budget_ratio =
             (double)b->statistics.allocationBytes / (double)b->budget;
+        int pct = (int)(use_to_budget_ratio * 100.0f);
+        if (pct > g_opt_stats.budget_pct_max) {
+            g_opt_stats.budget_pct_max = pct;
+        }
+        if (use_to_budget_ratio > max_ratio) {
+            max_ratio = use_to_budget_ratio;
+        }
         near_budget |= use_to_budget_ratio > budget_threshold;
     }
 
+    g_opt_stats.tex_cache_used = (int)r->texture_cache.num_used;
+
     if (near_budget) {
-        pgraph_vk_trim_texture_cache(pg);
+        /* Candidate (s38, default ON, XEMU_TEX_TRIM_LEGACY=1 restores the
+         * old behavior): the proactive trim used to fire on EVERY budget
+         * check while the heap sat above threshold. On Quest the steady
+         * heap ratio is dominated by surfaces/buffers/driver allocations,
+         * so repeated texture trims cannot push the ratio back under
+         * threshold; they only decimate the active texture working set
+         * (measured: Crimson heavy combat pinned the 1024-entry cache at
+         * ~87 used, ~2 trims/flip, ~39 eviction-driven re-uploads/flip,
+         * ~10 ms/frame of texture decode+upload). Floor the cache size
+         * (a small cache holds no reclaimable mass) and rate-limit trims;
+         * genuine allocation failure keeps its reactive eviction path in
+         * create_texture's OOM retry. */
+        static int trim_legacy = -1;
+        if (trim_legacy < 0) {
+            const char *v = getenv("XEMU_TEX_TRIM_LEGACY");
+            trim_legacy = (v && v[0] && strcmp(v, "0") != 0) ? 1 : 0;
+        }
+        if (trim_legacy) {
+            pgraph_vk_trim_texture_cache(pg);
+        } else {
+            /* Two-tier policy (review round 1): at moderate pressure a
+             * small cache holds no reclaimable mass, so trims below the
+             * floor only churn re-uploads; at genuinely high pressure
+             * (>85% of budget) the floor drops and the interval
+             * tightens so texture memory cannot ride toward the
+             * low-memory killer while the rate limit sleeps. */
+            bool high_pressure = max_ratio > 0.85f;
+            /* Above the hard ceiling the interval gate drops too: a
+             * budget-shrink event can spike the ratio inside the gate's
+             * sleep window, and surface allocations must not meet a hard
+             * OOM while a scheduled trim sleeps (review round 2). */
+            bool critical = max_ratio > 0.95f;
+            size_t floor_entries = high_pressure ? 0 : 256;
+            int64_t min_interval_ns =
+                high_pressure ? 500000000LL : 2000000000LL;
+            int64_t now = nv2a_clock_ns();
+            if (r->texture_cache.num_used > floor_entries &&
+                (critical ||
+                 now - r->last_texture_trim_ns >= min_interval_ns)) {
+                pgraph_vk_trim_texture_cache(pg);
+                r->last_texture_trim_ns = now;
+            }
+        }
     }
 }

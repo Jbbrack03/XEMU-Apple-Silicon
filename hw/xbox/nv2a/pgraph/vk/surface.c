@@ -2670,6 +2670,27 @@ void pgraph_vk_surface_image_pool_drain(PGRAPHVkState *r)
     r->surface_image_pool_count = 0;
 }
 
+/* Surface allocations previously had no eviction fallback of their own:
+ * after a pool drain, a second device-OOM hit a live VK_CHECK abort. With
+ * proactive texture trims now rate-limited, retire all in-flight work
+ * (making the texture LRU evictable), release it wholesale, and drain the
+ * pool again before the final attempt — mirroring create_texture's OOM
+ * retry ladder. */
+static void surface_alloc_emergency_evict(PGRAPHState *pg)
+{
+    PGRAPHVkState *r = pg->vk_renderer_state;
+
+    VK_LOG_ERROR("surface allocation OOM: flushing frames and releasing "
+                 "the texture cache before the final attempt");
+    pgraph_vk_flush_all_frames(pg);
+    for (int i = 0; i < 1024; i++) {
+        if (!lru_try_evict_one(&r->texture_cache)) {
+            break;
+        }
+    }
+    pgraph_vk_surface_image_pool_drain(r);
+}
+
 static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -2728,6 +2749,12 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
                                       &surface->allocation, NULL);
         if (res != VK_SUCCESS) {
             pgraph_vk_surface_image_pool_drain(r);
+            res = vmaCreateImage(r->allocator, &image_create_info,
+                                 &alloc_create_info, &surface->image,
+                                 &surface->allocation, NULL);
+        }
+        if (res != VK_SUCCESS) {
+            surface_alloc_emergency_evict(pg);
             VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
                                     &alloc_create_info, &surface->image,
                                     &surface->allocation, NULL));
@@ -2738,6 +2765,12 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
                              &surface->allocation_scratch, NULL);
         if (res != VK_SUCCESS) {
             pgraph_vk_surface_image_pool_drain(r);
+            res = vmaCreateImage(r->allocator, &image_create_info,
+                                 &alloc_create_info, &surface->image_scratch,
+                                 &surface->allocation_scratch, NULL);
+        }
+        if (res != VK_SUCCESS) {
+            surface_alloc_emergency_evict(pg);
             VK_CHECK(vmaCreateImage(r->allocator, &image_create_info,
                                     &alloc_create_info, &surface->image_scratch,
                                     &surface->allocation_scratch, NULL));
