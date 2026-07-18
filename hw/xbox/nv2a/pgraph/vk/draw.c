@@ -143,7 +143,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.rp_end_query,
                 g_opt_stats.rp_end_clear,
@@ -200,7 +200,17 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.dif_blit,
                 g_opt_stats.dif_flush,
                 g_opt_stats.dif_dds_fb,
-                g_opt_stats.dif_other);
+                g_opt_stats.dif_other,
+                g_opt_stats.iev_tgt_swz,
+                g_opt_stats.iev_tgt_pitch,
+                g_opt_stats.iev_tgt_fmt,
+                g_opt_stats.iev_tgt_other,
+                g_opt_stats.iev_size,
+                g_opt_stats.iev_src_swz,
+                g_opt_stats.iev_src_pitch,
+                g_opt_stats.iev_src_fmt,
+                g_opt_stats.iev_src_other,
+                g_opt_stats.iev_src_rows);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
                 "nd_detail: pd%d su%d dld%d s2b%d vdl%d vul%d cr%d sup%d "
                 "txu%d zcp%d s2t%d zbd%d s2c%d",

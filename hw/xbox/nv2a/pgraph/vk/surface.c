@@ -1270,28 +1270,55 @@ static void download_surface_deferred(NV2AState *d, SurfaceBinding *surface)
     download_surface(d, surface, true);
 }
 
-static bool guest_vram_surface_eligible(NV2AState *d,
-                                        const SurfaceBinding *surface)
+/* Why a surface can't use the imported guest-VRAM transfer path. Kept as a
+ * reason enum so diagnostics can attribute direct-path failures without a
+ * second, divergent copy of these conditions. */
+typedef enum {
+    GV_ELIGIBLE = 0,
+    GV_DISABLED,
+    GV_SWIZZLE,
+    GV_PITCH,
+    GV_BOUNDS,
+    GV_FMT,
+} GuestVramEligibility;
+
+static GuestVramEligibility
+guest_vram_surface_eligibility(NV2AState *d, const SurfaceBinding *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     bool packed_depth_stencil =
         surface->host_fmt.vk_format == VK_FORMAT_D24_UNORM_S8_UINT ||
         surface->host_fmt.vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT;
 
-    if (!r->guest_vram_buffer_enabled || surface->swizzle ||
-        !surface->width || !surface->height ||
-        surface->pitch != surface->width * surface->fmt.bytes_per_pixel ||
-        surface->vram_addr % 4 != 0 ||
+    if (!r->guest_vram_buffer_enabled) {
+        return GV_DISABLED;
+    }
+    if (surface->swizzle) {
+        return GV_SWIZZLE;
+    }
+    if (!surface->width || !surface->height ||
+        surface->pitch != surface->width * surface->fmt.bytes_per_pixel) {
+        return GV_PITCH;
+    }
+    if (surface->vram_addr % 4 != 0 ||
         surface->vram_addr >= memory_region_size(d->vram) ||
         surface->size > memory_region_size(d->vram) - surface->vram_addr) {
-        return false;
+        return GV_BOUNDS;
     }
 
     if (surface->color) {
         return surface->fmt.bytes_per_pixel ==
-               surface->host_fmt.host_bytes_per_pixel;
+                       surface->host_fmt.host_bytes_per_pixel ?
+                   GV_ELIGIBLE : GV_FMT;
     }
-    return packed_depth_stencil && surface->fmt.bytes_per_pixel == 4;
+    return (packed_depth_stencil && surface->fmt.bytes_per_pixel == 4) ?
+               GV_ELIGIBLE : GV_FMT;
+}
+
+static bool guest_vram_surface_eligible(NV2AState *d,
+                                        const SurfaceBinding *surface)
+{
+    return guest_vram_surface_eligibility(d, surface) == GV_ELIGIBLE;
 }
 
 static bool guest_vram_pending_range_overlaps(PGRAPHVkState *r,
@@ -1308,6 +1335,43 @@ static bool guest_vram_pending_range_overlaps(PGRAPHVkState *r,
         }
     }
     return false;
+}
+
+static bool guest_vram_valid_range_overlaps(PGRAPHVkState *r,
+                                            hwaddr addr, hwaddr size)
+{
+    if (!size) {
+        return false;
+    }
+
+    for (size_t i = 0; i < r->num_guest_vram_valid_ranges; i++) {
+        MemorySyncRequirement *range = &r->guest_vram_valid_ranges[i];
+        if (ranges_overlap(addr, size, range->addr, range->size)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Candidate (XEMU_GPU_VRAM_PARTIAL): allow a smaller dirty alias to take the
+ * queue-ordered guest-VRAM download when it is evicted by a LARGER eligible
+ * target, and let that target's upload consume the mixed span (GPU-authored
+ * subrange + coherent CPU bytes) from the imported buffer. Removes the
+ * measured 2/flip synchronous SURFACE_DOWN drains in Halo 2's heavy phase
+ * (s37 iEv probe: 100%% of drains were this size-guard rejection). */
+static bool guest_vram_partial_upload_enabled(void)
+{
+    static bool initialized;
+    static bool enabled;
+
+    if (!initialized) {
+        const char *value = getenv("XEMU_GPU_VRAM_PARTIAL");
+        if (value && value[0]) {
+            enabled = strcmp(value, "0") != 0;
+        }
+        initialized = true;
+    }
+    return enabled;
 }
 
 static bool guest_vram_valid_range_covers(PGRAPHVkState *r,
@@ -1627,10 +1691,22 @@ static bool upload_surface_from_guest_vram(NV2AState *d,
     PGRAPHState *pg = &d->pgraph;
     PGRAPHVkState *r = pg->vk_renderer_state;
     size_t guest_size = surface->pitch * surface->height;
-    if (!guest_vram_surface_eligible(d, surface) ||
-        !guest_vram_valid_range_covers(r, surface->vram_addr,
-                                      guest_size)) {
+    if (!guest_vram_surface_eligible(d, surface)) {
         return false;
+    }
+    if (!guest_vram_valid_range_covers(r, surface->vram_addr, guest_size)) {
+        /* Partial mode: a queue-ordered download wrote only part of this
+         * span. The imported buffer aliases d->vram_ptr, so the remainder
+         * is the coherent CPU content; the HOST_WRITE source barrier below
+         * already orders those bytes for the transfer read. Only VALID
+         * ranges gate this: they are wiped on CPU writes, while pending
+         * ranges are not and could serve a stale in-flight download over
+         * fresh CPU bytes (adversarial review s37, ranges lens F1). */
+        if (!(guest_vram_partial_upload_enabled() &&
+              guest_vram_valid_range_overlaps(r, surface->vram_addr,
+                                              guest_size))) {
+            return false;
+        }
     }
 
     bool packed_depth_stencil = !surface->color;
@@ -3590,10 +3666,14 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                 trace_nv2a_pgraph_surface_evict_reason(
                     "incompatible", surface->vram_addr);
                 compare_surfaces(surface, &target);
-                /* The new alias must be able to consume the entire target
-                 * from the imported buffer. Otherwise its legacy upload
+                /* Default: the new alias must be able to consume the entire
+                 * target from the imported buffer, else its legacy upload
                  * would read the CPU pointer before this queued download
-                 * completes. */
+                 * completes. XEMU_GPU_VRAM_PARTIAL relaxes the size half of
+                 * that rule: a smaller source may still download in queue
+                 * order because the target's upload then consumes the mixed
+                 * span (GPU-valid subrange + coherent CPU remainder) from
+                 * the imported buffer. */
                 ret_probe_record_eviction(surface->vram_addr,
                                           (size_t)surface->pitch *
                                               surface->height);
@@ -3601,15 +3681,94 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                     surface->draw_dirty &&
                     direct_incompatible_surface_enabled() &&
                     guest_vram_surface_eligible(d, &target) &&
-                    (size_t)surface->pitch * surface->height >=
-                        (size_t)target.pitch * target.height &&
+                    ((size_t)surface->pitch * surface->height >=
+                         (size_t)target.pitch * target.height ||
+                     guest_vram_partial_upload_enabled()) &&
                     download_surface_to_guest_vram(d, surface);
                 if (direct_invalidated) {
+                    size_t src_size =
+                        (size_t)surface->pitch * surface->height;
+                    size_t tgt_size = (size_t)target.pitch * target.height;
+                    if (src_size < tgt_size) {
+                        /* The target's deferred GPU upload will read the
+                         * CPU-authored remainder later; pending coverage
+                         * makes a racing guest write take the established
+                         * CPU wait instead of tearing that frame's read
+                         * (adversarial review s37, ordering lens F1). */
+                        if (r->num_guest_vram_pending_ranges ==
+                            MAX_GUEST_VRAM_PENDING_RANGES) {
+                            r->guest_vram_pending_ranges[0] =
+                                (MemorySyncRequirement) {
+                                    .addr = 0,
+                                    .size = memory_region_size(d->vram),
+                                };
+                            r->num_guest_vram_pending_ranges = 1;
+                        } else {
+                            guest_vram_merge_range(
+                                r->guest_vram_pending_ranges,
+                                &r->num_guest_vram_pending_ranges,
+                                surface->vram_addr + src_size,
+                                tgt_size - src_size);
+                        }
+                    }
                     invalidate_surface(d, surface);
                     if (r->in_command_buffer) {
                         surface->invalidation_frame = r->current_frame;
                     }
                 } else if (surface->draw_dirty) {
+                    /* Diagnostics: attribute why the queue-ordered direct
+                     * download was unavailable (the fallback below costs a
+                     * full synchronous GPU drain). Runs only on this cold
+                     * fail path, ~2/flip in the worst measured title. */
+                    if (direct_incompatible_surface_enabled()) {
+                        GuestVramEligibility te =
+                            guest_vram_surface_eligibility(d, &target);
+                        GuestVramEligibility se =
+                            guest_vram_surface_eligibility(d, surface);
+                        if (te == GV_SWIZZLE) {
+                            OPT_STAT_INC(iev_tgt_swz);
+                        } else if (te == GV_PITCH) {
+                            OPT_STAT_INC(iev_tgt_pitch);
+                        } else if (te == GV_FMT) {
+                            OPT_STAT_INC(iev_tgt_fmt);
+                        } else if (te != GV_ELIGIBLE) {
+                            OPT_STAT_INC(iev_tgt_other);
+                        } else if ((size_t)surface->pitch * surface->height <
+                                   (size_t)target.pitch * target.height) {
+                            OPT_STAT_INC(iev_size);
+                        } else if (se == GV_SWIZZLE) {
+                            OPT_STAT_INC(iev_src_swz);
+                        } else if (se == GV_PITCH) {
+                            OPT_STAT_INC(iev_src_pitch);
+                        } else if (se == GV_FMT) {
+                            OPT_STAT_INC(iev_src_fmt);
+                        } else if (se != GV_ELIGIBLE) {
+                            OPT_STAT_INC(iev_src_other);
+                        } else {
+                            OPT_STAT_INC(iev_src_rows);
+                        }
+#ifdef __ANDROID__
+                        static int iev_detail_budget = 24;
+                        if (iev_detail_budget > 0) {
+                            iev_detail_budget--;
+                            __android_log_print(
+                                ANDROID_LOG_INFO, "hakuX-vram",
+                                "iev: te%d se%d src[%s f%u %ux%u p%u sw%d] "
+                                "tgt[%s f%u %ux%u p%u sw%d]",
+                                (int)te, (int)se,
+                                surface->color ? "color" : "zeta",
+                                surface->color ? surface->shape.color_format :
+                                                 surface->shape.zeta_format,
+                                surface->width, surface->height,
+                                surface->pitch, surface->swizzle,
+                                target.color ? "color" : "zeta",
+                                target.color ? target.shape.color_format :
+                                               target.shape.zeta_format,
+                                target.width, target.height, target.pitch,
+                                target.swizzle);
+                        }
+#endif
+                    }
                     if (r->in_command_buffer) {
                         OPT_STAT_INC(sd_eviction);
                         pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
@@ -4014,6 +4173,13 @@ void pgraph_vk_surface_flush(NV2AState *d)
 
     prune_invalid_surfaces(r, 0);
     pgraph_vk_surface_image_pool_drain(r);
+
+    /* Every surface is gone; stale GPU-authored spans must not gate a later
+     * upload's path choice (adversarial review s37, ranges lens F3). Only
+     * the valid set is dropped — zeroing is always conservative for it.
+     * Pending ranges stay: the download_if_dirty loop above may have queued
+     * new downloads whose CPU-wait protection they provide. */
+    r->num_guest_vram_valid_ranges = 0;
 
     pgraph_vk_reload_surface_scale_factor(pg);
 }

@@ -209,6 +209,21 @@ struct OptBisectStats {
     int ret_t50;
     int ret_t100;
     int ret_nofind;
+    /* Incompatible-eviction direct-path failure classification: why a
+     * draw-dirty same-address eviction could not take the queue-ordered
+     * guest-VRAM download and fell back to the synchronous SURFACE_DOWN
+     * finish (target ineligible by swizzle/pitch/format/other, source
+     * smaller than target, source ineligible, partial download state). */
+    int iev_tgt_swz;
+    int iev_tgt_pitch;
+    int iev_tgt_fmt;
+    int iev_tgt_other;
+    int iev_size;
+    int iev_src_swz;
+    int iev_src_pitch;
+    int iev_src_fmt;
+    int iev_src_other;
+    int iev_src_rows;
 };
 extern struct OptBisectStats g_opt_stats;
 
