@@ -120,6 +120,25 @@ static uint32_t circular_scatter_gather_rw(MCPXAPUState *d, hwaddr sge_base,
                                            uint32_t base, uint32_t end,
                                            uint32_t cur, size_t len, bool dir)
 {
+    /* s42: a degenerate (zero-size) circular buffer cannot make progress:
+     * END==BASE==CUR gives bytes_to_copy==0 and the wrap resets CUR to BASE
+     * forever, spinning this thread with len never consumed. The guest can
+     * legally leave these registers zeroed mid audio teardown (disc eject).
+     * Real hardware would wedge only the DSP; spinning here wedges the whole
+     * emulator — the APU thread holds d->lock, guest APU MMIO then blocks the
+     * vCPU under the BQL, and BQL waiters (incl. GUEST_RESET processing)
+     * deadlock. Drop the transfer instead. */
+    if (end <= base) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr, "circular_scatter_gather_rw: degenerate buffer "
+                            "base=0x%x end=0x%x cur=0x%x len=0x%zx; dropping\n",
+                    base, end, cur, len);
+        }
+        return cur;
+    }
+
     while (len > 0) {
         unsigned int bytes_to_copy = end - cur;
 
@@ -177,9 +196,21 @@ static void gp_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
     //     dir ? "writing to" : "reading from", index,
     //     base, end, cur, len);
 
-    /* DSP hangs if current >= end; but forces current >= base */
-    assert(cur < end);
-    if (cur < base) {
+    /* s42: degenerate FIFO (END<=BASE, e.g. zeroed by guest audio teardown at
+     * disc eject) — skip; the old live assert below would otherwise abort the
+     * host on guest-writable register state. */
+    if (end <= base) {
+        return;
+    }
+
+    /* DSP hangs if current >= end; but forces current >= base.
+     * s42 (adversarial review): CUR is guest-writable and read here
+     * unsynchronized with the guest's END/CUR reprogram writes, so a torn
+     * read can present cur >= end with end > base — the former live
+     * assert(cur < end) was a host abort on that state. Clamp to base
+     * instead (the GP ring has no modulo; base restart matches the
+     * forces-cur>=base intent). */
+    if (cur >= end || cur < base) {
         cur = base;
     }
 
@@ -239,6 +270,14 @@ static void ep_fifo_rw(void *opaque, uint8_t *ptr, unsigned int index,
             assert(len <= sizeof(ep_silence));
             ptr = (uint8_t*)ep_silence;
         }
+    }
+
+    /* s42: degenerate FIFO (END<=BASE, e.g. zeroed by guest audio teardown at
+     * disc eject) — skip; the modulo below would divide by zero (ARM64
+     * silently yields 0) and hand circular_scatter_gather_rw a zero-size
+     * buffer it can never make progress on (the s42 quit-to-library hang). */
+    if (end <= base) {
+        return;
     }
 
     /* DSP hangs if current >= end; but forces current >= base */
