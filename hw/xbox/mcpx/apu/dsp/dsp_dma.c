@@ -20,6 +20,9 @@
 
 #include "qemu/osdep.h"
 #include "qemu/compiler.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "debug.h"
 #include "dsp_dma.h"
 #include "dsp_dma_regs.h"
@@ -126,6 +129,30 @@ static void dsp_dma_run(DSPDMAState *s)
     unsigned int blocks_processed = 0;
     const unsigned int max_blocks = 0x4000;
 
+    /* s44 trip test (env-gated, cold): XEMU_DSP_DMA_TRIP_TEST=1 strips the
+     * EOL bit from one call's next pointers, forcing a REAL cyclic walk so
+     * the bound above must trip and force end-of-list — validates the s43
+     * hardening end-to-end on device (pass = one trip log, audio continues,
+     * no wedge). One-shot per process, armed on a later call so the APU is
+     * fully initialized. */
+    bool inject_cycle = false;
+    {
+        static int trip_test = -1;
+        if (trip_test < 0) {
+            const char *e = getenv("XEMU_DSP_DMA_TRIP_TEST");
+            trip_test = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+        }
+        if (trip_test) {
+            static unsigned int calls;
+            static bool done;
+            calls++;
+            if (!done && calls >= 64) {
+                inject_cycle = true;
+                done = true;
+            }
+        }
+    }
+
     while (!(s->next_block & NODE_POINTER_EOL)) {
         if (++blocks_processed > max_blocks) {
             /* Rate-limited (not one-shot-forever): a re-issued ACTION_START on
@@ -144,6 +171,15 @@ static void dsp_dma_run(DSPDMAState *s)
                                 "blocks (cyclic guest list?) next_block=0x%x "
                                 "trip#%u; forcing end-of-list\n",
                         max_blocks, s->next_block, trips + 1);
+#ifdef __ANDROID__
+                /* App stderr is /dev/null on device; a real trip must be
+                 * visible in logcat (s43 texdiag lesson). */
+                __android_log_print(ANDROID_LOG_WARN, "xemu-apu",
+                                    "dsp_dma_run: chain exceeded %u blocks "
+                                    "(cyclic guest list?) next_block=0x%x "
+                                    "trip#%u; forcing end-of-list",
+                                    max_blocks, s->next_block, trips + 1);
+#endif
             }
             trips++;
             s->control |= DMA_CONTROL_STOPPED;
@@ -183,6 +219,12 @@ static void dsp_dma_run(DSPDMAState *s)
         s->next_block = next_block;
         if (s->next_block & NODE_POINTER_EOL) {
             s->eol = true;
+        }
+        if (inject_cycle) {
+            /* Trip test: revisit this block forever (a real cyclic list);
+             * the max_blocks bound above must trip and force EOL. */
+            s->next_block = addr;
+            s->eol = false;
         }
 
         /* Decode control word */
