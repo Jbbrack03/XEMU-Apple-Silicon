@@ -253,6 +253,23 @@ static void xemu_scripted_input_apply(ControllerState *state)
         }
         scripted_input.next_event++;
     }
+    /* s43 diag (env-gated, cold default): log button-mask edges actually
+     * applied to the emulated pad, to confirm scripted presses reach the
+     * guest controller state. */
+    static int diag = -1;
+    if (diag < 0) {
+        const char *e = getenv("XEMU_INPUT_DIAG");
+        diag = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    if (diag && scripted_input.buttons != state->buttons) {
+        fprintf(stderr, "xemu-inputdiag: t=%lldms buttons 0x%04x -> 0x%04x "
+                "(A=%d B=%d START=%d)\n",
+                (long long)(elapsed / 1000), state->buttons,
+                scripted_input.buttons,
+                !!(scripted_input.buttons & CONTROLLER_BUTTON_A),
+                !!(scripted_input.buttons & CONTROLLER_BUTTON_B),
+                !!(scripted_input.buttons & CONTROLLER_BUTTON_START));
+    }
     state->buttons = scripted_input.buttons;
     memcpy(state->axis, scripted_input.axis, sizeof(state->axis));
 }

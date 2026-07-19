@@ -31,10 +31,95 @@
 #include "renderer.h"
 #include "system/physmem.h"
 
+/* s43 dot-grid diagnostics route to logcat on Android (the app's stderr goes
+ * to /dev/null; only __android_log reaches the captured log), fprintf on host. */
+#ifdef __ANDROID__
+#include <android/log.h>
+#define TEXDIAG_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "nv2a-texdiag", __VA_ARGS__)
+#else
+#define TEXDIAG_LOG(...) \
+    do { fprintf(stderr, "nv2a-texdiag: " __VA_ARGS__); \
+         fprintf(stderr, "\n"); } while (0)
+#endif
+
 static void texture_cache_release_node_resources(PGRAPHVkState *r, TextureBinding *snode);
 static bool image_pool_acquire(PGRAPHVkState *r, const TextureImageConfig *config,
                                VkImage *out_image, VmaAllocation *out_allocation);
 static void image_pool_drain(PGRAPHVkState *r);
+
+/* s43 dot-grid diagnostics (env-gated, all cold by default; tag nv2a-texdiag):
+ *   XEMU_TEX_BIND_LOG=1    one line per create_texture resolution (identity,
+ *                          hit/miss, s2t, dirty) — locates the glyph atlas.
+ *   XEMU_TEX_STALE_DIAG=1  re-hash guest bytes on every non-s2t cache-hit
+ *                          bind; warn when a clean-claimed binding's VRAM no
+ *                          longer matches the bytes it was uploaded from
+ *                          (stale-entry serve — the s40 dot-grid suspect).
+ *   XEMU_TEX_DUMP_ADDR=hex + XEMU_TEX_DUMP_DIR=dir  dump the guest bytes of
+ *                          the texture at this vram offset on every content
+ *                          change (upload/re-upload/stale hit) for cold-vs-
+ *                          warm and vs-real-Xbox comparison. */
+static bool tex_bind_log_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XEMU_TEX_BIND_LOG");
+        v = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return v;
+}
+
+static bool tex_stale_diag_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XEMU_TEX_STALE_DIAG");
+        v = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return v;
+}
+
+static bool tex_dump_addr_match(hwaddr vram_offset)
+{
+    static int have = -1;
+    static uint64_t addr;
+    if (have < 0) {
+        const char *e = getenv("XEMU_TEX_DUMP_ADDR");
+        have = (e && e[0]) ? 1 : 0;
+        if (have) {
+            addr = strtoull(e, NULL, 16);
+        }
+    }
+    return have && (uint64_t)vram_offset == addr;
+}
+
+static void tex_diag_dump_bytes(hwaddr vram_offset, const void *data,
+                                size_t len, const TextureShape *state,
+                                uint64_t content_hash, const char *why)
+{
+    static uint64_t last_dumped_hash;
+    if (!tex_dump_addr_match(vram_offset) || content_hash == last_dumped_hash) {
+        return;
+    }
+    const char *dir = getenv("XEMU_TEX_DUMP_DIR");
+    if (!dir) {
+        return;
+    }
+    char path[512];
+    snprintf(path, sizeof(path), "%s/tex_%08llx_%016llx_%s.bin", dir,
+             (unsigned long long)vram_offset,
+             (unsigned long long)content_hash, why);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return;
+    }
+    fwrite(data, 1, len, f);
+    fclose(f);
+    last_dumped_hash = content_hash;
+    TEXDIAG_LOG("DUMP %s fmt=0x%02x %ux%u pitch=%u lv=%u len=0x%zx",
+                path, state->color_format, state->width, state->height,
+                state->pitch, state->levels, len);
+}
 
 static const VkImageType dimensionality_to_vk_image_type[] = {
     0,
@@ -1638,6 +1723,17 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     void *texture_data = (char*)d->vram_ptr + texture_vram_offset;
     void *palette_data = (char*)d->vram_ptr + texture_palette_vram_offset;
 
+    if (tex_bind_log_enabled()) {
+        TEXDIAG_LOG("BIND idx=%d fmt=0x%02x %ux%u lv=%u pitch=%u "
+                    "vram=0x%08llx len=0x%zx %s%s pd=%d frame=%u",
+                    texture_idx, state.color_format, state.width, state.height,
+                    state.levels, state.pitch,
+                    (unsigned long long)texture_vram_offset, texture_length,
+                    binding_found ? "HIT" : "MISS",
+                    surface_to_texture ? "+S2T" : "", possibly_dirty,
+                    pg->frame_time);
+    }
+
     uint64_t content_hash = 0;
     if (!surface_to_texture && possibly_dirty) {
         OPT_STAT_INC(tex_hash_n);
@@ -1709,6 +1805,31 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                     surface->image_view;
             }
         } else {
+            if (tex_stale_diag_enabled() && !possibly_dirty) {
+                /* Dirty tracking claims the cached image still matches VRAM.
+                 * Verify: a mismatch here is a served-stale cache entry. */
+                uint64_t actual = fast_hash(texture_data, texture_length);
+                if (is_indexed) {
+                    actual ^= fast_hash(palette_data,
+                                        texture_palette_data_size);
+                }
+                if (actual != snode->hash) {
+                    TEXDIAG_LOG("STALE-HIT idx=%d fmt=0x%02x %ux%u lv=%u "
+                                "vram=0x%08llx len=0x%zx cached=%016llx "
+                                "actual=%016llx dcf=%u dcr=%d frame=%u",
+                                texture_idx, state.color_format, state.width,
+                                state.height, state.levels,
+                                (unsigned long long)texture_vram_offset,
+                                texture_length,
+                                (unsigned long long)snode->hash,
+                                (unsigned long long)actual,
+                                snode->dirty_check_frame,
+                                snode->dirty_check_result, pg->frame_time);
+                    tex_diag_dump_bytes(texture_vram_offset, texture_data,
+                                        texture_length, &state, actual,
+                                        "stale");
+                }
+            }
             if (possibly_dirty && content_hash != snode->hash) {
                 if (snode->submit_time + r->num_active_frames > r->submit_count) {
                     OPT_STAT_INC(tex_up_drain);
@@ -1719,6 +1840,9 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
                 upload_texture_image(pg, texture_idx, snode);
                 snode->hash = content_hash;
                 did_upload = true;
+                tex_diag_dump_bytes(texture_vram_offset, texture_data,
+                                    texture_length, &state, content_hash,
+                                    "reup");
             } else if (possibly_dirty) {
                 OPT_STAT_INC(tex_hash_saved);
             }
@@ -1735,6 +1859,10 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
     snode->current_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     snode->possibly_dirty = false;
     snode->hash = content_hash;
+    if (!surface_to_texture) {
+        tex_diag_dump_bytes(texture_vram_offset, texture_data, texture_length,
+                            &state, content_hash, "miss");
+    }
 
     VkColorFormatInfo vkf = kelvin_color_format_vk_map[state.color_format];
     assert(vkf.vk_format != 0);
