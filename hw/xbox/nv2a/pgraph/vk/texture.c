@@ -1659,6 +1659,15 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         key.scale = pg->surface_scale_factor;
     }
 
+    if (pgraph_vk_vram_watch_overlaps(texture_vram_offset, texture_length)) {
+        char m[96];
+        snprintf(m, sizeof(m), "TEX-BIND addr=%08llx len=%zx fmt=0x%02x s2t=%d",
+                 (unsigned long long)texture_vram_offset,
+                 (size_t)texture_length, state.color_format,
+                 (int)surface_to_texture);
+        pgraph_vk_vram_watch_event(d, m);
+    }
+
     uint64_t key_hash = fast_hash((void*)&key, sizeof(key));
     TextureBinding *snode;
     bool binding_found;

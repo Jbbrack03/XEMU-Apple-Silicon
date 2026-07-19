@@ -26,6 +26,7 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "hw/xbox/nv2a/pgraph/swizzle.h"
 #include "qemu/compiler.h"
+#include "system/physmem.h"
 #include "ui/xemu-settings.h"
 #include "renderer.h"
 
@@ -35,6 +36,277 @@ const int max_surface_frame_time_delta = 5;
 static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface);
 static void download_surface_deferred(NV2AState *d, SurfaceBinding *surface);
 /* Forward declaration — defined below, also called from texture.c */
+
+/* ---- s44 VRAM-watch diagnostics (env-gated, cold by default) -------------
+ * XEMU_VRAM_WATCH=<hex phys> [+ XEMU_VRAM_WATCH_SIZE=<hex>, default 0x4000]
+ * logs every renderer-side write into the watched guest-VRAM range
+ * (sync/deferred/GPU-queue surface downloads, the shelve 0xFF fill) plus the
+ * lifecycle of aliasing surfaces (create/upload/invalidate/shelve,
+ * range-download queries) and appends a content fingerprint of the range, to
+ * attribute the s43 dot-grid VRAM-population race (glyph texture left as a
+ * uniform 0xff000000 fill). Tag: nv2a-vramwatch. */
+#ifdef __ANDROID__
+#define VRAMWATCH_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "nv2a-vramwatch", __VA_ARGS__)
+#else
+#define VRAMWATCH_LOG(...) \
+    do { fprintf(stderr, "nv2a-vramwatch: " __VA_ARGS__); \
+         fprintf(stderr, "\n"); } while (0)
+#endif
+
+static bool vram_watch_params(uint64_t *addr, uint64_t *size)
+{
+    static int have = -1;
+    static uint64_t a, s;
+    if (have < 0) {
+        const char *e = getenv("XEMU_VRAM_WATCH");
+        have = (e && e[0]) ? 1 : 0;
+        if (have) {
+            a = strtoull(e, NULL, 16);
+            const char *es = getenv("XEMU_VRAM_WATCH_SIZE");
+            s = (es && es[0]) ? strtoull(es, NULL, 16) : 0x4000;
+        }
+    }
+    if (!have) {
+        return false;
+    }
+    *addr = a;
+    *size = s;
+    return true;
+}
+
+bool pgraph_vk_vram_watch_overlaps(hwaddr addr, size_t size)
+{
+    uint64_t wa, ws;
+    if (!vram_watch_params(&wa, &ws)) {
+        return false;
+    }
+    return (uint64_t)addr < wa + ws && wa < (uint64_t)addr + size;
+}
+
+void pgraph_vk_vram_watch_event(NV2AState *d, const char *msg)
+{
+    uint64_t wa, ws;
+    if (!vram_watch_params(&wa, &ws)) {
+        return;
+    }
+    const uint8_t *p = d->vram_ptr + wa;
+    uint64_t x = 0;
+    for (uint64_t i = 0; i + 8 <= ws; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        x = ((x << 1) | (x >> 63)) ^ v;
+    }
+    VRAMWATCH_LOG(
+        "%s | b0=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x "
+        "%02x%02x%02x%02x x=%016llx",
+        msg, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9],
+        p[10], p[11], p[12], p[13], p[14], p[15], (unsigned long long)x);
+}
+
+static void vram_watch_surface_event(NV2AState *d, const char *tag,
+                                     const SurfaceBinding *s)
+{
+    if (!pgraph_vk_vram_watch_overlaps(s->vram_addr, s->size)) {
+        return;
+    }
+    char m[160];
+    snprintf(m, sizeof(m),
+             "%s surf=%08llx sz=%llx %s fmt=%u %ux%u p=%u sw=%d dd=%d up=%d",
+             tag, (unsigned long long)s->vram_addr,
+             (unsigned long long)s->size, s->color ? "col" : "zta",
+             s->color ? s->shape.color_format : s->shape.zeta_format,
+             s->width, s->height, s->pitch, s->swizzle, (int)s->draw_dirty,
+             (int)s->upload_pending);
+    pgraph_vk_vram_watch_event(d, m);
+}
+
+/* ---- s44 guest-write shadow tracking (DIRTY_MEMORY_NV2A_SURF) ------------
+ * Root cause of the Halo dot-grid (s43/s44 attribution, caught live by the
+ * VRAM watch): the guest reallocates memory that a stale draw_dirty surface
+ * still shadows and writes new data there (the glyph atlas arrives by DMA,
+ * which the TCG access callback cannot see), then a texture bind triggers a
+ * download of the stale surface, depositing the old GPU content OVER the
+ * newer guest bytes. The dedicated NV2A_SURF dirty client records every
+ * guest write (CPU slow-path and DMA both set it); the surface machinery
+ * consumes it at content-sync points (create/upload/download), and every
+ * download-to-VRAM preserves the bytes of pages the guest wrote since the
+ * last sync — those bytes are newer than the surface's GPU content by
+ * construction. The GPU-queue download path cannot preserve bytes, so it
+ * declines eligibility when such pages exist and the CPU path runs instead.
+ */
+
+/* 1024 spans covers worst-case alternating dirty/clean pages for surfaces up
+ * to 8 MiB (2048 pages) — beyond every surface geometry this fork produces.
+ * On overflow the whole range is conservatively treated as guest-written
+ * (download discarded; review s44 defect: loses that download's GPU content,
+ * so keep the cap unreachable and log the event loudly). */
+#define VRAM_SURF_MAX_KEEP_SPANS 1024
+
+typedef struct GuestKeepSpan {
+    hwaddr addr; /* VRAM offset */
+    size_t len;
+} GuestKeepSpan;
+
+/* Read-only scan (same pattern as texture_dirty_peek): page-granular spans
+ * of [addr, addr+size) whose NV2A_SURF bit is set, clipped to the range.
+ * Returns the span count, or -1 if more than max_spans would be needed
+ * (caller must then treat the entire range as guest-written). */
+static int vram_surf_guest_written_spans(NV2AState *d, hwaddr addr,
+                                         size_t size, GuestKeepSpan *spans,
+                                         int max_spans)
+{
+    if (!size) {
+        return 0;
+    }
+    ram_addr_t ram_base = memory_region_get_ram_addr(d->vram);
+    unsigned long page = (ram_base + addr) >> TARGET_PAGE_BITS;
+    unsigned long end_page =
+        (TARGET_PAGE_ALIGN(ram_base + addr + size)) >> TARGET_PAGE_BITS;
+    int n = 0;
+    bool in_span = false;
+
+    RCU_READ_LOCK_GUARD();
+    DirtyMemoryBlocks *blocks =
+        qatomic_rcu_read(&ram_list.dirty_memory[DIRTY_MEMORY_NV2A_SURF]);
+
+    for (; page < end_page; page++) {
+        unsigned long idx = page / DIRTY_MEMORY_BLOCK_SIZE;
+        unsigned long ofs = page % DIRTY_MEMORY_BLOCK_SIZE;
+        bool set = test_bit(ofs, blocks->blocks[idx]);
+        hwaddr page_vram =
+            ((ram_addr_t)page << TARGET_PAGE_BITS) - ram_base;
+        if (set) {
+            if (!in_span) {
+                if (n == max_spans) {
+                    return -1;
+                }
+                spans[n].addr = MAX(page_vram, addr);
+                in_span = true;
+            }
+            hwaddr span_end =
+                MIN(page_vram + TARGET_PAGE_SIZE, addr + size);
+            spans[n].len = span_end - spans[n].addr;
+        } else if (in_span) {
+            n++;
+            in_span = false;
+        }
+    }
+    if (in_span) {
+        n++;
+    }
+    return n;
+}
+
+typedef struct GuestKeep {
+    GuestKeepSpan spans[VRAM_SURF_MAX_KEEP_SPANS];
+    int num;
+    uint8_t *saved;
+    hwaddr addr;
+    size_t size;
+} GuestKeep;
+
+/* Snapshot the guest-written bytes of [addr, addr+size) before a download
+ * writes the range. Pair with vram_surf_keep_end() after the write. */
+static void vram_surf_keep_begin(NV2AState *d, hwaddr addr, size_t size,
+                                 GuestKeep *k)
+{
+    k->addr = addr;
+    k->size = size;
+    k->saved = NULL;
+    k->num = vram_surf_guest_written_spans(d, addr, size, k->spans,
+                                           VRAM_SURF_MAX_KEEP_SPANS);
+    if (k->num < 0) {
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_WARN, "hakuX-vram",
+                            "guest-keep SPAN OVERFLOW addr=0x%" HWADDR_PRIx
+                            " sz=0x%zx — whole range treated guest-written",
+                            addr, size);
+#endif
+        k->spans[0].addr = addr;
+        k->spans[0].len = size;
+        k->num = 1;
+    }
+    if (k->num == 0) {
+        return;
+    }
+    size_t total = 0;
+    for (int i = 0; i < k->num; i++) {
+        total += k->spans[i].len;
+    }
+    k->saved = g_malloc(total);
+    size_t off = 0;
+    for (int i = 0; i < k->num; i++) {
+        memcpy(k->saved + off, d->vram_ptr + k->spans[i].addr,
+               k->spans[i].len);
+        off += k->spans[i].len;
+    }
+}
+
+/* Restore preserved guest bytes over the downloaded content and refresh the
+ * range's sync baseline. Returns true when guest bytes were restored — the
+ * caller must then treat guest RAM as newer than the surface image
+ * (upload_pending). */
+static bool vram_surf_keep_end(NV2AState *d, GuestKeep *k)
+{
+    bool any = k->num > 0;
+    if (k->saved) {
+        size_t off = 0;
+        for (int i = 0; i < k->num; i++) {
+            memcpy(d->vram_ptr + k->spans[i].addr, k->saved + off,
+                   k->spans[i].len);
+            off += k->spans[i].len;
+        }
+        g_free(k->saved);
+        k->saved = NULL;
+    }
+    memory_region_test_and_clear_dirty(d->vram, k->addr, k->size,
+                                       DIRTY_MEMORY_NV2A_SURF);
+    /* The restored guest bytes are STILL newer than any surface content —
+     * re-mark them, or a SECOND overlapping stale surface's download in the
+     * same batch clobbers them (adversarial review s44, HIGH: multi-alias
+     * overlap is this fork's normal regime). Only a create/upload sync
+     * consumes the marker authoritatively. Known accepted asymmetry: if the
+     * GPU re-draws these pages later WITHOUT the surface re-uploading first,
+     * the preserved guest bytes keep winning until the next upload/create
+     * sync — inherent to unknown DMA-vs-GPU ordering (review defect 3,
+     * documented). */
+    for (int i = 0; i < k->num; i++) {
+        memory_region_set_client_dirty(d->vram, k->spans[i].addr,
+                                       k->spans[i].len,
+                                       DIRTY_MEMORY_NV2A_SURF);
+    }
+    if (any) {
+#ifdef __ANDROID__
+        static int keep_log_count;
+        keep_log_count++;
+        if (keep_log_count <= 16 || keep_log_count % 256 == 0) {
+            __android_log_print(ANDROID_LOG_INFO, "hakuX-vram",
+                                "guest-keep #%d addr=0x%" HWADDR_PRIx
+                                " sz=0x%zx spans=%d",
+                                keep_log_count, k->addr, k->size, k->num);
+        }
+#endif
+        if (pgraph_vk_vram_watch_overlaps(k->addr, k->size)) {
+            char m[96];
+            snprintf(m, sizeof(m), "GUEST-KEEP addr=%08llx sz=%zx n=%d",
+                     (unsigned long long)k->addr, k->size, k->num);
+            pgraph_vk_vram_watch_event(d, m);
+        }
+    }
+    return any;
+}
+
+/* Refresh the sync baseline for a range whose RAM content the surface
+ * image has just consumed (create/upload) or fully redefined. */
+static void vram_surf_sync_range(NV2AState *d, hwaddr addr, size_t size)
+{
+    if (!size) {
+        return;
+    }
+    memory_region_test_and_clear_dirty(d->vram, addr, size,
+                                       DIRTY_MEMORY_NV2A_SURF);
+}
 
 static bool batch_overlap_downloads_enabled(void)
 {
@@ -302,6 +574,13 @@ bool pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg,
     PGRAPHVkState *r = pg->vk_renderer_state;
     SurfaceBinding *surface;
     bool found_overlap = false;
+
+    if (pgraph_vk_vram_watch_overlaps(start, size)) {
+        char m[96];
+        snprintf(m, sizeof(m), "RANGE-DL-QUERY start=%08llx sz=%llx",
+                 (unsigned long long)start, (unsigned long long)size);
+        pgraph_vk_vram_watch_event(d, m);
+    }
 
     /* If prior downloads were already submitted by a previous finish,
      * complete them now before recording new ones. This ensures the
@@ -637,6 +916,7 @@ static bool download_surface_record_deferred(NV2AState *d,
     dl->surface = surface;
 
     r->staging_dst_offset = aligned_offset + staging_size;
+    vram_watch_surface_event(d, "DL-DEF-RECORD", surface);
     return true;
 }
 
@@ -665,6 +945,21 @@ void pgraph_vk_complete_staged_downloads(NV2AState *d, PGRAPHVkState *r)
 
         void *src = staging->mapped + dl->staging_offset;
 
+        hwaddr wl_addr = (uint8_t *)dl->dest_ptr - d->vram_ptr;
+        size_t wl_size = (size_t)dl->pitch * dl->height;
+        bool wl_hit = pgraph_vk_vram_watch_overlaps(wl_addr, wl_size);
+        if (wl_hit) {
+            char m[128];
+            snprintf(m, sizeof(m),
+                     "DL-DEF-COMPLETE-PRE addr=%08llx sz=%zx %ux%u p=%u sw=%d",
+                     (unsigned long long)wl_addr, wl_size, dl->width,
+                     dl->height, dl->pitch, (int)dl->swizzle);
+            pgraph_vk_vram_watch_event(d, m);
+        }
+
+        GuestKeep keep;
+        vram_surf_keep_begin(d, wl_addr, wl_size, &keep);
+
         if (dl->swizzle) {
             g_autofree uint8_t *swizzle_buf =
                 (uint8_t *)g_malloc(dl->pitch * dl->height);
@@ -676,6 +971,15 @@ void pgraph_vk_complete_staged_downloads(NV2AState *d, PGRAPHVkState *r)
         } else {
             memcpy_image(dl->dest_ptr, src, dl->pitch,
                          dl->width * dl->bytes_per_pixel, dl->height);
+        }
+
+        if (vram_surf_keep_end(d, &keep) && dl->surface) {
+            dl->surface->upload_pending = true;
+            dl->surface->upload_reason |= SURFACE_UPLOAD_REASON_CPU_WRITE;
+        }
+
+        if (wl_hit) {
+            pgraph_vk_vram_watch_event(d, "DL-DEF-COMPLETE-POST");
         }
 
         /* Clean up surface flags now that data is in VRAM */
@@ -1219,7 +1523,16 @@ static void download_surface(NV2AState *d, SurfaceBinding *surface, bool force)
 
     // FIXME: Respect write enable at last TOU?
 
+    vram_watch_surface_event(d, "DL-SYNC-PRE", surface);
+    GuestKeep keep;
+    vram_surf_keep_begin(d, surface->vram_addr,
+                         (size_t)surface->pitch * surface->height, &keep);
     download_surface_to_buffer(d, surface, d->vram_ptr + surface->vram_addr);
+    if (vram_surf_keep_end(d, &keep)) {
+        surface->upload_pending = true;
+        surface->upload_reason |= SURFACE_UPLOAD_REASON_CPU_WRITE;
+    }
+    vram_watch_surface_event(d, "DL-SYNC-POST", surface);
 
     memory_region_set_client_dirty(d->vram, surface->vram_addr,
                                    surface->pitch * surface->height,
@@ -1493,6 +1806,17 @@ static bool download_surface_to_guest_vram(NV2AState *d,
         return false;
     }
 
+    /* The queued GPU copy would clobber guest bytes written since the last
+     * sync (it cannot preserve them); decline so the CPU download path runs
+     * and restores those bytes instead. */
+    GuestKeepSpan gv_span;
+    if (vram_surf_guest_written_spans(d, surface->vram_addr,
+                                      (size_t)surface->pitch *
+                                          surface->height,
+                                      &gv_span, 1) != 0) {
+        return false;
+    }
+
     bool packed_depth_stencil = !surface->color;
     bool downscale = pg->surface_scale_factor != 1;
     size_t guest_size = surface->pitch * surface->height;
@@ -1503,6 +1827,7 @@ static bool download_surface_to_guest_vram(NV2AState *d,
     ret_probe_mark_download(surface->vram_addr, guest_size);
     nv2a_profile_inc_counter(NV2A_PROF_SURF_DOWNLOAD);
     ND_BREAK_STAT(pg, nd_vram_dl);
+    vram_watch_surface_event(d, "DL-GPU-ENQ", surface);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
     pgraph_vk_begin_debug_marker(r, cmd, RGBA_RED,
                                  "download_surface_to_guest_vram");
@@ -2144,6 +2469,14 @@ static void surface_access_callback(void *opaque, MemoryRegion *mr, hwaddr addr,
     NV2AState *d = (NV2AState *)opaque;
     qemu_mutex_lock(&d->pgraph.lock);
 
+    if (pgraph_vk_vram_watch_overlaps(addr, len)) {
+        char m[96];
+        snprintf(m, sizeof(m), "CPU-%s addr=%08llx len=%llx",
+                 write ? "WRITE" : "READ", (unsigned long long)addr,
+                 (unsigned long long)len);
+        pgraph_vk_vram_watch_event(d, m);
+    }
+
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     bool guest_vram_wait =
         guest_vram_pending_range_overlaps(r, addr, len);
@@ -2305,6 +2638,7 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     GHashTable *surface_addr_map;
 
+    vram_watch_surface_event(d, "SURF-INVAL", surface);
     trace_nv2a_pgraph_surface_invalidated(surface->vram_addr);
 
     pgraph_vk_handle_trace(HT_SURF_INVAL, (uint64_t)surface,
@@ -2353,6 +2687,7 @@ static void shelve_surface(NV2AState *d, SurfaceBinding *surface)
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     GHashTable *surface_addr_map;
 
+    vram_watch_surface_event(d, "SURF-SHELVE", surface);
     pgraph_vk_handle_trace(HT_SURF_SHELVE, (uint64_t)surface,
                            (uint64_t)surface->image_view,
                            (uint64_t)surface->vram_addr);
@@ -2529,9 +2864,14 @@ static void surface_put(NV2AState *d, SurfaceBinding *surface)
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     GHashTable *surface_addr_map;
 
+    vram_watch_surface_event(d, "SURF-CREATE", surface);
     assert(pgraph_vk_surface_get(d, surface->vram_addr) == NULL);
 
     invalidate_overlapping_surfaces(d, surface);
+    /* Guest bytes written before this surface's GPU life began would have
+     * been overwritten by its rendering on real hardware; start the
+     * guest-write sync baseline at creation. */
+    vram_surf_sync_range(d, surface->vram_addr, surface->size);
     register_cpu_access_callback(d, surface);
 
     surface_addr_map = surface_addr_map_get(r, "surface_put", true);
@@ -2998,6 +3338,8 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
         return;
     }
 
+    vram_watch_surface_event(d, "SURF-UPLOAD", surface);
+
     if (surface->deferred_upload) {
         surface->deferred_upload = false;
         OPT_STAT_INC(dnu_forced_any);
@@ -3441,6 +3783,9 @@ void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
     pgraph_vk_end_debug_marker(r, cmd);
     pgraph_vk_end_nondraw_commands(pg, cmd);
 
+    /* The image has consumed the guest bytes; refresh the sync baseline. */
+    vram_surf_sync_range(d, surface->vram_addr, surface->size);
+
     surface->initialized = true;
 }
 
@@ -3823,6 +4168,25 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                         }
 #endif
                     }
+                    /* s44 review (both lenses, MEDIUM): when the GPU-queue
+                     * path declined because of guest-written spans, the
+                     * surface is otherwise download-worthy — CPU-download it
+                     * (the keep machinery preserves the guest bytes) instead
+                     * of dropping the GPU content to the 0xFF fill,
+                     * mirroring invalidate_overlapping_surfaces' fallback.
+                     * On success draw_dirty clears and the fill is skipped. */
+                    {
+                        GuestKeepSpan gw_probe;
+                        if (vram_surf_guest_written_spans(
+                                d, surface->vram_addr,
+                                (size_t)surface->pitch * surface->height,
+                                &gw_probe, 1) != 0) {
+                            download_surface_deferred(d, surface);
+                            pgraph_vk_download_surface_complete_deferred(d);
+                        }
+                    }
+
+                    if (surface->draw_dirty) {
                     if (r->in_command_buffer) {
                         OPT_STAT_INC(sd_eviction);
                         pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
@@ -3849,14 +4213,21 @@ static void update_surface_part(NV2AState *d, bool upload, bool color)
                      */
                     size_t region =
                         (size_t)surface->pitch * surface->height;
+                    vram_watch_surface_event(d, "SHELVE-FILL-FF-PRE",
+                                             surface);
+                    GuestKeep ff_keep;
+                    vram_surf_keep_begin(d, surface->vram_addr, region,
+                                         &ff_keep);
                     memset(d->vram_ptr + surface->vram_addr, 0xFF,
                            region);
+                    vram_surf_keep_end(d, &ff_keep);
                     memory_region_set_client_dirty(
                         d->vram, surface->vram_addr, region,
                         DIRTY_MEMORY_NV2A_TEX);
                     memory_region_set_client_dirty(
                         d->vram, surface->vram_addr, region,
                         DIRTY_MEMORY_VGA);
+                    }
                 }
                 if (!direct_invalidated) {
                     shelve_surface(d, surface);

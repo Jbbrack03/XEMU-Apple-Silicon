@@ -241,4 +241,8 @@ void pgraph_vk_image_blit(NV2AState *d)
                                    DIRTY_MEMORY_VGA);
     memory_region_set_client_dirty(d->vram, dest_addr, clipped_dest_size,
                                    DIRTY_MEMORY_NV2A_TEX);
+    /* Blit output is guest-authored content: a later download of a stale
+     * shadowing surface must not overwrite it (DIRTY_MEMORY_NV2A_SURF). */
+    memory_region_set_client_dirty(d->vram, dest_addr, clipped_dest_size,
+                                   DIRTY_MEMORY_NV2A_SURF);
 }

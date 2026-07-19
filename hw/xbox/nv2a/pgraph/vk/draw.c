@@ -5764,6 +5764,17 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter)
 
     r->clear_parameter = parameter;
 
+    if (pgraph_vk_vram_watch_overlaps(binding->vram_addr, binding->size)) {
+        char m[128];
+        snprintf(m, sizeof(m),
+                 "CLEAR surf=%08llx sz=%llx param=%08x color=%08x %s",
+                 (unsigned long long)binding->vram_addr,
+                 (unsigned long long)binding->size, parameter,
+                 pgraph_vk_reg_r(pg, NV_PGRAPH_COLORCLEARVALUE),
+                 binding->color ? "col" : "zta");
+        pgraph_vk_vram_watch_event(d, m);
+    }
+
     uint32_t clearrectx = pgraph_vk_reg_r(pg, NV_PGRAPH_CLEARRECTX);
     uint32_t clearrecty = pgraph_vk_reg_r(pg, NV_PGRAPH_CLEARRECTY);
 

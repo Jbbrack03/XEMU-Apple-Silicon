@@ -1571,6 +1571,9 @@ void pgraph_vk_wait_for_surface_download(SurfaceBinding *e);
 bool pgraph_vk_prerecord_display_download(NV2AState *d);
 void pgraph_vk_download_dirty_surfaces(NV2AState *d);
 bool pgraph_vk_download_surfaces_in_range_if_dirty(PGRAPHState *pg, hwaddr start, hwaddr size);
+/* s44 VRAM-watch diagnostics (surface.c; cold unless XEMU_VRAM_WATCH set) */
+bool pgraph_vk_vram_watch_overlaps(hwaddr addr, size_t size);
+void pgraph_vk_vram_watch_event(NV2AState *d, const char *msg);
 void pgraph_vk_upload_surface_data(NV2AState *d, SurfaceBinding *surface,
                                    bool force);
 bool pgraph_vk_defer_new_surface_upload_enabled(void);
