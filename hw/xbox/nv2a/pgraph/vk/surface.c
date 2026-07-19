@@ -2263,6 +2263,9 @@ static void unregister_cpu_access_callback(NV2AState *d,
 
 static void bind_surface(PGRAPHVkState *r, SurfaceBinding *surface)
 {
+    pgraph_vk_handle_trace(surface->color ? HT_BIND_COLOR : HT_BIND_ZETA,
+                           (uint64_t)surface, (uint64_t)surface->image_view,
+                           (uint64_t)surface->vram_addr);
     VK_LOG("bind_surface: %s addr=0x%x %ux%u fmt=%d",
            surface->color ? "COLOR" : "ZETA", surface->vram_addr,
            surface->width, surface->height, surface->host_fmt.vk_format);
@@ -2303,6 +2306,10 @@ static void invalidate_surface(NV2AState *d, SurfaceBinding *surface)
     GHashTable *surface_addr_map;
 
     trace_nv2a_pgraph_surface_invalidated(surface->vram_addr);
+
+    pgraph_vk_handle_trace(HT_SURF_INVAL, (uint64_t)surface,
+                           (uint64_t)surface->image_view,
+                           (uint64_t)surface->vram_addr);
 
     if (r->in_command_buffer &&
         surface->draw_time >= r->command_buffer_start_time) {
@@ -2345,6 +2352,10 @@ static void shelve_surface(NV2AState *d, SurfaceBinding *surface)
 {
     PGRAPHVkState *r = d->pgraph.vk_renderer_state;
     GHashTable *surface_addr_map;
+
+    pgraph_vk_handle_trace(HT_SURF_SHELVE, (uint64_t)surface,
+                           (uint64_t)surface->image_view,
+                           (uint64_t)surface->vram_addr);
 
     if (surface == r->color_binding) {
         unbind_surface(d, true);
@@ -2475,6 +2486,8 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
                                    entry);
             } else {
                 destroy_surface_image(r, other_surface);
+                pgraph_vk_handle_trace(HT_SURF_FREE, (uint64_t)other_surface,
+                                       0, 3);
                 g_free(other_surface);
             }
         }
@@ -2504,6 +2517,8 @@ static void invalidate_overlapping_surfaces(NV2AState *d,
             QTAILQ_REMOVE(&r->shelved_surfaces, other_surface, entry);
             deferred_downloads_clear_surface(r, other_surface);
             destroy_surface_image(r, other_surface);
+            pgraph_vk_handle_trace(HT_SURF_FREE, (uint64_t)other_surface,
+                                   0, 4);
             g_free(other_surface);
         }
     }
@@ -2789,6 +2804,8 @@ static void create_surface_image(PGRAPHState *pg, SurfaceBinding *surface)
     };
     VK_CHECK(vkCreateImageView(r->device, &image_view_create_info, NULL,
                                &surface->image_view));
+    pgraph_vk_handle_trace(HT_VIEW_CREATE, (uint64_t)surface->image_view,
+                           (uint64_t)surface->image, (uint64_t)surface);
 
     ND_BREAK_STAT(pg, nd_surf_create);
     VkCommandBuffer cmd = pgraph_vk_begin_nondraw_commands(pg);
@@ -2827,6 +2844,8 @@ static void migrate_surface_image(SurfaceBinding *dst, SurfaceBinding *src)
 
 static void destroy_surface_image(PGRAPHVkState *r, SurfaceBinding *surface)
 {
+    pgraph_vk_handle_trace(HT_VIEW_DESTROY, (uint64_t)surface->image_view,
+                           (uint64_t)surface->image, (uint64_t)surface);
     vkDestroyImageView(r->device, surface->image_view, NULL);
     surface->image_view = VK_NULL_HANDLE;
 
@@ -2902,6 +2921,7 @@ static void prune_invalid_surfaces(PGRAPHVkState *r, int keep)
             QTAILQ_REMOVE(&r->invalid_surfaces, surface, entry);
             deferred_downloads_clear_surface(r, surface);
             destroy_surface_image(r, surface);
+            pgraph_vk_handle_trace(HT_SURF_FREE, (uint64_t)surface, 0, 0);
             g_free(surface);
         }
     }
@@ -2934,6 +2954,7 @@ static void expire_old_surfaces(NV2AState *d)
             QTAILQ_REMOVE(&r->shelved_surfaces, s, entry);
             deferred_downloads_clear_surface(r, s);
             destroy_surface_image(r, s);
+            pgraph_vk_handle_trace(HT_SURF_FREE, (uint64_t)s, 0, 1);
             g_free(s);
         } else {
             shelved_count++;
@@ -4201,6 +4222,7 @@ void pgraph_vk_surface_flush(NV2AState *d)
         QTAILQ_REMOVE(&r->shelved_surfaces, s, entry);
         deferred_downloads_clear_surface(r, s);
         destroy_surface_image(r, s);
+        pgraph_vk_handle_trace(HT_SURF_FREE, (uint64_t)s, 0, 2);
         g_free(s);
     }
 

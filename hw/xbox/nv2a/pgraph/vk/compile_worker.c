@@ -133,6 +133,8 @@ static void process_pipeline_job(PGRAPHVkState *r, CompileJob *job)
         &pipeline);
 
     if (result == VK_SUCCESS) {
+        pgraph_vk_handle_trace(HT_PIPE_CREATE, (uint64_t)pipeline,
+                               (uint64_t)target, 2);
         target->pipeline = pipeline;
         target->layout = p->layout;
         target->render_pass = p->render_pass;

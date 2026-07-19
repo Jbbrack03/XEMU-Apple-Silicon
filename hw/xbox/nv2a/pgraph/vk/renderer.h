@@ -1667,6 +1667,21 @@ void pgraph_vk_clear_surface(NV2AState *d, uint32_t parameter);
 void pgraph_vk_draw_begin(NV2AState *d);
 void pgraph_vk_draw_end(NV2AState *d);
 void pgraph_vk_finish(PGRAPHState *pg, FinishReason why);
+
+/* s42 diagnostic: lock-free ring of recent Vulkan handle lifecycle events,
+ * dumped from the SIGSEGV crash handler to attribute stale-handle driver
+ * faults (tu_CmdBindPipeline / tu_CreateFramebuffer). Env-gated
+ * XEMU_HANDLE_TRACE=1; recording is a single relaxed ring write when on,
+ * zero work when off. Implemented in vk/draw.c. */
+enum {
+    HT_VIEW_CREATE = 1, HT_VIEW_DESTROY,
+    HT_FB_TRY, HT_FB_CREATE, HT_FB_DESTROY,
+    HT_PIPE_CREATE, HT_PIPE_DESTROY, HT_PIPE_BIND,
+    HT_SURF_INVAL, HT_SURF_SHELVE, HT_SURF_FREE,
+    HT_BIND_COLOR, HT_BIND_ZETA,
+};
+void pgraph_vk_handle_trace(uint32_t op, uint64_t a, uint64_t b, uint64_t c);
+void pgraph_vk_handle_trace_dump(void);
 void pgraph_vk_flush_all_frames(PGRAPHState *pg);
 void pgraph_vk_flush_draw(NV2AState *d);
 void pgraph_vk_flush_draw_queue(NV2AState *d);

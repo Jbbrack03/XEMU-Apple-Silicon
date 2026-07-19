@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <unwind.h>
 
+/* s42 diagnostic: recent Vulkan handle-lifecycle ring, defined in
+ * hw/xbox/nv2a/pgraph/vk/draw.c (same .so). Env-gated; no-op when off. */
+extern "C" void pgraph_vk_handle_trace_dump(void);
+
 namespace {
 constexpr const char* kCrashTag = "xemu-android";
 constexpr size_t kPathMax = 512;
@@ -74,14 +78,18 @@ static void MarkInlineAioRequired() {
 }
 
 static void CrashHandler(int sig, siginfo_t* info, void* ucontext) {
-  (void)info;
   (void)ucontext;
   if (sig == SIGILL) {
     MarkInlineAioRequired();
   }
   __android_log_print(ANDROID_LOG_ERROR, kCrashTag,
-                      "Caught signal %d in tid %d", sig, GetTid());
+                      "Caught signal %d in tid %d (fault addr %p)", sig,
+                      GetTid(), info ? info->si_addr : nullptr);
   LogBacktrace();
+  /* s42: dump the recent Vulkan handle-lifecycle ring (env-gated
+   * XEMU_HANDLE_TRACE; no-op when off) so a stale-handle driver fault can be
+   * matched against the destroy that freed it. */
+  pgraph_vk_handle_trace_dump();
   signal(sig, SIG_DFL);
   raise(sig);
 }

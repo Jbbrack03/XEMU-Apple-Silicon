@@ -48,6 +48,103 @@ struct OptBisectStats g_opt_stats;
 #define VAF_LOG(...) do { fprintf(stderr, "[xemu-vaf] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif
 
+/* --- s42 handle-lifecycle trace (see renderer.h) ------------------------- */
+typedef struct {
+    uint64_t seq;
+    uint32_t op;
+    uint32_t tid;
+    uint64_t a, b, c;
+} HTEntry;
+#define HT_RING_SIZE 8192
+static HTEntry ht_ring[HT_RING_SIZE];
+static uint64_t ht_seq;
+static int ht_enabled = -1;
+
+static bool ht_on(void)
+{
+    if (ht_enabled < 0) {
+        const char *env = getenv("XEMU_HANDLE_TRACE");
+        ht_enabled = (env && env[0] == '1') ? 1 : 0;
+    }
+    return ht_enabled == 1;
+}
+
+void pgraph_vk_handle_trace(uint32_t op, uint64_t a, uint64_t b, uint64_t c)
+{
+    if (!ht_on()) {
+        return;
+    }
+    uint64_t s = qatomic_fetch_inc(&ht_seq);
+    HTEntry *e = &ht_ring[s % HT_RING_SIZE];
+    e->seq = s;
+    e->op = op;
+#ifdef __ANDROID__
+    e->tid = (uint32_t)gettid();
+#else
+    e->tid = 0;
+#endif
+    e->a = a;
+    e->b = b;
+    e->c = c;
+}
+
+static const char *ht_op_name(uint32_t op)
+{
+    switch (op) {
+    case HT_VIEW_CREATE:  return "VIEW_CREATE";
+    case HT_VIEW_DESTROY: return "VIEW_DESTROY";
+    case HT_FB_TRY:       return "FB_TRY";
+    case HT_FB_CREATE:    return "FB_CREATE";
+    case HT_FB_DESTROY:   return "FB_DESTROY";
+    case HT_PIPE_CREATE:  return "PIPE_CREATE";
+    case HT_PIPE_DESTROY: return "PIPE_DESTROY";
+    case HT_PIPE_BIND:    return "PIPE_BIND";
+    case HT_SURF_INVAL:   return "SURF_INVAL";
+    case HT_SURF_SHELVE:  return "SURF_SHELVE";
+    case HT_SURF_FREE:    return "SURF_FREE";
+    case HT_BIND_COLOR:   return "BIND_COLOR";
+    case HT_BIND_ZETA:    return "BIND_ZETA";
+    default:              return "?";
+    }
+}
+
+/* Called from the app SIGSEGV handler — best-effort, mirrors the handler's
+ * existing use of __android_log_print. Dumps the most recent 512 events. */
+void pgraph_vk_handle_trace_dump(void)
+{
+    if (!ht_on()) {
+        return;
+    }
+    uint64_t end = qatomic_read(&ht_seq);
+    uint64_t n = MIN(end, (uint64_t)512);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "xemu-handle-trace",
+                        "dump: last %llu of %llu events",
+                        (unsigned long long)n, (unsigned long long)end);
+#endif
+    for (uint64_t s = end - n; s < end; s++) {
+        HTEntry *e = &ht_ring[s % HT_RING_SIZE];
+        if (e->seq != s) {
+            continue; /* overwritten or torn — skip */
+        }
+#ifdef __ANDROID__
+        __android_log_print(ANDROID_LOG_ERROR, "xemu-handle-trace",
+                            "#%llu tid=%u %s a=0x%llx b=0x%llx c=0x%llx",
+                            (unsigned long long)e->seq, e->tid,
+                            ht_op_name(e->op), (unsigned long long)e->a,
+                            (unsigned long long)e->b, (unsigned long long)e->c);
+#else
+        fprintf(stderr, "ht #%llu %s a=0x%llx b=0x%llx c=0x%llx\n",
+                (unsigned long long)e->seq, ht_op_name(e->op),
+                (unsigned long long)e->a, (unsigned long long)e->b,
+                (unsigned long long)e->c);
+#endif
+    }
+}
+#define HT(op, a, b, c) \
+    pgraph_vk_handle_trace((op), (uint64_t)(a), (uint64_t)(b), (uint64_t)(c))
+/* ------------------------------------------------------------------------- */
+
 static struct {
     int sfp_vaf_hit;
     int sfp_vaf_miss;
@@ -439,7 +536,21 @@ static void pipeline_cache_entry_init(Lru *lru, LruNode *node,
     PipelineBinding *snode = container_of(node, PipelineBinding, node);
     snode->layout = VK_NULL_HANDLE;
     snode->pipeline = VK_NULL_HANDLE;
+    snode->render_pass = VK_NULL_HANDLE;
     snode->draw_time = 0;
+    snode->has_dynamic_line_width = false;
+#if OPT_ASYNC_COMPILE
+    /* s42 CRASH FIX: the node pool is plain g_malloc_n heap and this init
+     * never cleared `pending`. A fresh node with garbage-true `pending` takes
+     * the compile-time pending path in create_pipeline (NOT gated on the
+     * runtime async toggle), installing a binding with pipeline ==
+     * VK_NULL_HANDLE and an unset key; with async compile OFF, begin_draw's
+     * runtime-gated skip does not run and vkCmdBindPipeline(NULL) /
+     * a garbage-key render pass crashes the driver (the historical
+     * tu_CmdBindPipeline / tu_CreateFramebuffer SIGSEGVs, ~15%,
+     * heap-content-dependent). */
+    snode->pending = false;
+#endif
 }
 
 #if OPT_ASYNC_COMPILE
@@ -460,6 +571,7 @@ static void pipeline_cache_entry_post_evict(Lru *lru, LruNode *node)
            "Pipeline evicted while in use!");
 
     if (snode->pipeline != VK_NULL_HANDLE) {
+        HT(HT_PIPE_DESTROY, snode->pipeline, snode, snode->draw_time);
         vkDestroyPipeline(r->device, snode->pipeline, NULL);
         snode->pipeline = VK_NULL_HANDLE;
     }
@@ -717,6 +829,7 @@ void pgraph_vk_finalize_pipelines(PGRAPHState *pg)
             r->frame_submitted[i] = false;
         }
         for (int j = 0; j < r->deferred_framebuffer_count[i]; j++) {
+            HT(HT_FB_DESTROY, r->deferred_framebuffers[i][j], 0, 1);
             vkDestroyFramebuffer(r->device, r->deferred_framebuffers[i][j], NULL);
         }
         r->deferred_framebuffer_count[i] = 0;
@@ -905,10 +1018,14 @@ static void create_frame_buffer(PGRAPHState *pg)
         .height = h,
         .layers = 1,
     };
+    /* Recorded BEFORE the call: on a tu_CreateFramebuffer SIGSEGV this is the
+     * final ring entry = the exact inputs of the crashing create. */
+    HT(HT_FB_TRY, r->render_pass, color_view, zeta_view);
     VK_CHECK(vkCreateFramebuffer(r->device, &create_info, NULL,
                                  &r->framebuffers[r->framebuffer_index++]));
 
     VkFramebuffer fb = r->framebuffers[r->framebuffer_index - 1];
+    HT(HT_FB_CREATE, fb, color_view, zeta_view);
     r->current_framebuffer = fb;
 
     if (r->fb_cache_count < FB_CACHE_MAX) {
@@ -929,6 +1046,7 @@ static void destroy_framebuffers(PGRAPHState *pg)
     PGRAPHVkState *r = pg->vk_renderer_state;
 
     for (int i = 0; i < r->framebuffer_index; i++) {
+        HT(HT_FB_DESTROY, r->framebuffers[i], 0, 0);
         vkDestroyFramebuffer(r->device, r->framebuffers[i], NULL);
         r->framebuffers[i] = VK_NULL_HANDLE;
     }
@@ -1118,6 +1236,7 @@ static void create_clear_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_info, NULL, &pipeline));
 
+    HT(HT_PIPE_CREATE, pipeline, snode, 0);
     snode->pipeline = pipeline;
     snode->layout = layout;
     snode->render_pass = pipeline_info.renderPass;
@@ -1829,6 +1948,7 @@ static void create_pipeline(PGRAPHState *pg)
     VK_CHECK(vkCreateGraphicsPipelines(r->device, r->vk_pipeline_cache, 1,
                                        &pipeline_create_info, NULL, &pipeline));
 
+    HT(HT_PIPE_CREATE, pipeline, snode, 1);
     snode->pipeline = pipeline;
     snode->layout = layout;
     snode->render_pass = render_pass;
@@ -2311,6 +2431,7 @@ void pgraph_vk_flush_all_frames(PGRAPHState *pg)
             gpu_ts_readback(r, i);
             r->frame_submitted[i] = false;
             for (int j = 0; j < r->deferred_framebuffer_count[i]; j++) {
+                HT(HT_FB_DESTROY, r->deferred_framebuffers[i][j], 0, 2);
                 vkDestroyFramebuffer(r->device,
                                      r->deferred_framebuffers[i][j], NULL);
             }
@@ -2720,6 +2841,8 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
                     pgraph_vk_complete_staged_downloads(d, r);
                 }
                 for (int i = 0; i < r->deferred_framebuffer_count[next_frame]; i++) {
+                    HT(HT_FB_DESTROY,
+                       r->deferred_framebuffers[next_frame][i], 0, 3);
                     vkDestroyFramebuffer(r->device,
                                          r->deferred_framebuffers[next_frame][i],
                                          NULL);
@@ -3320,6 +3443,35 @@ mfp_miss: (void)0;
     }
 #endif
 
+#if OPT_ASYNC_COMPILE /* gated like the callers that honor async_draw_skip */
+    /* s42 hardening (runtime-ungated): NEVER hand the driver a
+     * VK_NULL_HANDLE pipeline — any path that leaves the binding uncompiled
+     * must skip the draw, not crash the process (tu_CmdBindPipeline
+     * dereferences the handle). Complements the entry-init `pending` fix.
+     * Mirrors the async skip epilogue above (async_draw_skip routes callers
+     * past the draw). */
+    if (!pg->clearing &&
+        (!r->pipeline_binding ||
+         r->pipeline_binding->pipeline == VK_NULL_HANDLE)) {
+        static unsigned null_pipeline_skips;
+        null_pipeline_skips++;
+        if (null_pipeline_skips <= 4 || (null_pipeline_skips % 256) == 0) {
+#ifdef __ANDROID__
+            __android_log_print(ANDROID_LOG_WARN, "xemu-vk",
+                                "begin_pre_draw: NULL pipeline binding=%p — "
+                                "skipping draw (#%u)",
+                                (void *)r->pipeline_binding,
+                                null_pipeline_skips);
+#endif
+        }
+        OPT_STAT_INC(draws_skipped_pending);
+        r->async_draw_skip = true;
+        r->pre_draw_skipped = true;
+        pgraph_vk_ensure_command_buffer(pg);
+        return;
+    }
+#endif /* OPT_ASYNC_COMPILE (s42 hardening) */
+
     {
         NV2A_PHASE_TIMER_BEGIN(draw_setup);
         bool render_pass_dirty = r->pipeline_binding->render_pass != r->render_pass;
@@ -3405,6 +3557,7 @@ static void begin_draw(PGRAPHState *pg)
 
     if (must_bind_pipeline) {
         nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_BIND);
+        HT(HT_PIPE_BIND, r->pipeline_binding->pipeline, r->pipeline_binding, 0);
         vkCmdBindPipeline(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           r->pipeline_binding->pipeline);
         r->pipeline_binding_changed = false;
@@ -4844,6 +4997,7 @@ static void emit_reorder_entry(PGRAPHState *pg, ReorderWindowEntry *e,
 
     if (pipeline_changed) {
         nv2a_profile_inc_counter(NV2A_PROF_PIPELINE_BIND);
+        HT(HT_PIPE_BIND, e->pipeline_binding->pipeline, e->pipeline_binding, 1);
         vkCmdBindPipeline(r->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           e->pipeline_binding->pipeline);
         e->pipeline_binding->draw_time = pg->draw_time;
