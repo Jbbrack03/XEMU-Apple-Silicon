@@ -19,6 +19,46 @@
 
 #include "renderer.h"
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#define REPORT_DIAG_LOG(...) \
+    __android_log_print(ANDROID_LOG_INFO, "xemu-report-diag", __VA_ARGS__)
+#else
+#define REPORT_DIAG_LOG(...) fprintf(stderr, "xemu-report-diag: " __VA_ARGS__)
+#endif
+
+/* s42 diagnostic (env XEMU_REPORT_DIAG=1, cold when unset): trace queued-report
+ * starvation — a report sitting in report_queue while no drain path fires
+ * leaves the guest polling its report address forever (vCPU tight-spin). */
+static bool report_diag_enabled(void)
+{
+    static bool initialized = false;
+    static bool enabled = false;
+    if (!initialized) {
+        const char *env = getenv("XEMU_REPORT_DIAG");
+        enabled = env && env[0] == '1';
+        initialized = true;
+    }
+    return enabled;
+}
+
+/* s42 fix (default on; XEMU_REPORT_STARVATION_FIX=0 = exact rollback): a
+ * queued report must always have a drain path once the FIFO idles, or the
+ * guest polls its report address forever. */
+static bool report_starvation_fix_enabled(void)
+{
+    static bool initialized = false;
+    static bool enabled = true;
+    if (!initialized) {
+        const char *env = getenv("XEMU_REPORT_STARVATION_FIX");
+        if (env && env[0] == '0') {
+            enabled = false;
+        }
+        initialized = true;
+    }
+    return enabled;
+}
+
 void pgraph_vk_init_reports(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -152,6 +192,17 @@ void pgraph_vk_get_report(NV2AState *d, uint32_t parameter)
 
     r->new_query_needed = true;
 
+    if (report_diag_enabled()) {
+        static unsigned enq_count;
+        enq_count++;
+        if (enq_count <= 4 || (enq_count % 256) == 0) {
+            REPORT_DIAG_LOG("get_report #%u qc=%d in_cb=%d nqif=%d draws=%d",
+                            enq_count, report->query_count,
+                            r->in_command_buffer, r->num_queries_in_flight,
+                            r->draws_in_cb);
+        }
+    }
+
     if (early_report_submit_enabled()) {
         OPT_STAT_INC(ers_seen);
         /* The query-pool guard mirrors the stall-skip guard below: an early
@@ -255,6 +306,22 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
         return;
     }
 
+    /* s42 starvation guard: with the FIFO idle (get==put) and a report
+     * queued but NO open CB, nothing below can ever drain it — the STALLED
+     * finish requires an open CB, and a polling guest issues no further
+     * methods to open one. Every query belonging to the queued reports was
+     * submitted with a previous finish (baseline drains on every finish, so
+     * nqif==0 here and the report only needs the accumulated zpass result
+     * written out). Same shape as the early-submit no-CB drain above, made
+     * unconditional. Without this the guest spins on the report address
+     * forever (s42 disc-swap hang, 4/15 tours). */
+    if (report_starvation_fix_enabled() &&
+        *dma_get == *dma_put && !r->in_command_buffer &&
+        !QSIMPLEQ_EMPTY(&r->report_queue)) {
+        pgraph_vk_process_pending_reports_internal(d);
+        return;
+    }
+
     if (*dma_get == *dma_put && r->in_command_buffer) {
         /* This preemptive drain-finish exists only to service pending
          * occlusion reports: every finish runs process_pending_reports_
@@ -273,11 +340,42 @@ void pgraph_vk_process_pending_reports(NV2AState *d)
             OPT_STAT_INC(stall_skipped_empty);
             return;
         }
-        if (pg->draw_time != r->last_stall_draw_time) {
+        /* s42 starvation guard, open-CB variant: stall-batching exists to
+         * skip redundant EMPTY-queue stall finishes; it must never gate the
+         * drain of an actually-queued report (the guest may already be
+         * polling it, issuing no further draws to advance draw_time). */
+        if (pg->draw_time != r->last_stall_draw_time ||
+            (report_starvation_fix_enabled() &&
+             !QSIMPLEQ_EMPTY(&r->report_queue))) {
             pgraph_vk_finish(pg, VK_FINISH_REASON_STALLED);
             r->last_stall_draw_time = pg->draw_time;
         } else {
             OPT_STAT_INC(stall_batched);
+        }
+    }
+
+    if (report_diag_enabled()) {
+        /* Any report still queued when this pass ends took a non-draining
+         * path; if the guest is polling that report, no further drain can
+         * ever fire (no new methods -> no finish) = permanent starvation. */
+        static unsigned starve_count;
+        if (!QSIMPLEQ_EMPTY(&r->report_queue)) {
+            starve_count++;
+            if (starve_count <= 8 || (starve_count % 512) == 0) {
+                int depth = 0;
+                QueryReport *qr;
+                QSIMPLEQ_FOREACH(qr, &r->report_queue, entry) { depth++; }
+                REPORT_DIAG_LOG(
+                    "starved pass #%u depth=%d in_cb=%d get=%08x put=%08x "
+                    "draw_time=%" PRId64 " last_stall=%" PRId64 " nqif=%d",
+                    starve_count, depth, r->in_command_buffer, *dma_get,
+                    *dma_put, (int64_t)pg->draw_time,
+                    (int64_t)r->last_stall_draw_time,
+                    r->num_queries_in_flight);
+            }
+        } else if (starve_count) {
+            REPORT_DIAG_LOG("starvation cleared after %u passes", starve_count);
+            starve_count = 0;
         }
     }
 }
