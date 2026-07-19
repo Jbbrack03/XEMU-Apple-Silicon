@@ -1293,6 +1293,15 @@ target_link_libraries(xr_shell
   ${jnigraphics-lib}
   ${m-lib}
 )
+# --- s42 diagnostic: ASan build (gradle -PxemuAsan → -DXEMU_ASAN=ON).
+# Instruments xemu_core + the xemu shared lib only; the preloaded runtime
+# (wrap.sh) intercepts malloc/free process-wide regardless. ---
+if(XEMU_ASAN)
+  target_compile_options(xemu_core PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+  target_compile_options(xemu PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+  target_link_options(xemu PRIVATE -fsanitize=address)
+endif()
+
 # native_app_glue needs this to keep ANativeActivity_onCreate
 set_property(TARGET xr_shell APPEND_STRING PROPERTY
   LINK_FLAGS " -u ANativeActivity_onCreate")

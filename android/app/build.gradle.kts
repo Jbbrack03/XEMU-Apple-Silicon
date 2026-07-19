@@ -50,7 +50,20 @@ android {
           "-DCMAKE_CXX_FLAGS_RELEASE=-O2 -g0 -fvisibility=hidden",
         )
         cppFlags += listOf("-std=c++17", "-fexceptions", "-frtti")
+        // s42 diagnostic: ./gradlew assembleRelease -PxemuAsan builds libxemu
+        // with ASan (+ wrap.sh + runtime packaged below).
+        if (project.hasProperty("xemuAsan")) {
+          arguments += "-DXEMU_ASAN=ON"
+        }
       }
+    }
+  }
+
+  // s42 diagnostic: package wrap.sh (APK lib/arm64-v8a/) + the ASan runtime.
+  if (project.hasProperty("xemuAsan")) {
+    sourceSets.getByName("main") {
+      resources.srcDir("src/main/asan/res")
+      jniLibs.srcDir("src/main/asan/jniLibs")
     }
   }
 
