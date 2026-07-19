@@ -107,7 +107,50 @@ static void dsp_dma_run(DSPDMAState *s)
         return;
     }
 
+    /* s42 follow-up: the descriptor chain is guest-writable; a cyclic list
+     * (a block whose next pointer revisits an earlier block without EOL)
+     * would spin this loop forever on the DSP thread — the same
+     * whole-emulator wedge class as the s42 gp_ep.c degenerate-buffer hang
+     * (thread holds locks the vCPU then blocks on under the BQL). The valid
+     * block-start addresses across the X/Y/P windows number ~12270 (each
+     * block needs addr+6 in-window), so any legitimate acyclic chain — which
+     * by pigeonhole cannot revisit an address without forming a cycle — is
+     * far shorter than this 16384 bound. On trip: warn once, then force
+     * end-of-list completion. Setting DMA_CONTROL_STOPPED alone is NOT enough
+     * — GP/EP microcode commonly polls the EOL interrupt (dsp.c reads dma.eol
+     * as INTERRUPT_DMA_EOL) and is driven by a spin-until-self-halt loop on
+     * the lock-holding APU thread (gp_ep.c). Leaving eol=false there would
+     * just relocate the same whole-emulator wedge one level up (the DSP never
+     * sees completion, never halts, the APU thread spins holding d->lock).
+     * So assert eol like a real forced end-of-list. */
+    unsigned int blocks_processed = 0;
+    const unsigned int max_blocks = 0x4000;
+
     while (!(s->next_block & NODE_POINTER_EOL)) {
+        if (++blocks_processed > max_blocks) {
+            /* Rate-limited (not one-shot-forever): a re-issued ACTION_START on
+             * a cyclic list re-walks this bound each time, so recurring trips
+             * matter — log the 1st and then periodically with a running count
+             * so a compounding-START stall stays visible without spamming.
+             * NOTE (adversarial review, not fixed here): this bounds block
+             * COUNT, not per-block work; a worst-case max-count cyclic list can
+             * still cost ~0.5-1 s of APU-thread time under d->lock per trip
+             * (finite, vs the pre-change INFINITE loop). Acceptable for this
+             * malformed-guest safety valve; a per-block work budget would touch
+             * the audio hot path and needs its own review. */
+            static unsigned int trips;
+            if (trips == 0 || (trips & (trips - 1)) == 0) {
+                fprintf(stderr, "dsp_dma_run: descriptor chain exceeded %u "
+                                "blocks (cyclic guest list?) next_block=0x%x "
+                                "trip#%u; forcing end-of-list\n",
+                        max_blocks, s->next_block, trips + 1);
+            }
+            trips++;
+            s->control |= DMA_CONTROL_STOPPED;
+            s->control &= ~DMA_CONTROL_RUNNING;
+            s->eol = true;
+            break;
+        }
         uint32_t addr = s->next_block & NODE_POINTER_VAL;
         uint32_t block_addr = 0;
         int block_space = DSP_SPACE_X;
