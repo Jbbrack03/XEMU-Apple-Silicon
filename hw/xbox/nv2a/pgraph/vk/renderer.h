@@ -195,6 +195,8 @@ struct OptBisectStats {
     int tex_up_drain;     /* flush_all_frames forced by in-flight re-upload */
     int tex_trim_calls;   /* budget-pressure trim invocations */
     int tex_trim_evicted; /* entries evicted by budget trims */
+    int tex_lru_drains;   /* full-idle recoveries after no evictable slot */
+    int tex_lru_failures; /* recovery still could not allocate a slot */
     int tex_cache_used;   /* texture_cache.num_used at last trim/check */
     int budget_pct_max;   /* max heap allocation/budget ratio x100 seen */
     int predownload_hits;
@@ -1463,6 +1465,62 @@ static inline unsigned long *get_uploaded_bitmap(PGRAPHVkState *r)
     return r->frame_staging[r->current_frame].uploaded_bitmap;
 }
 
+/* s45 fix: the 64 MiB per-slot vertex_ram shadow propagates written bytes only
+ * ONE hop at frame rotation, but its page-presence bitmap was copied IN FULL to
+ * the next slot — so a slot >=2 hops from the writer claimed pages it did not
+ * hold, read stale vertex positions, and the geometry (e.g. Halo's rotating
+ * menu ring) intermittently flipped winding and was back-face culled at
+ * submit_frames>=3. Fix: keep each slot's bitmap accurate (a write invalidates
+ * the page in every other slot) and re-upload any page the current slot does
+ * not hold. Gated on XEMU_VRAM_SHARE_FIX (default on; =0 = old buggy behavior
+ * for A/B / rollback). */
+static inline bool vram_share_fix_enabled(void)
+{
+    static int en = -1;
+    if (en < 0) {
+        const char *e = getenv("XEMU_VRAM_SHARE_FIX");
+        en = (e && e[0] == '0') ? 0 : 1;
+    }
+    return en != 0;
+}
+
+/* A write of these pages to the current slot's vertex_ram makes the other
+ * slots' copies stale — clear their presence bits so they re-upload on demand. */
+static inline void vertex_ram_invalidate_other_slots(PGRAPHVkState *r,
+                                                     size_t start_bit,
+                                                     size_t nbits)
+{
+    if (!vram_share_fix_enabled()) {
+        return;
+    }
+    for (int i = 0; i < r->num_active_frames; i++) {
+        if (i == r->current_frame || !r->frame_staging[i].uploaded_bitmap) {
+            continue;
+        }
+        bitmap_clear(r->frame_staging[i].uploaded_bitmap, start_bit, nbits);
+    }
+}
+
+/* True iff every page of [addr, addr+size) is marked present in the current
+ * slot's vertex_ram shadow. */
+static inline bool vertex_ram_range_present(PGRAPHVkState *r, hwaddr addr,
+                                            hwaddr size)
+{
+    unsigned long *bmp = get_uploaded_bitmap(r);
+    hwaddr start = addr & TARGET_PAGE_MASK;
+    hwaddr end = ROUND_UP(addr + size, TARGET_PAGE_SIZE);
+    size_t sb = start / TARGET_PAGE_SIZE;
+    size_t eb = end / TARGET_PAGE_SIZE;
+    /* clamp to the bitmap (guest could program a vertex array near VRAM top) */
+    if (eb > r->bitmap_size) {
+        eb = r->bitmap_size;
+    }
+    if (sb >= eb) {
+        return true;
+    }
+    return find_next_zero_bit(bmp, eb, sb) >= eb;
+}
+
 /*
  * Snapshot-aware register read: uses the active snapshot if the render thread
  * has one set, otherwise falls through to the live PGRAPHState register file.
@@ -1549,7 +1607,7 @@ void pgraph_vk_bind_vertex_attributes(NV2AState *d, unsigned int min_element,
                                       unsigned int provoking_element);
 void pgraph_vk_bind_vertex_attributes_inline(NV2AState *d);
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset, void *data,
-                                    VkDeviceSize size);
+                                    VkDeviceSize size, bool invalidate_others);
 VkDeviceSize pgraph_vk_update_index_buffer(PGRAPHState *pg, void *data,
                                            VkDeviceSize size);
 VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
@@ -1625,6 +1683,7 @@ bool pgraph_vk_check_textures_fast_skip(PGRAPHState *pg);
 void pgraph_vk_mark_textures_possibly_dirty(NV2AState *d, hwaddr addr,
                                             hwaddr size);
 void pgraph_vk_trim_texture_cache(PGRAPHState *pg);
+void pgraph_vk_trim_texture_cache_to(PGRAPHState *pg, size_t min_entries);
 void pgraph_vk_stamp_bound_textures(PGRAPHState *pg);
 
 // compile_worker.c

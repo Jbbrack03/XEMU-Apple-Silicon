@@ -32,6 +32,7 @@ extern "C" {
 
 void xemu_set_widescreen(bool widescreen);
 bool xemu_get_widescreen(void);
+void xemu_set_display_raster(unsigned int width, unsigned int height);
 
 #ifdef __cplusplus
 }

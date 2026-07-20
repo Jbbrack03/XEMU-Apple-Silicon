@@ -102,7 +102,8 @@ typedef struct {
     /* Emulator frame feed (Spike B). Resolved from libxemu.so at runtime;
      * NULL until the emulator process side is up. */
     struct AHardwareBuffer *(*acquire_ahb)(uint64_t *seq);
-    float (*get_display_aspect)(void); /* guest GPIO decision: 4:3 or 16:9 */
+    float (*get_display_aspect)(void); /* signal raster + guest GPIO aspect */
+    float (*get_display_crop_x)(void); /* centered HD-carrier pillarbox */
 
     /* Gamepad forwarding: SDL can't see a paired pad while the XR NativeActivity
      * has focus, so we translate Android gamepad events and push them to the
@@ -119,6 +120,7 @@ typedef struct {
     } ahb_cache[8];
     GLuint blit_prog;
     GLint blit_tex_uniform;
+    GLint blit_uv_rect_uniform;
     GLuint blit_vao;
     bool bridge_fallback_logged;
     bool bridge_ready_logged;
@@ -128,6 +130,7 @@ typedef struct {
     XrQuaternionf quad_orient;
     float quad_size_m;      /* width in meters; height derives from aspect */
     float quad_aspect;      /* w/h */
+    float quad_crop_x;      /* fraction removed from each horizontal edge */
 
     /* Controller input */
     XrActionSet action_set;
@@ -208,6 +211,7 @@ typedef struct {
     GLint cursor_center_loc, cursor_radius_loc;
     int64_t guest_ms_push_ns;   /* last setGuestFrameMs push */
     float (*get_game_frame_ms)(void); /* libxemu pace readout, may be NULL */
+    uint32_t (*get_last_display_addr)(void); /* s45 flicker diag, may be NULL */
 
     /* JNI bridge to XrMenuBridge (Kotlin owns the model + Canvas rendering). */
     JavaVM *jvm;
@@ -372,10 +376,11 @@ static const char *BLIT_VS =
  * Only this emulator-quad program drops the flip; menu/cursor keep BLIT_VS. */
 static const char *BLIT_VS_EMU =
     "#version 300 es\n"
+    "uniform vec4 uv_rect;\n"
     "out vec2 uv;\n"
     "void main() {\n"
     "  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);\n"
-    "  uv = vec2(p.x, p.y);\n"
+    "  uv = uv_rect.xy + p * uv_rect.zw;\n"
     "  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
     "}\n";
 static const char *BLIT_FS =
@@ -557,6 +562,10 @@ static void resolve_emulator_feed(XrShell *s)
             LOGI("emulator native-aspect bridge resolved");
         }
     }
+    if (!s->get_display_crop_x) {
+        s->get_display_crop_x = (float (*)(void))
+            dlsym(h, "xemu_xr_get_display_crop_x");
+    }
     if (!s->set_gamepad) {
         s->set_gamepad = (void (*)(uint16_t, const int16_t *, int))
             dlsym(h, "xemu_xr_set_gamepad_state");
@@ -586,6 +595,10 @@ static void resolve_emulator_feed(XrShell *s)
         s->get_game_frame_ms = (float (*)(void))
             dlsym(h, "xemu_xr_get_game_frame_ms");
     }
+    if (!s->get_last_display_addr) {
+        s->get_last_display_addr = (uint32_t (*)(void))
+            dlsym(h, "xemu_xr_get_last_display_addr");
+    }
     if (!s->set_mic_muted) {
         s->set_mic_muted = (void (*)(int))dlsym(h, "xemu_xr_set_mic_muted");
         s->get_mic_muted = (int (*)(void))dlsym(h, "xemu_xr_get_mic_muted");
@@ -594,9 +607,9 @@ static void resolve_emulator_feed(XrShell *s)
     }
 }
 
-/* Keep the physical OpenXR quad in the same aspect that xui's desktop
- * presenter derives from the Xbox PM GPIO.  The texture itself remains the
- * native framebuffer; only the composition-layer geometry changes. */
+/* Keep the physical OpenXR quad at the guest's requested display aspect.  A
+ * normal-aspect image inside an HD carrier also reports a centered horizontal
+ * crop; that removes only the 160-pixel carrier bars from 1280x720. */
 static void xr_update_emulator_aspect(XrShell *s)
 {
     if (!s->get_display_aspect) {
@@ -604,12 +617,18 @@ static void xr_update_emulator_aspect(XrShell *s)
     }
 
     float aspect = s->get_display_aspect();
-    if (aspect < 1.2f || aspect > 2.0f || aspect == s->quad_aspect) {
+    float crop_x = s->get_display_crop_x ? s->get_display_crop_x() : 0.0f;
+    if (aspect < 1.2f || aspect > 2.0f || crop_x < 0.0f || crop_x >= 0.5f) {
+        return;
+    }
+    if (aspect == s->quad_aspect && crop_x == s->quad_crop_x) {
         return;
     }
 
     s->quad_aspect = aspect;
-    LOGI("emulator display aspect %.3f", (double)aspect);
+    s->quad_crop_x = crop_x;
+    LOGI("emulator display aspect %.3f crop-x %.3f", (double)aspect,
+         (double)crop_x);
 }
 
 static void xr_apply_thread_settings(XrShell *s)
@@ -1530,8 +1549,12 @@ static void egl_init(XrShell *s)
     s->cursor_center_loc = glGetUniformLocation(s->cursor_prog, "center");
     s->cursor_radius_loc = glGetUniformLocation(s->cursor_prog, "radius");
     s->blit_tex_uniform = glGetUniformLocation(s->blit_prog, "tex");
+    s->blit_uv_rect_uniform = glGetUniformLocation(s->blit_prog, "uv_rect");
     if (s->blit_tex_uniform < 0) {
         LOGE("frame bridge: blit sampler uniform unavailable");
+    }
+    if (s->blit_uv_rect_uniform < 0) {
+        LOGE("frame bridge: blit UV rectangle uniform unavailable");
     }
     glGenVertexArrays(1, &s->blit_vao);
 }
@@ -2249,7 +2272,7 @@ static void xr_dump_quad(XrShell *s, uint32_t idx)
     static const char *dir = NULL;
     static int every = 120;
     static int skip = 0;
-    static const int cap = 30;
+    static int cap = 30;
     static int written = 0;
     static uint64_t seen = 0;
     if (!inited) {
@@ -2259,6 +2282,9 @@ static void xr_dump_quad(XrShell *s, uint32_t idx)
         if (e && *e) { int v = atoi(e); if (v > 0) every = v; }
         const char *sk = getenv("XEMU_XR_DUMP_QUAD_SKIP");
         if (sk && *sk) { int v = atoi(sk); if (v >= 0) skip = v; }
+        /* s45: configurable frame cap for sustained-gameplay capture. */
+        const char *mx = getenv("XEMU_XR_DUMP_QUAD_MAX");
+        if (mx && *mx) { int v = atoi(mx); if (v > 0) cap = v; }
     }
     if (!dir || !*dir || written >= cap) return;
     uint64_t n = seen++;
@@ -2285,7 +2311,9 @@ static void xr_dump_quad(XrShell *s, uint32_t idx)
     }
 
     char path[512];
-    snprintf(path, sizeof(path), "%s/quad_%04d_%dx%d.ppm", dir, written, w, h);
+    uint32_t da = s->get_last_display_addr ? s->get_last_display_addr() : 0;
+    snprintf(path, sizeof(path), "%s/quad_%04d_da%08x_%dx%d.ppm",
+             dir, written, da, w, h);
     FILE *f = fopen(path, "wb");
     if (!f) { LOGE("quad dump: open %s failed", path); free(rgba); free(rgb_row); return; }
     fprintf(f, "P6\n%d %d\n255\n", w, h);
@@ -2392,6 +2420,11 @@ static void xr_frame(XrShell *s)
             glBindTexture(GL_TEXTURE_2D, emu_tex);
             if (s->blit_tex_uniform >= 0) {
                 glUniform1i(s->blit_tex_uniform, 0);
+            }
+            if (s->blit_uv_rect_uniform >= 0) {
+                float crop_x = s->quad_crop_x;
+                glUniform4f(s->blit_uv_rect_uniform, crop_x, 0.0f,
+                            1.0f - 2.0f * crop_x, 1.0f);
             }
             glBindVertexArray(s->blit_vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);

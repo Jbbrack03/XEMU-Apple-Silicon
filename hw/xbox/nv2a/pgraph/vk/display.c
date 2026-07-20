@@ -19,6 +19,7 @@
 
 #include "renderer.h"
 #include "qemu/error-report.h"
+#include "ui/xemu-widescreen.h"
 #include <EGL/egl.h>
 #include <math.h>
 #ifdef __ANDROID__
@@ -1845,6 +1846,16 @@ void pgraph_vk_finalize_display(PGRAPHState *pg)
     destroy_descriptor_pool(pg);
 }
 
+/* s45: last display scanout VRAM address, exported so the xr_shell quad-dump
+ * can tag each composed frame with the double-buffer it came from (correlates
+ * the ring flicker with buffer identity). */
+static uint32_t g_xemu_xr_last_disp_addr;
+__attribute__((visibility("default")))
+uint32_t xemu_xr_get_last_display_addr(void)
+{
+    return qatomic_read(&g_xemu_xr_last_disp_addr);
+}
+
 void pgraph_vk_render_display(PGRAPHState *pg)
 {
     NV2AState *d = container_of(pg, NV2AState, pgraph);
@@ -1854,6 +1865,7 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     d->vga.get_params(&d->vga, &vga_display_params);
 
     hwaddr display_addr = d->pcrtc.start + vga_display_params.line_offset;
+    qatomic_set(&g_xemu_xr_last_disp_addr, (uint32_t)display_addr);
 
     if (r->frame_was_skipped && xemu_get_frame_skip() &&
         r->frame_skip_last_good_addr) {
@@ -1863,6 +1875,87 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     }
 
     SurfaceBinding *surface = pgraph_vk_surface_get_within(d, display_addr);
+
+    /* s45 env-gated display scanout trace (XEMU_DISP_TRACE=1): one line per
+     * flip — the scanout address + the selected surface's identity/freshness.
+     * Correlate with the good/bad ring state in the composed-quad burst to
+     * decide double-buffer (addr toggles) vs single-buffer content toggle. */
+#ifdef __ANDROID__
+    {
+        static int dt = -2;
+        if (dt == -2) { const char *e = getenv("XEMU_DISP_TRACE"); dt = (e && e[0]) ? atoi(e) : 0; }
+        if (dt) {
+            static uint64_t dn;
+            SurfaceBinding *cb = r->color_binding, *zb = r->zeta_binding;
+            int vga_w = 0, vga_h = 0;
+            d->vga.get_resolution(&d->vga, &vga_w, &vga_h);
+            /* Level 2 (heavy): download the display color surface AND the zeta,
+             * so we read REAL rendered content — the REAL ring-region luminance
+             * (was 0/26 from the stale VRAM shadow in level 1) and a zeta
+             * ring-region fingerprint. Decisive: on a color-BAD (ring-absent)
+             * flip, does the zeta ring fingerprint MATCH the color-GOOD zeta
+             * (=> ring wrote depth => rasterized-but-color-invisible) or differ
+             * (=> ring absent from depth => not rasterized)? */
+            int rl = -1; unsigned long zhash = 0;
+            if (dt >= 2 && surface && surface->color) {
+                pgraph_vk_surface_download_if_dirty(d, surface);
+            }
+            if (dt >= 2 && zb && zb->draw_dirty) {
+                pgraph_vk_surface_download_if_dirty(d, zb);
+            }
+            if (surface && surface->width && surface->height &&
+                surface->fmt.bytes_per_pixel == 4) {
+                unsigned w = surface->width, h = surface->height, pitch = surface->pitch;
+                const uint8_t *base = d->vram_ptr + display_addr;
+                unsigned y0 = h*5/100, y1 = h*45/100, x0 = w*10/100, x1 = w*95/100;
+                unsigned long sum = 0; unsigned cnt = 0;
+                for (unsigned y = y0; y < y1; y += 4) {
+                    const uint8_t *row = base + (size_t)y*pitch;
+                    for (unsigned x = x0; x < x1; x += 4) {
+                        const uint8_t *p = row + (size_t)x*4;
+                        sum += p[0]+p[1]+p[2]; cnt++;
+                    }
+                }
+                if (cnt) rl = (int)(sum/(cnt*3));
+            }
+            if (dt >= 2 && zb && zb->width && zb->height && zb->pitch) {
+                unsigned w = zb->width, h = zb->height, pitch = zb->pitch;
+                const uint8_t *base = d->vram_ptr + zb->vram_addr;
+                unsigned y0 = h*5/100, y1 = h*45/100, x0 = w*10/100, x1 = w*95/100;
+                for (unsigned y = y0; y < y1; y += 4) {
+                    const uint8_t *row = base + (size_t)y*pitch;
+                    for (unsigned x = x0; x < x1; x += 4) {
+                        uint32_t v; memcpy(&v, row + (size_t)x*4, 4);
+                        zhash = ((zhash << 1) | (zhash >> 63)) ^ v;
+                    }
+                }
+            }
+            __android_log_print(ANDROID_LOG_INFO, "xemu-disp",
+                "flip #%llu mode=%dx%d line=%u start=%08x disp=%08llx "
+                "surf=%08llx %ux%u pitch=%u dd=%d dt=%lu ringlum=%d "
+                "zhash=%016lx | cbind=%08llx cdd=%d | zbind=%08llx zdd=%d "
+                "pvideo=%08x in=%08x out=%08x point=%08x",
+                (unsigned long long)dn++, vga_w, vga_h,
+                vga_display_params.line_offset,
+                (uint32_t)d->pcrtc.start, (unsigned long long)display_addr,
+                surface ? (unsigned long long)surface->vram_addr : 0ULL,
+                surface ? surface->width : 0,
+                surface ? surface->height : 0,
+                surface ? surface->pitch : 0,
+                surface ? (int)surface->draw_dirty : -1,
+                surface ? (unsigned long)surface->draw_time : 0UL, rl, zhash,
+                cb ? (unsigned long long)cb->vram_addr : 0ULL,
+                cb ? (int)cb->draw_dirty : -1,
+                zb ? (unsigned long long)zb->vram_addr : 0ULL,
+                zb ? (int)zb->draw_dirty : -1,
+                d->pvideo.regs[NV_PVIDEO_BUFFER],
+                d->pvideo.regs[NV_PVIDEO_SIZE_IN],
+                d->pvideo.regs[NV_PVIDEO_SIZE_OUT],
+                d->pvideo.regs[NV_PVIDEO_POINT_OUT]);
+        }
+    }
+#endif
+
     if (surface == NULL || !surface->color || !surface->width ||
         !surface->height) {
         static int dbg_no_surf = 0;
@@ -1880,6 +1973,11 @@ void pgraph_vk_render_display(PGRAPHState *pg)
     if (d->vga.cr[NV_PRMCIO_INTERLACE_MODE] != NV_PRMCIO_INTERLACE_MODE_DISABLED) {
         height *= 2;
     }
+
+    /* Feed the actual signal raster to the OpenXR presenter.  The PM-GPIO
+     * aspect bit alone cannot identify a pillarboxed 4:3 title running in the
+     * inherently-16:9 720p mode. */
+    xemu_set_display_raster(width, height);
 
     pgraph_apply_scaling_factor(pg, &width, &height);
 

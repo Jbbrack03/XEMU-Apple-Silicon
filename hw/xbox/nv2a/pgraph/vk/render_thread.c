@@ -188,6 +188,9 @@ static void process_vertex_ram_update(PGRAPHVkState *r, RenderCommand *cmd)
     size_t start_bit = offset / TARGET_PAGE_SIZE;
     size_t end_bit = TARGET_PAGE_ALIGN(offset + size) / TARGET_PAGE_SIZE;
     bitmap_set(get_uploaded_bitmap(r), start_bit, end_bit - start_bit);
+    /* NOTE: RCMD_VERTEX_RAM_UPDATE is never enqueued (dead code). Do NOT add a
+     * cross-slot bitmap invalidate here without serialization: this runs on the
+     * render thread and the bitmaps are guest-thread-owned (both reviews). */
 
     g_free(data);
 }
@@ -269,7 +272,7 @@ static void *render_thread_func(void *opaque)
             pgraph_vk_mark_textures_possibly_dirty(
                 d, 0, memory_region_size(d->vram));
             pgraph_vk_update_vertex_ram_buffer(
-                pg, 0, d->vram_ptr, memory_region_size(d->vram));
+                pg, 0, d->vram_ptr, memory_region_size(d->vram), true);
             r->texture_vram_gen++;
             for (int i = 0; i < 4; i++) {
                 pg->texture_dirty[i] = true;

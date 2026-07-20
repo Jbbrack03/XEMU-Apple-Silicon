@@ -240,7 +240,7 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.draws_skipped_pending,
                 g_opt_stats.draws_skipped_frameskip);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
-                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d] eRS[f%d s%d nd%d] TexU[re%d nw%d kb%d h%d hkb%d sv%d dr%d tc%d te%d cu%d bp%d]",
+                "RPBreaks:%d(q%d c%d n%d f%d) Finish:%d(vtx%d sc%d sd%d buf%d fb%d pres%d flip%d flu%d stl%d stlDef%d stlBat%d stlSkip%d) InlClr:%d/%d(p%d cb%d rp%d fb%d) PreDL:%d UplR[cw%d nb%d md%d bl%d un%d] Dnu[df%d dc%d fp%d fa%d] Ret[u%d a%d b%d c%d nf%d] sd[ev%d noCb%d dl%d cDef%d cDefC%d pDl%d dDl%d] dlSrc[defFb%d ppdFb%d dirtyIf%d] dif[ovl%d ovlSh%d exp%d expSh%d blt%d flu%d dds%d oth%d] iEv[tSwz%d tPit%d tFmt%d tO%d sz%d sSwz%d sPit%d sFmt%d sO%d sRow%d] eRS[f%d s%d nd%d] TexU[re%d nw%d kb%d h%d hkb%d sv%d dr%d tc%d te%d lr%d lf%d cu%d bp%d]",
                 g_opt_stats.render_pass_breaks,
                 g_opt_stats.rp_end_query,
                 g_opt_stats.rp_end_clear,
@@ -320,6 +320,8 @@ static void opt_stats_log_and_reset(void)
                 g_opt_stats.tex_up_drain,
                 g_opt_stats.tex_trim_calls,
                 g_opt_stats.tex_trim_evicted,
+                g_opt_stats.tex_lru_drains,
+                g_opt_stats.tex_lru_failures,
                 g_opt_stats.tex_cache_used,
                 g_opt_stats.budget_pct_max);
         __android_log_print(ANDROID_LOG_INFO, "hakuX-stall",
@@ -2883,29 +2885,48 @@ void pgraph_vk_finish(PGRAPHState *pg, FinishReason finish_reason)
 
                 unsigned long bitmap_longs =
                     BITS_TO_LONGS(r->bitmap_size);
-                memcpy(next_fs->uploaded_bitmap,
-                       cur_fs->uploaded_bitmap,
-                       bitmap_longs * sizeof(unsigned long));
+                bool vr_fix = vram_share_fix_enabled();
 
                 next_fs->vertex_ram_flush_min = VK_WHOLE_SIZE;
                 next_fs->vertex_ram_flush_max = 0;
 
                 if (!next_fs->vertex_ram_initialized) {
+                    /* First use of this slot: it receives ALL of cur's bytes,
+                     * so its presence bitmap equals cur's exactly. */
                     size_t total = cur_fs->vertex_ram.buffer_size;
                     memcpy(next_fs->vertex_ram.mapped,
                            cur_fs->vertex_ram.mapped, total);
+                    memcpy(next_fs->uploaded_bitmap,
+                           cur_fs->uploaded_bitmap,
+                           bitmap_longs * sizeof(unsigned long));
                     next_fs->vertex_ram_flush_min = 0;
                     next_fs->vertex_ram_flush_max = total;
                     next_fs->vertex_ram_initialized = true;
-                } else if (cur_fs->vertex_ram_propagate_min <
-                           cur_fs->vertex_ram_propagate_max) {
-                    size_t off = cur_fs->vertex_ram_propagate_min;
-                    size_t len = cur_fs->vertex_ram_propagate_max - off;
-                    memcpy(next_fs->vertex_ram.mapped + off,
-                           cur_fs->vertex_ram.mapped + off, len);
-                    next_fs->vertex_ram_flush_min = off;
-                    next_fs->vertex_ram_flush_max = off + len;
+                } else if (!vr_fix) {
+                    /* OLD (buggy) behavior: full presence-bitmap copy + a
+                     * one-hop byte propagate whose min/max SPAN also republished
+                     * stale gap pages between disjoint writes → a slot >=2 hops
+                     * from the writer read stale vertices → winding flip →
+                     * back-cull = the ~30% flicker at submit_frames=3
+                     * (both adversarial reviews). */
+                    memcpy(next_fs->uploaded_bitmap,
+                           cur_fs->uploaded_bitmap,
+                           bitmap_longs * sizeof(unsigned long));
+                    if (cur_fs->vertex_ram_propagate_min <
+                        cur_fs->vertex_ram_propagate_max) {
+                        size_t off = cur_fs->vertex_ram_propagate_min;
+                        size_t len = cur_fs->vertex_ram_propagate_max - off;
+                        memcpy(next_fs->vertex_ram.mapped + off,
+                               cur_fs->vertex_ram.mapped + off, len);
+                        next_fs->vertex_ram_flush_min = off;
+                        next_fs->vertex_ram_flush_max = off + len;
+                    }
                 }
+                /* vr_fix + already-initialized: NO cross-slot propagation.
+                 * next keeps its own (write-invalidation-maintained) bitmap and
+                 * re-uploads any page it lacks from authoritative guest VRAM on
+                 * demand (sync_vertex_ram_buffer). This is what makes the
+                 * bitmap accurate and eliminates the span-gap corruption. */
 
                 cur_fs->vertex_ram_propagate_min = VK_WHOLE_SIZE;
                 cur_fs->vertex_ram_propagate_max = 0;
@@ -2968,6 +2989,13 @@ void pgraph_vk_begin_command_buffer(PGRAPHState *pg)
     r->in_command_buffer = true;
     r->draws_in_cb = 0;
 
+    /* Vulkan dynamic state does not persist across command buffers.  The host
+     * cache only describes commands recorded in the previous buffer, so force
+     * the first draw in this one to re-issue every enabled dynamic state. */
+#if OPT_DYNAMIC_STATES
+    r->dyn_state.valid = false;
+#endif
+
     if (r->gpu_ts_supported) {
         uint32_t base = r->current_frame * GPU_TS_QUERIES_PER_CB;
         vkCmdResetQueryPool(r->command_buffer, r->gpu_ts_pool,
@@ -3024,6 +3052,19 @@ void pgraph_vk_end_nondraw_commands(PGRAPHState *pg, VkCommandBuffer cmd)
 // buffer. For other reasons though (like descriptor set amount, surface
 // changes, etc) we do flush often.
 
+/* s45: gate for the SFP/bindless-fast-path constants-dirty bail (see the fix
+ * note at the sfp gate). Default ON (correct); XEMU_SFP_CHECK_CONSTS=0 disables
+ * it to reproduce the pre-fix flicker for A/B. */
+static bool sfp_consts_check_enabled(void)
+{
+    static int en = -1;
+    if (en < 0) {
+        const char *e = getenv("XEMU_SFP_CHECK_CONSTS");
+        en = (e && e[0] == '0') ? 0 : 1;
+    }
+    return en != 0;
+}
+
 static void begin_pre_draw(PGRAPHState *pg)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
@@ -3046,6 +3087,20 @@ static void begin_pre_draw(PGRAPHState *pg)
         else if (r->pipeline_state_dirty) { OPT_STAT_INC(sfp_miss_pipe_dirty); sfp_ok = false; }
         else if (r->need_descriptor_rebind) { OPT_STAT_INC(sfp_miss_desc_rebind); sfp_ok = false; }
         else if (r->uniforms_changed)    { OPT_STAT_INC(sfp_miss_uniforms); sfp_ok = false; }
+        /* s45 FIX: the super-fast-path skips update_shader_uniforms/
+         * update_descriptor_sets, but transform/light constant writes
+         * (SET_TRANSFORM_CONSTANT, SET_*_MATRIX, ...) set ONLY
+         * vsh_constants_any_dirty/ltctx*_any_dirty — NOT uniforms_changed or
+         * any_reg_gen. Without this bail, a pure-transform change (e.g. Halo's
+         * rotating menu ring) reuses the stale UBO offset → geometry projected
+         * off-screen = the intermittent ring/texture flicker. Mirror
+         * update_shader_uniforms' constants_dirty predicate (shaders.c:1312).
+         * XEMU_SFP_CHECK_CONSTS=0 restores the buggy behavior for A/B. */
+        else if (sfp_consts_check_enabled() &&
+                 (pg->vsh_constants_any_dirty || pg->ltctxa_any_dirty ||
+                  pg->ltctxb_any_dirty || pg->ltc1_any_dirty)) {
+            OPT_STAT_INC(sfp_miss_uniforms); sfp_ok = false;
+        }
 #if OPT_BINDLESS_TEXTURES
         else if (r->bindless_textures_supported
                      ? (r->ubo_descriptor_set_index <= 0)
@@ -3253,6 +3308,11 @@ static void begin_pre_draw(PGRAPHState *pg)
         !r->pipeline_state_dirty &&
         !r->need_descriptor_rebind &&
         !r->uniforms_changed &&
+        /* s45: same constants-dirty bail as the SFP gate — this bindless
+         * fast path also returns without re-uploading vertex uniforms. */
+        !(sfp_consts_check_enabled() &&
+          (pg->vsh_constants_any_dirty || pg->ltctxa_any_dirty ||
+           pg->ltctxb_any_dirty || pg->ltc1_any_dirty)) &&
         !pg->program_data_dirty &&
         pg->primitive_mode == r->shader_binding->state.geom.primitive_mode &&
         pg->non_dynamic_reg_gen == r->last_non_dynamic_reg_gen &&
@@ -5688,13 +5748,24 @@ static void sync_vertex_ram_buffer(PGRAPHState *pg)
                 page += num;
             }
 
+            /* s45 fix: also re-upload a range the CURRENT slot does not hold.
+             * The presence bitmap is now per-slot-accurate, so this
+             * re-materializes exactly the pages a slot >=2 rotations from the
+             * writer never received (was the ~30%-at-submit_frames=3 flicker). */
+            bool missing = vram_share_fix_enabled() &&
+                           !vertex_ram_range_present(r, addr, size);
             if (dirty) {
-                NV2A_VK_DPRINTF("Memory dirty. Synchronizing...");
                 physical_memory_dirty_bits_cleared(start, size);
+            }
+            if (dirty || missing) {
+                NV2A_VK_DPRINTF("Memory dirty/missing. Synchronizing...");
                 vw->dirty_count++;
                 vw->bytes_copied += size;
+                /* invalidate other slots ONLY for a genuine guest write; a
+                 * missing-only fill re-materializes identical bytes. */
                 pgraph_vk_update_vertex_ram_buffer(pg, addr,
-                                                   d->vram_ptr + addr, size);
+                                                   d->vram_ptr + addr, size,
+                                                   dirty);
             }
         }
     }

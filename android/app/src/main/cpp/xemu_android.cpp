@@ -785,6 +785,16 @@ static SetupFiles SyncSetupFiles() {
     }
   }
 
+  /* Diagnostic-only, out-of-place EEPROM selection.  This lets video-mode
+   * A/B tests boot a checksum-valid copy without ever editing the user's
+   * canonical EEPROM in place. */
+  if (const char* eepromOverride = SDL_getenv("XEMU_EEPROM_PATH")) {
+    if (eepromOverride[0] != '\0') {
+      out.eeprom = eepromOverride;
+      LogInfoFmt("Using EEPROM override %s", out.eeprom.c_str());
+    }
+  }
+
   const std::string mcpxPath = GetPrefString(env, activity, "mcpxPath");
   const std::string flashPath = GetPrefString(env, activity, "flashPath");
   const std::string hddPath = GetPrefString(env, activity, "hddPath");

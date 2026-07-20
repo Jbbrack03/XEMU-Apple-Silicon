@@ -143,6 +143,22 @@ static void vram_watch_surface_event(NV2AState *d, const char *tag,
  * so keep the cap unreachable and log the event loudly). */
 #define VRAM_SURF_MAX_KEEP_SPANS 1024
 
+/* Master kill switch for the s44 guest-write preservation (XEMU_GUEST_KEEP,
+ * default 1 = on). When 0, the preservation/decline/CPU-fallback machinery is
+ * fully bypassed (download paths behave as s43), letting a single build A/B
+ * the preservation in isolation. Gated at the two choke points below:
+ * vram_surf_guest_written_spans() returns 0 (no spans => no keep, no decline,
+ * no CPU fallback) and vram_surf_keep_begin() short-circuits. */
+static bool vram_surf_keep_enabled(void)
+{
+    static int en = -1;
+    if (en < 0) {
+        const char *e = getenv("XEMU_GUEST_KEEP");
+        en = (e && e[0] == '0') ? 0 : 1;
+    }
+    return en != 0;
+}
+
 typedef struct GuestKeepSpan {
     hwaddr addr; /* VRAM offset */
     size_t len;
@@ -156,7 +172,7 @@ static int vram_surf_guest_written_spans(NV2AState *d, hwaddr addr,
                                          size_t size, GuestKeepSpan *spans,
                                          int max_spans)
 {
-    if (!size) {
+    if (!size || !vram_surf_keep_enabled()) {
         return 0;
     }
     ram_addr_t ram_base = memory_region_get_ram_addr(d->vram);

@@ -43,7 +43,8 @@ VkDeviceSize pgraph_vk_update_vertex_inline_buffer(PGRAPHState *pg, void **data,
 }
 
 void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
-                                        void *data, VkDeviceSize size)
+                                        void *data, VkDeviceSize size,
+                                        bool invalidate_others)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -75,6 +76,13 @@ void pgraph_vk_update_vertex_ram_buffer(PGRAPHState *pg, hwaddr offset,
     }
 
     bitmap_set(get_uploaded_bitmap(r), start_bit, nbits);
+    /* Only a genuine content change (guest write) makes other slots' copies
+     * stale. A missing-only re-materialize writes identical authoritative bytes,
+     * so invalidating there would cause a perpetual cross-slot re-upload storm
+     * (both adversarial reviews). */
+    if (invalidate_others) {
+        vertex_ram_invalidate_other_slots(r, start_bit, nbits);
+    }
 }
 
 static void update_memory_buffer(NV2AState *d, hwaddr addr, hwaddr size)

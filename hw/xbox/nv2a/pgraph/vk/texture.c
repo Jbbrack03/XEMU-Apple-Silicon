@@ -79,6 +79,19 @@ static bool tex_stale_diag_enabled(void)
     return v;
 }
 
+/* Correctness fallback if a title ever exceeds the configured cache capacity.
+ * PGR2 no longer reaches this path with the measured 512-entry Quest cache,
+ * but silently retaining an unrelated old descriptor is never valid. */
+static bool tex_lru_recovery_enabled(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("XEMU_TEX_LRU_RECOVERY");
+        v = (e && e[0] == '0') ? 0 : 1;
+    }
+    return v != 0;
+}
+
 static bool tex_dump_addr_match(hwaddr vram_offset)
 {
     static int have = -1;
@@ -1679,9 +1692,35 @@ static void create_texture(PGRAPHState *pg, int texture_idx)
         binding_found = true;
     } else {
         LruNode *node = lru_lookup(&r->texture_cache, key_hash, &key);
+        if (!node && tex_lru_recovery_enabled()) {
+            /* Close and submit the command buffer that may reference recently
+             * unbound textures, then wait every frame fence.  At this point
+             * the submit-time protection is provably obsolete for all cache
+             * entries; currently bound entries remain pinned independently by
+             * texture_cache_entry_pre_evict(). */
+            OPT_STAT_INC(tex_lru_drains);
+            pgraph_vk_finish(pg, VK_FINISH_REASON_NEED_BUFFER_SPACE);
+            pgraph_vk_flush_all_frames(pg);
+
+            size_t cache_size = r->texture_cache_target ?
+                                    r->texture_cache_target : 1024;
+            uint32_t safe_submit =
+                r->submit_count >= (uint32_t)r->num_active_frames ?
+                    r->submit_count - (uint32_t)r->num_active_frames : 0;
+            for (size_t i = 0; i < cache_size; i++) {
+                TextureBinding *entry = &r->texture_cache_entries[i];
+                if (lru_is_node_in_use(&r->texture_cache, &entry->node)) {
+                    entry->submit_time = safe_submit;
+                }
+            }
+            node = lru_lookup(&r->texture_cache, key_hash, &key);
+        }
         if (!node) {
-            /* LRU exhausted — all texture slots in-flight. Skip this
-             * texture bind and use whatever was previously bound. */
+            /* This should be unreachable after the full-idle recovery unless
+             * the cache has fewer slots than simultaneously bound units.  Do
+             * not sample an unrelated stale descriptor if it ever happens. */
+            OPT_STAT_INC(tex_lru_failures);
+            pgraph_vk_bind_invalid_texture(r, texture_idx);
             return;
         }
         snode = container_of(node, TextureBinding, node);
@@ -2551,7 +2590,7 @@ static void texture_cache_finalize(PGRAPHVkState *r)
     r->texture_cache_entries = NULL;
 }
 
-void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
+void pgraph_vk_trim_texture_cache_to(PGRAPHState *pg, size_t min_entries)
 {
     PGRAPHVkState *r = pg->vk_renderer_state;
 
@@ -2560,7 +2599,8 @@ void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
     OPT_STAT_INC(tex_trim_calls);
     g_opt_stats.tex_cache_used = (int)r->texture_cache.num_used;
 
-    int num_to_evict = r->texture_cache.num_used / 4;
+    int above_floor = MAX(0, r->texture_cache.num_used - (int)min_entries);
+    int num_to_evict = MIN(r->texture_cache.num_used / 4, above_floor);
     int num_evicted = 0;
 
     while (num_to_evict-- && lru_try_evict_one(&r->texture_cache)) {
@@ -2569,6 +2609,11 @@ void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
     g_opt_stats.tex_trim_evicted += num_evicted;
 
     NV2A_VK_DPRINTF("Evicted %d textures, %d remain", num_evicted, r->texture_cache.num_used);
+}
+
+void pgraph_vk_trim_texture_cache(PGRAPHState *pg)
+{
+    pgraph_vk_trim_texture_cache_to(pg, 0);
 }
 
 void pgraph_vk_init_textures(PGRAPHState *pg)

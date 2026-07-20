@@ -262,7 +262,7 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
     pg->vk_renderer_state->vram_ram_addr = memory_region_get_ram_addr(d->vram);
 
     pgraph_vk_update_vertex_ram_buffer(&d->pgraph, 0, d->vram_ptr,
-                                   memory_region_size(d->vram));
+                                   memory_region_size(d->vram), false);
 
     pg->vk_renderer_state->frame_staging[0].vertex_ram_initialized = true;
 
@@ -376,6 +376,21 @@ static void pgraph_vk_process_pending(NV2AState *d)
 #endif
 
 static char rt_dump_dir[512] = "";
+
+/* JSON-only diagnostic mode for draw-dense games.  The legacy diagnostic
+ * captures a full color/depth PPM after every draw, which can produce several
+ * gigabytes and changes frame timing before the HUD draws we need to inspect.
+ * State/shader/texture identity remains complete; the final frame is still
+ * dumped at the boundary. */
+static bool diag_no_draw_images(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("XEMU_DIAG_NO_DRAW_IMAGES");
+        enabled = (e && e[0] && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return enabled != 0;
+}
 
 void nv2a_dbg_set_rt_dump_path(const char *dir)
 {
@@ -912,8 +927,10 @@ void nv2a_diag_log_clear(NV2AState *d, PGRAPHState *pg,
     if (r->color_binding) {
         diag_json_append(
             "          \"color_surface\": {"
+                "\"vram\": \"0x%08" PRIx64 "\", "
                 "\"format\": %u, \"width\": %u, \"height\": %u, "
                 "\"pitch\": %u, \"bpp\": %u},\n",
+            (uint64_t)r->color_binding->vram_addr,
             r->color_binding->shape.color_format,
             r->color_binding->width, r->color_binding->height,
             r->color_binding->pitch, r->color_binding->fmt.bytes_per_pixel
@@ -1146,8 +1163,10 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
     if (r->color_binding) {
         diag_json_append(
             "          \"color_surface\": {"
+                "\"vram\": \"0x%08" PRIx64 "\", "
                 "\"format\": %u, \"width\": %u, \"height\": %u, "
                 "\"pitch\": %u, \"bpp\": %u},\n",
+            (uint64_t)r->color_binding->vram_addr,
             r->color_binding->shape.color_format,
             r->color_binding->width, r->color_binding->height,
             r->color_binding->pitch, r->color_binding->fmt.bytes_per_pixel
@@ -1159,8 +1178,10 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
     if (r->zeta_binding) {
         diag_json_append(
             "          \"zeta_surface\": {"
+                "\"vram\": \"0x%08" PRIx64 "\", "
                 "\"format\": %u, \"width\": %u, \"height\": %u, "
                 "\"pitch\": %u, \"bpp\": %u},\n",
+            (uint64_t)r->zeta_binding->vram_addr,
             r->zeta_binding->shape.zeta_format,
             r->zeta_binding->width, r->zeta_binding->height,
             r->zeta_binding->pitch, r->zeta_binding->fmt.bytes_per_pixel
@@ -1172,6 +1193,16 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
     diag_json_append("          \"textures\": [");
     for (int i = 0; i < NV2A_MAX_TEXTURES; i++) {
         bool tex_en = pgraph_is_texture_enabled(pg, i);
+        TextureShape tex_shape = pgraph_get_texture_shape(pg, i);
+        hwaddr tex_vram = tex_en ? pgraph_get_texture_phys_addr(pg, i) : 0;
+        size_t tex_len = tex_en ? pgraph_get_texture_length(pg, &tex_shape) : 0;
+        uint64_t vram_hash = 0;
+        hwaddr vram_size = memory_region_size(d->vram);
+        if (tex_en && tex_vram < vram_size && tex_len <= vram_size - tex_vram) {
+            vram_hash = fast_hash((uint8_t *)d->vram_ptr + tex_vram,
+                                  tex_len);
+        }
+        TextureBinding *binding = r->texture_bindings[i];
         uint32_t tex_fmt = pgraph_vk_reg_r(pg, NV_PGRAPH_TEXFMT0 + i * 4);
         unsigned int color_format = GET_MASK(tex_fmt, NV_PGRAPH_TEXFMT0_COLOR);
         unsigned int dimensionality = GET_MASK(tex_fmt,
@@ -1193,6 +1224,14 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
         diag_json_append(
             "%s{\"stage\": %d, \"enabled\": %s, \"color_format\": %u, "
             "\"dim\": %u, \"width\": %u, \"height\": %u, "
+            "\"vram\": \"0x%08" PRIx64 "\", \"length\": %zu, "
+            "\"vram_hash\": \"0x%016" PRIx64 "\", "
+            "\"cache_hash\": \"0x%016" PRIx64 "\", "
+            "\"possibly_dirty\": %s, "
+            "\"surface_direct\": %s, "
+            "\"binding_view\": \"0x%" PRIxPTR "\", "
+            "\"direct_view\": \"0x%" PRIxPTR "\", "
+            "\"push_view\": \"0x%" PRIxPTR "\", "
             "\"addru\": \"%s\", \"addrv\": \"%s\", "
             "\"border_color\": \"0x%08x\"}",
             i > 0 ? ", " : "",
@@ -1201,6 +1240,16 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
             color_format,
             dimensionality,
             1u << log_w, 1u << log_h,
+            (uint64_t)tex_vram, tex_len, vram_hash,
+            (uint64_t)((binding && binding != &r->dummy_texture) ?
+                           binding->hash : 0),
+            (binding && binding != &r->dummy_texture &&
+             binding->possibly_dirty) ? "true" : "false",
+            r->tex_surface_direct[i] ? "true" : "false",
+            (uintptr_t)((binding && binding != &r->dummy_texture) ?
+                            binding->image_view : VK_NULL_HANDLE),
+            (uintptr_t)r->tex_surface_direct_views[i],
+            (uintptr_t)r->push_tex_infos[i].imageView,
             addru_name, addrv_name,
             border_color
         );
@@ -1208,13 +1257,16 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
     diag_json_append("],\n");
 
     /* Per-draw surface dumps */
-    pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
+    if (!diag_no_draw_images()) {
+        pgraph_vk_finish(pg, VK_FINISH_REASON_SURFACE_DOWN);
+    }
 
     {
         char color_fname[128] = "";
         char depth_fname[128] = "";
 
-        if (r->color_binding && r->color_binding->draw_dirty) {
+        if (!diag_no_draw_images() && r->color_binding &&
+            r->color_binding->draw_dirty) {
             pgraph_vk_surface_download_if_dirty(d, r->color_binding);
             snprintf(color_fname, sizeof(color_fname),
                      "f%d_draw%d_color.ppm", diag_current_frame_index, idx);
@@ -1223,7 +1275,8 @@ void nv2a_diag_log_draw_call(NV2AState *d, PGRAPHState *pg,
             dump_surface_ppm(d, r->color_binding, path);
         }
 
-        if (r->zeta_binding && r->zeta_binding->draw_dirty) {
+        if (!diag_no_draw_images() && r->zeta_binding &&
+            r->zeta_binding->draw_dirty) {
             pgraph_vk_surface_download_if_dirty(d, r->zeta_binding);
             snprintf(depth_fname, sizeof(depth_fname),
                      "f%d_draw%d_depth.ppm", diag_current_frame_index, idx);
@@ -1654,14 +1707,29 @@ void pgraph_vk_check_memory_budget(PGRAPHState *pg)
              * sleep window, and surface allocations must not meet a hard
              * OOM while a scheduled trim sleeps (review round 2). */
             bool critical = max_ratio > 0.95f;
-            size_t floor_entries = high_pressure ? 0 : 256;
+            /* PGR2 needs the full measured 512-entry working set at moderate
+             * pressure.  At >85% budget the safety tier still permits reclaim.
+             * Clamp to the allocated target so diagnostic smaller-cache runs
+             * do not advertise an impossible floor. */
+            size_t floor_entries = high_pressure ? 0 :
+                MIN(r->texture_cache_target, (size_t)512);
+            if (!high_pressure) {
+                static int floor_override = -1;
+                if (floor_override < 0) {
+                    const char *e = getenv("XEMU_TEX_CACHE_FLOOR");
+                    floor_override = (e && e[0]) ? atoi(e) : 0;
+                }
+                if (floor_override > 0) {
+                    floor_entries = floor_override;
+                }
+            }
             int64_t min_interval_ns =
                 high_pressure ? 500000000LL : 2000000000LL;
             int64_t now = nv2a_clock_ns();
             if (r->texture_cache.num_used > floor_entries &&
                 (critical ||
                  now - r->last_texture_trim_ns >= min_interval_ns)) {
-                pgraph_vk_trim_texture_cache(pg);
+                pgraph_vk_trim_texture_cache_to(pg, floor_entries);
                 r->last_texture_trim_ns = now;
             }
         }

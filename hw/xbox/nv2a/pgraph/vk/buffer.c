@@ -108,7 +108,12 @@ static MemoryBudget compute_memory_budget(PGRAPHVkState *r)
         }
 
         if (budget_mib <= 768) {
-            b.texture_cache_entries = 256;
+            /* PGR2's normal three-frame working set exceeds 256 distinct
+             * texture bindings.  Exhausting this LRU used to leave the prior
+             * descriptor live, rendering unrelated solid HUD blocks.  Quest 3
+             * measurements show 512 entries remain at 65--67% heap budget and
+             * avoid both exhaustion and emergency drains. */
+            b.texture_cache_entries = 512;
             b.image_pool_max = 16;
             b.surface_image_pool_max = 8;
         } else if (budget_mib <= 1536) {
@@ -119,6 +124,16 @@ static MemoryBudget compute_memory_budget(PGRAPHVkState *r)
             b.texture_cache_entries = 1024;
             b.image_pool_max = 64;
             b.surface_image_pool_max = 32;
+        }
+
+        /* Diagnostic/rollback override.  XEMU_TEX_CACHE_ENTRIES=256 restores
+         * the old Quest allocation for exact A/B captures. */
+        const char *tex_cache_override = getenv("XEMU_TEX_CACHE_ENTRIES");
+        if (tex_cache_override && tex_cache_override[0]) {
+            size_t requested = strtoull(tex_cache_override, NULL, 10);
+            if (requested >= 64 && requested <= 4096) {
+                b.texture_cache_entries = requested;
+            }
         }
     }
 

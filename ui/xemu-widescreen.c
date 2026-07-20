@@ -22,9 +22,13 @@
  * THE SOFTWARE.
  */
 
+#include "qemu/osdep.h"
 #include "xemu-widescreen.h"
+#include "qemu/atomic.h"
 
 static bool g_widescreen = false;
+static unsigned int g_display_raster_width = 640;
+static unsigned int g_display_raster_height = 480;
 
 void xemu_set_widescreen(bool widescreen)
 {
@@ -36,14 +40,39 @@ bool xemu_get_widescreen(void)
     return g_widescreen;
 }
 
+void xemu_set_display_raster(unsigned int width, unsigned int height)
+{
+    if (!width || !height) {
+        return;
+    }
+    qatomic_set(&g_display_raster_width, width);
+    qatomic_set(&g_display_raster_height, height);
+}
+
 #ifdef __ANDROID__
 /* The OpenXR shell receives the guest frame as an AHardwareBuffer and does not
- * pass through xui's normal aspect-aware presenter.  Export the same guest
- * GPIO-derived decision so its composition quad retains the native display
- * aspect without a title list or a host-side override. */
+ * pass through xui's aspect-aware presenter.  Standard-definition Xbox modes
+ * use a 4:3 raster that may be anamorphic, so their PM-GPIO aspect decision is
+ * authoritative.  HD modes are 16:9 carriers, but a title may deliberately
+ * place a normal-aspect 960x720 image in the center of 1280x720.  In that case
+ * the XR shell crops only the standardized carrier pillarbox and presents the
+ * complete 4:3 image; title safe-area pixels remain untouched. */
 __attribute__((visibility("default")))
 float xemu_xr_get_display_aspect(void)
 {
     return g_widescreen ? (16.0f / 9.0f) : (4.0f / 3.0f);
+}
+
+/* Fraction to remove from each horizontal edge of an HD carrier when the
+ * guest explicitly requests normal (4:3) presentation.  Cropping 1/8 from
+ * both sides maps 1280x720 to the complete centered 960x720 image. */
+__attribute__((visibility("default")))
+float xemu_xr_get_display_crop_x(void)
+{
+    unsigned int width = qatomic_read(&g_display_raster_width);
+    unsigned int height = qatomic_read(&g_display_raster_height);
+    bool hd_16_9 = width >= 1280 &&
+                   (uint64_t)width * 9 == (uint64_t)height * 16;
+    return hd_16_9 && !g_widescreen ? 0.125f : 0.0f;
 }
 #endif
