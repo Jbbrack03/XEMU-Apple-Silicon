@@ -106,6 +106,8 @@ static struct {
     bool active;                        /* synthetic pad created + bound */
     uint16_t buttons;
     int16_t axis[CONTROLLER_AXIS__COUNT];
+    uint16_t rumble_l;
+    uint16_t rumble_r;
     ControllerState *con;
 } xr_pad;
 
@@ -118,6 +120,19 @@ void xemu_xr_set_gamepad_state(uint16_t buttons, const int16_t *axis, int naxis)
         xr_pad.axis[i] = axis[i];
     }
     pthread_mutex_unlock(&xr_pad_lock);
+}
+
+/* The XR NativeActivity, rather than SDLActivity, owns the Bluetooth gamepad
+ * while immersive. Publish the guest's two Xbox motor strengths so the shell
+ * can drive that same Android InputDevice's vibrator. */
+__attribute__((visibility("default")))
+uint32_t xemu_xr_get_gamepad_rumble(void)
+{
+    pthread_mutex_lock(&xr_pad_lock);
+    uint32_t packed = (uint32_t)xr_pad.rumble_l |
+                      ((uint32_t)xr_pad.rumble_r << 16);
+    pthread_mutex_unlock(&xr_pad_lock);
+    return packed;
 }
 
 typedef struct XemuInputButtonName { const char *name; int mask; } XemuInputButtonName;
@@ -1103,6 +1118,20 @@ void xemu_input_update_sdl_controller_state(ControllerState *state)
 
 void xemu_input_update_rumble(ControllerState *state)
 {
+#ifdef __ANDROID__
+    if (state == xr_pad.con) {
+        pthread_mutex_lock(&xr_pad_lock);
+        if (g_config.input.allow_vibration) {
+            xr_pad.rumble_l = state->rumble_l;
+            xr_pad.rumble_r = state->rumble_r;
+        } else {
+            xr_pad.rumble_l = 0;
+            xr_pad.rumble_r = 0;
+        }
+        pthread_mutex_unlock(&xr_pad_lock);
+        return;
+    }
+#endif
     if (state->type != INPUT_DEVICE_SDL_GAMECONTROLLER) {
         return;
     }

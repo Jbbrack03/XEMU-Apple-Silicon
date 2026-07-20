@@ -619,7 +619,7 @@ struct DisplaySettings {
   bool use_dsp_jit = true;
   bool hrtf = false;
   bool cache_shaders = true;
-  bool net_enable = false;
+  bool net_enable = true;
   std::string renderer = "vulkan";
   std::string filtering = "nearest";
   std::string aspect_ratio = "fit";
@@ -907,7 +907,7 @@ static SetupFiles SyncSetupFiles() {
   ds.hrtf = GetPrefBool(env, activity, "setting_hrtf",
                          GetPrefBool(env, activity, "hrtf", false));
   ds.cache_shaders = true;
-  ds.net_enable = GetPrefBool(env, activity, "setting_network_enable", false);
+  ds.net_enable = GetPrefBool(env, activity, "setting_network_enable", true);
   ds.mem_limit_mib = 64;
   __android_log_print(ANDROID_LOG_INFO, "xemu-android",
                       "VR fixed settings: ssaa=2 vsync=off mem=64 "

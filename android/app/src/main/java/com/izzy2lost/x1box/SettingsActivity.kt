@@ -444,7 +444,7 @@ class SettingsActivity : AppCompatActivity() {
     switchDebugLogs.isChecked =
       prefs.getBoolean(DebugLog.PREF_ENABLED, false)
     switchNetworkEnable.isChecked =
-      prefs.getBoolean("setting_network_enable", false)
+      prefs.getBoolean("setting_network_enable", true)
 
     val audioDriver = prefs.getString("setting_audio_driver", "openslES") ?: "openslES"
     when (audioDriver) {
@@ -635,7 +635,7 @@ class SettingsActivity : AppCompatActivity() {
     if (!prefs.contains("setting_vsync")) editor.putBoolean("setting_vsync", false)
     if (!prefs.contains("setting_use_dsp")) editor.putBoolean("setting_use_dsp", false)
     if (!prefs.contains("setting_hrtf")) editor.putBoolean("setting_hrtf", false)
-    if (!prefs.contains("setting_network_enable")) editor.putBoolean("setting_network_enable", false)
+    if (!prefs.contains("setting_network_enable")) editor.putBoolean("setting_network_enable", true)
     if (!prefs.contains("setting_renderer")) editor.putString("setting_renderer", "vulkan")
     if (!prefs.contains("setting_filtering")) editor.putString("setting_filtering", "nearest")
     if (!prefs.contains("setting_tcg_thread")) editor.putString("setting_tcg_thread", "multi")

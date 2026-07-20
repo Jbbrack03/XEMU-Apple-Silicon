@@ -103,14 +103,19 @@ typedef struct {
      * NULL until the emulator process side is up. */
     struct AHardwareBuffer *(*acquire_ahb)(uint64_t *seq);
     float (*get_display_aspect)(void); /* signal raster + guest GPIO aspect */
-    float (*get_display_crop_x)(void); /* centered HD-carrier pillarbox */
+    float (*get_display_crop_x)(void); /* centered carrier + safe-area crop */
+    float (*get_display_crop_y)(void);
 
     /* Gamepad forwarding: SDL can't see a paired pad while the XR NativeActivity
      * has focus, so we translate Android gamepad events and push them to the
      * emulator via this resolved setter. pad_* accumulate current state. */
     void (*set_gamepad)(uint16_t buttons, const int16_t *axis, int naxis);
+    uint32_t (*get_gamepad_rumble)(void);
     uint16_t pad_buttons;
     int16_t pad_axis[6];  /* LTRIG,RTRIG,LSTICK_X,LSTICK_Y,RSTICK_X,RSTICK_Y */
+    int gamepad_device_id; /* Android device that supplies the forwarded pad */
+    uint32_t last_rumble;
+    int64_t last_rumble_push_ns;
     uint64_t last_seq;
     /* Per-AHB EGLImage/texture cache (AHBs are a small stable ring). */
     struct {
@@ -137,12 +142,13 @@ typedef struct {
     float quad_size_m;      /* width in meters; height derives from aspect */
     float quad_aspect;      /* w/h */
     float quad_crop_x;      /* fraction removed from each horizontal edge */
+    float quad_crop_y;      /* fraction removed from each vertical edge */
 
     /* Controller input */
     XrActionSet action_set;
-    XrAction grab_action;   /* squeeze/grip: move the window */
-    XrAction resize_action; /* trigger: resize while held */
-    XrAction stick_action;  /* thumbstick: push/pull + scale */
+    XrAction grab_action;   /* squeeze/grip: grab the pointed window */
+    XrAction resize_action; /* trigger: select body or corner handle */
+    XrAction stick_action;  /* menu scrolling only */
     XrAction aim_pose_action;
     XrSpace aim_space[2];   /* 0=left, 1=right */
     XrPath hand_path[2];
@@ -153,6 +159,21 @@ typedef struct {
     int grab_hand;          /* -1 none, else 0/1 */
     XrVector3f grab_offset;  /* window pos relative to controller at grab */
     bool resizing;
+
+    /* Browser-style game-window pointer + direct manipulation. Hit values:
+     * 0=none, 1=body, 2=TL, 3=TR, 4=BL, 5=BR. Drag mode: 0=idle,
+     * 1=6DOF move, 2=aspect-locked corner resize. */
+    int game_pointer_hand;
+    int game_pointer_hit;
+    bool game_pointer_inside;
+    float game_pointer_u, game_pointer_v;
+    int window_drag_mode;
+    int window_drag_hand;
+    XrVector3f window_drag_offset;
+    XrQuaternionf window_drag_orient_offset;
+    int resize_sx, resize_sy;
+    XrVector3f resize_anchor;
+    XrQuaternionf resize_orient;
 
     /* Emulator control bridges (resolved from libxemu.so alongside the feed);
      * NULL until the emulator side is up. */
@@ -227,7 +248,8 @@ typedef struct {
         m_activate, m_setActiveFp, m_selectByName, m_startEmulator,
         m_pointer, m_pointerExit, m_scroll, m_navPage, m_command, m_button,
         m_setGuestMs, m_getWinPlacement, m_saveWinPlacement, m_setMicState,
-        m_shouldAutoBoot, m_setEmuState, m_showLibrary;
+        m_shouldAutoBoot, m_setEmuState, m_showLibrary, m_showInGameOverlay,
+        m_ensureCoreSetup, m_setGamepadRumble;
     bool jni_tried;
     bool emulator_bootstrap_started;
     /* Library-first: true after quit-to-library (guest idles on the hidden
@@ -347,6 +369,25 @@ static XrVector3f v3_sub(XrVector3f a, XrVector3f b)
 static XrVector3f v3_add(XrVector3f a, XrVector3f b)
 {
     return (XrVector3f){ a.x + b.x, a.y + b.y, a.z + b.z };
+}
+static XrQuaternionf q_conjugate(XrQuaternionf q)
+{
+    return (XrQuaternionf){ -q.x, -q.y, -q.z, q.w };
+}
+static XrQuaternionf q_mul(XrQuaternionf a, XrQuaternionf b)
+{
+    return (XrQuaternionf){
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+static XrQuaternionf q_normalize(XrQuaternionf q)
+{
+    float n = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (n < 1e-6f) return (XrQuaternionf){ 0, 0, 0, 1 };
+    return (XrQuaternionf){ q.x / n, q.y / n, q.z / n, q.w / n };
 }
 static XrVector3f q_rotate(XrQuaternionf q, XrVector3f v)
 {
@@ -609,6 +650,8 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb,
 }
 
 /* Try to resolve the emulator frame feed; libxemu.so may not be loaded yet. */
+static bool menu_jni_check(XrShell *s, const char *where);
+
 static void resolve_emulator_feed(XrShell *s)
 {
     if (s->acquire_ahb && s->get_display_aspect && s->set_gamepad &&
@@ -637,11 +680,22 @@ static void resolve_emulator_feed(XrShell *s)
         s->get_display_crop_x = (float (*)(void))
             dlsym(h, "xemu_xr_get_display_crop_x");
     }
+    if (!s->get_display_crop_y) {
+        s->get_display_crop_y = (float (*)(void))
+            dlsym(h, "xemu_xr_get_display_crop_y");
+    }
     if (!s->set_gamepad) {
         s->set_gamepad = (void (*)(uint16_t, const int16_t *, int))
             dlsym(h, "xemu_xr_set_gamepad_state");
         if (s->set_gamepad) {
             LOGI("emulator gamepad forwarding resolved");
+        }
+    }
+    if (!s->get_gamepad_rumble) {
+        s->get_gamepad_rumble = (uint32_t (*)(void))
+            dlsym(h, "xemu_xr_get_gamepad_rumble");
+        if (s->get_gamepad_rumble) {
+            LOGI("Bluetooth gamepad rumble bridge resolved");
         }
     }
     if (!s->request_load_disc) {
@@ -678,9 +732,55 @@ static void resolve_emulator_feed(XrShell *s)
     }
 }
 
+/* Record the exact Android device that supplied Xbox-style input. Force one
+ * zero-amplitude JNI call for each newly active device so Kotlin can inspect
+ * and log Horizon's per-device vibrator capability before the first game
+ * pulse. Also cancel a previous physical pad when focus moves to another. */
+static void xr_note_gamepad_device(XrShell *s, int device_id)
+{
+    if (device_id < 0 || device_id == s->gamepad_device_id) return;
+    if (s->menu_bridge && s->m_setGamepadRumble &&
+        s->gamepad_device_id >= 0) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                      s->m_setGamepadRumble,
+                                      s->gamepad_device_id, 0.0f, 0.0f);
+        menu_jni_check(s, "setGamepadRumble(old device)");
+    }
+    s->gamepad_device_id = device_id;
+    s->last_rumble = UINT32_MAX;
+    s->last_rumble_push_ns = 0;
+    LOGI("Android gamepad device selected: id=%d", device_id);
+}
+
+/* Refresh a 250 ms Android vibration pulse while the guest holds either Xbox
+ * motor. Android exposes the Bluetooth controller as a single vibrator, so the
+ * stronger of the two motors determines amplitude. A zero transition cancels
+ * immediately. */
+static void xr_update_gamepad_rumble(XrShell *s)
+{
+    if (!s->get_gamepad_rumble || !s->menu_bridge ||
+        s->gamepad_device_id < 0 || !s->m_setGamepadRumble) {
+        return;
+    }
+    uint32_t packed = s->get_gamepad_rumble();
+    int64_t now = now_ns();
+    bool refresh = packed != 0 && now - s->last_rumble_push_ns >= 200000000LL;
+    if (packed == s->last_rumble && !refresh) {
+        return;
+    }
+    s->last_rumble = packed;
+    s->last_rumble_push_ns = now;
+    float low = (float)(packed & 0xffffu) / 65535.0f;
+    float high = (float)(packed >> 16) / 65535.0f;
+    (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                  s->m_setGamepadRumble,
+                                  s->gamepad_device_id, low, high);
+    menu_jni_check(s, "setGamepadRumble");
+}
+
 /* Keep the physical OpenXR quad at the guest's requested display aspect.  A
- * normal-aspect image inside an HD carrier also reports a centered horizontal
- * crop; that removes only the 160-pixel carrier bars from 1280x720. */
+ * normal-aspect image inside an HD carrier reports a centered crop that
+ * removes its transport bars and symmetric black safe-area matte. */
 static void xr_update_emulator_aspect(XrShell *s)
 {
     if (!s->get_display_aspect) {
@@ -689,17 +789,22 @@ static void xr_update_emulator_aspect(XrShell *s)
 
     float aspect = s->get_display_aspect();
     float crop_x = s->get_display_crop_x ? s->get_display_crop_x() : 0.0f;
-    if (aspect < 1.2f || aspect > 2.0f || crop_x < 0.0f || crop_x >= 0.5f) {
+    float crop_y = s->get_display_crop_y ? s->get_display_crop_y() : 0.0f;
+    if (aspect < 1.2f || aspect > 2.0f ||
+        crop_x < 0.0f || crop_x >= 0.5f ||
+        crop_y < 0.0f || crop_y >= 0.5f) {
         return;
     }
-    if (aspect == s->quad_aspect && crop_x == s->quad_crop_x) {
+    if (aspect == s->quad_aspect && crop_x == s->quad_crop_x &&
+        crop_y == s->quad_crop_y) {
         return;
     }
 
     s->quad_aspect = aspect;
     s->quad_crop_x = crop_x;
-    LOGI("emulator display aspect %.3f crop-x %.3f", (double)aspect,
-         (double)crop_x);
+    s->quad_crop_y = crop_y;
+    LOGI("emulator display aspect %.3f crop %.3f,%.3f", (double)aspect,
+         (double)crop_x, (double)crop_y);
 }
 
 static void xr_apply_thread_settings(XrShell *s)
@@ -845,6 +950,12 @@ static void menu_jni_init(XrShell *s)
     s->m_setEmuState =
         (*env)->GetMethodID(env, bcls, "setEmulatorState", "(Z)V");
     s->m_showLibrary = (*env)->GetMethodID(env, bcls, "showLibrary", "()V");
+    s->m_showInGameOverlay =
+        (*env)->GetMethodID(env, bcls, "showInGameOverlay", "()V");
+    s->m_ensureCoreSetup =
+        (*env)->GetMethodID(env, bcls, "ensureCoreSetup", "()Z");
+    s->m_setGamepadRumble =
+        (*env)->GetMethodID(env, bcls, "setGamepadRumble", "(IFF)V");
     /* A missing method ID leaves a pending exception AND would abort ART on the
      * next Call*; validate all before publishing the bridge. */
     if ((*env)->ExceptionCheck(env) || !s->m_refresh || !s->m_count ||
@@ -854,7 +965,8 @@ static void menu_jni_init(XrShell *s)
         !s->m_scroll || !s->m_navPage || !s->m_command || !s->m_button ||
         !s->m_setGuestMs || !s->m_getWinPlacement || !s->m_saveWinPlacement ||
         !s->m_setMicState || !s->m_shouldAutoBoot || !s->m_setEmuState ||
-        !s->m_showLibrary) {
+        !s->m_showLibrary || !s->m_showInGameOverlay ||
+        !s->m_ensureCoreSetup || !s->m_setGamepadRumble) {
         (*env)->ExceptionClear(env);
         LOGE("menu: method resolution failed; picker disabled");
         goto fail;
@@ -905,6 +1017,12 @@ static void start_emulator_once(XrShell *s)
         if (!s->emulator_bootstrap_started) {
             LOGE("bootstrap: JNI bridge unavailable; emulator not started");
         }
+        return;
+    }
+    jboolean setup_ready = (*s->jni_env)->CallBooleanMethod(
+        s->jni_env, s->menu_bridge, s->m_ensureCoreSetup);
+    if (menu_jni_check(s, "ensureCoreSetup") || !setup_ready) {
+        LOGI("bootstrap: core setup incomplete; handing off to setup flow");
         return;
     }
     jboolean boot = (*s->jni_env)->CallBooleanMethod(
@@ -1137,6 +1255,13 @@ static void menu_open(XrShell *s)
     if (menu_jni_check(s, "setEmulatorState")) {
         return;
     }
+    if (s->emulator_bootstrap_started && !s->game_hidden) {
+        (*s->jni_env)->CallVoidMethod(s->jni_env, s->menu_bridge,
+                                      s->m_showInGameOverlay);
+        if (menu_jni_check(s, "showInGameOverlay")) {
+            return;
+        }
+    }
     s->menu_open = true;
     s->nav_latch = 0;
     /* Spawn the panel in front of the user's current gaze. */
@@ -1146,6 +1271,9 @@ static void menu_open(XrShell *s)
     s->pointer_pressed = false;
     s->pointer_sent_press = false;
     s->pointer_sent_x = s->pointer_sent_y = -1;
+    s->window_drag_mode = 0;
+    s->game_pointer_inside = false;
+    s->game_pointer_hit = 0;
     /* Release any held inputs so nothing sticks in the game while navigating. */
     s->pad_buttons = 0;
     s->pad_deferred = 0;
@@ -1154,7 +1282,9 @@ static void menu_open(XrShell *s)
     if (s->set_gamepad) {
         s->set_gamepad(0, s->pad_axis, 6);
     }
-    LOGI("menu opened");
+    LOGI("menu opened (%s)",
+         s->emulator_bootstrap_started && !s->game_hidden
+             ? "in-game overlay" : "main shell");
 }
 
 static void menu_close(XrShell *s)
@@ -1720,9 +1850,9 @@ static void xr_create_instance(XrShell *s)
                           (PFN_xrVoidFunction *)&s->get_refresh);
 }
 
-/* Task #9: controller action set for 6DOF window move/resize. Touch
- * controller profile. grip = grab-to-move, trigger = resize-mode,
- * thumbstick = push/pull (Y) + scale (X while resizing). */
+/* Controller action set for browser-style 6DOF window manipulation. Touch
+ * controller profile. Trigger selects the pointed body/corner handle, Grip
+ * grabs the pointed body, and thumbstick is reserved for menu scrolling. */
 static void xr_input_init(XrShell *s)
 {
     XrActionSetCreateInfo asci = { .type = XR_TYPE_ACTION_SET_CREATE_INFO };
@@ -1827,7 +1957,7 @@ static void xr_input_init(XrShell *s)
     }
     s->grab_hand = -1;
     s->input_ready = true;
-    LOGI("6DOF window controls ready (grip=move, trigger=resize, stick=push/scale)");
+    LOGI("6DOF window controls ready (ray grab=move, corner trigger=resize)");
 }
 
 /* Quest boots the CPU perf domain at SUSTAINED_LOW by default. Since the
@@ -1904,6 +2034,204 @@ static bool action_bool(XrShell *s, XrAction a)
     XrActionStateBoolean st = { .type = XR_TYPE_ACTION_STATE_BOOLEAN };
     xrGetActionStateBoolean(s->session, &gi, &st);
     return st.isActive && st.currentState;
+}
+
+enum {
+    GAME_HIT_NONE = 0,
+    GAME_HIT_BODY = 1,
+    GAME_HIT_TL = 2,
+    GAME_HIT_TR = 3,
+    GAME_HIT_BL = 4,
+    GAME_HIT_BR = 5,
+};
+
+/* Intersect an aim ray with an oriented quad's infinite plane. Local +Y is
+ * up and the quad faces local +Z. */
+static bool quad_ray_plane(const XrPosef *aim, XrVector3f pos,
+                           XrQuaternionf orient, XrVector3f *out_world,
+                           XrVector3f *out_local)
+{
+    XrVector3f n = q_rotate(orient, (XrVector3f){ 0, 0, 1 });
+    XrVector3f d = q_rotate(aim->orientation, (XrVector3f){ 0, 0, -1 });
+    float denom = d.x * n.x + d.y * n.y + d.z * n.z;
+    if (fabsf(denom) < 1e-4f) return false;
+    XrVector3f rel = v3_sub(pos, aim->position);
+    float t = (rel.x * n.x + rel.y * n.y + rel.z * n.z) / denom;
+    if (t < 0.05f || t > 10.0f) return false;
+    XrVector3f world = v3_add(
+        aim->position, (XrVector3f){ d.x * t, d.y * t, d.z * t });
+    XrVector3f local = q_rotate(q_conjugate(orient), v3_sub(world, pos));
+    if (out_world) *out_world = world;
+    if (out_local) *out_local = local;
+    return true;
+}
+
+static int game_ray_hit(XrShell *s, const XrPosef *aim, float *out_u,
+                        float *out_v)
+{
+    XrVector3f local;
+    if (!quad_ray_plane(aim, s->quad_pos, s->quad_orient, NULL, &local)) {
+        return GAME_HIT_NONE;
+    }
+    float w = s->quad_size_m;
+    float h = w / (s->quad_aspect > 0.0f ? s->quad_aspect : 4.0f / 3.0f);
+    float u = local.x / w + 0.5f;
+    float v = 0.5f - local.y / h;
+    if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) {
+        return GAME_HIT_NONE;
+    }
+    *out_u = u;
+    *out_v = v;
+    const float edge = 0.12f;
+    if (u <= edge && v <= edge) return GAME_HIT_TL;
+    if (u >= 1.0f - edge && v <= edge) return GAME_HIT_TR;
+    if (u <= edge && v >= 1.0f - edge) return GAME_HIT_BL;
+    if (u >= 1.0f - edge && v >= 1.0f - edge) return GAME_HIT_BR;
+    return GAME_HIT_BODY;
+}
+
+static void game_window_pointer_update(XrShell *s, XrSpaceLocation loc[2])
+{
+    if (s->game_hidden || !s->emulator_bootstrap_started) {
+        s->game_pointer_inside = false;
+        s->game_pointer_hit = GAME_HIT_NONE;
+        s->window_drag_mode = 0;
+        return;
+    }
+
+    /* Active drag keeps its original hand even when a corner leaves the
+     * bounds. This is what makes a resize continuous instead of sticky. */
+    if (s->window_drag_mode != 0) {
+        int hand = s->window_drag_hand;
+        if (hand < 0 || hand > 1 ||
+            !(loc[hand].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
+            !(loc[hand].locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            s->window_drag_mode = 0;
+            s->game_pointer_inside = false;
+            return;
+        }
+        XrPosef cp = loc[hand].pose;
+        float trigger = action_float(s, s->resize_action, hand);
+        float grip = action_float(s, s->grab_action, hand);
+        bool held = s->window_drag_mode == 2 ? trigger > 0.4f
+                                             : (trigger > 0.4f || grip > 0.4f);
+        if (!held) {
+            s->window_drag_mode = 0;
+            window_placement_mark_dirty(s);
+            return;
+        }
+        if (s->window_drag_mode == 1) {
+            s->quad_pos = v3_add(cp.position, q_rotate(cp.orientation,
+                                                       s->window_drag_offset));
+            s->quad_orient = q_normalize(q_mul(cp.orientation,
+                                                s->window_drag_orient_offset));
+        } else {
+            XrVector3f world;
+            if (quad_ray_plane(&cp, s->quad_pos, s->resize_orient,
+                               &world, NULL)) {
+                XrVector3f from_anchor = q_rotate(
+                    q_conjugate(s->resize_orient),
+                    v3_sub(world, s->resize_anchor));
+                float aspect = s->quad_aspect > 0.0f ? s->quad_aspect
+                                                     : 4.0f / 3.0f;
+                XrVector3f diagonal = {
+                    (float)s->resize_sx,
+                    (float)s->resize_sy / aspect,
+                    0.0f,
+                };
+                float denom = diagonal.x * diagonal.x +
+                              diagonal.y * diagonal.y;
+                float width = (from_anchor.x * diagonal.x +
+                               from_anchor.y * diagonal.y) / denom;
+                if (width < 0.3f) width = 0.3f;
+                if (width > 4.0f) width = 4.0f;
+                XrVector3f center_from_anchor = {
+                    s->resize_sx * width * 0.5f,
+                    s->resize_sy * (width / aspect) * 0.5f,
+                    0.0f,
+                };
+                s->quad_size_m = width;
+                s->quad_orient = s->resize_orient;
+                s->quad_pos = v3_add(
+                    s->resize_anchor,
+                    q_rotate(s->resize_orient, center_from_anchor));
+            }
+        }
+        window_placement_mark_dirty(s);
+        float u = 0.0f, v = 0.0f;
+        int hit = game_ray_hit(s, &cp, &u, &v);
+        if (hit != GAME_HIT_NONE) {
+            s->game_pointer_inside = true;
+            s->game_pointer_u = u;
+            s->game_pointer_v = v;
+        } else {
+            s->game_pointer_inside = false;
+        }
+        return;
+    }
+
+    int hit_hand = -1;
+    int hit = GAME_HIT_NONE;
+    float u = 0.0f, v = 0.0f;
+    int order[3];
+    int order_n = 0;
+    if (s->game_pointer_hand >= 0) order[order_n++] = s->game_pointer_hand;
+    order[order_n++] = 1;
+    order[order_n++] = 0;
+    for (int i = 0; i < order_n; i++) {
+        int hand = order[i];
+        if (hand < 0 || hand > 1) continue;
+        if (!(loc[hand].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) ||
+            !(loc[hand].locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+            continue;
+        }
+        hit = game_ray_hit(s, &loc[hand].pose, &u, &v);
+        if (hit != GAME_HIT_NONE) {
+            hit_hand = hand;
+            break;
+        }
+    }
+    if (hit_hand < 0) {
+        s->game_pointer_hand = -1;
+        s->game_pointer_inside = false;
+        s->game_pointer_hit = GAME_HIT_NONE;
+        return;
+    }
+
+    s->game_pointer_hand = hit_hand;
+    s->game_pointer_inside = true;
+    s->game_pointer_hit = hit;
+    s->game_pointer_u = u;
+    s->game_pointer_v = v;
+    float trigger = action_float(s, s->resize_action, hit_hand);
+    float grip = action_float(s, s->grab_action, hit_hand);
+    if (trigger <= 0.6f && grip <= 0.6f) return;
+
+    XrPosef cp = loc[hit_hand].pose;
+    s->window_drag_hand = hit_hand;
+    bool corner = hit >= GAME_HIT_TL;
+    if (corner && trigger > 0.6f) {
+        s->window_drag_mode = 2;
+        s->resize_sx = (hit == GAME_HIT_TR || hit == GAME_HIT_BR) ? 1 : -1;
+        s->resize_sy = (hit == GAME_HIT_TL || hit == GAME_HIT_TR) ? 1 : -1;
+        s->resize_orient = s->quad_orient;
+        float h = s->quad_size_m /
+                  (s->quad_aspect > 0.0f ? s->quad_aspect : 4.0f / 3.0f);
+        XrVector3f opposite = {
+            -s->resize_sx * s->quad_size_m * 0.5f,
+            -s->resize_sy * h * 0.5f,
+            0.0f,
+        };
+        s->resize_anchor = v3_add(
+            s->quad_pos, q_rotate(s->quad_orient, opposite));
+        LOGI("window resize begin: hand=%d corner=%d", hit_hand, hit);
+    } else {
+        s->window_drag_mode = 1;
+        XrQuaternionf inv = q_conjugate(cp.orientation);
+        s->window_drag_offset = q_rotate(inv, v3_sub(s->quad_pos, cp.position));
+        s->window_drag_orient_offset = q_mul(inv, s->quad_orient);
+        LOGI("window move begin: hand=%d", hit_hand);
+    }
 }
 
 /* Intersect a controller aim pose with the menu quad. Returns panel pixel
@@ -2017,11 +2345,11 @@ static void menu_pointer_update(XrShell *s, XrSpaceLocation loc[2], float dt)
     }
 }
 
-/* Per-frame controller update. Menu closed: grip = grab-to-move the game
- * window, trigger = resize (stick X scales, Y pushes/pulls). Menu open: the
- * ray drives the UI (trigger = click, stick = scroll) and grip moves the UI
- * panel instead. The left-controller menu button toggles the shell UI in
- * both states. */
+/* Per-frame controller update. With the menu closed, a ray-targeted Trigger
+ * or Grip moves the game quad in 6DOF; Trigger on a corner handle resizes with
+ * the opposite corner anchored and aspect locked. Thumbsticks never move the
+ * game window. With the menu open, Trigger clicks/scrolls and Grip can still
+ * reposition the menu panel. */
 static void xr_update_window(XrShell *s, XrTime predicted, float dt)
 {
     if (!s->input_ready) {
@@ -2069,74 +2397,40 @@ static void xr_update_window(XrShell *s, XrTime predicted, float dt)
         }
     }
 
-    /* Grab: prefer a hand already grabbing; else whichever grip is pressed.
-     * Targets the shell panel while the menu is open, else the game window. */
-    XrVector3f *tgt_pos = s->menu_open ? &s->menu_pos : &s->quad_pos;
-    XrQuaternionf *tgt_orient = s->menu_open ? &s->menu_orient
-                                             : &s->quad_orient;
-    int want = -1;
-    for (int h = 0; h < 2; h++) {
-        if (action_float(s, s->grab_action, h) > 0.6f &&
-            (loc[h].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)) {
-            want = h;
-            if (h == s->grab_hand) {
-                break;
+    if (s->menu_open) {
+        /* Menu grip is intentionally panel-scoped; game-window interaction is
+         * suspended while the overlay owns input. */
+        int want = -1;
+        for (int h = 0; h < 2; h++) {
+            if (action_float(s, s->grab_action, h) > 0.6f &&
+                (loc[h].locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+                (loc[h].locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+                want = h;
+                if (h == s->grab_hand) break;
             }
         }
-    }
-    if (want >= 0) {
-        XrPosef cp = loc[want].pose;
-        if (s->grab_hand != want) {
-            /* Begin grab: record window offset in controller-local frame. */
-            XrQuaternionf inv = { -cp.orientation.x, -cp.orientation.y,
-                                  -cp.orientation.z, cp.orientation.w };
-            s->grab_offset = q_rotate(inv, v3_sub(*tgt_pos, cp.position));
-            s->grab_hand = want;
+        if (want >= 0) {
+            XrPosef cp = loc[want].pose;
+            if (s->grab_hand != want) {
+                s->grab_offset = q_rotate(
+                    q_conjugate(cp.orientation),
+                    v3_sub(s->menu_pos, cp.position));
+                s->grab_hand = want;
+            }
+            s->menu_pos = v3_add(cp.position, q_rotate(cp.orientation,
+                                                       s->grab_offset));
+            s->menu_orient = cp.orientation;
+        } else {
+            s->grab_hand = -1;
         }
-        /* Move: window rides the controller. Orientation follows controller
-         * so the panel faces where you point. */
-        *tgt_pos = v3_add(cp.position, q_rotate(cp.orientation,
-                                                s->grab_offset));
-        *tgt_orient = cp.orientation;
-        if (!s->menu_open) {
-            window_placement_mark_dirty(s);
-        }
-    } else {
-        s->grab_hand = -1;
-    }
-
-    if (s->menu_open) {
+        s->game_pointer_inside = false;
+        s->window_drag_mode = 0;
         menu_pointer_update(s, loc, dt);
         menu_drain_commands(s);
         return;
     }
-
-    /* Resize mode: either trigger held (menu closed only). */
-    bool resize = action_float(s, s->resize_action, 0) > 0.6f ||
-                  action_float(s, s->resize_action, 1) > 0.6f;
-
-    /* Thumbstick: use the right stick (fall back to left). */
-    XrVector2f stick = action_vec2(s, s->stick_action, 1);
-    if (stick.x == 0 && stick.y == 0) {
-        stick = action_vec2(s, s->stick_action, 0);
-    }
-    const float DEAD = 0.15f;
-    if (resize) {
-        if (stick.x > DEAD || stick.x < -DEAD) {
-            s->quad_size_m *= (1.0f + stick.x * 0.6f * dt);
-            if (s->quad_size_m < 0.3f) s->quad_size_m = 0.3f;
-            if (s->quad_size_m > 4.0f) s->quad_size_m = 4.0f;
-            window_placement_mark_dirty(s);
-        }
-    }
-    if (stick.y > DEAD || stick.y < -DEAD) {
-        /* Push/pull along the window's forward (-Z) axis. */
-        XrVector3f fwd = q_rotate(s->quad_orient, (XrVector3f){ 0, 0, -1 });
-        float d = -stick.y * 0.8f * dt;
-        s->quad_pos = v3_add(s->quad_pos,
-                             (XrVector3f){ fwd.x * d, fwd.y * d, fwd.z * d });
-        window_placement_mark_dirty(s);
-    }
+    s->grab_hand = -1;
+    game_window_pointer_update(s, loc);
 }
 
 static bool xr_create_session(XrShell *s)
@@ -2408,6 +2702,43 @@ static void xr_dump_quad(XrShell *s, uint32_t idx)
     written++;
 }
 
+static void draw_game_window_pointer(XrShell *s)
+{
+    if (!s->game_pointer_inside || !s->cursor_prog || s->menu_open) return;
+    bool corner = s->game_pointer_hit >= GAME_HIT_TL;
+    float radius = corner ? 20.0f : 10.0f;
+    float cx = s->game_pointer_u * (float)s->quad_w;
+    float cy = (1.0f - s->game_pointer_v) * (float)s->quad_h;
+    if (corner) {
+        float inset = radius + 4.0f;
+        bool right = s->game_pointer_hit == GAME_HIT_TR ||
+                     s->game_pointer_hit == GAME_HIT_BR;
+        bool top = s->game_pointer_hit == GAME_HIT_TL ||
+                   s->game_pointer_hit == GAME_HIT_TR;
+        cx = right ? (float)s->quad_w - inset : inset;
+        cy = top ? (float)s->quad_h - inset : inset;
+    }
+    glUseProgram(s->cursor_prog);
+    glUniform2f(s->cursor_center_loc, cx, cy);
+    glUniform1f(s->cursor_radius_loc, radius);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_SCISSOR_TEST);
+    int x0 = (int)(cx - radius - 3.0f);
+    int y0 = (int)(cy - radius - 3.0f);
+    int x1 = (int)(cx + radius + 3.0f);
+    int y1 = (int)(cy + radius + 3.0f);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s->quad_w) x1 = s->quad_w;
+    if (y1 > s->quad_h) y1 = s->quad_h;
+    glScissor(x0, y0, x1 - x0, y1 - y0);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+}
+
 static void xr_frame(XrShell *s)
 {
     XrFrameWaitInfo fwi = { .type = XR_TYPE_FRAME_WAIT_INFO };
@@ -2431,6 +2762,7 @@ static void xr_frame(XrShell *s)
      * visible in the same XR frame and never perturb frame production. */
     resolve_emulator_feed(s);
     xr_update_emulator_aspect(s);
+    xr_update_gamepad_rumble(s);
 
     /* Drive 6DOF window move/resize from the controllers. */
     xr_update_window(s, fs.predictedDisplayTime, 1.0f / 72.0f);
@@ -2501,8 +2833,10 @@ static void xr_frame(XrShell *s)
             }
             if (s->blit_uv_rect_uniform >= 0) {
                 float crop_x = s->quad_crop_x;
-                glUniform4f(s->blit_uv_rect_uniform, crop_x, 0.0f,
-                            1.0f - 2.0f * crop_x, 1.0f);
+                float crop_y = s->quad_crop_y;
+                glUniform4f(s->blit_uv_rect_uniform, crop_x, crop_y,
+                            1.0f - 2.0f * crop_x,
+                            1.0f - 2.0f * crop_y);
             }
             if (s->blit_manual_srgb_uniform >= 0) {
                 glUniform1i(s->blit_manual_srgb_uniform,
@@ -2515,6 +2849,7 @@ static void xr_frame(XrShell *s)
                 LOGE("frame bridge: blit failed (tex=%u seq=%llu err=0x%x)",
                      emu_tex, (unsigned long long)emu_seq, gl_error);
             }
+            draw_game_window_pointer(s);
             glBindVertexArray(0);
             glBindTexture(GL_TEXTURE_2D, 0);
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2834,6 +3169,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
     if (type == AINPUT_EVENT_TYPE_KEY &&
         (src & (AINPUT_SOURCE_GAMEPAD | AINPUT_SOURCE_JOYSTICK |
                 AINPUT_SOURCE_DPAD))) {
+        xr_note_gamepad_device(s, AInputEvent_getDeviceId(event));
         uint16_t mask = gp_keycode_mask(AKeyEvent_getKeyCode(event));
         if (!mask) return 0;
         int32_t action = AKeyEvent_getAction(event);
@@ -2895,6 +3231,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *event)
     }
 
     if (type == AINPUT_EVENT_TYPE_MOTION && (src & AINPUT_SOURCE_JOYSTICK)) {
+        xr_note_gamepad_device(s, AInputEvent_getDeviceId(event));
         /* Y axes are negated: Android reports stick-up as negative, but the
          * emulator's convention (see keyboard map + SDL path's default
          * invert_axis_*_y) is stick-up = POSITIVE. X and triggers match as-is. */
@@ -2950,6 +3287,7 @@ void android_main(struct android_app *app)
     shell.quad_size_m = 1.2f;
     shell.quad_aspect = 4.0f / 3.0f;
     shell.grab_hand = -1;
+    shell.gamepad_device_id = -1;
 
     /* Shell UI panel: landscape, a little closer than the game window; it is
      * re-anchored in front of the user's gaze every time it opens. */
@@ -2992,6 +3330,14 @@ void android_main(struct android_app *app)
     /* Release the JNI bridge and detach this thread if we ever attached it. */
     if (shell.jvm && shell.jni_env) {
         if (shell.menu_bridge) {
+            if (shell.last_rumble && shell.m_setGamepadRumble &&
+                shell.gamepad_device_id >= 0) {
+                (*shell.jni_env)->CallVoidMethod(
+                    shell.jni_env, shell.menu_bridge,
+                    shell.m_setGamepadRumble, shell.gamepad_device_id,
+                    0.0f, 0.0f);
+                (*shell.jni_env)->ExceptionClear(shell.jni_env);
+            }
             (*shell.jni_env)->DeleteGlobalRef(shell.jni_env, shell.menu_bridge);
             shell.menu_bridge = NULL;
         }

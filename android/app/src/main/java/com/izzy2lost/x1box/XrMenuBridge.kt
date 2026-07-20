@@ -14,6 +14,11 @@ import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.BatteryManager
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.util.Log
+import android.view.InputDevice
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -31,7 +36,7 @@ import kotlin.math.min
  * runs on the native `android_main` thread (never the UI thread), so plain
  * file/prefs/Canvas work is safe and needs no marshaling.
  *
- * The UI is a Horizon-style landscape panel: a left nav rail with three pages
+ * The UI is a Horizon-style landscape panel: a left nav rail with four pages
  * (Library / Settings / System), a cover-art game grid, grouped settings rows
  * that persist to the same `x1box_prefs` keys the 2D Settings uses, and a
  * system page with live telemetry plus shell actions. One focus concept is
@@ -81,10 +86,10 @@ class XrMenuBridge(context: Context) {
   private var pendingCommand = CMD_NONE
 
   // Whether the emulator process bootstrap has run (pushed by native on open).
-  // Running: the menu is an in-game overlay — Library (disc swap) plus the
-  // SAFE-while-running System actions only; cold-boot settings (Settings /
-  // Online pages) are offered only before a game is up.
+  // A running, visible game gets a dedicated overlay containing only safe live
+  // controls; it never exposes the library or cold-boot settings.
   @Volatile private var emulatorRunning = false
+  @Volatile private var inGameOverlay = false
 
   // Focusables are rebuilt on every render pass (screen coordinates).
   private data class Focusable(val id: String, val rect: RectF)
@@ -137,6 +142,9 @@ class XrMenuBridge(context: Context) {
   private var dumpCounter = 0
 
   private var bitmap: Bitmap? = null
+  private var rumbleDeviceId = -1
+  private val loggedRumbleDevices = HashSet<Int>()
+  private val controllerSettings = ControllerSettings(appContext)
 
   // ---------------------------------------------------------------------
   // Theme
@@ -215,13 +223,28 @@ class XrMenuBridge(context: Context) {
     )),
     Section("NETWORK", listOf(
       Setting.Toggle("setting_network_enable", "Online Play (Insignia)",
-        "Connect to the Insignia service for Xbox Live-era online play", false),
+        "Connect to the Insignia service for Xbox Live-era online play", true),
     )),
   )
 
   init {
+    migrateNetworkDefaultOn()
     reloadGames()
     inspectOnlineStatusOnce()
+  }
+
+  /**
+   * Networking used to default off, which left the emulated Ethernet cable
+   * disconnected on every existing install. Migrate that old default once;
+   * after the marker is written, an explicit user choice is preserved.
+   */
+  private fun migrateNetworkDefaultOn() {
+    if (!prefs.getBoolean("network_default_on_migrated_v1", false)) {
+      prefs.edit()
+        .putBoolean("setting_network_enable", true)
+        .putBoolean("network_default_on_migrated_v1", true)
+        .commit()
+    }
   }
 
   private fun resolveHddFileForOnline(): File? =
@@ -307,6 +330,37 @@ class XrMenuBridge(context: Context) {
     }
   }
 
+  /**
+   * The launcher icon now enters NativeActivity directly so Horizon never
+   * composes the legacy 2D launcher first. A genuinely incomplete install is
+   * the one exception: leave XR and run the setup flow intentionally.
+   */
+  fun ensureCoreSetup(): Boolean {
+    val hasLocal: (String) -> Boolean = { key ->
+      prefs.getString(key, null)?.let(::File)?.isFile == true
+    }
+    val hasUri: (String) -> Boolean = { key ->
+      val raw = prefs.getString(key, null)
+      raw != null && runCatching {
+        val uri = android.net.Uri.parse(raw)
+        appContext.contentResolver.persistedUriPermissions.any {
+          permission -> permission.uri == uri && permission.isReadPermission
+        }
+      }.getOrDefault(false)
+    }
+    val ready = prefs.getBoolean("setup_complete", false) &&
+      (hasLocal("mcpxPath") || hasUri("mcpxUri")) &&
+      (hasLocal("flashPath") || hasUri("flashUri")) &&
+      (hasLocal("hddPath") || hasUri("hddUri"))
+    if (!ready) {
+      activity.runOnUiThread {
+        activity.startActivity(Intent(activity, LauncherActivity::class.java))
+        activity.finish()
+      }
+    }
+    return ready
+  }
+
   /** Kick an async library rescan (safe to call from the frame thread). */
   fun refresh() {
     reloadGames()
@@ -355,6 +409,7 @@ class XrMenuBridge(context: Context) {
   fun setEmulatorState(running: Boolean) {
     if (running != emulatorRunning) {
       emulatorRunning = running
+      if (!running) inGameOverlay = false
       if (!visiblePages().contains(page)) {
         switchPage(PAGE_LIBRARY)
       }
@@ -364,7 +419,75 @@ class XrMenuBridge(context: Context) {
 
   /** Native lands the wearer here after quit-to-library. */
   fun showLibrary() {
+    inGameOverlay = false
     switchPage(PAGE_LIBRARY)
+  }
+
+  /** Native uses this only while a game is visible. It is deliberately not
+   * the main library: B resumes, and only Quit Game returns to the library. */
+  fun showInGameOverlay() {
+    emulatorRunning = true
+    inGameOverlay = true
+    hoverId = null
+    pressedId = null
+    focusId = "sys:close"
+    dirty = true
+  }
+
+  /**
+   * Drive the vibrator owned by the Android InputDevice that delivered the
+   * Bluetooth gamepad event. Touch controllers never enter this path.
+   */
+  private fun gamepadVibrator(device: InputDevice): Vibrator =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      device.vibratorManager.defaultVibrator
+    } else {
+      @Suppress("DEPRECATION")
+      device.vibrator
+    }
+
+  fun setGamepadRumble(deviceId: Int, low: Float, high: Float) {
+    val device = InputDevice.getDevice(deviceId) ?: return
+    val sources = device.sources
+    val gamepadSource =
+      (sources and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD ||
+      (sources and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+    val physicalExternal = !device.isVirtual && device.vendorId != 0x2833
+    if (loggedRumbleDevices.add(deviceId)) {
+      val vibratorCount = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        device.vibratorManager.vibratorIds.size
+      } else {
+        @Suppress("DEPRECATION")
+        if (device.vibrator.hasVibrator()) 1 else 0
+      }
+      Log.i("xemu-rumble", "device=$deviceId name=${device.name} " +
+        "vid=${device.vendorId.toString(16)} pid=${device.productId.toString(16)} " +
+        "external=${device.isExternal} virtual=${device.isVirtual} " +
+        "sources=0x${sources.toString(16)} vibrators=$vibratorCount")
+    }
+    if (!gamepadSource) return
+    // Horizon also publishes a virtual Meta gamepad-shaped device for Touch.
+    // Only a physical external controller may receive guest Xbox vibration.
+    if (!physicalExternal) return
+    val vibrator = gamepadVibrator(device)
+    if (!vibrator.hasVibrator()) return
+    if (rumbleDeviceId >= 0 && rumbleDeviceId != deviceId) {
+      InputDevice.getDevice(rumbleDeviceId)?.let(::gamepadVibrator)?.cancel()
+    }
+    val strength = max(low, high).coerceIn(0f, 1f)
+    if (!controllerSettings.vibrationEnabled || strength <= 0f) {
+      vibrator.cancel()
+      rumbleDeviceId = -1
+      return
+    }
+    rumbleDeviceId = deviceId
+    val amplitude = (strength * 255f).toInt().coerceIn(1, 255)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      vibrator.vibrate(VibrationEffect.createOneShot(250L, amplitude))
+    } else {
+      @Suppress("DEPRECATION")
+      vibrator.vibrate(250L)
+    }
   }
 
   private fun visiblePages(): IntArray =
@@ -384,7 +507,7 @@ class XrMenuBridge(context: Context) {
   fun setGuestFrameMs(ms: Float) {
     if (abs(ms - guestFrameMs) > 0.15f) {
       guestFrameMs = ms
-      if (page == PAGE_SYSTEM) dirty = true
+      if (page == PAGE_SYSTEM || inGameOverlay) dirty = true
     }
   }
 
@@ -392,7 +515,7 @@ class XrMenuBridge(context: Context) {
   fun setMicState(state: Int) {
     if (state != micState) {
       micState = state
-      if (page == PAGE_SYSTEM) dirty = true
+      if (page == PAGE_SYSTEM || inGameOverlay) dirty = true
     }
   }
 
@@ -658,9 +781,17 @@ class XrMenuBridge(context: Context) {
       id == "sys:recenter" -> { pendingCommand = CMD_RECENTER; dirty = true }
       id == "sys:quit" -> pendingCommand = CMD_QUIT_TO_DASHBOARD
       id == "sys:mic" -> { pendingCommand = CMD_MIC_TOGGLE; dirty = true }
+      id == "sys:rumble" -> {
+        controllerSettings.vibrationEnabled = !controllerSettings.vibrationEnabled
+        if (!controllerSettings.vibrationEnabled && rumbleDeviceId >= 0) {
+          InputDevice.getDevice(rumbleDeviceId)?.let(::gamepadVibrator)?.cancel()
+          rumbleDeviceId = -1
+        }
+        dirty = true
+      }
       id == "sys:close" -> pendingCommand = CMD_CLOSE
       id == "ins:net" -> {
-        val cur = prefs.getBoolean("setting_network_enable", false)
+        val cur = prefs.getBoolean("setting_network_enable", true)
         prefs.edit().putBoolean("setting_network_enable", !cur).apply()
         changedKeys.add("setting_network_enable")
         dirty = true
@@ -795,6 +926,11 @@ class XrMenuBridge(context: Context) {
     c.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
     focusables.clear()
 
+    if (inGameOverlay) {
+      drawInGameOverlay(c, w, h)
+      return
+    }
+
     // Panel body + hairline stroke + soft top sheen.
     val panel = RectF(2f, 2f, w - 2f, h - 2f)
     fill.shader = null
@@ -827,6 +963,125 @@ class XrMenuBridge(context: Context) {
     c.restore()
 
     drawFooter(c, w, h, contentLeft)
+  }
+
+  /** Compact, game-specific overlay. It intentionally has no library or page
+   * navigation: closing resumes the same game; Quit Game is the sole path back
+   * to the main library. Every exposed action is safe while xemu is running. */
+  private fun drawInGameOverlay(c: Canvas, w: Float, h: Float) {
+    val panel = RectF(2f, 2f, w - 2f, h - 2f)
+    fill.shader = null
+    fill.color = Th.PANEL_BG
+    c.drawRoundRect(panel, Th.RADIUS, Th.RADIUS, fill)
+    fill.shader = LinearGradient(0f, 0f, 0f, h * 0.3f, 0x12FFFFFF, 0x00FFFFFF,
+      Shader.TileMode.CLAMP)
+    c.drawRoundRect(RectF(2f, 2f, w - 2f, h * 0.3f), Th.RADIUS, Th.RADIUS, fill)
+    fill.shader = null
+    stroke.color = Th.PANEL_STROKE
+    stroke.strokeWidth = 2.5f
+    c.drawRoundRect(panel, Th.RADIUS, Th.RADIUS, stroke)
+
+    val margin = 74f
+    text.textAlign = Paint.Align.LEFT
+    text.typeface = tfMedium
+    text.textSize = 48f
+    text.color = Th.TEXT_PRIMARY
+    c.drawText("Game Controls", margin, 94f, text)
+    text.typeface = tfRegular
+    text.textSize = 24f
+    text.color = Th.TEXT_SECONDARY
+    c.drawText("Press B again at any time to resume", margin, 132f, text)
+
+    val currentDvd = prefs.getString("dvdPath", null)
+    val playing = currentDvd?.let { p ->
+      games.find { it.path == p }?.displayTitle
+        ?: File(p).name.substringBeforeLast('.').replace('_', ' ')
+    } ?: "Xbox game"
+    val pace = if (guestFrameMs > 0.5f) {
+      "%.0f fps  ·  %.1f ms".format(1000f / guestFrameMs, guestFrameMs)
+    } else "Measuring…"
+
+    fun statusCard(left: Float, right: Float, label: String, value: String,
+                   valueColor: Int) {
+      val r = RectF(left, 176f, right, 310f)
+      fill.color = Th.CARD_BG
+      c.drawRoundRect(r, 24f, 24f, fill)
+      stroke.color = Th.CARD_STROKE
+      stroke.strokeWidth = 2f
+      c.drawRoundRect(r, 24f, 24f, stroke)
+      text.typeface = tfRegular
+      text.textSize = 21f
+      text.color = Th.TEXT_TERTIARY
+      c.drawText(label, r.left + 28f, r.top + 42f, text)
+      text.typeface = tfMedium
+      text.textSize = 36f
+      text.color = valueColor
+      c.drawText(ellipsize(value, text, r.width() - 56f), r.left + 28f,
+        r.top + 98f, text)
+    }
+    val cardGap = 24f
+    val cardW = (w - margin * 2f - cardGap) / 2f
+    statusCard(margin, margin + cardW, "NOW PLAYING", playing, Th.TEXT_PRIMARY)
+    statusCard(margin + cardW + cardGap, w - margin, "GAME PACE", pace,
+      if (guestFrameMs > 0.5f) Th.ACCENT else Th.TEXT_SECONDARY)
+
+    text.typeface = tfMedium
+    text.textSize = 22f
+    text.color = Th.TEXT_TERTIARY
+    c.drawText("SAFE IN-GAME ACTIONS", margin + 4f, 370f, text)
+
+    val actions = ArrayList<Triple<String, String, Boolean>>()
+    actions.add(Triple("sys:close", "Resume Game", false))
+    actions.add(Triple("sys:recenter", "Recenter Window", false))
+    actions.add(Triple("sys:rumble",
+      if (controllerSettings.vibrationEnabled) "Controller Rumble: On"
+      else "Controller Rumble: Off", false))
+    if (micState >= 0) {
+      actions.add(Triple("sys:mic", if (micState == 1) "Unmute Mic" else "Mute Mic", false))
+    }
+    actions.add(Triple("sys:quit", "Quit Game", true))
+
+    val buttonGap = 22f
+    val buttonCols = 3
+    val buttonW = (w - margin * 2f - buttonGap * (buttonCols - 1)) / buttonCols
+    val buttonH = 94f
+    for ((i, action) in actions.withIndex()) {
+      val col = i % buttonCols
+      val row = i / buttonCols
+      val left = margin + col * (buttonW + buttonGap)
+      val top = 398f + row * (buttonH + buttonGap)
+      val r = RectF(left, top, left + buttonW, top + buttonH)
+      val (id, label, danger) = action
+      focusables.add(Focusable(id, r))
+      fill.color = when {
+        pressedId == id -> Th.PRESS_FILL
+        danger -> Th.DANGER_DIM
+        hoverId == id || focusId == id -> Th.HOVER_FILL
+        else -> Th.CARD_BG
+      }
+      c.drawRoundRect(r, 28f, 28f, fill)
+      stroke.color = when {
+        danger -> Th.DANGER
+        focusId == id || hoverId == id -> Th.ACCENT
+        else -> Th.CARD_STROKE
+      }
+      stroke.strokeWidth = if (focusId == id || hoverId == id) 3f else 2f
+      c.drawRoundRect(r, 28f, 28f, stroke)
+      text.typeface = tfMedium
+      text.textSize = 26f
+      text.color = if (danger) Th.DANGER else Th.TEXT_PRIMARY
+      text.textAlign = Paint.Align.CENTER
+      c.drawText(label, r.centerX(), r.centerY() + 10f, text)
+      text.textAlign = Paint.Align.LEFT
+    }
+
+    text.typeface = tfRegular
+    text.textSize = 23f
+    text.color = Th.TEXT_TERTIARY
+    c.drawText("Point at the game window and hold Trigger or Grip to move it.",
+      margin, h - 80f, text)
+    c.drawText("Point at a corner and hold Trigger to resize — aspect ratio stays locked.",
+      margin, h - 44f, text)
   }
 
   // --- chrome ---
@@ -1371,7 +1626,7 @@ class XrMenuBridge(context: Context) {
     c.drawText("Online Play — Insignia", left, contentTop - 12f, text)
 
     val st = onlineStatus
-    val netOn = prefs.getBoolean("setting_network_enable", false)
+    val netOn = prefs.getBoolean("setting_network_enable", true)
     val preparePending = prefs.getBoolean("insignia_prepare_pending", false)
     val preparedMs = prefs.getLong("insignia_prepared_ms", 0L)
     val setupIdx = games.indexOfFirst {

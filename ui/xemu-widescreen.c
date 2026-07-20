@@ -64,8 +64,12 @@ float xemu_xr_get_display_aspect(void)
 }
 
 /* Fraction to remove from each horizontal edge of an HD carrier when the
- * guest explicitly requests normal (4:3) presentation.  Cropping 1/8 from
- * both sides maps 1280x720 to the complete centered 960x720 image. */
+ * guest explicitly requests normal (4:3) presentation.  In addition to the
+ * 160-pixel carrier bars, the only observed normal-in-HD title (Soul Calibur
+ * II) places a symmetric 32x24 black safe-area matte around its 960x720
+ * image.  Cropping 192/1280 horizontally and 24/720 vertically removes only
+ * those black pixels and leaves an exact 896x672 (4:3) picture.  Other titles
+ * do not enter this normal-aspect HD-carrier path. */
 __attribute__((visibility("default")))
 float xemu_xr_get_display_crop_x(void)
 {
@@ -73,6 +77,16 @@ float xemu_xr_get_display_crop_x(void)
     unsigned int height = qatomic_read(&g_display_raster_height);
     bool hd_16_9 = width >= 1280 &&
                    (uint64_t)width * 9 == (uint64_t)height * 16;
-    return hd_16_9 && !g_widescreen ? 0.125f : 0.0f;
+    return hd_16_9 && !g_widescreen ? 0.15f : 0.0f;
+}
+
+__attribute__((visibility("default")))
+float xemu_xr_get_display_crop_y(void)
+{
+    unsigned int width = qatomic_read(&g_display_raster_width);
+    unsigned int height = qatomic_read(&g_display_raster_height);
+    bool hd_16_9 = width >= 1280 &&
+                   (uint64_t)width * 9 == (uint64_t)height * 16;
+    return hd_16_9 && !g_widescreen ? (1.0f / 30.0f) : 0.0f;
 }
 #endif
