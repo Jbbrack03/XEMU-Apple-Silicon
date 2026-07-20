@@ -117,11 +117,17 @@ typedef struct {
         struct AHardwareBuffer *ahb;
         EGLImageKHR image;
         GLuint tex;
+        bool manual_srgb_decode;
     } ahb_cache[8];
     GLuint blit_prog;
     GLint blit_tex_uniform;
     GLint blit_uv_rect_uniform;
+    GLint blit_manual_srgb_uniform;
     GLuint blit_vao;
+    bool color_fix_initialized;
+    bool color_fix_enabled;
+    bool srgb_override_supported;
+    bool srgb_override_failure_logged;
     bool bridge_fallback_logged;
     bool bridge_ready_logged;
 
@@ -385,11 +391,21 @@ static const char *BLIT_VS_EMU =
     "}\n";
 static const char *BLIT_FS =
     "#version 300 es\n"
-    "precision mediump float;\n"
+    "precision highp float;\n"
     "uniform sampler2D tex;\n"
+    "uniform bool manual_srgb_decode;\n"
     "in vec2 uv;\n"
     "out vec4 frag;\n"
-    "void main() { frag = vec4(texture(tex, uv).rgb, 1.0); }\n";
+    "vec3 srgb_to_linear(vec3 c) {\n"
+    "  vec3 lo = c / 12.92;\n"
+    "  vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));\n"
+    "  return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));\n"
+    "}\n"
+    "void main() {\n"
+    "  vec3 rgb = texture(tex, uv).rgb;\n"
+    "  if (manual_srgb_decode) rgb = srgb_to_linear(rgb);\n"
+    "  frag = vec4(rgb, 1.0);\n"
+    "}\n";
 /* Menu blit keeps the source alpha so transparent panel edges reveal the
  * passthrough / emulator layers behind the quad. */
 static const char *MENU_BLIT_FS =
@@ -454,10 +470,36 @@ static GLuint compile_prog(const char *vs_src, const char *fs_src)
     return prog;
 }
 
-static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
+static bool gl_has_extension(const char *wanted)
 {
+    GLint count = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+    for (GLint i = 0; i < count; i++) {
+        const char *extension =
+            (const char *)glGetStringi(GL_EXTENSIONS, (GLuint)i);
+        if (extension && strcmp(extension, wanted) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb,
+                             bool *manual_srgb_decode)
+{
+    if (!s->color_fix_initialized) {
+        const char *env = getenv("XEMU_XR_COLOR_FIX");
+        s->color_fix_enabled = !env || strcmp(env, "0") != 0;
+        s->srgb_override_supported = gl_has_extension(
+            "GL_EXT_texture_format_sRGB_override");
+        s->color_fix_initialized = true;
+        LOGI("frame bridge: color transfer fix=%s sRGB override=%s",
+             s->color_fix_enabled ? "on" : "off",
+             s->srgb_override_supported ? "available" : "unavailable");
+    }
     for (int i = 0; i < 8; i++) {
         if (s->ahb_cache[i].ahb == ahb) {
+            *manual_srgb_decode = s->ahb_cache[i].manual_srgb_decode;
             return s->ahb_cache[i].tex;
         }
     }
@@ -523,6 +565,31 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    bool manual_decode = false;
+    if (s->color_fix_enabled) {
+        if (s->srgb_override_supported) {
+            /* The Vulkan display AHB is RGBA8_UNORM storage containing
+             * display-encoded sRGB bytes.  OpenXR's GL_SRGB8_ALPHA8
+             * swapchain encodes fragment output on store, so sampling the AHB
+             * as plain linear RGBA double-encodes it and washes the game out.
+             * This extension exists specifically to reinterpret an EGLImage
+             * with known sRGB values and performs the decode during filtering. */
+            glTexParameteri(GL_TEXTURE_2D,
+                            GL_TEXTURE_FORMAT_SRGB_OVERRIDE_EXT, GL_SRGB);
+            gl_error = glGetError();
+            if (gl_error != GL_NO_ERROR) {
+                manual_decode = true;
+                s->srgb_override_supported = false;
+                if (!s->srgb_override_failure_logged) {
+                    LOGE("frame bridge: sRGB EGLImage override failed "
+                         "(0x%x); using shader decode", gl_error);
+                    s->srgb_override_failure_logged = true;
+                }
+            }
+        } else {
+            manual_decode = true;
+        }
+    }
     glBindTexture(GL_TEXTURE_2D, 0);
     /* An EGLImage does not substitute for an explicit native-buffer owner.
      * Keep one cache reference until this imported texture is evicted. */
@@ -530,10 +597,14 @@ static GLuint ahb_to_texture(XrShell *s, struct AHardwareBuffer *ahb)
     s->ahb_cache[slot].ahb = ahb;
     s->ahb_cache[slot].image = img;
     s->ahb_cache[slot].tex = tex;
+    s->ahb_cache[slot].manual_srgb_decode = manual_decode;
+    *manual_srgb_decode = manual_decode;
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(ahb, &desc);
-    LOGI("imported emulator AHB %p as tex %u (%ux%u)", ahb, tex,
-         desc.width, desc.height);
+    LOGI("imported emulator AHB %p as tex %u (%ux%u, sRGB decode=%s)",
+         ahb, tex, desc.width, desc.height,
+         s->color_fix_enabled ? (manual_decode ? "shader" : "texture")
+                              : "off");
     return tex;
 }
 
@@ -1550,11 +1621,16 @@ static void egl_init(XrShell *s)
     s->cursor_radius_loc = glGetUniformLocation(s->cursor_prog, "radius");
     s->blit_tex_uniform = glGetUniformLocation(s->blit_prog, "tex");
     s->blit_uv_rect_uniform = glGetUniformLocation(s->blit_prog, "uv_rect");
+    s->blit_manual_srgb_uniform =
+        glGetUniformLocation(s->blit_prog, "manual_srgb_decode");
     if (s->blit_tex_uniform < 0) {
         LOGE("frame bridge: blit sampler uniform unavailable");
     }
     if (s->blit_uv_rect_uniform < 0) {
         LOGE("frame bridge: blit UV rectangle uniform unavailable");
+    }
+    if (s->blit_manual_srgb_uniform < 0) {
+        LOGE("frame bridge: manual sRGB uniform unavailable");
     }
     glGenVertexArrays(1, &s->blit_vao);
 }
@@ -2387,12 +2463,14 @@ static void xr_frame(XrShell *s)
 
         xr_apply_thread_settings(s);
         GLuint emu_tex = 0;
+        bool emu_manual_srgb_decode = false;
         struct AHardwareBuffer *emu_ahb = NULL;
         uint64_t emu_seq = 0;
         if (s->acquire_ahb) {
             emu_ahb = s->acquire_ahb(&emu_seq);
             if (emu_ahb) {
-                emu_tex = ahb_to_texture(s, emu_ahb);
+                emu_tex = ahb_to_texture(s, emu_ahb,
+                                         &emu_manual_srgb_decode);
                 if (emu_seq != s->last_seq) {
                     int64_t frame_now = now_ns();
                     if (s->adpf_last_frame_seq_ns > 0) {
@@ -2425,6 +2503,10 @@ static void xr_frame(XrShell *s)
                 float crop_x = s->quad_crop_x;
                 glUniform4f(s->blit_uv_rect_uniform, crop_x, 0.0f,
                             1.0f - 2.0f * crop_x, 1.0f);
+            }
+            if (s->blit_manual_srgb_uniform >= 0) {
+                glUniform1i(s->blit_manual_srgb_uniform,
+                            emu_manual_srgb_decode ? 1 : 0);
             }
             glBindVertexArray(s->blit_vao);
             glDrawArrays(GL_TRIANGLES, 0, 3);
