@@ -27,7 +27,78 @@
 #include "accel/tcg/cpu-ops.h"
 #include "tcg-cpu.h"
 
+#if defined(XBOX) && defined(__aarch64__) && defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 /* Frob eflags into and out of the CPU temporary format.  */
+
+#if defined(XBOX) && defined(__aarch64__)
+static __thread uint64_t xemu_fpcr_host_value;
+static __thread bool xemu_fpcr_host_saved;
+
+void xemu_fpcr_latch_enter(uint16_t fpuc)
+{
+    if (!xemu_fpcr_latch_active()) {
+        return;
+    }
+    if (xemu_fpcr_host_saved) {
+        xemu_fpcr_latch_apply(fpuc);
+        return;
+    }
+
+    /* Preserve every host FPCR bit, not just RMode.  This keeps the latch
+     * invisible to QEMU/runtime code on either side of cpu_exec(). */
+    __asm__ volatile("mrs %0, fpcr" : "=r"(xemu_fpcr_host_value));
+    xemu_fpcr_host_saved = true;
+    xemu_fpcr_latch_apply(fpuc);
+}
+
+void xemu_fpcr_latch_apply(uint16_t fpuc)
+{
+    uint64_t x86_rc, arm_rc, fpcr;
+
+    if (!xemu_fpcr_latch_active() || !xemu_fpcr_host_saved) {
+        return;
+    }
+
+    /* x86: nearest/down/up/zero; AArch64: nearest/up/down/zero. */
+    x86_rc = (fpuc >> 10) & 3;
+    arm_rc = ((x86_rc & 1) << 1) | ((x86_rc & 2) >> 1);
+    fpcr = arm_rc << 22;
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr) : "memory");
+#if defined(__ANDROID__)
+    {
+        static bool verified;
+
+        if (!verified) {
+            uint64_t actual;
+
+            __asm__ volatile("mrs %0, fpcr" : "=r"(actual));
+            verified = true;
+            __android_log_print(actual == fpcr ? ANDROID_LOG_INFO :
+                                                  ANDROID_LOG_ERROR,
+                                "xemu-tcg",
+                                "fpcr-latch active guest_rc=%llu "
+                                "expected=0x%llx actual=0x%llx %s",
+                                (unsigned long long)x86_rc,
+                                (unsigned long long)fpcr,
+                                (unsigned long long)actual,
+                                actual == fpcr ? "PASS" : "FAIL");
+        }
+    }
+#endif
+}
+
+void xemu_fpcr_latch_restore(void)
+{
+    if (xemu_fpcr_latch_active() && xemu_fpcr_host_saved) {
+        __asm__ volatile("msr fpcr, %0" : : "r"(xemu_fpcr_host_value)
+                         : "memory");
+        xemu_fpcr_host_saved = false;
+    }
+}
+#endif
 
 static void x86_cpu_exec_enter(CPUState *cs)
 {
@@ -38,6 +109,9 @@ static void x86_cpu_exec_enter(CPUState *cs)
     env->df = 1 - (2 * ((env->eflags >> 10) & 1));
     CC_OP = CC_OP_EFLAGS;
     env->eflags &= ~(DF_MASK | CC_O | CC_S | CC_Z | CC_A | CC_P | CC_C);
+#if defined(XBOX) && defined(__aarch64__)
+    xemu_fpcr_latch_enter(env->fpuc);
+#endif
 }
 
 static void x86_cpu_exec_exit(CPUState *cs)
@@ -46,6 +120,9 @@ static void x86_cpu_exec_exit(CPUState *cs)
     CPUX86State *env = &cpu->env;
 
     env->eflags = cpu_compute_eflags(env);
+#if defined(XBOX) && defined(__aarch64__)
+    xemu_fpcr_latch_restore();
+#endif
 }
 
 static TCGTBCPUState x86_get_tb_cpu_state(CPUState *cs)

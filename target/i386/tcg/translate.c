@@ -31,11 +31,19 @@
 #include "exec/helper-proto.h"
 #include "exec/helper-gen.h"
 #include "helper-tcg.h"
+#include "tcg-cpu.h"
 #include "decode-new.h"
 
 #include "exec/log.h"
 
+#if defined(XBOX) && defined(__aarch64__) && defined(__ANDROID__)
+#include <android/log.h>
+#endif
+
 static int g_use_fp_jit;
+static int g_use_fpcr_latch;
+static int g_use_x87_ptr_batch;
+static int g_use_x87_fip_only;
 
 /*
  * The fp_jit mode all translated code uses, LATCHED at tcg init. Runtime
@@ -47,6 +55,13 @@ bool xemu_fp_jit_active(void)
 {
     return g_use_fp_jit;
 }
+
+#if defined(XBOX) && defined(__aarch64__)
+bool xemu_fpcr_latch_active(void)
+{
+    return g_use_fp_jit && g_use_fpcr_latch;
+}
+#endif
 
 #if defined(XBOX)
 struct FPUProfileCounters {
@@ -265,6 +280,11 @@ typedef struct DisasContext {
     int fpstt_delta;
     TCGv_fp fpregs[8];
     TCGv_fp ft0;
+    bool fpu_ip_pending;
+    TCGv fpu_ip;
+    bool fpu_dp_pending;
+    TCGv fpu_dp;
+    int fpu_dp_seg;
 } DisasContext;
 
 /*
@@ -1741,6 +1761,18 @@ static void gen_flcr(DisasContext *s)
         return;
     }
 
+#if defined(XBOX) && defined(__aarch64__)
+    /*
+     * In latch mode cpu_exec_enter and every cpu_set_fpuc() synchronize the
+     * thread FPCR.  Re-emitting the same MSR in every x87-using TB is then
+     * redundant (18.9% of the exact Halo horde TB trace).
+     */
+    if (xemu_fpcr_latch_active()) {
+        s->flcr_set = true;
+        return;
+    }
+#endif
+
     TCGv_i32 v = tcg_temp_new_i32();
     tcg_gen_ld16u_i32(v, tcg_env, offsetof(CPUX86State, fpuc));
     tcg_gen_andi_i32(v, v, 0xc00);
@@ -1809,8 +1841,39 @@ static void gen_mov64i_f64(TCGv_f64 ret, TCGv_i64 arg)
 #define fp_pc_wrapper(f) \
     (fpu_using_double_precision(s) ? glue(f, _f64) : glue(f, _f32))
 
+static void gen_commit_fpu_ptrs(DisasContext *s)
+{
+    if (!g_use_x87_ptr_batch) {
+        return;
+    }
+
+    if (s->fpu_ip_pending) {
+        TCGv_i32 selector = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(selector, tcg_env,
+                       offsetof(CPUX86State, segs[R_CS].selector));
+        tcg_gen_st16_i32(selector, tcg_env, offsetof(CPUX86State, fpcs));
+        tcg_gen_st_tl(s->fpu_ip, tcg_env, offsetof(CPUX86State, fpip));
+        s->fpu_ip_pending = false;
+    }
+
+    if (s->fpu_dp_pending) {
+        TCGv_i32 selector = tcg_temp_new_i32();
+
+        tcg_gen_ld_i32(selector, tcg_env,
+                       offsetof(CPUX86State,
+                                segs[s->fpu_dp_seg].selector));
+        tcg_gen_st16_i32(selector, tcg_env, offsetof(CPUX86State, fpds));
+        tcg_gen_st_tl(s->fpu_dp, tcg_env, offsetof(CPUX86State, fpdp));
+        s->fpu_dp_pending = false;
+    }
+}
+
 static void gen_flush_fp(DisasContext *s)
 {
+    /* A helper, basic-block edge, or TB exit is an architectural observation
+     * boundary for the coalesced x87 instruction/data pointers. */
+    gen_commit_fpu_ptrs(s);
     fp_pc_wrapper(flush_fp_regs)(s);
     s->fpstt_delta = 0;
     s->flcr_set = false;
@@ -3337,13 +3400,19 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
         if (update_fdp) {
             int last_seg = s->override >= 0 ? s->override : decode->mem.def_seg;
 
-            tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
-                           offsetof(CPUX86State,
-                                    segs[last_seg].selector));
-            tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
-                             offsetof(CPUX86State, fpds));
-            tcg_gen_st_tl(last_addr, tcg_env,
-                          offsetof(CPUX86State, fpdp));
+            if (g_use_x87_ptr_batch && !g_use_x87_fip_only) {
+                s->fpu_dp_pending = true;
+                s->fpu_dp = last_addr;
+                s->fpu_dp_seg = last_seg;
+            } else {
+                tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
+                               offsetof(CPUX86State,
+                                        segs[last_seg].selector));
+                tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
+                                 offsetof(CPUX86State, fpds));
+                tcg_gen_st_tl(last_addr, tcg_env,
+                              offsetof(CPUX86State, fpdp));
+            }
         }
     } else {
         /* register float ops */
@@ -3676,12 +3745,17 @@ static void gen_x87(DisasContext *s, X86DecodedInsn *decode)
     }
 
     if (update_fip) {
-        tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
-                       offsetof(CPUX86State, segs[R_CS].selector));
-        tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
-                         offsetof(CPUX86State, fpcs));
-        tcg_gen_st_tl(eip_cur_tl(s),
-                      tcg_env, offsetof(CPUX86State, fpip));
+        if (g_use_x87_ptr_batch) {
+            s->fpu_ip_pending = true;
+            s->fpu_ip = eip_cur_tl(s);
+        } else {
+            tcg_gen_ld_i32(s->tmp2_i32, tcg_env,
+                           offsetof(CPUX86State, segs[R_CS].selector));
+            tcg_gen_st16_i32(s->tmp2_i32, tcg_env,
+                             offsetof(CPUX86State, fpcs));
+            tcg_gen_st_tl(eip_cur_tl(s),
+                          tcg_env, offsetof(CPUX86State, fpip));
+        }
     }
     return;
 
@@ -4423,6 +4497,30 @@ void tcg_x86_init(void)
 
 #if defined(XBOX) && (defined(__x86_64__) || defined(__aarch64__))
     g_use_fp_jit = g_config.perf.fp_jit;
+#if defined(__aarch64__)
+    {
+        const char *value = getenv("XEMU_TCG_FPCR_LATCH");
+        g_use_fpcr_latch = value && strtol(value, NULL, 0) != 0;
+        if (g_use_fpcr_latch) {
+            fprintf(stderr, "xemu-tcg: fpcr-latch=%d fp-jit=%d\n",
+                    g_use_fpcr_latch, g_use_fp_jit);
+        }
+    }
+    {
+        const char *value = getenv("XEMU_TCG_X87_PTR_BATCH");
+        g_use_x87_ptr_batch = value && strtol(value, NULL, 0) != 0;
+        value = getenv("XEMU_TCG_X87_FIP_ONLY");
+        g_use_x87_fip_only = value && strtol(value, NULL, 0) != 0;
+#if defined(__ANDROID__)
+        if (g_use_x87_ptr_batch) {
+            __android_log_print(ANDROID_LOG_INFO, "xemu-tcg",
+                                "x87 pointer batching active fp-jit=%d "
+                                "fip-only=%d",
+                                g_use_fp_jit, g_use_x87_fip_only);
+        }
+#endif
+    }
+#endif
 #endif
 }
 
@@ -4485,6 +4583,11 @@ static void i386_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cpu)
     dc->fpstt_delta = 0;
     dc->ft0 = NULL;
     dc->flcr_set = false;
+    dc->fpu_ip_pending = false;
+    dc->fpu_ip = NULL;
+    dc->fpu_dp_pending = false;
+    dc->fpu_dp = NULL;
+    dc->fpu_dp_seg = 0;
 }
 
 static void i386_tr_tb_start(DisasContextBase *db, CPUState *cpu)
@@ -4510,6 +4613,11 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     bool orig_cc_op_dirty = dc->cc_op_dirty;
     CCOp orig_cc_op = dc->cc_op;
     target_ulong orig_pc_save = dc->pc_save;
+    bool orig_fpu_ip_pending = dc->fpu_ip_pending;
+    TCGv orig_fpu_ip = dc->fpu_ip;
+    bool orig_fpu_dp_pending = dc->fpu_dp_pending;
+    TCGv orig_fpu_dp = dc->fpu_dp;
+    int orig_fpu_dp_seg = dc->fpu_dp_seg;
 
 #ifdef TARGET_VSYSCALL_PAGE
     /*
@@ -4537,6 +4645,14 @@ static void i386_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
         assert(dc->pc_save == orig_pc_save);
         dc->base.num_insns--;
         tcg_remove_ops_after(dc->prev_insn_end);
+        /* Any pointer commit emitted by the discarded instruction was also
+         * removed.  Restore the coalescer to the preceding instruction's
+         * state so the TB epilogue still publishes that architectural value. */
+        dc->fpu_ip_pending = orig_fpu_ip_pending;
+        dc->fpu_ip = orig_fpu_ip;
+        dc->fpu_dp_pending = orig_fpu_dp_pending;
+        dc->fpu_dp = orig_fpu_dp;
+        dc->fpu_dp_seg = orig_fpu_dp_seg;
         dc->base.insn_start = dc->prev_insn_start;
         dc->base.is_jmp = DISAS_TOO_MANY;
         return;

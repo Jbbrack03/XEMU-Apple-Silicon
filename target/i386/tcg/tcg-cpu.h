@@ -84,4 +84,17 @@ bool tcg_cpu_realizefn(CPUState *cs, Error **errp);
 
 int x86_mmu_index_pl(CPUX86State *env, unsigned pl);
 
+#if defined(XBOX) && defined(__aarch64__)
+/*
+ * Android's hard-x87 path executes native AArch64 floating-point
+ * instructions.  These helpers keep the host FPCR synchronized with the
+ * guest x87 control word when the optional exec-latched mode is enabled.
+ */
+bool xemu_fp_jit_active(void);
+bool xemu_fpcr_latch_active(void);
+void xemu_fpcr_latch_enter(uint16_t fpuc);
+void xemu_fpcr_latch_apply(uint16_t fpuc);
+void xemu_fpcr_latch_restore(void);
+#endif
+
 #endif /* TCG_CPU_H */

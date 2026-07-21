@@ -1439,6 +1439,11 @@ void update_fp_status(CPUX86State *env)
         break;
     }
     set_floatx80_rounding_precision(rnd_prec, &env->fp_status);
+#if defined(XBOX) && defined(__aarch64__)
+    /* If called by an in-flight hard-x87 helper, update this vCPU thread now.
+     * Calls during reset are harmless; cpu_exec_enter reapplies the value. */
+    xemu_fpcr_latch_apply(env->fpuc);
+#endif
 }
 #endif
 
